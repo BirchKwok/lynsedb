@@ -226,14 +226,14 @@ class MinVectorDB:
         return id
 
     @ParameterValuesAssert({'vector': lambda s: s.ndim == 1})
-    @ParameterTypeAssert({'vector': np.ndarray, 'k': int, 'field': (None, str)})
-    def query(self, vector, k: int = 12, field: str = None):
+    @ParameterTypeAssert({'vector': np.ndarray, 'k': int, 'field': (None, str, list)})
+    def query(self, vector, k: int = 12, field: str | list = None):
         """Query the database for the vectors most similar to the given vector.
         
         Parameters:
             vector: The query vector.
             k (int): The number of nearest vectors to return.
-            field (str): The target of the vector
+            field (str or list): The target of the vector
         
         Returns:
             The indices and similarity scores of the top k nearest vectors.
@@ -251,9 +251,12 @@ class MinVectorDB:
         all_scores = []
         all_index = []
 
+        if isinstance(field, str):
+            field = [field]
+
         for database, index, vector_field in self._data_loader():
-            database = database[vector_field == field]
-            index = index[vector_field == field]
+            database = database[np.isin(vector_field, field)]
+            index = index[np.isin(vector_field, field)]
 
             batch_scores = np.dot(database, vector).squeeze()
             if batch_scores.ndim == 0:
