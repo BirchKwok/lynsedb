@@ -147,3 +147,7 @@ cython_debug/
 
 # system stuff
 .DS_Store
+
+.vscode/
+
+.idea/
