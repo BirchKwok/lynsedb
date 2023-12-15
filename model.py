@@ -7,7 +7,7 @@ from spinesUtils.asserts import ParameterValuesAssert, augmented_isinstance, Par
 
 class MinVectorDB:
     """A class for managing a vector database stored in .npy files and computing cosine similarity."""
-    
+
     @ParameterTypeAssert({'dim': int, 'database_path': str, 'chunk_size': int}, func_name='MinVectorDB')
     @ParameterValuesAssert({'database_path': lambda s: s.endswith('.npy')}, func_name='MinVectorDB')
     def __init__(self, dim, database_path, chunk_size=10000, dtypes=np.float32) -> None:
@@ -24,10 +24,10 @@ class MinVectorDB:
         """
         if chunk_size <= 1:
             raise ValueError('chunk_size must be greater than 1')
-        
+
         self.dim = dim
         self.dtypes = dtypes
-        
+
         self.chunk_size = chunk_size
         self.database_path_parent = Path(database_path).parent
         self.database_name_prefix = '.npy'.join(Path(database_path).name.split('.npy')[:-1])
@@ -44,9 +44,9 @@ class MinVectorDB:
         # If database_chunk_path is not empty, define the loading conditions for the database and index.
         if len(self.database_chunk_path) > 0:
             self.chunk_id = max([int(Path(i).name.split('.')[0].split('_')[-1]) for i in self.database_chunk_path])
-            max_chunk_path = [i for i in self.database_chunk_path 
+            max_chunk_path = [i for i in self.database_chunk_path
                               if int(Path(i).name.split('.')[0].split('_')[-1]) == self.chunk_id][0]
-            
+
             with open(max_chunk_path, 'rb') as f:
                 self.database = np.load(f, allow_pickle=True)
                 self.index = list(np.load(f, allow_pickle=True))
@@ -69,12 +69,12 @@ class MinVectorDB:
         self.database = np.zeros((1, self.dim), dtype=self.dtypes)
         self.index = []
         self.field = []
-        
+
     def _data_loader(self):
         """Generator that yields database chunks and corresponding indices."""
         # By default, save the checkpoint first.
         self.save_checkpoint()
-        
+
         for i in self.database_chunk_path:
             with open(i, 'rb') as f:
                 database = np.load(f, allow_pickle=True)
@@ -91,16 +91,17 @@ class MinVectorDB:
         path = str(path)
         if path not in self.database_chunk_path:
             self.database_chunk_path.append(path)
-            self.database_chunk_path = sorted(self.database_chunk_path, 
+            self.database_chunk_path = sorted(self.database_chunk_path,
                                               key=lambda s: int(Path(s).name.split('.')[0].split('_')[-1]))
 
     def _is_database_reset(self):
         """Check if the database is in its reset state (filled with zeros)."""
         return (np.zeros((1, self.dim), dtype=self.dtypes) == self.database).all()
-        
+
     def _length_checker(self):
         """Check if the length of the database and index are equal."""
-        if np.mean([self.database.shape[0], len(self.index), len(self.field)]) != self.database.shape[0] and not self._is_database_reset():
+        if np.mean([self.database.shape[0], len(self.index), len(self.field)]) != self.database.shape[
+            0] and not self._is_database_reset():
             raise ValueError('The database, index length and field length not the same.')
 
     def _auto_save(self):
@@ -113,7 +114,7 @@ class MinVectorDB:
                 np.save(f, self.database)
                 np.save(f, self.index)
                 np.save(f, self.field)
-            
+
             self.chunk_id += 1
 
             # Storage path for .npy file chunks.
@@ -173,9 +174,10 @@ class MinVectorDB:
             indices.append(self.add_item(vector, id, field))
 
         return indices
-        
-    @ParameterValuesAssert({'vector': lambda s: s.ndim == 1, 'id': lambda s: augmented_isinstance(s, (int, None))})
-    def add_item(self, vector, id:int = None, field: str = None) -> None:
+
+    @ParameterValuesAssert({'vector': lambda s: s.ndim == 1})
+    @ParameterTypeAssert({'vector': np.ndarray, 'id': (int, None), 'field': (str, None)})
+    def add_item(self, vector, id: int = None, field: str = None) -> None:
         """Add a single vector to the database.
         
         Parameters:
@@ -189,22 +191,22 @@ class MinVectorDB:
         Raises:
             ValueError: If the vector dimensions don't match or the ID already exists.
         """
-        
+
         if id in self.all_indeces:
             raise ValueError(f'id {id} already exists')
-        
+
         if len(vector) != self.dim:
             raise ValueError(f'vector dim error, expect {self.dim}, got {len(vector)}')
-        
+
         if id is None:
             if self.last_id is None:
                 id = -10000
                 if self.database_chunk_path == []:
-                    id = max(id, len(self.index), 0 if len(self.index) == 0 else max(self.index)) 
+                    id = max(id, len(self.index), 0 if len(self.index) == 0 else max(self.index))
                 else:
                     for _, index in self._data_loader():
                         id = max(id, max(index))
-                    
+
                 id += 1
             else:
                 id = self.last_id + 1
@@ -213,7 +215,7 @@ class MinVectorDB:
             self.database[0, :] = vector
         else:
             self.database = np.vstack((self.database, vector))
-        
+
         self.index.append(id)
         self.field.append(field)
         self.all_indeces.add(id)
@@ -222,9 +224,10 @@ class MinVectorDB:
         self.save_checkpoint()
 
         return id
-    
-    @ParameterValuesAssert({'vector': lambda s: s.ndim == 1, 'k': lambda s: isinstance(s, int)})
-    def query(self, vector, k:int=12, field:str = None):
+
+    @ParameterValuesAssert({'vector': lambda s: s.ndim == 1})
+    @ParameterTypeAssert({'vector': np.ndarray, 'k': int, 'field': (None, str)})
+    def query(self, vector, k: int = 12, field: str = None):
         """Query the database for the vectors most similar to the given vector.
         
         Parameters:
@@ -242,12 +245,12 @@ class MinVectorDB:
 
         if len(self.database_chunk_path) == 0:
             raise ValueError('database is empty.')
-        
+
         vector = vector.reshape(-1, 1)
 
         all_scores = []
         all_index = []
-        
+
         for database, index, vector_field in self._data_loader():
             database = database[vector_field == field]
             index = index[vector_field == field]
@@ -263,7 +266,7 @@ class MinVectorDB:
         all_index = np.asarray(all_index)
         top_k_indices = np.argsort(-all_scores)[:k]
         return all_index[top_k_indices], all_scores[top_k_indices]
-            
+
     @property
     def shape(self):
         """Return the shape of the entire database."""
@@ -275,7 +278,7 @@ class MinVectorDB:
         length = 0
         for database, _ in self._data_loader():
             length += database.shape[0]
-            
+
         return (length, self.dim)
 
     @ParameterTypeAssert({'n': int})
@@ -292,14 +295,14 @@ class MinVectorDB:
 
         if len(self.database_chunk_path) == 0:
             return None
-        
+
         _database = None
         for database, *_ in self._data_loader():
             if _database is None:
                 _database = database
             else:
                 _database = np.vstack((_database, database))
-            
+
             if _database.shape[0] >= n:
                 break
         return _database[:n, :]
