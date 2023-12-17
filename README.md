@@ -12,6 +12,12 @@ Additionally, it has not undergone rigorous code testing, so caution is advised 
 
 它起源于作者需要演示大语言模型Demo的契机，为了追求100%召回率而设计，此外，也没有经过严格的代码测试，因此如果将其用于生产环境需要特别谨慎。
 
+# Install
+```shell
+pip install MinVectorDB
+```
+
+
 # Quick start
 
 ## Demo 1-2
