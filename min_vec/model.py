@@ -8,10 +8,10 @@ from min_vec.utils import to_normalize
 
 
 class MinVectorDB:
-    """A class for managing a vector database stored in .npy files and computing cosine similarity."""
+    """A class for managing a vector database stored in .mvdb files and computing cosine similarity."""
 
     @ParameterTypeAssert({'dim': int, 'database_path': str, 'chunk_size': int}, func_name='MinVectorDB')
-    @ParameterValuesAssert({'database_path': lambda s: s.endswith('.npy')}, func_name='MinVectorDB')
+    @ParameterValuesAssert({'database_path': lambda s: s.endswith('.mvdb')}, func_name='MinVectorDB')
     def __init__(self, dim, database_path, chunk_size=10000, dtypes=np.float32) -> None:
         """Initialize the vector database.
         
@@ -32,11 +32,11 @@ class MinVectorDB:
 
         self.chunk_size = chunk_size
         self.database_path_parent = Path(database_path).parent
-        self.database_name_prefix = '.npy'.join(Path(database_path).name.split('.npy')[:-1])
+        self.database_name_prefix = '.mvdb'.join(Path(database_path).name.split('.mvdb')[:-1])
         self.all_indices = set()
         self.last_id = None
 
-        # If they exist, iterate through all .npy files.
+        # If they exist, iterate through all .mvdb files.
         self.database_chunk_path = []
         for i in os.listdir(self.database_path_parent):
             # If it meets the naming convention, add it to the chunk list.
@@ -108,7 +108,7 @@ class MinVectorDB:
 
     def _save(self):
         self._length_checker()
-        database_name = self.database_path_parent / f'{self.database_name_prefix}_{self.chunk_id}.npy'
+        database_name = self.database_path_parent / f'{self.database_name_prefix}_{self.chunk_id}.mvdb'
 
         with open(database_name, 'wb') as f:
             np.save(f, self.database)
@@ -124,7 +124,7 @@ class MinVectorDB:
 
             self.chunk_id += 1
 
-            # Storage path for .npy file chunks.
+            # Storage path for .mvdb file chunks.
             self._added_path_to_chunk_list(database_name)
             # Reset the database.
             self.reset_database()
@@ -319,7 +319,7 @@ class MinVectorDB:
         return _database[:n, :]
 
     def delete(self):
-        """Delete all .npy files in the database_chunk_path list and reset the database."""
+        """Delete all .mvdb files in the database_chunk_path list and reset the database."""
         if len(self.database_chunk_path) == 0:
             return None
 

@@ -2,7 +2,7 @@ from test import MinVectorDB
 import numpy as np
 
 
-def get_database(dim=100, database_path='test.npy', chunk_size=1000, dtypes=np.float32):
+def get_database(dim=100, database_path='test.mvdb', chunk_size=1000, dtypes=np.float32):
     database = MinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
     if database.database_chunk_path:
         database.delete()

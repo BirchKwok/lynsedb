@@ -40,7 +40,7 @@ timer = Timer()
 display_markdown("*Demo 1* -- **Sequentially add vectors**", raw=True)
 
 timer.start()
-db = MinVectorDB(dim=1024, database_path='test.npy', chunk_size=100)
+db = MinVectorDB(dim=1024, database_path='test.mvdb', chunk_size=100)
 
 np.random.seed(23)
 
@@ -80,7 +80,7 @@ display_markdown("*Demo 2* -- **Bulk add vectors**", raw=True)
 
 timer.middle_point()
 
-db = MinVectorDB(dim=1024, database_path='test.npy', chunk_size=100)
+db = MinVectorDB(dim=1024, database_path='test.mvdb', chunk_size=100)
 
 np.random.seed(23)
 
@@ -130,7 +130,7 @@ display_markdown("*Demo 3* -- **Use field to improve Searching Recall**", raw=Tr
 
 timer.start()
 
-db = MinVectorDB(dim=1024, database_path='test.npy', chunk_size=100)
+db = MinVectorDB(dim=1024, database_path='test.mvdb', chunk_size=100)
 
 np.random.seed(23)
 
