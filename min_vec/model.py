@@ -2,7 +2,9 @@ from pathlib import Path
 import os
 
 import numpy as np
-from spinesUtils.asserts import ParameterValuesAssert, augmented_isinstance, ParameterTypeAssert
+from spinesUtils.asserts import ParameterValuesAssert, ParameterTypeAssert
+
+from min_vec.utils import to_normalize
 
 
 class MinVectorDB:
@@ -31,7 +33,7 @@ class MinVectorDB:
         self.chunk_size = chunk_size
         self.database_path_parent = Path(database_path).parent
         self.database_name_prefix = '.npy'.join(Path(database_path).name.split('.npy')[:-1])
-        self.all_indeces = set()
+        self.all_indices = set()
         self.last_id = None
 
         # If they exist, iterate through all .npy files.
@@ -58,7 +60,7 @@ class MinVectorDB:
 
             for _, index, _ in self._data_loader():
                 for idx in index:
-                    self.all_indeces.add(idx)
+                    self.all_indices.add(idx)
         else:
             # If database_chunk_path is empty, define a new database and index.
             self.chunk_id = 0
@@ -104,16 +106,21 @@ class MinVectorDB:
             0] and not self._is_database_reset():
             raise ValueError('The database, index length and field length not the same.')
 
+    def _save(self):
+        self._length_checker()
+        database_name = self.database_path_parent / f'{self.database_name_prefix}_{self.chunk_id}.npy'
+
+        with open(database_name, 'wb') as f:
+            np.save(f, self.database)
+            np.save(f, self.index)
+            np.save(f, self.field)
+
+        return database_name
+
     def _auto_save(self):
         """Automatically save the database and index to a chunk file when the current chunk is full."""
         if self.database.shape[0] == self.chunk_size:
-            self._length_checker()
-            database_name = self.database_path_parent / f'{self.database_name_prefix}_{self.chunk_id}.npy'
-
-            with open(database_name, 'wb') as f:
-                np.save(f, self.database)
-                np.save(f, self.index)
-                np.save(f, self.field)
+            database_name = self._save()
 
             self.chunk_id += 1
 
@@ -128,17 +135,11 @@ class MinVectorDB:
 
         # After auto-saving, if the database in memory does not meet the chunk length, it still needs to be saved.
         if not self._is_database_reset():
-            self._length_checker()
-            database_name = self.database_path_parent / f'{self.database_name_prefix}_{self.chunk_id}.npy'
-
-            with open(database_name, 'wb') as f:
-                np.save(f, self.database)
-                np.save(f, self.index)
-                np.save(f, self.field)
+            database_name = self._save()
 
             self._added_path_to_chunk_list(database_name)
 
-    def save(self):
+    def submit(self):
         """Save the database, ensuring that all data is written to disk."""
         # If this method is called, the part that meets the chunk size will be saved first, 
         #  and the part that does not meet the chunk size will be directly saved as the last chunk.
@@ -150,11 +151,12 @@ class MinVectorDB:
 
     @ParameterTypeAssert({'vectors': (tuple, list)})
     @ParameterValuesAssert({'vectors': lambda s: all(1 <= len(i) <= 3 and isinstance(i, tuple) for i in s)})
-    def bulk_add_items(self, vectors):
+    def bulk_add_items(self, vectors, normalize: bool = False):
         """Bulk add vectors to the database.
         
         Parameters:
             vectors: A list or tuple of vectors to be saved.
+            normalize (bool): whether to to_normalize the input vector
         
         Returns:
             A list of indices where the vectors are stored.
@@ -171,19 +173,20 @@ class MinVectorDB:
             else:
                 vector, id, field = sample
 
-            indices.append(self.add_item(vector, id, field))
+            indices.append(self.add_item(vector, id, field, normalize=normalize))
 
         return indices
 
     @ParameterValuesAssert({'vector': lambda s: s.ndim == 1})
     @ParameterTypeAssert({'vector': np.ndarray, 'id': (int, None), 'field': (str, None)})
-    def add_item(self, vector, id: int = None, field: str = None) -> None:
+    def add_item(self, vector, id: int = None, field: str = None, normalize: bool = False) -> int:
         """Add a single vector to the database.
         
         Parameters:
             vector: The vector to be added.
             id (int): Optional ID for the vector.
             field (str): Optional target for the vector
+            normalize (bool): whether to to_normalize the input vector
         
         Returns:
             The ID of the added vector.
@@ -192,7 +195,7 @@ class MinVectorDB:
             ValueError: If the vector dimensions don't match or the ID already exists.
         """
 
-        if id in self.all_indeces:
+        if id in self.all_indices:
             raise ValueError(f'id {id} already exists')
 
         if len(vector) != self.dim:
@@ -211,6 +214,8 @@ class MinVectorDB:
             else:
                 id = self.last_id + 1
 
+        vector = to_normalize(vector) if normalize else vector
+
         if self._is_database_reset():
             self.database[0, :] = vector
         else:
@@ -218,7 +223,7 @@ class MinVectorDB:
 
         self.index.append(id)
         self.field.append(field)
-        self.all_indeces.add(id)
+        self.all_indices.add(id)
         self.last_id = id
 
         self.save_checkpoint()
@@ -227,13 +232,14 @@ class MinVectorDB:
 
     @ParameterValuesAssert({'vector': lambda s: s.ndim == 1})
     @ParameterTypeAssert({'vector': np.ndarray, 'k': int, 'field': (None, str, list)})
-    def query(self, vector, k: int = 12, field: str | list = None):
+    def query(self, vector, k: int = 12, field: str | list = None, normalize: bool = False):
         """Query the database for the vectors most similar to the given vector.
         
         Parameters:
             vector: The query vector.
             k (int): The number of nearest vectors to return.
             field (str or list): The target of the vector
+            normalize (bool): whether to to_normalize the input vector
         
         Returns:
             The indices and similarity scores of the top k nearest vectors.
@@ -246,6 +252,7 @@ class MinVectorDB:
         if len(self.database_chunk_path) == 0:
             raise ValueError('database is empty.')
 
+        vector = to_normalize(vector) if normalize else vector
         vector = vector.reshape(-1, 1)
 
         all_scores = []
@@ -255,8 +262,9 @@ class MinVectorDB:
             field = [field]
 
         for database, index, vector_field in self._data_loader():
-            database = database[np.isin(vector_field, field)]
-            index = index[np.isin(vector_field, field)]
+            if field is not None:
+                database = database[np.isin(vector_field, field)]
+                index = index[np.isin(vector_field, field)]
 
             batch_scores = np.dot(database, vector).squeeze()
             if batch_scores.ndim == 0:
@@ -279,10 +287,10 @@ class MinVectorDB:
             return None
 
         length = 0
-        for database, _ in self._data_loader():
+        for database, *_ in self._data_loader():
             length += database.shape[0]
 
-        return (length, self.dim)
+        return length, self.dim
 
     @ParameterTypeAssert({'n': int})
     def head(self, n=10):
