@@ -9,7 +9,7 @@ from min_vec.engine import cosine_distance, euclidean_distance
 
 
 class MinVectorDB:
-    """A class for managing a vector database stored in .mvdb files and computing cosine similarity."""
+    """A class for managing a vector database stored in .mvdb files and computing vectors similarity."""
 
     @ParameterTypeAssert({'dim': int, 'database_path': str, 'chunk_size': int}, func_name='MinVectorDB')
     @ParameterValuesAssert({
@@ -48,7 +48,7 @@ class MinVectorDB:
         for i in os.listdir(self.database_path_parent):
             # If it meets the naming convention, add it to the chunk list.
             if i.startswith(self.database_name_prefix) and Path(i).name.split('.')[0].split('_')[-1].isdigit():
-                self._added_path_to_chunk_list(self.database_path_parent / i)
+                self._add_path_to_chunk_list(self.database_path_parent / i)
 
         # If database_chunk_path is not empty, define the loading conditions for the database and index.
         if len(self.database_chunk_path) > 0:
@@ -91,7 +91,7 @@ class MinVectorDB:
                 field = np.load(f, allow_pickle=True)
             yield database, index, field
 
-    def _added_path_to_chunk_list(self, path):
+    def _add_path_to_chunk_list(self, path):
         """Add a new chunk's path to the list of database chunks.
         
         Parameters:
@@ -132,7 +132,7 @@ class MinVectorDB:
             self.chunk_id += 1
 
             # Storage path for .mvdb file chunks.
-            self._added_path_to_chunk_list(database_name)
+            self._add_path_to_chunk_list(database_name)
             # Reset the database.
             self.reset_database()
 
@@ -144,7 +144,7 @@ class MinVectorDB:
         if not self._is_database_reset():
             database_name = self._save()
 
-            self._added_path_to_chunk_list(database_name)
+            self._add_path_to_chunk_list(database_name)
 
     def commit(self):
         """Save the database, ensuring that all data is written to disk."""
