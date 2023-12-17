@@ -79,6 +79,19 @@ def test_add_single_item_with_id_and_field():
     database.delete()
 
 
+def test_add_single_item_with_vector_normalize():
+    database = get_database()
+    id = database.add_item(np.random.random(100), id=1, field="test", normalize=True)
+
+    assert database.shape == (1, 100)
+    assert database.field == ["test"]
+    assert database.index == [id]
+    assert id == 1
+
+    database.submit()
+    database.delete()
+
+
 def test_add_bulk_item_with_id_and_field():
     database = get_database()
     items = []
@@ -86,6 +99,22 @@ def test_add_bulk_item_with_id_and_field():
         items.append((np.ones(100), i, "test_"+str(i // 10)))
 
     indices = database.bulk_add_items(items)
+
+    assert database.shape == (100, 100)
+    assert database.field == ["test_"+str(i // 10) for i in range(100)]
+    assert database.index == indices
+
+    database.submit()
+    database.delete()
+
+
+def test_add_bulk_item_with_normalize():
+    database = get_database()
+    items = []
+    for i in range(100):
+        items.append((np.ones(100), i, "test_"+str(i // 10)))
+
+    indices = database.bulk_add_items(items, normalize=True)
 
     assert database.shape == (100, 100)
     assert database.field == ["test_"+str(i // 10) for i in range(100)]
@@ -117,7 +146,7 @@ def test_query_without_field():
 
     assert len(n) == len(d) == 12
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database.all_indeces for i in n)
+    assert all(i in database.all_indices for i in n)
 
     database.delete()
 
@@ -130,7 +159,21 @@ def test_query_with_field():
 
     assert len(n) == len(d) == 6
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database.all_indeces for i in n)
+    assert all(i in database.all_indices for i in n)
+    assert all(10 <= i < 20 for i in n)
+
+    database.delete()
+
+
+def test_query_with_normalize():
+    database = get_database_for_query(with_field=True)
+
+    vec = np.random.random(100)
+    n, d = database.query(vec, k=6, field='test_1', normalize=True)
+
+    assert len(n) == len(d) == 6
+    assert list(d) == sorted(d, key=lambda s: -s)
+    assert all(i in database.all_indices for i in n)
     assert all(10 <= i < 20 for i in n)
 
     database.delete()
@@ -144,7 +187,7 @@ def test_query_with_list_field():
 
     assert len(n) == len(d) == 12
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database.all_indeces for i in n)
+    assert all(i in database.all_indices for i in n)
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
     database.delete()
@@ -158,7 +201,7 @@ def test_query_with_chinese_field():
 
     assert len(n) == len(d) == 6
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database.all_indeces for i in n)
+    assert all(i in database.all_indices for i in n)
     assert all(10 <= i < 20 for i in n)
 
     database.delete()
@@ -172,7 +215,7 @@ def test_query_with_chinese_list_field():
 
     assert len(n) == len(d) == 12
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database.all_indeces for i in n)
+    assert all(i in database.all_indices for i in n)
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
     database.delete()
