@@ -139,7 +139,7 @@ class MinVectorDB:
 
             self._added_path_to_chunk_list(database_name)
 
-    def submit(self):
+    def commit(self):
         """Save the database, ensuring that all data is written to disk."""
         # If this method is called, the part that meets the chunk size will be saved first, 
         #  and the part that does not meet the chunk size will be directly saved as the last chunk.

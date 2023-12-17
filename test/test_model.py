@@ -20,7 +20,7 @@ def get_database_for_query(*args, with_field=True, field_prefix='test_', **kwarg
 
     database.bulk_add_items(items)
 
-    database.submit()
+    database.commit()
 
     return database
 
@@ -46,7 +46,7 @@ def test_add_single_item_without_id_and_field():
     assert database.field == [None]
     assert database.index == [id]
 
-    database.submit()
+    database.commit()
     database.delete()
 
 
@@ -61,7 +61,7 @@ def test_bulk_add_item_without_id_and_field():
     assert database.shape == (100, 100)
     assert database.field == [None for i in range(100)]
     assert database.index == indices
-    database.submit()
+    database.commit()
     database.delete()
 
 
@@ -75,7 +75,7 @@ def test_add_single_item_with_id_and_field():
     assert database.index == [id]
     assert id == 1
 
-    database.submit()
+    database.commit()
     database.delete()
 
 
@@ -88,7 +88,7 @@ def test_add_single_item_with_vector_normalize():
     assert database.index == [id]
     assert id == 1
 
-    database.submit()
+    database.commit()
     database.delete()
 
 
@@ -104,7 +104,7 @@ def test_add_bulk_item_with_id_and_field():
     assert database.field == ["test_"+str(i // 10) for i in range(100)]
     assert database.index == indices
 
-    database.submit()
+    database.commit()
     database.delete()
 
 
@@ -120,7 +120,7 @@ def test_add_bulk_item_with_normalize():
     assert database.field == ["test_"+str(i // 10) for i in range(100)]
     assert database.index == indices
 
-    database.submit()
+    database.commit()
     database.delete()
 
 
@@ -135,7 +135,7 @@ def test_add_bulk_item_with_id_and_chinese_field():
     assert database.shape == (100, 100)
     assert database.field == ["测试_" + str(i // 10) for i in range(100)]
     assert database.index == indices
-    database.submit()
+    database.commit()
     database.delete()
 
 
