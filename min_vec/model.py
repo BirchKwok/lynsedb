@@ -5,14 +5,18 @@ import numpy as np
 from spinesUtils.asserts import ParameterValuesAssert, ParameterTypeAssert
 
 from min_vec.utils import to_normalize
+from min_vec.engine import cosine_distance, euclidean_distance
 
 
 class MinVectorDB:
     """A class for managing a vector database stored in .mvdb files and computing cosine similarity."""
 
     @ParameterTypeAssert({'dim': int, 'database_path': str, 'chunk_size': int}, func_name='MinVectorDB')
-    @ParameterValuesAssert({'database_path': lambda s: s.endswith('.mvdb')}, func_name='MinVectorDB')
-    def __init__(self, dim, database_path, chunk_size=10000, dtypes=np.float32) -> None:
+    @ParameterValuesAssert({
+        'database_path': lambda s: s.endswith('.mvdb'),
+        'distance': ('cosine', 'L2')
+    }, func_name='MinVectorDB')
+    def __init__(self, dim, database_path, chunk_size=10000, dtypes=np.float32, distance='cosine') -> None:
         """Initialize the vector database.
         
         Parameters:
@@ -20,6 +24,8 @@ class MinVectorDB:
             database_path (str): Path to the database file.
             chunk_size (int): The size of each data chunk.
             dtypes: Data type of the vectors.
+            distance (str): Specify the method for calculating vector distance:
+                L2 for Euclidean distance, cosine for cosine distance.
         
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -29,6 +35,7 @@ class MinVectorDB:
 
         self.dim = dim
         self.dtypes = dtypes
+        self.distance = distance
 
         self.chunk_size = chunk_size
         self.database_path_parent = Path(database_path).parent
@@ -266,7 +273,12 @@ class MinVectorDB:
                 database = database[np.isin(vector_field, field)]
                 index = index[np.isin(vector_field, field)]
 
-            batch_scores = np.dot(database, vector).squeeze()
+            # Distance calculation core code
+            if self.distance == 'cosine':
+                batch_scores = cosine_distance(database, vector).squeeze()
+            else:
+                batch_scores = euclidean_distance(database, vector).squeeze()
+
             if batch_scores.ndim == 0:
                 batch_scores = [batch_scores]
 
