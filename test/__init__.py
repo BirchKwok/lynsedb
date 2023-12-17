@@ -1,0 +1,1 @@
+from min_vec import MinVectorDB
