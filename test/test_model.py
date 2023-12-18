@@ -1,8 +1,14 @@
+import shutil
+from pathlib import Path
+
 from test import MinVectorDB
 import numpy as np
 
 
-def get_database(dim=100, database_path='test.mvdb', chunk_size=1000, dtypes=np.float32):
+def get_database(dim=100, database_path='test_min_vec.mvdb', chunk_size=1000, dtypes=np.float32):
+    if Path('.mvdb'.join(Path(database_path).name.split('.mvdb')[:-1])).exists():
+        shutil.rmtree(Path('.mvdb'.join(Path(database_path).name.split('.mvdb')[:-1])))
+
     database = MinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
     if database.database_chunk_path:
         database.delete()
@@ -30,8 +36,8 @@ def test_database_initialization():
     assert isinstance(database.database, np.ndarray)
     assert database.database.shape == (1, 100)
     assert database.database.sum() == 0
-    assert database.field == []
-    assert database.index == []
+    assert database.fields == []
+    assert database.indices == []
     assert database.chunk_size == 1000
     assert database.dtypes == np.float32
     assert database.database_chunk_path == []
@@ -41,12 +47,13 @@ def test_add_single_item_without_id_and_field():
     database = get_database()
     id = database.add_item(np.ones(100))
 
-    assert database.shape == (1, 100)
     assert database.database.sum() == 100
-    assert database.field == [None]
-    assert database.index == [id]
+    assert database.fields == [None]
+    assert database.indices == [id]
 
     database.commit()
+
+    assert database.shape == (1, 100)
     database.delete()
 
 
@@ -57,11 +64,13 @@ def test_bulk_add_item_without_id_and_field():
         items.append((np.ones(100),))
 
     indices = database.bulk_add_items(items)
+    assert database.fields == [None for i in range(100)]
+    assert database.indices == indices
+
+    database.commit()
 
     assert database.shape == (100, 100)
-    assert database.field == [None for i in range(100)]
-    assert database.index == indices
-    database.commit()
+
     database.delete()
 
 
@@ -69,13 +78,15 @@ def test_add_single_item_with_id_and_field():
     database = get_database()
     id = database.add_item(np.ones(100), id=1, field="test")
 
-    assert database.shape == (1, 100)
     assert database.database.sum() == 100
-    assert database.field == ["test"]
-    assert database.index == [id]
+    assert database.fields == ["test"]
+    assert database.indices == [id]
     assert id == 1
 
     database.commit()
+
+    assert database.shape == (1, 100)
+
     database.delete()
 
 
@@ -83,12 +94,13 @@ def test_add_single_item_with_vector_normalize():
     database = get_database()
     id = database.add_item(np.random.random(100), id=1, field="test", normalize=True)
 
-    assert database.shape == (1, 100)
-    assert database.field == ["test"]
-    assert database.index == [id]
+    assert database.fields == ["test"]
+    assert database.indices == [id]
     assert id == 1
 
     database.commit()
+    assert database.shape == (1, 100)
+
     database.delete()
 
 
@@ -100,11 +112,13 @@ def test_add_bulk_item_with_id_and_field():
 
     indices = database.bulk_add_items(items)
 
-    assert database.shape == (100, 100)
-    assert database.field == ["test_"+str(i // 10) for i in range(100)]
-    assert database.index == indices
+    assert database.fields == ["test_" + str(i // 10) for i in range(100)]
+    assert database.indices == indices
 
     database.commit()
+
+    assert database.shape == (100, 100)
+
     database.delete()
 
 
@@ -116,11 +130,12 @@ def test_add_bulk_item_with_normalize():
 
     indices = database.bulk_add_items(items, normalize=True)
 
-    assert database.shape == (100, 100)
-    assert database.field == ["test_"+str(i // 10) for i in range(100)]
-    assert database.index == indices
+    assert database.fields == ["test_" + str(i // 10) for i in range(100)]
+    assert database.indices == indices
 
     database.commit()
+
+    assert database.shape == (100, 100)
     database.delete()
 
 
@@ -132,10 +147,13 @@ def test_add_bulk_item_with_id_and_chinese_field():
 
     indices = database.bulk_add_items(items)
 
-    assert database.shape == (100, 100)
-    assert database.field == ["测试_" + str(i // 10) for i in range(100)]
-    assert database.index == indices
+    assert database.fields == ["测试_" + str(i // 10) for i in range(100)]
+    assert database.indices == indices
+
     database.commit()
+
+    assert database.shape == (100, 100)
+
     database.delete()
 
 
