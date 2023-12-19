@@ -44,11 +44,7 @@ class MinVectorDB:
             '.mvdb'.join(Path(database_path).absolute().name.split('.mvdb')[:-1]))
         self.database_name_prefix = '.mvdb'.join(Path(database_path).name.split('.mvdb')[:-1])
 
-        if self.database_path_parent.exists():
-            raise FileExistsError("The database needs to create a folder with the same name."
-                                  f" Please ensure there is no folder named '{self.database_name_prefix}' "
-                                  f"in your current file path, or specify a different name for the database.")
-        else:
+        if not self.database_path_parent.exists():
             self.database_path_parent.mkdir(parents=True)
 
         self.all_indices = set()
