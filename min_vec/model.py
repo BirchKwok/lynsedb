@@ -40,7 +40,8 @@ class MinVectorDB:
         self._EMPTY_DATABASE = np.zeros((1, self.dim), dtype=self.dtypes)
 
         self.chunk_size = chunk_size
-        self.database_path_parent = Path('.mvdb'.join(Path(database_path).name.split('.mvdb')[:-1]))
+        self.database_path_parent = Path(database_path).parent.absolute() / Path(
+            '.mvdb'.join(Path(database_path).absolute().name.split('.mvdb')[:-1]))
         self.database_name_prefix = '.mvdb'.join(Path(database_path).name.split('.mvdb')[:-1])
 
         if self.database_path_parent.exists():
