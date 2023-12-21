@@ -93,8 +93,6 @@ class MinVectorDB:
     def _data_loader(self):
         """Generator that yields database chunks and corresponding indices."""
         # By default, save the checkpoint first.
-        self.save_checkpoint()
-
         try:
             for i in self.database_chunk_path:
                 with open(i, 'rb') as f:
@@ -279,8 +277,6 @@ class MinVectorDB:
         Raises:
             ValueError: If the database is empty.
         """
-        self.save_checkpoint()
-
         if len(self.database_chunk_path) == 0:
             raise ValueError('database is empty.')
 
@@ -333,8 +329,6 @@ class MinVectorDB:
         Returns:
             The first n vectors in the database.
         """
-        self.save_checkpoint()
-
         if len(self.database_chunk_path) == 0:
             return None
 
