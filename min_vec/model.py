@@ -261,8 +261,11 @@ class MinVectorDB:
         return id
 
     @ParameterValuesAssert({'vector': lambda s: s.ndim == 1})
-    @ParameterTypeAssert({'vector': np.ndarray, 'k': int, 'field': (None, str, list)})
-    def query(self, vector, k: int = 12, field: str | list = None, normalize: bool = False):
+    @ParameterTypeAssert({
+        'vector': np.ndarray, 'k': int, 'field': (None, str, list),
+        'normalize': bool, 'subset_indices': (None, list)
+    })
+    def query(self, vector, k: int = 12, field: str | list = None, normalize: bool = False, subset_indices=None):
         """Query the database for the vectors most similar to the given vector.
         
         Parameters:
@@ -270,6 +273,7 @@ class MinVectorDB:
             k (int): The number of nearest vectors to return.
             field (str or list): The target of the vector
             normalize (bool): whether to to_normalize the input vector
+            subset_indices (list): The subset of indices to query.
         
         Returns:
             The indices and similarity scores of the top k nearest vectors.
@@ -293,6 +297,11 @@ class MinVectorDB:
             if field is not None:
                 database = database[np.isin(vector_field, field)]
                 index = index[np.isin(vector_field, field)]
+
+            if subset_indices is not None:
+                subset_indices = list(set(subset_indices))
+                database = database[np.isin(index, subset_indices)]
+                index = index[np.isin(index, subset_indices)]
 
             if len(index) == 0:
                 continue
