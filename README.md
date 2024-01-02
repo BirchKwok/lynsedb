@@ -1,3 +1,8 @@
+<div style="text-align: center; font-size: 2em; background: -webkit-linear-gradient(left, red, orange, yellow, green, blue, indigo, violet); -webkit-background-clip: text; color: transparent;">
+  MinVectorDB
+</div>
+
+
 [MinVectorDB](https://github.com/BirchKwok/MinVectorDB/blob/main/MinVecDB.ipynb) is a simple vector storage and query database implementation, providing clear and concise Python APIs aimed at lowering the barrier to using vector databases. More practical features will be added in the future. 
 
 It is important to note that MinVectorDB is not designed for efficiency and thus does not include built-in algorithms like approximate nearest neighbors for efficient searching. 
