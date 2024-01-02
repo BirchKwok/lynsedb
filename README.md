@@ -1,5 +1,7 @@
-<div style="text-align: center; font-size: 2em; background: -webkit-linear-gradient(left, red, orange, yellow, green, blue, indigo, violet); -webkit-background-clip: text; color: transparent;">
-  MinVectorDB
+<div align="center">
+
+# MinVectorDB
+
 </div>
 
 
