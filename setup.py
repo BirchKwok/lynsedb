@@ -12,7 +12,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name='MinVectorDB',
-    version="0.0.8",
+    version="0.0.9",
     description='MinVectorDB is a simple vector storage and query database implementation, ' \
                 'providing clear and concise Python APIs aimed at lowering the barrier to using vector databases.',
     keywords='vector database',
