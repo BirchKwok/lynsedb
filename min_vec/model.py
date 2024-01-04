@@ -5,6 +5,7 @@ import shutil
 import numpy as np
 from spinesUtils.asserts import ParameterValuesAssert, ParameterTypeAssert
 
+from min_vec.session import DatabaseSession
 from min_vec.utils import to_normalize
 from min_vec.engine import cosine_distance, euclidean_distance
 
@@ -45,7 +46,7 @@ class MinVectorDB:
             chunk_size (int): The size of each data chunk.
             dtypes (data-type): Data type of the vectors.
             distance (str): Method for calculating vector distance. Options are 'cosine' or 'L2' for Euclidean distance.
-        
+
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
         """
@@ -101,6 +102,12 @@ class MinVectorDB:
             self.chunk_id = 0
             self.last_id = 0
             self.reset_database()
+
+        self._COMMIT_FLAG = True
+
+    def _check_commit(self):
+        if not self._COMMIT_FLAG:
+            raise ValueError("Did you forget to run `commit()` function ? Try to run `commit()` first.")
 
     def reset_database(self):
         """Reset the database to its initial state with zeros."""
@@ -193,7 +200,6 @@ class MinVectorDB:
             # Reset the database.
             self.reset_database()
 
-
     def save_checkpoint(self):
         """
         Save the current state of the database as a checkpoint.
@@ -213,7 +219,7 @@ class MinVectorDB:
         Save the database, ensuring that all data is written to disk.
         This method is required to be called after saving vectors to query them.
         """
-        # If this method is called, the part that meets the chunk size will be saved first, 
+        # If this method is called, the part that meets the chunk size will be saved first,
         #  and the part that does not meet the chunk size will be directly saved as the last chunk.
         self.save_checkpoint()
 
@@ -223,16 +229,18 @@ class MinVectorDB:
 
         for fp in self._database_chunk_path:
             os.rename(str(fp) + self.temp_file_target, fp)
+        self._COMMIT_FLAG = True
 
     @ParameterTypeAssert({'vectors': (tuple, list), 'normalize': bool})
     @ParameterValuesAssert({'vectors': lambda s: all(1 <= len(i) <= 3 and isinstance(i, tuple) for i in s)})
-    def bulk_add_items(self, vectors, normalize: bool = False):
+    def bulk_add_items(self, vectors, normalize: bool = False, save_immediately=False):
         """
         Bulk add vectors to the database.
 
         Parameters:
             vectors (list or tuple): A list or tuple of vectors to be saved. Each vector can be a tuple of (vector, id, field).
             normalize (bool): Whether to normalize the input vector.
+            save_immediately (bool): Whether to save the database immediately.
 
         Returns:
             list: A list of indices where the vectors are stored.
@@ -278,7 +286,14 @@ class MinVectorDB:
         self.fields.extend(new_fields)
         self.all_indices.update(new_ids)
 
-        self.save_checkpoint()
+        if save_immediately:
+            self.save_checkpoint()
+        else:
+            if self.database.shape[0] == self.chunk_size:
+                self.save_checkpoint()
+
+        if self._COMMIT_FLAG:
+            self._COMMIT_FLAG = False
 
         return new_ids
 
@@ -292,12 +307,17 @@ class MinVectorDB:
                 self.last_id += 1
             else:
                 self.last_id = 0
+        else:
+            self.last_id += 1
 
         return self.last_id
 
     @ParameterValuesAssert({'vector': lambda s: s.ndim == 1})
-    @ParameterTypeAssert({'vector': np.ndarray, 'id': (int, None), 'field': (str, None), 'normalize': bool})
-    def add_item(self, vector, id: int = None, field: str = None, normalize: bool = False) -> int:
+    @ParameterTypeAssert({
+        'vector': np.ndarray, 'id': (int, None), 'field': (str, None), 'normalize': bool, 'save_immediately': bool
+    })
+    def add_item(self, vector, id: int = None, field: str = None, normalize: bool = False,
+                 save_immediately=False) -> int:
         """
         Add a single vector to the database.
 
@@ -306,10 +326,10 @@ class MinVectorDB:
             id (int, optional): Optional ID for the vector.
             field (str, optional): Optional field for the vector.
             normalize (bool): Whether to normalize the input vector.
-
+            save_immediately (bool): Whether to save the database immediately.
         Returns:
             int: The ID of the added vector.
-        
+
         Raises:
             ValueError: If the vector dimensions don't match or the ID already exists.
         """
@@ -332,9 +352,15 @@ class MinVectorDB:
         self.indices.append(id)
         self.fields.append(field)
         self.all_indices.add(id)
-        self.last_id = id
 
-        self.save_checkpoint()
+        if save_immediately:
+            self.save_checkpoint()
+        else:
+            if self.database.shape[0] == self.chunk_size:
+                self.save_checkpoint()
+
+        if self._COMMIT_FLAG:
+            self._COMMIT_FLAG = False
 
         return id
 
@@ -356,10 +382,12 @@ class MinVectorDB:
 
         Returns:
             Tuple: The indices and similarity scores of the top k nearest vectors.
-        
+
         Raises:
             ValueError: If the database is empty.
         """
+        self._check_commit()
+
         if len(self._database_chunk_path) == 0:
             raise ValueError('database is empty.')
 
@@ -410,6 +438,8 @@ class MinVectorDB:
         Returns:
             tuple: The number of vectors and the dimension of each vector in the database.
         """
+        self._check_commit()
+
         if len(self._database_chunk_path) == 0:
             return 0, 0
         else:
@@ -422,13 +452,15 @@ class MinVectorDB:
     @ParameterTypeAssert({'n': int})
     def head(self, n=10):
         """Return the first n vectors in the database.
-        
+
         Parameters:
             n (int): The number of vectors to return.
-        
+
         Returns:
             The first n vectors in the database.
         """
+        self._check_commit()
+
         if len(self._database_chunk_path) == 0:
             return None
 
@@ -448,7 +480,12 @@ class MinVectorDB:
         if len(self._database_chunk_path) == 0:
             return None
 
-        shutil.rmtree(self.database_path_parent)
+        try:
+            shutil.rmtree(self.database_path_parent)
+        except FileNotFoundError:
+            pass
 
         self.reset_database()
 
+    def insert_session(self):
+        return DatabaseSession(self)
