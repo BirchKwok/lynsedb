@@ -151,3 +151,5 @@ cython_debug/
 .vscode/
 
 .idea/
+
+readme.ipynb
