@@ -27,8 +27,11 @@ pip install MinVectorDB
 
 
 ```python
-from IPython.display import display_markdown
-
+try:
+    from IPython.display import display_markdown
+except ImportError:
+    def display_markdown(text, raw=True):
+        print(text)
 
 import numpy as np
 
@@ -47,21 +50,39 @@ timer = Timer()
 display_markdown("*Demo 1* -- **Sequentially add vectors**", raw=True)
 
 timer.start()
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=100)
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=1000)
 
 np.random.seed(23)
 
-# Define the initial ID.
-id = 0
-for t in np.random.random((1000, 1024)):
-    # Vectors need to be normalized before writing to the database.
-    # t = t / np.linalg.norm(t) 
-    # Here, normalization can be directly specified, achieving the same effect as the previous sentence.
-    db.add_item(t, id=id, normalize=True) 
-    
-    # ID increments by 1 with each loop iteration.
-    id += 1
-db.commit()
+def get_test_vectors(shape):
+    for i in range(shape[0]):
+        yield np.random.random(shape[1])
+
+# Use automatic commit statements. Recommended.
+with db.insert_session():
+    # Define the initial ID.
+    id = 0
+    for t in get_test_vectors((10000, 1024)):
+        # Vectors need to be normalized before writing to the database.
+        # t = t / np.linalg.norm(t) 
+        # Here, normalization can be directly specified, achieving the same effect as the previous sentence.
+        db.add_item(t, id=id, normalize=True)
+        
+        # ID increments by 1 with each loop iteration.
+        id += 1
+
+# Or use manual commit statements.
+# id = 0
+# for t in get_test_vectors((10000, 1024)):
+#     # Vectors need to be normalized before writing to the database.
+#     # t = t / np.linalg.norm(t) 
+#     # Here, normalization can be directly specified, achieving the same effect as the previous sentence.
+#     db.add_item(t, id=id, normalize=True)
+#     
+#     # ID increments by 1 with each loop iteration.
+#     id += 1
+# db.commit()
+        
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 timer.middle_point()
 
@@ -74,7 +95,7 @@ timer.end()
 
 
 
-# For demonstrating Demo2, the database created in Demo1 needs to be deleted, but this operation is not required in actual use.
+# This sentence is for demo demonstration purposes, to clear the currently created .mvdb files from the database, but this is optional in actual use.
 db.delete()
 ```
 
@@ -83,21 +104,24 @@ db.delete()
 
 
     
-    * [Insert data] Time cost 0.3461 s.
+    * [Insert data] Time cost 6.9145 s.
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658325 0.04808333]
-      - Database index of top 10 results:  [  0 842 202 396 123 550 688 431 924 555]
-      - Cosine similarity of top 10 results:  [1.         0.77242908 0.77178528 0.77129891 0.76868025 0.76643363
-     0.76631299 0.76518539 0.76441551 0.76278279]
+      - Database index of top 10 results:  [   0 5788  842  202 6658  396 5116 9447 1245 2393]
+      - Cosine similarity of top 10 results:  [1.         0.77570757 0.77242908 0.77178528 0.77165615 0.77129891
+     0.77062634 0.77019239 0.76990888 0.76983951]
     
-    * [Query data] Time cost 0.0285 s.
+    * [Query data] Time cost 0.0320 s.
 
 
 ### Bulk add vectors
 
 
 ```python
-from IPython.display import display_markdown
-
+try:
+    from IPython.display import display_markdown
+except ImportError:
+    def display_markdown(text, raw=True):
+        print(text)
 
 import numpy as np
 
@@ -115,23 +139,27 @@ display_markdown("*Demo 2* -- **Bulk add vectors**", raw=True)
 
 timer.start()
 
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=100)
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000)
 
 np.random.seed(23)
 
-# Define the initial ID.
-id = 0
-vectors = []
-for t in np.random.random((1000, 1024)):
-    # Vectors need to be normalized before writing to the database.
-    # t = t / np.linalg.norm(t) 
-    vectors.append((t, id))
-    # ID increments by 1 with each loop iteration.
-    id += 1
-    
-# Here, normalization can be directly specified, achieving the same effect as `t = t / np.linalg.norm(t) `.
-db.bulk_add_items(vectors, normalize=True)
-db.commit()
+def get_test_vectors(shape):
+    for i in range(shape[0]):
+        yield np.random.random(shape[1])
+
+with db.insert_session():  
+    # Define the initial ID.
+    id = 0
+    vectors = []
+    for t in get_test_vectors((100000, 1024)):
+        # Vectors need to be normalized before writing to the database.
+        # t = t / np.linalg.norm(t) 
+        vectors.append((t, id))
+        # ID increments by 1 with each loop iteration.
+        id += 1
+        
+    # Here, normalization can be directly specified, achieving the same effect as `t = t / np.linalg.norm(t) `.
+    db.bulk_add_items(vectors, normalize=True)
 
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 timer.middle_point()
@@ -144,7 +172,8 @@ print(f"\n* [Query data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
 
 timer.end()
-# This operation is not required in actual use.
+
+# This sentence is for demo demonstration purposes, to clear the currently created .mvdb files from the database, but this is optional in actual use.
 db.delete()
 ```
 
@@ -153,19 +182,27 @@ db.delete()
 
 
     
-    * [Insert data] Time cost 0.0138 s.
+    * [Insert data] Time cost 1.0924 s.
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658325 0.04808333]
-      - Database index of top 10 results:  [  0 842 202 396 123 550 688 431 924 555]
-      - Cosine similarity of top 10 results:  [1.         0.7724291  0.7717853  0.7712989  0.7686802  0.7664336
-     0.766313   0.7651854  0.7644155  0.76278275]
+      - Database index of top 10 results:  [    0 67927 53447 47665 64134 13859 41949  5788 38082 18507]
+      - Cosine similarity of top 10 results:  [1.         0.78101647 0.7777599  0.77717626 0.7759101  0.77581763
+     0.77578723 0.77570754 0.77500904 0.7742009 ]
     
-    * [Query data] Time cost 0.0131 s.
+    * [Query data] Time cost 0.2244 s.
 
 
 ### Use field to improve Searching Recall
 
 
 ```python
+try:
+    from IPython.display import display_markdown
+except ImportError:
+    def display_markdown(text, raw=True):
+        print(text)
+
+import numpy as np
+
 from spinesUtils.utils import Timer
 from min_vec import MinVectorDB
 
@@ -179,22 +216,27 @@ display_markdown("*Demo 3* -- **Use field to improve Searching Recall**", raw=Tr
 
 timer.start()
 
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=100)
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000)
 
 np.random.seed(23)
 
-# Define the initial ID.
-id = 0
-vectors = []
-for t in np.random.random((1000, 1024)):
-    # Vectors need to be normalized before writing to the database.
-    # t = t / np.linalg.norm(t) 
-    vectors.append((t, id, 'test_'+str(id // 100)))
-    # ID increments by 1 with each loop iteration.
-    id += 1
-    
-db.bulk_add_items(vectors, normalize=True)
-db.commit()
+
+def get_test_vectors(shape):
+    for i in range(shape[0]):
+        yield np.random.random(shape[1])
+
+with db.insert_session():     
+    # Define the initial ID.
+    id = 0
+    vectors = []
+    for t in get_test_vectors((100000, 1024)):
+        # Vectors need to be normalized before writing to the database.
+        # t = t / np.linalg.norm(t) 
+        vectors.append((t, id, 'test_'+str(id // 100)))
+        # ID increments by 1 with each loop iteration.
+        id += 1
+        
+    db.bulk_add_items(vectors, normalize=True)
 
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 timer.middle_point()
@@ -206,6 +248,8 @@ print("  - Cosine similarity of top 10 results: ", res[1])
 print(f"\n* [Query data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
 timer.end()
+
+# This sentence is for demo demonstration purposes, to clear the currently created .mvdb files from the database, but this is optional in actual use.
 db.delete()
 ```
 
@@ -214,19 +258,27 @@ db.delete()
 
 
     
-    * [Insert data] Time cost 0.0456 s.
+    * [Insert data] Time cost 1.0831 s.
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658325 0.04808333]
       - Database index of top 10 results:  [  0 396   9 359  98 317  20  66 347 337]
       - Cosine similarity of top 10 results:  [1.         0.7712989  0.76116776 0.7611464  0.7591922  0.7587052
      0.7574989  0.7574572  0.7573151  0.75730586]
     
-    * [Query data] Time cost 0.0797 s.
+    * [Query data] Time cost 0.1830 s.
 
 
 ### Use subset_indices to narrow down the search range
 
 
 ```python
+try:
+    from IPython.display import display_markdown
+except ImportError:
+    def display_markdown(text, raw=True):
+        print(text)
+
+import numpy as np
+
 from spinesUtils.utils import Timer
 from min_vec import MinVectorDB
 
@@ -240,33 +292,40 @@ display_markdown("*Demo 4* -- **Use subset_indices to narrow down the search ran
 
 timer.start()
 
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=100)
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000)
 
 np.random.seed(23)
 
-# Define the initial ID.
-id = 0
-vectors = []
-for t in np.random.random((1000, 1024)):
-    # Vectors need to be normalized before writing to the database.
-    # t = t / np.linalg.norm(t) 
-    vectors.append((t, id, 'test_'+str(id // 100)))
-    # ID increments by 1 with each loop iteration.
-    id += 1
-    
-db.bulk_add_items(vectors, normalize=True)
-db.commit()
+
+def get_test_vectors(shape):
+    for i in range(shape[0]):
+        yield np.random.random(shape[1])
+
+with db.insert_session():     
+    # Define the initial ID.
+    id = 0
+    vectors = []
+    for t in get_test_vectors((100000, 1024)):
+        # Vectors need to be normalized before writing to the database.
+        # t = t / np.linalg.norm(t) 
+        vectors.append((t, id, 'test_'+str(id // 100)))
+        # ID increments by 1 with each loop iteration.
+        id += 1
+        
+    db.bulk_add_items(vectors, normalize=True)
 
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 timer.middle_point()
 
-res = db.query(db.head(10)[0], k=10, field=['test_0', 'test_3'], subset_indices=list(range(100)))
+res = db.query(db.head(10)[0], k=10, field=['test_0', 'test_3'], subset_indices=list(range(1000)))
 print("  - Query vector: ", db.head(10)[0])
 print("  - Database index of top 10 results: ", res[0])
 print("  - Cosine similarity of top 10 results: ", res[1])
 print(f"\n* [Query data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
 timer.end()
+
+# This sentence is for demo demonstration purposes, to clear the currently created .mvdb files from the database, but this is optional in actual use.
 db.delete()
 ```
 
@@ -275,11 +334,11 @@ db.delete()
 
 
     
-    * [Insert data] Time cost 0.0143 s.
+    * [Insert data] Time cost 1.1138 s.
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658325 0.04808333]
-      - Database index of top 10 results:  [ 0  9 98 20 66 32 53 74 51 21]
-      - Cosine similarity of top 10 results:  [1.         0.76116776 0.7591922  0.7574989  0.7574572  0.75695866
-     0.75688934 0.7559832  0.7552062  0.75445503]
+      - Database index of top 10 results:  [  0 396   9 359  98 317  20  66 347 337]
+      - Cosine similarity of top 10 results:  [1.         0.7712989  0.76116776 0.7611464  0.7591922  0.7587052
+     0.7574989  0.7574572  0.7573151  0.75730586]
     
-    * [Query data] Time cost 0.0157 s.
+    * [Query data] Time cost 0.1830 s.
 
