@@ -224,7 +224,7 @@ class MinVectorDB:
         for fp in self._database_chunk_path:
             os.rename(str(fp) + self.temp_file_target, fp)
 
-    @ParameterTypeAssert({'vectors': (tuple, list)})
+    @ParameterTypeAssert({'vectors': (tuple, list), 'normalize': bool})
     @ParameterValuesAssert({'vectors': lambda s: all(1 <= len(i) <= 3 and isinstance(i, tuple) for i in s)})
     def bulk_add_items(self, vectors, normalize: bool = False):
         """
@@ -296,7 +296,7 @@ class MinVectorDB:
         return self.last_id
 
     @ParameterValuesAssert({'vector': lambda s: s.ndim == 1})
-    @ParameterTypeAssert({'vector': np.ndarray, 'id': (int, None), 'field': (str, None)})
+    @ParameterTypeAssert({'vector': np.ndarray, 'id': (int, None), 'field': (str, None), 'normalize': bool})
     def add_item(self, vector, id: int = None, field: str = None, normalize: bool = False) -> int:
         """
         Add a single vector to the database.
