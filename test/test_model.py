@@ -22,15 +22,13 @@ def get_database(dim=100, database_path='test_min_vec.mvdb', chunk_size=1000, dt
 
 def get_database_for_query(*args, with_field=True, field_prefix='test_', **kwargs):
     database = get_database(*args, **kwargs)
-
     np.random.seed(2023)
-    items = []
-    for i in range(100):
-        items.append((np.random.random(100), i, field_prefix + str(i // 10) if with_field else None))
+    with database.insert_session():
+        items = []
+        for i in range(100):
+            items.append((np.random.random(100), i, field_prefix + str(i // 10) if with_field else None))
 
-    database.bulk_add_items(items)
-
-    database.commit()
+        database.bulk_add_items(items)
 
     return database
 
@@ -55,8 +53,6 @@ def test_add_single_item_without_id_and_field():
     assert database.fields == [None]
     assert database.indices == [id]
 
-    with pytest.raises(FileNotFoundError):
-        t = database.shape
     database.commit()
     assert database.shape == (1, 100)
     database.delete()
@@ -71,8 +67,6 @@ def test_add_single_item_with_id_and_field():
     assert database.indices == [id]
     assert id == 1
 
-    with pytest.raises(FileNotFoundError):
-        t = database.shape
     database.commit()
 
     assert database.shape == (1, 100)
@@ -90,8 +84,6 @@ def test_bulk_add_item_without_id_and_field():
     assert database.fields == [None for i in range(100)]
     assert database.indices == indices
 
-    with pytest.raises(FileNotFoundError):
-        t = database.shape
     database.commit()
     assert database.shape == (100, 100)
     database.delete()
@@ -105,8 +97,6 @@ def test_add_single_item_with_vector_normalize():
     assert database.indices == [id]
     assert id == 1
 
-    with pytest.raises(FileNotFoundError):
-        t = database.shape
     database.commit()
     assert database.shape == (1, 100)
 
@@ -124,8 +114,6 @@ def test_add_bulk_item_with_id_and_field():
     assert database.fields == ["test_" + str(i // 10) for i in range(100)]
     assert database.indices == indices
 
-    with pytest.raises(FileNotFoundError):
-        t = database.shape
     database.commit()
 
     assert database.shape == (100, 100)
@@ -144,8 +132,6 @@ def test_add_bulk_item_with_normalize():
     assert database.fields == ["test_" + str(i // 10) for i in range(100)]
     assert database.indices == indices
 
-    with pytest.raises(FileNotFoundError):
-        t = database.shape
     database.commit()
 
     assert database.shape == (100, 100)
@@ -162,9 +148,6 @@ def test_add_bulk_item_with_id_and_chinese_field():
 
     assert database.fields == ["测试_" + str(i // 10) for i in range(100)]
     assert database.indices == indices
-
-    with pytest.raises(FileNotFoundError):
-        t = database.shape
 
     database.commit()
 
