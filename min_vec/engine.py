@@ -16,7 +16,6 @@ def to_normalize(vec: np.ndarray, device='auto'):
             return vec
         return vec / norm
     elif vec.ndim == 2:
-        # 每一行求归一化, 使用pytorch实现
         device = get_device(device)
         vec = torch.from_numpy(vec).to(device)
         norm = torch.norm(vec, dim=1, keepdim=True)
@@ -34,7 +33,6 @@ def cosine_distance(vec1, vec2, device='auto'):
 
 def euclidean_distance(vec1, vec2, device='auto'):
     device = get_device(device)
-    # 使用pytorch实现欧氏距离
     vec1 = torch.from_numpy(vec1).to(device).squeeze()
     vec2 = torch.from_numpy(vec2).to(device).squeeze()
     return torch.norm(vec1 - vec2).detach().cpu().numpy()
