@@ -38,7 +38,7 @@ class MinVectorDB:
         'distance': ('cosine', 'L2')
     }, func_name='MinVectorDB')
     def __init__(self, dim, database_path, chunk_size=100_000, dtypes=np.float32, distance='cosine',
-                 bloom_filter_size=10_000_000, device='auto') -> None:
+                 bloom_filter_size=100_000_000, device='auto') -> None:
         """
         Initialize the vector database.
 
@@ -63,7 +63,7 @@ class MinVectorDB:
         self._EMPTY_DATABASE = np.zeros((1, self.dim), dtype=self.dtypes)
         self.device = device
 
-        # list for add_item function
+        # list for add item
         self._tmp_vectors = []
         self._tmp_indices = []
         self._tmp_fields = []
@@ -95,6 +95,12 @@ class MinVectorDB:
 
         self._bloom_filter = BloomFilter(size=bloom_filter_size, hash_count=5)
 
+        self._initialize()
+
+        self._COMMIT_FLAG = True
+        self._NEVER_COMMIT_FLAG = True
+
+    def _initialize(self):
         # If database_chunk_path is not empty, define the loading conditions for the database and index.
         if len(self._database_chunk_path) > 0:
             self.chunk_id = max([int(Path(i).name.split('.')[0].split('_')[-1]) for i in self._database_chunk_path])
@@ -102,30 +108,37 @@ class MinVectorDB:
             if self._bloom_filter_path.exists():
                 self._bloom_filter.from_file(self._bloom_filter_path)
 
-                with open(self._database_chunk_path[-1], 'rb') as f:
+                if Path(self._database_chunk_path[-1]).exists():
+                    last_file_path = self._database_chunk_path[-1]
+                else:
+                    last_file_path = Path(str(self._database_chunk_path[-1]) + self.temp_file_target)
+
+                with open(last_file_path, 'rb') as f:
                     self.database = np.load(f, allow_pickle=True)
-                    self.indices = np.load(f, allow_pickle=True)
-                    self.fields = np.load(f, allow_pickle=True)
+                    self.indices = np.load(f, allow_pickle=True).tolist()
+                    self.fields = np.load(f, allow_pickle=True).tolist()
                     self.last_id = self.indices[-1]
             else:
                 for chunk_id, (chunk_data, index, chunk_field) in enumerate(self._data_loader()):
                     self.database = chunk_data
-                    self.indices = index
+                    self.indices = index.tolist()
                     for idx in index:
                         self._bloom_filter.add(idx)
                         self.last_id = idx
-                    self.fields = chunk_field
+                    self.fields = chunk_field.tolist()
 
             if self.database.shape[0] == self.chunk_size:
                 self.reset_database()
                 self.chunk_id += 1
+            else:
+                print(str(self._database_chunk_path[-1]), str(self._database_chunk_path[-1]) + self.temp_file_target)
+                # rename the last file
+                os.rename(str(self._database_chunk_path[-1]), str(self._database_chunk_path[-1]) + self.temp_file_target)
         else:
             # If database_chunk_path is empty, define a new database and index.
             self.chunk_id = 0
             self.last_id = 0
             self.reset_database()
-
-        self._COMMIT_FLAG = True
 
     def _check_commit(self):
         if not self._COMMIT_FLAG:
@@ -233,7 +246,6 @@ class MinVectorDB:
         """
         self._auto_save()
 
-        # 如果数据库的长度大于chunk_size，还有一点数据没有被保存，此时需要保存一下
         if not self._is_database_reset():
             # After auto-saving, if the database in memory does not meet the chunk length, it still needs to be saved.
 
@@ -245,7 +257,6 @@ class MinVectorDB:
 
             self.reset_database()
 
-
     def commit(self):
         """
         Save the database, ensuring that all data is written to disk.
@@ -253,19 +264,37 @@ class MinVectorDB:
         """
         # If this method is called, the part that meets the chunk size will be saved first,
         #  and the part that does not meet the chunk size will be directly saved as the last chunk.
-        self.save_checkpoint()
+        if not self._COMMIT_FLAG:
+            if self._tmp_vectors:
+                if self._is_database_reset():
+                    self.database = np.vstack(self._tmp_vectors)
+                else:
+                    self.database = np.vstack((self.database, np.vstack(self._tmp_vectors)))
 
-        # Initialize the database.
-        if not self._is_database_reset():
-            self.reset_database()
+                self.indices.extend(self._tmp_indices)
+                self.fields.extend(self._tmp_fields)
+                for item in self.indices:
+                    self._bloom_filter.add(item)
 
-        for fp in self._database_chunk_path:
-            os.rename(str(fp) + self.temp_file_target, fp)
+                self.save_checkpoint()
 
-        # save bloom filter
-        self._bloom_filter.to_file(self._bloom_filter_path)
+            self._tmp_vectors = []  # reset tmp_vectors
+            self._tmp_indices = []  # reset tmp_indices
+            self._tmp_fields = []  # reset tmp_fields
 
-        self._COMMIT_FLAG = True
+            # Initialize the database.
+            if not self._is_database_reset():
+                self.reset_database()
+
+            for fp in self._database_chunk_path:
+                if Path(fp + self.temp_file_target).exists():
+                    os.rename(str(fp) + self.temp_file_target, fp)
+
+            # save bloom filter
+            self._bloom_filter.to_file(self._bloom_filter_path)
+
+            self._COMMIT_FLAG = True
+            self._NEVER_COMMIT_FLAG = False
 
     @ParameterTypeAssert({'vectors': (tuple, list), 'normalize': bool})
     @ParameterValuesAssert({'vectors': lambda s: all(1 <= len(i) <= 3 and isinstance(i, tuple) for i in s)})
@@ -281,6 +310,10 @@ class MinVectorDB:
         Returns:
             list: A list of indices where the vectors are stored.
         """
+        if not self._NEVER_COMMIT_FLAG:
+            self._initialize()
+            self._NEVER_COMMIT_FLAG = True
+
         new_vectors = []
         new_ids = []
         new_fields = []
@@ -304,9 +337,6 @@ class MinVectorDB:
             if len(vector) != self.dim:
                 raise ValueError(f'vector dim error, expect {self.dim}, got {len(vector)}')
 
-            if normalize and save_immediately:
-                vector = to_normalize(vector)
-
             new_vectors.append(vector)
             new_ids.append(id if id is not None else self._generate_new_id())
             new_fields.append(field)
@@ -314,25 +344,40 @@ class MinVectorDB:
         # Convert lists to numpy arrays
         new_vectors = np.array(new_vectors, dtype=self.dtypes)
 
-        # Update database, indices, and fields
-        if self._is_database_reset():
-            self.database = new_vectors
-        else:
-            self.database = np.vstack((self.database, new_vectors))
-
-        self.indices.extend(new_ids)
-        self.fields.extend(new_fields)
-        for item in new_ids:
-            self._bloom_filter.add(item)
+        if normalize:
+            new_vectors = to_normalize(new_vectors)
 
         if save_immediately:
+            # Update database, indices, and fields
+            if self._is_database_reset():
+                self.database = new_vectors
+            else:
+                self.database = np.vstack((self.database, new_vectors))
+
+            self.indices.extend(new_ids)
+            self.fields.extend(new_fields)
+            for item in new_ids:
+                self._bloom_filter.add(item)
+
             self.save_checkpoint()
         else:
             if self.database.shape[0] >= self.chunk_size:
-                if normalize:
-                    self.database = to_normalize(self.database)
+                # Update database, indices, and fields
+                if self._is_database_reset():
+                    self.database = new_vectors
+                else:
+                    self.database = np.vstack((self.database, new_vectors))
+
+                self.indices.extend(new_ids)
+                self.fields.extend(new_fields)
+                for item in new_ids:
+                    self._bloom_filter.add(item)
 
                 self.save_checkpoint()
+            else:
+                self._tmp_vectors.extend(new_vectors)
+                self._tmp_indices.extend(new_ids)
+                self._tmp_fields.extend(new_fields)
 
         if self._COMMIT_FLAG:
             self._COMMIT_FLAG = False
@@ -368,6 +413,10 @@ class MinVectorDB:
         Raises:
             ValueError: If the vector dimensions don't match or the ID already exists.
         """
+        if not self._NEVER_COMMIT_FLAG:
+            self._initialize()
+            self._NEVER_COMMIT_FLAG = True
+
         if id in self._bloom_filter:
             raise ValueError(f'id {id} already exists')
 
@@ -377,14 +426,12 @@ class MinVectorDB:
         id = self._generate_new_id() if id is None else id
 
         vector = vector.astype(self.dtypes)
+        vector = to_normalize(vector) if normalize else vector
 
         # Add the id to then bloom filter.
         self._bloom_filter.add(id)
 
         if save_immediately:
-            if normalize:
-                vector = to_normalize(vector)
-
             if self._is_database_reset():
                 self.database[0, :] = vector
             else:
@@ -404,9 +451,6 @@ class MinVectorDB:
                     self.database = np.vstack(self._tmp_vectors)
                 else:
                     self.database = np.vstack((self.database, np.vstack(self._tmp_vectors)))
-
-                if normalize:
-                    self.database = to_normalize(self.database)
 
                 self.indices.extend(self._tmp_indices)
                 self.fields.extend(self._tmp_fields)
@@ -546,4 +590,7 @@ class MinVectorDB:
         self.reset_database()
 
     def insert_session(self):
+        """
+        Create a session to insert data, which will automatically commit the data when the session ends.
+        """
         return DatabaseSession(self)
