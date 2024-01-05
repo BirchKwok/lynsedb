@@ -6,8 +6,8 @@ import numpy as np
 from spinesUtils.asserts import ParameterValuesAssert, ParameterTypeAssert
 
 from min_vec.session import DatabaseSession
-from min_vec.utils import to_normalize
-from min_vec.engine import cosine_distance, euclidean_distance
+from min_vec.engine import cosine_distance, euclidean_distance, to_normalize
+from min_vec.filter import BloomFilter
 
 
 class MinVectorDB:
@@ -21,7 +21,6 @@ class MinVectorDB:
         database_path_parent (Path): Path to the parent directory of the database.
         database_name_prefix (str): Prefix for naming the database files.
         chunk_size (int): Size of each data chunk in the database.
-        all_indices (set): A set of all indices in the database.
         last_id (int): Last ID used in the database.
         temp_file_target (str): Suffix for temporary files during operations.
         _database_chunk_path (list): Paths to the database chunks.
@@ -31,12 +30,15 @@ class MinVectorDB:
         fields (list): List of fields associated with each vector in the chunk.
     """
 
-    @ParameterTypeAssert({'dim': int, 'database_path': str, 'chunk_size': int}, func_name='MinVectorDB')
+    @ParameterTypeAssert({
+        'dim': int, 'database_path': str, 'chunk_size': int, 'bloom_filter_size': int, 'device': str
+    }, func_name='MinVectorDB')
     @ParameterValuesAssert({
         'database_path': lambda s: s.endswith('.mvdb'),
         'distance': ('cosine', 'L2')
     }, func_name='MinVectorDB')
-    def __init__(self, dim, database_path, chunk_size=10000, dtypes=np.float32, distance='cosine') -> None:
+    def __init__(self, dim, database_path, chunk_size=100_000, dtypes=np.float32, distance='cosine',
+                 bloom_filter_size=10_000_000, device='auto') -> None:
         """
         Initialize the vector database.
 
@@ -46,6 +48,8 @@ class MinVectorDB:
             chunk_size (int): The size of each data chunk.
             dtypes (data-type): Data type of the vectors.
             distance (str): Method for calculating vector distance. Options are 'cosine' or 'L2' for Euclidean distance.
+            bloom_filter_size (int): The size of the bloom filter.
+            device (str): The device to use for vector operations. Options are 'auto', 'cpu', 'mps', or 'cuda'.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -57,6 +61,12 @@ class MinVectorDB:
         self.dtypes = dtypes
         self.distance = distance
         self._EMPTY_DATABASE = np.zeros((1, self.dim), dtype=self.dtypes)
+        self.device = device
+
+        # list for add_item function
+        self._tmp_vectors = []
+        self._tmp_indices = []
+        self._tmp_fields = []
 
         self.chunk_size = chunk_size
         self.database_path_parent = Path(database_path).parent.absolute() / Path(
@@ -66,7 +76,6 @@ class MinVectorDB:
         if not self.database_path_parent.exists():
             self.database_path_parent.mkdir(parents=True)
 
-        self.all_indices = set()
         # parameters for reorganize the temporary files
         self.temp_file_target = '.temp'
 
@@ -77,22 +86,35 @@ class MinVectorDB:
         # If they exist, iterate through all .mvdb files.
         self._database_chunk_path = []
 
+        self._bloom_filter_path = self.database_path_parent / 'bloom_filter.mvdb'
+
         for i in os.listdir(self.database_path_parent):
             # If it meets the naming convention, add it to the chunk list.
             if i.startswith(self.database_name_prefix) and Path(i).name.split('.')[0].split('_')[-1].isdigit():
                 self._add_path_to_chunk_list(self.database_path_parent / i)
 
+        self._bloom_filter = BloomFilter(size=bloom_filter_size, hash_count=5)
+
         # If database_chunk_path is not empty, define the loading conditions for the database and index.
         if len(self._database_chunk_path) > 0:
             self.chunk_id = max([int(Path(i).name.split('.')[0].split('_')[-1]) for i in self._database_chunk_path])
 
-            for chunk_id, (chunk_data, index, chunk_field) in enumerate(self._data_loader()):
-                self.database = chunk_data
-                self.indices = index
-                self.fields = chunk_field
-                for idx in index:
-                    self.all_indices.add(idx)
-                    self.last_id = idx
+            if self._bloom_filter_path.exists():
+                self._bloom_filter.from_file(self._bloom_filter_path)
+
+                with open(self._database_chunk_path[-1], 'rb') as f:
+                    self.database = np.load(f, allow_pickle=True)
+                    self.indices = np.load(f, allow_pickle=True)
+                    self.fields = np.load(f, allow_pickle=True)
+                    self.last_id = self.indices[-1]
+            else:
+                for chunk_id, (chunk_data, index, chunk_field) in enumerate(self._data_loader()):
+                    self.database = chunk_data
+                    self.indices = index
+                    for idx in index:
+                        self._bloom_filter.add(idx)
+                        self.last_id = idx
+                    self.fields = chunk_field
 
             if self.database.shape[0] == self.chunk_size:
                 self.reset_database()
@@ -178,9 +200,9 @@ class MinVectorDB:
                          f'{self.database_name_prefix}_{self.chunk_id}.mvdb{self.temp_file_target}')
 
         with open(database_name, 'wb') as f:
-            np.save(f, self.database, allow_pickle=True)
-            np.save(f, self.indices, allow_pickle=True)
-            np.save(f, self.fields, allow_pickle=True)
+            np.save(f, self.database[:self.chunk_size, :], allow_pickle=True)
+            np.save(f, self.indices[:self.chunk_size], allow_pickle=True)
+            np.save(f, self.fields[:self.chunk_size], allow_pickle=True)
 
         return database_name
 
@@ -188,8 +210,15 @@ class MinVectorDB:
         """
         Automatically save the database and index to a chunk file when the current chunk is full.
         """
-        if self.database.shape[0] == self.chunk_size:
+        while self.database.shape[0] >= self.chunk_size:
             database_name = self._save()
+
+            if self.database.shape[0] == self.chunk_size:
+                self.reset_database()
+            else:
+                self.database = self.database[self.chunk_size:, :]
+                self.indices = self.indices[self.chunk_size:]
+                self.fields = self.fields[self.chunk_size:]
 
             self.chunk_id += 1
 
@@ -197,8 +226,6 @@ class MinVectorDB:
             self._add_path_to_chunk_list(
                 Path(self.temp_file_target.join(str(database_name).split(self.temp_file_target)[:-1]))
             )
-            # Reset the database.
-            self.reset_database()
 
     def save_checkpoint(self):
         """
@@ -206,13 +233,18 @@ class MinVectorDB:
         """
         self._auto_save()
 
-        # After auto-saving, if the database in memory does not meet the chunk length, it still needs to be saved.
+        # 如果数据库的长度大于chunk_size，还有一点数据没有被保存，此时需要保存一下
         if not self._is_database_reset():
+            # After auto-saving, if the database in memory does not meet the chunk length, it still needs to be saved.
+
             database_name = self._save()
 
             self._add_path_to_chunk_list(
                 Path(self.temp_file_target.join(str(database_name).split(self.temp_file_target)[:-1]))
             )
+
+            self.reset_database()
+
 
     def commit(self):
         """
@@ -229,6 +261,10 @@ class MinVectorDB:
 
         for fp in self._database_chunk_path:
             os.rename(str(fp) + self.temp_file_target, fp)
+
+        # save bloom filter
+        self._bloom_filter.to_file(self._bloom_filter_path)
+
         self._COMMIT_FLAG = True
 
     @ParameterTypeAssert({'vectors': (tuple, list), 'normalize': bool})
@@ -260,13 +296,15 @@ class MinVectorDB:
             else:
                 vector, id, field = sample
 
-            if id is not None and id in self.all_indices:
+            vector = vector.astype(self.dtypes)
+
+            if id is not None and id in self._bloom_filter:
                 raise ValueError(f'id {id} already exists')
 
             if len(vector) != self.dim:
                 raise ValueError(f'vector dim error, expect {self.dim}, got {len(vector)}')
 
-            if normalize:
+            if normalize and save_immediately:
                 vector = to_normalize(vector)
 
             new_vectors.append(vector)
@@ -284,12 +322,16 @@ class MinVectorDB:
 
         self.indices.extend(new_ids)
         self.fields.extend(new_fields)
-        self.all_indices.update(new_ids)
+        for item in new_ids:
+            self._bloom_filter.add(item)
 
         if save_immediately:
             self.save_checkpoint()
         else:
-            if self.database.shape[0] == self.chunk_size:
+            if self.database.shape[0] >= self.chunk_size:
+                if normalize:
+                    self.database = to_normalize(self.database)
+
                 self.save_checkpoint()
 
         if self._COMMIT_FLAG:
@@ -301,14 +343,7 @@ class MinVectorDB:
         """
         Generate a new ID for the vector.
         """
-        if self.last_id is None:
-            if self.all_indices:
-                self.last_id = max(self.all_indices)
-                self.last_id += 1
-            else:
-                self.last_id = 0
-        else:
-            self.last_id += 1
+        self.last_id += 1
 
         return self.last_id
 
@@ -333,8 +368,7 @@ class MinVectorDB:
         Raises:
             ValueError: If the vector dimensions don't match or the ID already exists.
         """
-
-        if id in self.all_indices:
+        if id in self._bloom_filter:
             raise ValueError(f'id {id} already exists')
 
         if len(vector) != self.dim:
@@ -342,22 +376,45 @@ class MinVectorDB:
 
         id = self._generate_new_id() if id is None else id
 
-        vector = to_normalize(vector) if normalize else vector
+        vector = vector.astype(self.dtypes)
 
-        if self._is_database_reset():
-            self.database[0, :] = vector
-        else:
-            self.database = np.vstack((self.database, vector))
-
-        self.indices.append(id)
-        self.fields.append(field)
-        self.all_indices.add(id)
+        # Add the id to then bloom filter.
+        self._bloom_filter.add(id)
 
         if save_immediately:
+            if normalize:
+                vector = to_normalize(vector)
+
+            if self._is_database_reset():
+                self.database[0, :] = vector
+            else:
+                self.database = np.vstack((self.database, vector))
+
+            self.indices.append(id)
+            self.fields.append(field)
+
             self.save_checkpoint()
         else:
-            if self.database.shape[0] == self.chunk_size:
+            self._tmp_vectors.append(vector)
+            self._tmp_indices.append(id)
+            self._tmp_fields.append(field)
+
+            if len(self._tmp_vectors) >= self.chunk_size:
+                if self._is_database_reset():
+                    self.database = np.vstack(self._tmp_vectors)
+                else:
+                    self.database = np.vstack((self.database, np.vstack(self._tmp_vectors)))
+
+                if normalize:
+                    self.database = to_normalize(self.database)
+
+                self.indices.extend(self._tmp_indices)
+                self.fields.extend(self._tmp_fields)
                 self.save_checkpoint()
+
+                self._tmp_vectors = []  # reset tmp_vectors
+                self._tmp_indices = []  # reset tmp_indices
+                self._tmp_fields = []  # reset tmp_fields
 
         if self._COMMIT_FLAG:
             self._COMMIT_FLAG = False
@@ -391,6 +448,7 @@ class MinVectorDB:
         if len(self._database_chunk_path) == 0:
             raise ValueError('database is empty.')
 
+        vector = vector.astype(self.dtypes)
         vector = to_normalize(vector) if normalize else vector
         vector = vector.reshape(-1, 1)
 
@@ -415,9 +473,9 @@ class MinVectorDB:
 
             # Distance calculation core code
             if self.distance == 'cosine':
-                batch_scores = cosine_distance(database, vector).squeeze()
+                batch_scores = cosine_distance(database, vector, self.device).squeeze()
             else:
-                batch_scores = euclidean_distance(database, vector).squeeze()
+                batch_scores = euclidean_distance(database, vector, self.device).squeeze()
 
             if batch_scores.ndim == 0:
                 batch_scores = [batch_scores]
