@@ -12,7 +12,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name='MinVectorDB',
-    version="0.0.9",
+    version="0.0.10",
     description='MinVectorDB is a simple vector storage and query database implementation, ' \
                 'providing clear and concise Python APIs aimed at lowering the barrier to using vector databases.',
     keywords='vector database',
@@ -37,7 +37,10 @@ setup(
     author_email='birchkwok@gmail.com',
     install_requires=[
         'numpy>=1.17.0',
-        'spinesUtils>=0.3.13'
+        'spinesUtils>=0.3.13',
+        'bitarray>=2.3.4',
+        'mmh3>=3.0.0',
+        'torch>=2.0.0'
     ],
     zip_safe=False,
 )
