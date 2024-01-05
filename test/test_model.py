@@ -3,8 +3,6 @@ import shutil
 import time
 from pathlib import Path
 
-import pytest
-
 from test import MinVectorDB
 import numpy as np
 
@@ -47,11 +45,11 @@ def test_database_initialization():
 
 def test_add_single_item_without_id_and_field():
     database = get_database()
-    id = database.add_item(np.ones(100))
+    id = database.add_item(np.ones(100), save_immediately=True)
 
-    assert database.database.sum() == 100
-    assert database.fields == [None]
-    assert database.indices == [id]
+    assert database.database.sum() == 0
+    assert database.fields == []
+    assert database.indices == []
 
     database.commit()
     assert database.shape == (1, 100)
@@ -60,11 +58,11 @@ def test_add_single_item_without_id_and_field():
 
 def test_add_single_item_with_id_and_field():
     database = get_database()
-    id = database.add_item(np.ones(100), id=1, field="test")
+    id = database.add_item(np.ones(100), id=1, field="test", save_immediately=True)
 
-    assert database.database.sum() == 100
-    assert database.fields == ["test"]
-    assert database.indices == [id]
+    assert database.database.sum() == 0
+    assert database.fields == []
+    assert database.indices == []
     assert id == 1
 
     database.commit()
@@ -91,13 +89,14 @@ def test_bulk_add_item_without_id_and_field():
 
 def test_add_single_item_with_vector_normalize():
     database = get_database()
-    id = database.add_item(np.random.random(100), id=1, field="test", normalize=True)
+    id = database.add_item(np.random.random(100), id=1, field="test", normalize=True, save_immediately=True)
 
-    assert database.fields == ["test"]
-    assert database.indices == [id]
+    assert database.fields == []
+    assert database.indices == []
     assert id == 1
 
     database.commit()
+
     assert database.shape == (1, 100)
 
     database.delete()
@@ -163,7 +162,7 @@ def test_query_without_field():
 
     assert len(n) == len(d) == 12
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database.all_indices for i in n)
+    assert all(i in database._bloom_filter for i in n)
 
     database.delete()
 
@@ -176,7 +175,7 @@ def test_query_with_field():
 
     assert len(n) == len(d) == 6
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database.all_indices for i in n)
+    assert all(i in database._bloom_filter for i in n)
     assert all(10 <= i < 20 for i in n)
 
     database.delete()
@@ -190,7 +189,7 @@ def test_query_with_normalize():
 
     assert len(n) == len(d) == 6
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database.all_indices for i in n)
+    assert all(i in database._bloom_filter for i in n)
     assert all(10 <= i < 20 for i in n)
 
     database.delete()
@@ -204,7 +203,7 @@ def test_query_with_list_field():
 
     assert len(n) == len(d) == 12
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database.all_indices for i in n)
+    assert all(i in database._bloom_filter for i in n)
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
     database.delete()
@@ -218,7 +217,7 @@ def test_query_with_chinese_field():
 
     assert len(n) == len(d) == 6
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database.all_indices for i in n)
+    assert all(i in database._bloom_filter for i in n)
     assert all(10 <= i < 20 for i in n)
 
     database.delete()
@@ -232,7 +231,7 @@ def test_query_with_chinese_list_field():
 
     assert len(n) == len(d) == 12
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database.all_indices for i in n)
+    assert all(i in database._bloom_filter for i in n)
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
     database.delete()
@@ -245,7 +244,7 @@ def test_query_stability_of_mvdb_files():
     n, d = database.query(vec, k=6, field='test_1')
     assert len(n) == len(d) == 6
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database.all_indices for i in n)
+    assert all(i in database._bloom_filter for i in n)
     assert all(10 <= i < 20 for i in n)
     mvdb_path = database._database_chunk_path
     mvdb_mtime = [os.path.getmtime(_) for _ in mvdb_path]
@@ -255,7 +254,7 @@ def test_query_stability_of_mvdb_files():
         n, d = database.query(vec, k=6, field='test_1')
         assert len(n) == len(d) == 6
         assert list(d) == sorted(d, key=lambda s: -s)
-        assert all(i in database.all_indices for i in n)
+        assert all(i in database._bloom_filter for i in n)
         assert all(10 <= i < 20 for i in n)
         assert mvdb_mtime == [os.path.getmtime(_) for _ in mvdb_path]
         time.sleep(1)
