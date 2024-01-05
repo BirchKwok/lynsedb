@@ -1,6 +1,5 @@
-# Description: Bloom filter implementation
 from bitarray import bitarray
-import mmh3 # 使用MurmurHash3作为哈希函数
+import mmh3
 import numpy as np
 
 
@@ -39,13 +38,13 @@ class BloomFilter:
         self.bit_array.setall(0)
 
     def add(self, item):
-        item = str(item)  # 确保 item 是字符串
+        item = str(item)
         for i in range(self.hash_count):
             index = mmh3.hash(item, i) % self.size
             self.bit_array[index] = 1
 
     def __contains__(self, item):
-        item = str(item)  # 确保 item 是字符串
+        item = str(item)
         for i in range(self.hash_count):
             index = mmh3.hash(item, i) % self.size
             if self.bit_array[index] == 0:
