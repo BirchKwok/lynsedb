@@ -95,12 +95,13 @@ class MinVectorDB:
 
         self._bloom_filter = BloomFilter(size=bloom_filter_size, hash_count=5)
 
+        # If the database is not empty, load the database and index.
         self._initialize()
 
         self._COMMIT_FLAG = True
         self._NEVER_COMMIT_FLAG = True
 
-    def _initialize(self):
+    def _initialize(self, insert=False):
         # If database_chunk_path is not empty, define the loading conditions for the database and index.
         if len(self._database_chunk_path) > 0:
             self.chunk_id = max([int(Path(i).name.split('.')[0].split('_')[-1]) for i in self._database_chunk_path])
@@ -127,13 +128,15 @@ class MinVectorDB:
                         self.last_id = idx
                     self.fields = chunk_field.tolist()
 
+            # last chunk file
             if self.database.shape[0] == self.chunk_size:
                 self.reset_database()
                 self.chunk_id += 1
             else:
-                print(str(self._database_chunk_path[-1]), str(self._database_chunk_path[-1]) + self.temp_file_target)
-                # rename the last file
-                os.rename(str(self._database_chunk_path[-1]), str(self._database_chunk_path[-1]) + self.temp_file_target)
+                if insert:
+                    # rename the last file
+                    os.rename(str(self._database_chunk_path[-1]),
+                              str(self._database_chunk_path[-1]) + self.temp_file_target)
         else:
             # If database_chunk_path is empty, define a new database and index.
             self.chunk_id = 0
