@@ -314,7 +314,7 @@ class MinVectorDB:
             list: A list of indices where the vectors are stored.
         """
         if not self._NEVER_COMMIT_FLAG:
-            self._initialize()
+            self._initialize(insert=True)
             self._NEVER_COMMIT_FLAG = True
 
         new_vectors = []
@@ -417,7 +417,7 @@ class MinVectorDB:
             ValueError: If the vector dimensions don't match or the ID already exists.
         """
         if not self._NEVER_COMMIT_FLAG:
-            self._initialize()
+            self._initialize(insert=True)
             self._NEVER_COMMIT_FLAG = True
 
         if id in self._bloom_filter:
