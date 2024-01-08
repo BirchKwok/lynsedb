@@ -1,33 +1,41 @@
 from bitarray import bitarray
 import mmh3
-import numpy as np
+import struct
 
 
-class CountingBloomFilter:
-    def __init__(self, size, hash_count, dtype=np.int32):
-        self.size = size
-        self.hash_count = hash_count
-        self.count_array = np.zeros(size, dtype=dtype)
-        self.hash_functions = [self._generate_hash_function(i) for i in range(hash_count)]
+class TrieNode:
+    def __init__(self):
+        self.children = {}
+        self.is_end_of_word = False
 
-    def _generate_hash_function(self, seed):
-        def hash_function(item):
-            return (hash(item) + seed) % self.size
-        return hash_function
 
-    def add(self, item):
-        for hash_function in self.hash_functions:
-            index = hash_function(item)
-            self.count_array[index] += 1
+class Trie:
+    def __init__(self):
+        self.root = TrieNode()
 
-    def remove(self, item):
-        for hash_function in self.hash_functions:
-            index = hash_function(item)
-            if self.count_array[index] > 0:
-                self.count_array[index] -= 1
+    def insert(self, word):
+        node = self.root
+        for char in word:
+            if char not in node.children:
+                node.children[char] = TrieNode()
+            node = node.children[char]
+        node.is_end_of_word = True
 
-    def __contains__(self, item):
-        return all(self.count_array[hash_function(item)] > 0 for hash_function in self.hash_functions)
+    def search(self, word):
+        node = self.root
+        for char in word:
+            if char not in node.children:
+                return False
+            node = node.children[char]
+        return node.is_end_of_word
+
+    def starts_with(self, prefix):
+        node = self.root
+        for char in prefix:
+            if char not in node.children:
+                return False
+            node = node.children[char]
+        return True
 
 
 class BloomFilter:
@@ -64,3 +72,49 @@ class BloomFilter:
             raise ValueError('The size of the bit array is not equal to the size of the Bloom filter, '
                              f'excepted {self.size} but got {len(self.bit_array)}. '
                              f'Perhaps you want to delete the file {path},  to recreate a new Bloom filter?')
+
+
+class BloomTrie:
+    def __init__(self, bloom_size, bloom_hash_count):
+        self.bloom_filter = BloomFilter(bloom_size, bloom_hash_count)
+        self.trie = Trie()
+
+    def add(self, item):
+        str_item = str(item)
+        self.bloom_filter.add(str_item)
+        self.trie.insert(str_item)
+
+    def __contains__(self, item):
+        str_item = str(item)
+        if str_item in self.bloom_filter:
+            return self.trie.search(str_item)
+        return False
+
+    def _save_trie_node(self, node, f):
+        f.write(struct.pack('B', len(node.children)))
+        f.write(struct.pack('?', node.is_end_of_word))
+        for char, child in node.children.items():
+            f.write(struct.pack('c', char.encode('utf-8')))
+            self._save_trie_node(child, f)
+
+    def to_file(self, path):
+        path = str(path)
+        self.bloom_filter.to_file(path + '.bloom.mvdb')
+        with open(path + '.trie.mvdb', 'wb') as f:
+            self._save_trie_node(self.trie.root, f)
+
+    def _load_trie_node(self, f):
+        node = TrieNode()
+        children_count = struct.unpack('B', f.read(1))[0]
+        node.is_end_of_word = struct.unpack('?', f.read(1))[0]
+        for _ in range(children_count):
+            char = struct.unpack('c', f.read(1))[0].decode('utf-8')
+            child = self._load_trie_node(f)
+            node.children[char] = child
+        return node
+
+    def from_file(self, path):
+        path = str(path)
+        self.bloom_filter.from_file(path + '.bloom.mvdb')
+        with open(path + '.trie.mvdb', 'rb') as f:
+            self.trie.root = self._load_trie_node(f)
