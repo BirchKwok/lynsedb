@@ -49,7 +49,7 @@ timer = Timer()
 # Create a MinVectorDB instance.
 display_markdown("*Demo 1* -- **Sequentially add vectors**", raw=True)
 
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000)
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, device='cpu')
 
 np.random.seed(23)
 
@@ -67,7 +67,7 @@ with db.insert_session():
         # t = t / np.linalg.norm(t) 
         # Here, normalization can be directly specified, achieving the same effect as the previous sentence.
         db.add_item(t, id=id, normalize=True)
-        
+
         # ID increments by 1 with each loop iteration.
         id += 1
 
@@ -118,14 +118,14 @@ db.delete()
 
 
     
-    * [Insert data] Time cost 8.3943 s.
+    * [Insert data] Time cost 8.7585 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Database index of top 10 results:  [    0 67927 53447 47665 64134 13859 41949  5788 38082 18507]
-      - Cosine similarity of top 10 results:  [1.0000001  0.7810165  0.7777599  0.77717626 0.7759102  0.77581775
-     0.7757873  0.77570766 0.77500904 0.774201  ]
+      - Cosine similarity of top 10 results:  [1.0000002  0.78101647 0.77775997 0.77717626 0.77591014 0.77581763
+     0.77578723 0.77570754 0.77500904 0.77420104]
     
-    * [Query data] Time cost 0.2876 s.
+    * [Query data] Time cost 0.1690 s.
 
 
 ### Bulk add vectors
@@ -151,7 +151,7 @@ timer = Timer()
 # Demo 2 -- Bulk add vectors.
 display_markdown("*Demo 2* -- **Bulk add vectors**", raw=True)
 
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, bloom_filter_size=100_000_000)
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, device='cpu')
 
 np.random.seed(23)
 
@@ -211,14 +211,14 @@ db.delete()
 
 
     
-    * [Insert data] Time cost 1.0421 s.
+    * [Insert data] Time cost 1.4038 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Database index of top 10 results:  [    0 67927 53447 47665 64134 13859 41949  5788 38082 18507]
-      - Cosine similarity of top 10 results:  [1.0000001  0.7810165  0.7777599  0.7771764  0.7759102  0.77581775
-     0.7757873  0.77570766 0.77500904 0.774201  ]
+      - Cosine similarity of top 10 results:  [1.0000002  0.78101647 0.77775997 0.77717626 0.77591014 0.77581763
+     0.77578723 0.77570754 0.77500904 0.77420104]
     
-    * [Query data] Time cost 0.1890 s.
+    * [Query data] Time cost 0.1626 s.
 
 
 ### Use field to improve Searching Recall
@@ -244,7 +244,7 @@ timer = Timer()
 # Demo 3 -- Use field to improve Searching Recall
 display_markdown("*Demo 3* -- **Use field to improve Searching Recall**", raw=True)
 
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000)
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, device='cpu')
 
 np.random.seed(23)
 
@@ -291,14 +291,14 @@ db.delete()
 
 
     
-    * [Insert data] Time cost 1.0885 s.
+    * [Insert data] Time cost 1.5334 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Database index of top 10 results:  [  0 396   9 359  98 317  20  66 347 337]
-      - Cosine similarity of top 10 results:  [1.0000001  0.7712989  0.7611679  0.7611464  0.7591923  0.75870526
-     0.757499   0.7574572  0.75731516 0.75730586]
+      - Cosine similarity of top 10 results:  [1.0000002  0.7712989  0.7611679  0.7611464  0.7591923  0.75870526
+     0.7574989  0.7574572  0.75731516 0.7573059 ]
     
-    * [Query data] Time cost 0.1255 s.
+    * [Query data] Time cost 0.1290 s.
 
 
 ### Use subset_indices to narrow down the search range
@@ -326,7 +326,7 @@ display_markdown("*Demo 4* -- **Use subset_indices to narrow down the search ran
 
 timer.start()
 
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000)
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, device='cpu')
 
 np.random.seed(23)
 
@@ -372,12 +372,12 @@ db.delete()
 
 
     
-    * [Insert data] Time cost 1.1307 s.
+    * [Insert data] Time cost 1.4955 s.
       - Database shape:  (100001, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Database index of top 10 results:  [  0 396   9 359  98 317  20  66 347 337]
-      - Cosine similarity of top 10 results:  [1.0000001  0.7712989  0.7611679  0.7611464  0.7591923  0.75870526
-     0.757499   0.7574572  0.75731516 0.75730586]
+      - Cosine similarity of top 10 results:  [1.0000002  0.7712989  0.7611679  0.7611464  0.7591923  0.75870526
+     0.7574989  0.7574572  0.75731516 0.7573059 ]
     
-    * [Query data] Time cost 0.1223 s.
+    * [Query data] Time cost 0.1321 s.
 
