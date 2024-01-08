@@ -162,7 +162,7 @@ def test_query_without_field():
 
     assert len(n) == len(d) == 12
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database._bloom_filter for i in n)
+    assert all(i in database._id_filter for i in n)
 
     database.delete()
 
@@ -175,7 +175,7 @@ def test_query_with_field():
 
     assert len(n) == len(d) == 6
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database._bloom_filter for i in n)
+    assert all(i in database._id_filter for i in n)
     assert all(10 <= i < 20 for i in n)
 
     database.delete()
@@ -189,7 +189,7 @@ def test_query_with_normalize():
 
     assert len(n) == len(d) == 6
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database._bloom_filter for i in n)
+    assert all(i in database._id_filter for i in n)
     assert all(10 <= i < 20 for i in n)
 
     database.delete()
@@ -203,7 +203,7 @@ def test_query_with_list_field():
 
     assert len(n) == len(d) == 12
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database._bloom_filter for i in n)
+    assert all(i in database._id_filter for i in n)
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
     database.delete()
@@ -217,7 +217,7 @@ def test_query_with_chinese_field():
 
     assert len(n) == len(d) == 6
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database._bloom_filter for i in n)
+    assert all(i in database._id_filter for i in n)
     assert all(10 <= i < 20 for i in n)
 
     database.delete()
@@ -231,7 +231,7 @@ def test_query_with_chinese_list_field():
 
     assert len(n) == len(d) == 12
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database._bloom_filter for i in n)
+    assert all(i in database._id_filter for i in n)
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
     database.delete()
@@ -244,7 +244,7 @@ def test_query_stability_of_mvdb_files():
     n, d = database.query(vec, k=6, field='test_1')
     assert len(n) == len(d) == 6
     assert list(d) == sorted(d, key=lambda s: -s)
-    assert all(i in database._bloom_filter for i in n)
+    assert all(i in database._id_filter for i in n)
     assert all(10 <= i < 20 for i in n)
     mvdb_path = database._database_chunk_path
     mvdb_mtime = [os.path.getmtime(_) for _ in mvdb_path]
@@ -254,7 +254,7 @@ def test_query_stability_of_mvdb_files():
         n, d = database.query(vec, k=6, field='test_1')
         assert len(n) == len(d) == 6
         assert list(d) == sorted(d, key=lambda s: -s)
-        assert all(i in database._bloom_filter for i in n)
+        assert all(i in database._id_filter for i in n)
         assert all(10 <= i < 20 for i in n)
         assert mvdb_mtime == [os.path.getmtime(_) for _ in mvdb_path]
         time.sleep(1)
@@ -315,13 +315,13 @@ def test_query_stability_of_query_function():
         assert last_n.tolist() == n.tolist()
         assert len(n) == len(d) == 6
         assert list(d) == sorted(d, key=lambda s: -s)
-        assert all(i in database._bloom_filter for i in n)
+        assert all(i in database._id_filter for i in n)
         assert all(10 <= i < 20 for i in n)
 
     database.delete()
 
 
-# 测试多次调用bulk_add_items是否能正常插入数据
+# Test whether calling bulk_add_items multiple times can insert data normally
 def test_multiple_bulk_add_items():
     database = get_database()
     items = []
@@ -357,6 +357,63 @@ def test_multiple_bulk_add_items_with_insert_session():
 
     assert database.shape == (101, 100)
 
+    with database.insert_session():
+        database.bulk_add_items(items, save_immediately=True)
+    assert database.fields == []
+    assert database.indices == []
+
+    assert database.shape == (202, 100)
+    database.delete()
+
+
+# Test if secondary initialization can properly initialize and query
+def test_multiple_initialization(dim=100, database_path='test_min_vec.mvdb', chunk_size=1000, dtypes=np.float32):
+    database = MinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
+    items = []
+    for i in range(101):
+        items.append((np.ones(100), i, "test_" + str(i // 10)))
+
+    database.bulk_add_items(items, save_immediately=True)
+    assert database.fields == []
+    assert database.indices == []
+
+    database.commit()
+    assert database.shape == (101, 100)
+    del database
+
+    database = MinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
+
+    # query
+    vec = np.random.random(100)
+    n, d = database.query(vec, k=10, field='test_1')
+    assert len(n) == len(d) == 10
+    assert list(d) == sorted(d, key=lambda s: -s)
+    assert all(i in database._id_filter for i in n)
+    assert all(10 <= i < 20 for i in n)
+    database.delete()
+
+
+# Test if secondary initialization can properly initialize and insert
+def test_multiple_initialization_with_insert_session(dim=100, database_path='test_min_vec.mvdb', chunk_size=1000, dtypes=np.float32):
+    database = MinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
+    items = []
+    for i in range(101):
+        items.append((np.ones(100), i, "test_" + str(i // 10)))
+
+    with database.insert_session():
+        database.bulk_add_items(items, save_immediately=False)
+    assert database.fields == []
+    assert database.indices == []
+
+    assert database.shape == (101, 100)
+    del database
+
+    database = MinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
+
+    items = []
+    for i in range(101):
+        items.append((np.ones(100), None, "test_" + str(i // 10)))
+    # insert
     with database.insert_session():
         database.bulk_add_items(items, save_immediately=True)
     assert database.fields == []
