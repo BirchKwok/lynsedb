@@ -9,17 +9,19 @@ def get_device(device='auto'):
     return torch.device(device)
 
 
-def to_normalize(vec: np.ndarray, device='auto'):
+def to_normalize(vec: np.ndarray):
+    norm_func = np.linalg.norm
+
     if vec.ndim == 1:
-        norm = np.linalg.norm(vec)
+        norm = norm_func(vec)
         if norm == 0:
             return vec
         return vec / norm
     elif vec.ndim == 2:
-        device = get_device(device)
-        vec = torch.from_numpy(vec).to(device)
-        norm = torch.norm(vec, dim=1, keepdim=True)
-        return (vec / norm).detach().cpu().numpy()
+        norm = norm_func(vec, axis=1, keepdims=True)
+        if (norm == 0).any():
+            return vec
+        return vec / norm
     else:
         raise ValueError("vec must be 1d or 2d array")
 
