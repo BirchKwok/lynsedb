@@ -7,7 +7,7 @@ from spinesUtils.asserts import ParameterValuesAssert, ParameterTypeAssert
 
 from min_vec.session import DatabaseSession
 from min_vec.engine import cosine_distance, euclidean_distance, to_normalize
-from min_vec.filter import BloomFilter
+from min_vec.filter import BloomTrie
 
 
 class MinVectorDB:
@@ -86,14 +86,14 @@ class MinVectorDB:
         # If they exist, iterate through all .mvdb files.
         self._database_chunk_path = []
 
-        self._bloom_filter_path = self.database_path_parent / 'bloom_filter.mvdb'
+        self._bloom_filter_path = self.database_path_parent / 'id_filter'
 
         for i in os.listdir(self.database_path_parent):
             # If it meets the naming convention, add it to the chunk list.
             if i.startswith(self.database_name_prefix) and Path(i).name.split('.')[0].split('_')[-1].isdigit():
                 self._add_path_to_chunk_list(self.database_path_parent / i)
 
-        self._bloom_filter = BloomFilter(size=bloom_filter_size, hash_count=5)
+        self._id_filter = BloomTrie(bloom_size=bloom_filter_size, bloom_hash_count=5)
 
         # If the database is not empty, load the database and index.
         self._initialize()
@@ -107,7 +107,7 @@ class MinVectorDB:
             self.chunk_id = max([int(Path(i).name.split('.')[0].split('_')[-1]) for i in self._database_chunk_path])
 
             if self._bloom_filter_path.exists():
-                self._bloom_filter.from_file(self._bloom_filter_path)
+                self._id_filter.from_file(self._bloom_filter_path)
 
                 if Path(self._database_chunk_path[-1]).exists():
                     last_file_path = self._database_chunk_path[-1]
@@ -124,7 +124,7 @@ class MinVectorDB:
                     self.database = chunk_data
                     self.indices = index.tolist()
                     for idx in index:
-                        self._bloom_filter.add(idx)
+                        self._id_filter.add(idx)
                         self.last_id = idx
                     self.fields = chunk_field.tolist()
 
@@ -277,7 +277,7 @@ class MinVectorDB:
                 self.indices.extend(self._tmp_indices)
                 self.fields.extend(self._tmp_fields)
                 for item in self.indices:
-                    self._bloom_filter.add(item)
+                    self._id_filter.add(item)
 
                 self.save_checkpoint()
 
@@ -294,7 +294,7 @@ class MinVectorDB:
                     os.rename(str(fp) + self.temp_file_target, fp)
 
             # save bloom filter
-            self._bloom_filter.to_file(self._bloom_filter_path)
+            self._id_filter.to_file(self._bloom_filter_path)
 
             self._COMMIT_FLAG = True
             self._NEVER_COMMIT_FLAG = False
@@ -334,7 +334,7 @@ class MinVectorDB:
 
             vector = vector.astype(self.dtypes)
 
-            if id is not None and id in self._bloom_filter:
+            if id is not None and id in self._id_filter:
                 raise ValueError(f'id {id} already exists')
 
             if len(vector) != self.dim:
@@ -360,7 +360,7 @@ class MinVectorDB:
             self.indices.extend(new_ids)
             self.fields.extend(new_fields)
             for item in new_ids:
-                self._bloom_filter.add(item)
+                self._id_filter.add(item)
 
             self.save_checkpoint()
         else:
@@ -374,7 +374,7 @@ class MinVectorDB:
                 self.indices.extend(new_ids)
                 self.fields.extend(new_fields)
                 for item in new_ids:
-                    self._bloom_filter.add(item)
+                    self._id_filter.add(item)
 
                 self.save_checkpoint()
             else:
@@ -391,7 +391,10 @@ class MinVectorDB:
         """
         Generate a new ID for the vector.
         """
-        self.last_id += 1
+        while True:
+            self.last_id += 1
+            if self.last_id not in self._id_filter:
+                break
 
         return self.last_id
 
@@ -420,7 +423,7 @@ class MinVectorDB:
             self._initialize(insert=True)
             self._NEVER_COMMIT_FLAG = True
 
-        if id in self._bloom_filter:
+        if id in self._id_filter:
             raise ValueError(f'id {id} already exists')
 
         if len(vector) != self.dim:
@@ -432,7 +435,7 @@ class MinVectorDB:
         vector = to_normalize(vector) if normalize else vector
 
         # Add the id to then bloom filter.
-        self._bloom_filter.add(id)
+        self._id_filter.add(id)
 
         if save_immediately:
             if self._is_database_reset():
