@@ -129,6 +129,9 @@ class MinVectorDB:
                         self.last_id = idx
                     self.fields = chunk_field.tolist()
 
+                # save id filter
+                self._id_filter.to_file(self._bloom_filter_path)
+
             # last chunk file
             if self.database.shape[0] == self.chunk_size:
                 self.reset_database()
