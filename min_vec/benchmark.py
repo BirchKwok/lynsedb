@@ -16,9 +16,6 @@ def get_database(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, 
         shutil.rmtree(Path('.mvdb'.join(Path(database_path).name.split('.mvdb')[:-1])))
 
     database = MinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes, device=device)
-    if database._database_chunk_path:
-        database.delete()
-    database._database_chunk_path = []
     return database
 
 

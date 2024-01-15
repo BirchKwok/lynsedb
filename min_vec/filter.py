@@ -9,9 +9,10 @@ class TrieNode:
         self.is_end_of_word = False
 
 
-class Trie:
+class IDTrie:
     def __init__(self):
         self.root = TrieNode()
+        self.max_value = None
 
     def insert(self, word):
         node = self.root
@@ -20,6 +21,10 @@ class Trie:
                 node.children[char] = TrieNode()
             node = node.children[char]
         node.is_end_of_word = True
+
+        # 更新最大值
+        if self.max_value is None or int(word) > int(self.max_value):
+            self.max_value = word
 
     def search(self, word):
         node = self.root
@@ -36,6 +41,9 @@ class Trie:
                 return False
             node = node.children[char]
         return True
+
+    def get_max_value(self):
+        return self.max_value
 
 
 class BloomFilter:
@@ -77,7 +85,7 @@ class BloomFilter:
 class BloomTrie:
     def __init__(self, bloom_size, bloom_hash_count):
         self.bloom_filter = BloomFilter(bloom_size, bloom_hash_count)
-        self.trie = Trie()
+        self.trie = IDTrie()
 
     def add(self, item):
         str_item = str(item)
@@ -118,3 +126,20 @@ class BloomTrie:
         self.bloom_filter.from_file(path + '.bloom.mvdb')
         with open(path + '.trie.mvdb', 'rb') as f:
             self.trie.root = self._load_trie_node(f)
+
+    def find_max_value(self):
+        if self.trie.max_value is not None:
+            return self.trie.max_value
+
+        current_value = ""
+        node = self.trie.root
+        max_value = current_value
+        if node.is_end_of_word and (max_value == "" or int(current_value) > int(max_value)):
+            max_value = current_value
+
+        for char in node.children:
+            value = self.find_max_value()
+            if max_value == "" or int(value) > int(max_value):
+                max_value = value
+
+        return int(max_value) if max_value != "" else 0

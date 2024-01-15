@@ -12,9 +12,9 @@ def get_database(dim=100, database_path='test_min_vec.mvdb', chunk_size=1000, dt
         shutil.rmtree(Path('.mvdb'.join(Path(database_path).name.split('.mvdb')[:-1])))
 
     database = MinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
-    if database._database_chunk_path:
+    if database._database_cluster_path:
         database.delete()
-    database._database_chunk_path = []
+    database._database_cluster_path = []
     return database
 
 
@@ -33,23 +33,22 @@ def get_database_for_query(*args, with_field=True, field_prefix='test_', **kwarg
 
 def test_database_initialization():
     database = get_database()
-    assert isinstance(database.database, np.ndarray)
-    assert database.database.shape == (1, 100)
-    assert database.database.sum() == 0
-    assert database.fields == []
-    assert database.indices == []
+    assert isinstance(database._database, np.ndarray)
+    assert database._database.shape == (1, 100)
+    assert database._database.sum() == 0
+    assert database._fields == []
+    assert database._indices == []
     assert database.chunk_size == 1000
     assert database.dtypes == np.float32
-    assert database._database_chunk_path == []
 
 
 def test_add_single_item_without_id_and_field():
     database = get_database()
     id = database.add_item(np.ones(100), save_immediately=True)
 
-    assert database.database.sum() == 0
-    assert database.fields == []
-    assert database.indices == []
+    assert database._database.sum() == 0
+    assert database._fields == ['']
+    assert database._indices == [id]
 
     database.commit()
     assert database.shape == (1, 100)
@@ -60,9 +59,9 @@ def test_add_single_item_with_id_and_field():
     database = get_database()
     id = database.add_item(np.ones(100), id=1, field="test", save_immediately=True)
 
-    assert database.database.sum() == 0
-    assert database.fields == []
-    assert database.indices == []
+    assert database._binary_matrix_serializer.database.sum() == 0
+    assert database._binary_matrix_serializer.fields == ['test']
+    assert database._binary_matrix_serializer.indices == [id]
     assert id == 1
 
     database.commit()
@@ -78,9 +77,9 @@ def test_bulk_add_item_without_id_and_field():
     for i in range(101):
         items.append((np.ones(100),))
 
-    database.bulk_add_items(items, save_immediately=True)
-    assert database.fields == []
-    assert database.indices == []
+    ids = database.bulk_add_items(items, save_immediately=True)
+    assert database._fields == ['' for i in range(101)]
+    assert database._indices == ids
 
     database.commit()
     assert database.shape == (101, 100)
@@ -91,8 +90,8 @@ def test_add_single_item_with_vector_normalize():
     database = get_database()
     id = database.add_item(np.random.random(100), id=1, field="test", normalize=True, save_immediately=True)
 
-    assert database.fields == []
-    assert database.indices == []
+    assert database._fields == []
+    assert database._indices == []
     assert id == 1
 
     database.commit()
@@ -110,8 +109,8 @@ def test_add_bulk_item_with_id_and_field():
 
     database.bulk_add_items(items)
 
-    assert database.fields == []
-    assert database.indices == []
+    assert database._fields == []
+    assert database._indices == []
 
     database.commit()
 
@@ -128,8 +127,8 @@ def test_add_bulk_item_with_normalize():
 
     database.bulk_add_items(items, normalize=True, save_immediately=True)
 
-    assert database.fields == []
-    assert database.indices == []
+    assert database._fields == []
+    assert database._indices == []
 
     database.commit()
 
@@ -145,8 +144,8 @@ def test_add_bulk_item_with_id_and_chinese_field():
 
     database.bulk_add_items(items, save_immediately=True)
 
-    assert database.fields == []
-    assert database.indices == []
+    assert database._fields == ['']
+    assert database._indices == []
 
     database.commit()
 
@@ -246,7 +245,7 @@ def test_query_stability_of_mvdb_files():
     assert list(d) == sorted(d, key=lambda s: -s)
     assert all(i in database._id_filter for i in n)
     assert all(10 <= i < 20 for i in n)
-    mvdb_path = database._database_chunk_path
+    mvdb_path = database._database_cluster_path
     mvdb_mtime = [os.path.getmtime(_) for _ in mvdb_path]
     time.sleep(1)
 
@@ -329,15 +328,15 @@ def test_multiple_bulk_add_items():
         items.append((np.ones(100), ))
 
     database.bulk_add_items(items, save_immediately=True)
-    assert database.fields == []
-    assert database.indices == []
+    assert database._fields == ['']
+    assert database._indices == []
 
     database.commit()
     assert database.shape == (101, 100)
 
     database.bulk_add_items(items, save_immediately=True)
-    assert database.fields == []
-    assert database.indices == []
+    assert database._fields == ['']
+    assert database._indices == []
 
     database.commit()
     assert database.shape == (202, 100)
@@ -352,15 +351,15 @@ def test_multiple_bulk_add_items_with_insert_session():
 
     with database.insert_session():
         database.bulk_add_items(items, save_immediately=True)
-    assert database.fields == []
-    assert database.indices == []
+    assert database._fields == ['']
+    assert database._indices == []
 
     assert database.shape == (101, 100)
 
     with database.insert_session():
         database.bulk_add_items(items, save_immediately=True)
-    assert database.fields == []
-    assert database.indices == []
+    assert database._fields == ['']
+    assert database._indices == []
 
     assert database.shape == (202, 100)
     database.delete()
@@ -374,8 +373,8 @@ def test_multiple_initialization(dim=100, database_path='test_min_vec.mvdb', chu
         items.append((np.ones(100), i, "test_" + str(i // 10)))
 
     database.bulk_add_items(items, save_immediately=True)
-    assert database.fields == []
-    assert database.indices == []
+    assert database._fields == ['']
+    assert database._indices == []
 
     database.commit()
     assert database.shape == (101, 100)
@@ -402,8 +401,8 @@ def test_multiple_initialization_with_insert_session(dim=100, database_path='tes
 
     with database.insert_session():
         database.bulk_add_items(items, save_immediately=False)
-    assert database.fields == []
-    assert database.indices == []
+    assert database._fields == ['']
+    assert database._indices == []
 
     assert database.shape == (101, 100)
     del database
@@ -416,8 +415,8 @@ def test_multiple_initialization_with_insert_session(dim=100, database_path='tes
     # insert
     with database.insert_session():
         database.bulk_add_items(items, save_immediately=True)
-    assert database.fields == []
-    assert database.indices == []
+    assert database._fields == ['']
+    assert database._indices == []
 
     assert database.shape == (202, 100)
     database.delete()
