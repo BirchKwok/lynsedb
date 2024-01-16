@@ -1,7 +1,7 @@
 import os
 
 import numpy as np
-from spinesUtils.asserts import ParameterValuesAssert, ParameterTypeAssert
+from spinesUtils.asserts import raise_if
 from concurrent.futures import ThreadPoolExecutor
 
 from min_vec.engine import cosine_distance, euclidean_distance, to_normalize, get_device
@@ -10,8 +10,19 @@ from min_vec.engine import cosine_distance, euclidean_distance, to_normalize, ge
 class DatabaseQuery:
     def __init__(self, binary_matrix_serializer, distance='cosine', device='auto', dtypes=np.float32,
                  chunk_size=10000) -> None:
+        """
+        Query the database for the vectors most similar to the given vector.
+
+        Parameters:
+            binary_matrix_serializer (BinaryMatrixSerializer): The database to be queried.
+            distance (str, optional): The distance metric to use. Options are 'cosine' or 'euclidean'.
+            device (str, optional): The device to use. Options are 'cpu', 'cuda', or 'auto'.
+            dtypes (np.dtype, optional): The data type of the vectors in the database.
+            chunk_size (int, optional): The number of vectors to load into memory at a time.
+
+        """
         self.binary_matrix_serializer = binary_matrix_serializer
-        
+
         # attributes
         self.dtypes = dtypes
         self.distance = distance
@@ -60,20 +71,14 @@ class DatabaseQuery:
 
         return index_chunk, scores
 
-
-    @ParameterValuesAssert({'vector': lambda s: s.ndim == 1})
-    @ParameterTypeAssert({
-        'vector': np.ndarray, 'k': int, 'fields': (None, list),
-        'normalize': bool, 'subset_indices': (None, list)
-    })
-    def query(self, vector, k: int = 12, fields: str | list = None, normalize: bool = False, subset_indices=None):
+    def query(self, vector, k: int | str = 12, fields: list = None, normalize: bool = False, subset_indices=None):
         """
         Query the database for the vectors most similar to the given vector in batches.
 
         Parameters:
             vector (np.ndarray): The query vector.
-            k (int): The number of nearest vectors to return.
-            fields (str or list, optional): The target of the vector.
+            k (int or str): The number of nearest vectors to return. if be 'all', return all vectors.
+            fields (list, optional): The target of the vector.
             normalize (bool): Whether to normalize the input vector.
             subset_indices (list, optional): The subset of indices to query.
 
@@ -83,7 +88,18 @@ class DatabaseQuery:
         Raises:
             ValueError: If the database is empty.
         """
-        self.binary_matrix_serializer.check_commit()
+        raise_if(TypeError, not isinstance(k, int) and not (isinstance(k, str) and k != 'all'),
+                 'k must be int or "all".')
+        raise_if(ValueError, k <= 0, 'k must be greater than 0.')
+        raise_if(ValueError, not isinstance(fields, list) and fields is not None,
+                 'fields must be list or None.')
+        raise_if(ValueError, not isinstance(subset_indices, list) and subset_indices is not None,
+                 'subset_indices must be list or None.')
+        raise_if(TypeError, not isinstance(normalize, bool), 'normalize must be bool.')
+        raise_if(ValueError, len(vector) != self.binary_matrix_serializer.database_shape[1],
+                 'vector must be same dim with database.')
+        raise_if(ValueError, not isinstance(vector, np.ndarray), 'vector must be np.ndarray.')
+        raise_if(ValueError, vector.ndim != 1, 'vector must be 1d array.')
 
         if (len(self.binary_matrix_serializer.database_cluster_path) == 0 and
                 len(self.binary_matrix_serializer.database_chunk_path) == 0):
@@ -126,7 +142,7 @@ class DatabaseQuery:
             return all_index_inside, all_scores_inside, top_k_indices
 
         if len(self.binary_matrix_serializer.database_cluster_path) == 0:
-            all_index_inside, all_scores_inside, top_k_indices =\
+            all_index_inside, all_scores_inside, top_k_indices = \
                 batch_query(self.binary_matrix_serializer.database_chunk_path, vector, k, fields, subset_indices)
             if len(top_k_indices) == k:
                 return all_index_inside[top_k_indices], all_scores_inside[top_k_indices]
