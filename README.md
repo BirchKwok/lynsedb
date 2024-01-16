@@ -4,7 +4,7 @@
 <br>
 It is important to note that MinVectorDB is not designed for efficiency, and therefore does not include built-in algorithms like approximate nearest neighbors for efficient searching.
 <br>
-Originally created to demonstrate large language model demos with a goal of 100% recall, the library will no longer be actively maintained due to adjustments in the author's current work.
+Originally created to demonstrate large language model demos with a goal of 100% recall, **the library will no longer be actively maintained due to adjustments in the author's current work**.
 <br>
 <br>
 <b>MinVectorDB</b> 是简易实现的向量存储和查询数据库，提供简洁明了的python API，旨在降低向量数据库的使用门槛。未来将添加更多实用功能。
