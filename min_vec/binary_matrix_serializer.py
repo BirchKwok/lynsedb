@@ -12,7 +12,6 @@ from min_vec.utils import io_checker, silhouette_score, get_env_variable
 from min_vec.ivf_index import CompactIVFIndex
 from min_vec.kmeans import KMeans
 
-
 logger = Logger(
     verbose=get_env_variable('MVDB_LOG_VERBOSE', True, bool),
     fp=get_env_variable('MVDB_LOG_PATH', None, str),
@@ -38,6 +37,22 @@ class BinaryMatrixSerializer:
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
         """
+        self.initial_params = {
+            'dim': dim,
+            'database_path': database_path,
+            'distance': distance,
+            'n_clusters': n_clusters,
+            'chunk_size': chunk_size,
+            'dtypes': dtypes,
+            'bloom_filter_size': bloom_filter_size,
+            'device': device
+        }
+        self._initialize_all(**self.initial_params)
+
+        self._COMMIT_FLAG = True
+
+    def _initialize_all(self, dim, database_path, distance, n_clusters, chunk_size, dtypes,
+                        bloom_filter_size, device):
         if chunk_size <= 1:
             raise ValueError('chunk_size must be greater than 1')
 
@@ -46,6 +61,12 @@ class BinaryMatrixSerializer:
         self.database_path_parent = Path(database_path).parent.absolute() / Path(
             '.mvdb'.join(Path(database_path).absolute().name.split('.mvdb')[:-1]))
         self.database_name_prefix = '.mvdb'.join(Path(database_path).name.split('.mvdb')[:-1])
+
+        if not self.database_path_parent.exists():
+            self.database_path_parent.mkdir(parents=True)
+
+        self.rollback_backup_path = (self.database_path_parent.parent /
+                                     (self.database_name_prefix + '_rollback_backup'))
 
         self.n_clusters = n_clusters
         self.ann_model = KMeans(n_clusters=self.n_clusters, random_state=0,
@@ -56,7 +77,6 @@ class BinaryMatrixSerializer:
         if Path(self.database_path_parent / 'ann_model.mvdb').exists():
             self.ann_model = self.ann_model.load(self.database_path_parent / 'ann_model.mvdb')
             if (self.ann_model.n_clusters != self.n_clusters or self.ann_model.distance != self.distance or
-                    self.ann_model.device != device or
                     self.ann_model.epochs != get_env_variable('MVDB_KMEANS_EPOCHS', 500, int) or
                     self.ann_model.batch_size != 10240):
                 self.ann_model = KMeans(n_clusters=self.n_clusters, random_state=0,
@@ -87,14 +107,9 @@ class BinaryMatrixSerializer:
         # cluster meta data
         self.current_cluster_data_msg = dict()
 
-        if not self.database_path_parent.exists():
-            self.database_path_parent.mkdir(parents=True)
-
         # ============== Loading or create one empty database ==============
         # first of all, initialize a database
-        self.database = []
-        self.indices = []
-        self.fields = []
+        self.reset_database()
 
         # If they exist, iterate through all .mvdb files.
         self.temp_chunk_suffix = ".temp"
@@ -115,8 +130,6 @@ class BinaryMatrixSerializer:
 
         # If the database is not empty, load the database and index.
         self._initialize_id_filter_and_shape()
-
-        self._COMMIT_FLAG = True
 
     def _initialize_id_filter_and_shape(self):
         self.id_filter = BloomTrie(bloom_size=self.bloom_filter_size, bloom_hash_count=5)
