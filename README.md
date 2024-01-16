@@ -13,6 +13,15 @@ Originally created to demonstrate large language model demos with a goal of 100%
 <br>
 它起源于作者需要演示大语言模型Demo的契机，为了追求100%召回率而设计，**因目前工作有调整，此库将不再积极维护**。
 
+## TODO
+- [x] Sequentially add vectors.
+- [x] Bulk add vectors.
+- [x] Use field to improve Searching Recall.
+- [x] Use subset_indices to narrow down the search range.
+- [ ] Add rollback functionality.
+- [ ] Add multi-threaded writing functionality.
+- [ ] Add multi-threaded query functionality.
+
 ## Install
 
 ```shell
