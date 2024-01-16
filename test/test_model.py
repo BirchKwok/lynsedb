@@ -316,7 +316,7 @@ def test_multiple_bulk_add_items():
 
     database.bulk_add_items(items, save_immediately=False)
     assert len(database._binary_matrix_serializer.fields) == 101
-    assert database._binary_matrix_serializer.indices == list(range(1, 102))
+    assert database._binary_matrix_serializer.indices == list(range(101))
 
     database.commit()
     assert database.shape == (101, 100)
@@ -338,7 +338,7 @@ def test_multiple_bulk_add_items_with_insert_session():
 
     database.bulk_add_items(items, save_immediately=False)
     assert len(database._binary_matrix_serializer.fields) == 101
-    assert database._binary_matrix_serializer.indices == list(range(1, 102))
+    assert database._binary_matrix_serializer.indices == list(range(101))
 
     database.commit()
     assert database.shape == (101, 100)
