@@ -35,6 +35,6 @@ def cosine_distance(vec1, vec2, device='auto'):
 
 def euclidean_distance(vec1, vec2, device='auto'):
     device = get_device(device)
-    vec1 = torch.from_numpy(vec1).to(device).squeeze()
-    vec2 = torch.from_numpy(vec2).to(device).squeeze()
-    return torch.norm(vec1 - vec2).detach().cpu().numpy()
+    vec1 = torch.from_numpy(vec1).to(device)
+    vec2 = torch.from_numpy(vec2).to(device)
+    return torch.norm(vec1 - vec2, dim=1).detach().cpu().numpy()

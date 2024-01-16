@@ -129,7 +129,7 @@ class BloomTrie:
 
     def find_max_value(self):
         if self.trie.max_value is not None:
-            return self.trie.max_value
+            return int(self.trie.max_value)
 
         current_value = ""
         node = self.trie.root

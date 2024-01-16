@@ -33,8 +33,9 @@ class KMeans:
         return 1 - torch.nn.functional.cosine_similarity(a.unsqueeze(1), b, dim=2)
 
     @staticmethod
-    def euclidean_distance(self, a, b):
-        return torch.norm(a - b, dim=1)
+    def euclidean_distance(a, b):
+        b = b.unsqueeze(0)
+        return torch.norm(a.unsqueeze(1) - b, dim=2)
 
     def fit(self, X):
         if isinstance(X, np.ndarray):
@@ -53,7 +54,7 @@ class KMeans:
         return self
 
     def _update_centroids(self, X):
-        distances = self.cosine_distance(X, self.centroids)
+        distances = self.distance_func(X, self.centroids)
         labels = torch.argmin(distances, dim=1)
 
         for i in range(self.n_clusters):
@@ -81,7 +82,7 @@ class KMeans:
         if isinstance(X, np.ndarray):
             X = torch.from_numpy(X)
         X = X.to(self.device)
-        distances = self.cosine_distance(X, self.centroids)
+        distances = self.distance_func(X, self.centroids)
         labels = torch.argmin(distances, dim=1)
         return labels.detach().cpu().numpy()
 

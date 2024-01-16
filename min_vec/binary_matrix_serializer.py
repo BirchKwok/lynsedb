@@ -8,15 +8,21 @@ from spinesUtils.utils import Logger
 
 from min_vec.engine import to_normalize
 from min_vec.filter import BloomTrie
-from min_vec.utils import io_checker, silhouette_score
+from min_vec.utils import io_checker, silhouette_score, get_env_variable
 from min_vec.ivf_index import CompactIVFIndex
 from min_vec.kmeans import KMeans
 
-logger = Logger(with_time=False)
+
+logger = Logger(
+    verbose=get_env_variable('MVDB_LOG_VERBOSE', True, bool),
+    fp=get_env_variable('MVDB_LOG_PATH', None, str),
+    name='MinVectorDB', truncate_file=get_env_variable('MVDB_TRUNCATE_LOG', True, bool),
+    with_time=get_env_variable('MVDB_LOG_WITH_TIME', False, bool)
+)
 
 
 class BinaryMatrixSerializer:
-    def __init__(self, dim, database_path, n_clusters=8, chunk_size=100_000, dtypes=np.float32,
+    def __init__(self, dim, database_path, distance, n_clusters=8, chunk_size=100_000, dtypes=np.float32,
                  bloom_filter_size=100_000_000, device='auto') -> None:
         """
         Initialize the vector database.
@@ -35,16 +41,28 @@ class BinaryMatrixSerializer:
         if chunk_size <= 1:
             raise ValueError('chunk_size must be greater than 1')
 
+        self.distance = distance
+
         self.database_path_parent = Path(database_path).parent.absolute() / Path(
             '.mvdb'.join(Path(database_path).absolute().name.split('.mvdb')[:-1]))
         self.database_name_prefix = '.mvdb'.join(Path(database_path).name.split('.mvdb')[:-1])
 
         self.n_clusters = n_clusters
         self.ann_model = KMeans(n_clusters=self.n_clusters, random_state=0,
-                                batch_size=10240, device=device)
+                                batch_size=10240, device=device,
+                                epochs=get_env_variable('MVDB_KMEANS_EPOCHS', 500, int),
+                                distance=self.distance)
 
         if Path(self.database_path_parent / 'ann_model.mvdb').exists():
             self.ann_model = self.ann_model.load(self.database_path_parent / 'ann_model.mvdb')
+            if (self.ann_model.n_clusters != self.n_clusters or self.ann_model.distance != self.distance or
+                    self.ann_model.device != device or
+                    self.ann_model.epochs != get_env_variable('MVDB_KMEANS_EPOCHS', 500, int) or
+                    self.ann_model.batch_size != 10240):
+                self.ann_model = KMeans(n_clusters=self.n_clusters, random_state=0,
+                                        batch_size=10240, device=device,
+                                        epochs=get_env_variable('MVDB_KMEANS_EPOCHS', 500, int),
+                                        distance=self.distance)
 
         self.device = device
 
@@ -76,18 +94,18 @@ class BinaryMatrixSerializer:
         self.fields = []
 
         # If they exist, iterate through all .mvdb files.
+        self.temp_chunk_suffix = ".temp"
         self.database_cluster_path = []
         self.database_chunk_path = []
 
         self._bloom_filter_path = self.database_path_parent / 'id_filter'
 
         for i in os.listdir(self.database_path_parent):
-            # If it meets the naming convention, add it to the chunk list.
-            # 仅添加名称中包含chunk的文件
+            # Only add files whose names contain 'chunk'.
             if (i.startswith(self.database_name_prefix) and Path(i).name.split('.')[0].split('_')[-1].isdigit()
-                    and 'chunk' in i):
+                    and 'chunk' in i and not str(i).endswith(self.temp_chunk_suffix)):
                 self._append_to_list_without_conflict(self.database_path_parent / i, self.database_chunk_path)
-            # 仅添加名称中包含cluster的文件
+            # Only add files whose names contain 'cluster'.
             if (i.startswith(self.database_name_prefix) and Path(i).name.split('.')[0].split('_')[-1].isdigit()
                     and 'cluster' in i):
                 self._append_to_list_without_conflict(self.database_path_parent / i, self.database_cluster_path)
@@ -100,29 +118,28 @@ class BinaryMatrixSerializer:
     def _initialize_id_filter_and_shape(self):
         self.id_filter = BloomTrie(bloom_size=self.bloom_filter_size, bloom_hash_count=5)
 
-        bloom_filter_initialed = False
-
         if self._bloom_filter_path.exists():
             self.id_filter.from_file(self._bloom_filter_path)
-            bloom_filter_initialed = True
 
-        # 初始化database形状
-        if len(self.database_cluster_path) == 0:
+        # Initialize the shape of the database.
+        if len(self.database_cluster_path) == 0 and len(self.database_chunk_path) == 0:
             self.database_shape = (0, self.dim)
         else:
             length = 0
-            for database, index, field in self.data_loader(self.database_cluster_path):
-                length += database.shape[0]
-                if not bloom_filter_initialed:
-                    for idx in index:
+            for database, index, _ in self.data_loader(
+                    self.database_cluster_path + self.database_chunk_path
+            ):
+                for idx in index:
+                    if idx not in self.id_filter:
                         self.id_filter.add(idx)
+                    length += 1
+
             self.database_shape = (length, self.dim)
 
         self.last_id = self.id_filter.find_max_value()
 
-        if not bloom_filter_initialed:
-            # save id filter
-            self.id_filter.to_file(self._bloom_filter_path)
+        # save id filter
+        self.id_filter.to_file(self._bloom_filter_path)
 
     def check_commit(self):
         if not self._COMMIT_FLAG:
@@ -174,6 +191,18 @@ class BinaryMatrixSerializer:
         if path not in plist:
             plist.append(path)
 
+    @staticmethod
+    def _remove_from_list_without_conflict(path, plist):
+        """
+        Remove a chunk's path from the list of database chunks.
+
+        Parameters:
+            path (Path): Path of the chunk.
+        """
+        path = str(path)
+        if path in plist:
+            plist.remove(path)
+
     def _is_database_reset(self):
         """
         Check if the database is in its reset state (filled with zeros).
@@ -194,13 +223,20 @@ class BinaryMatrixSerializer:
             if not (len(self.database) == len(self.indices) == len(self.fields)):
                 raise ValueError('The database, index length and field length not the same.')
 
-    def save_and_merge_data(self, prefix, new_data, new_indices, new_fields, check_path_list):
+    def save_and_merge_data(self, prefix, new_data, new_indices, new_fields, check_path_list, as_temp=True):
         if len(check_path_list) == 0:
             max_id = 0
         else:
             try:
-                max_id = max([int(Path(i).name.split('.')[0].split('_')[-1]) for i in check_path_list
-                              if prefix in Path(i).name and Path(i).name.split('.')[0].split('_')[-1].isdigit()])
+                if not as_temp:
+                    condition = [int(Path(i).name.split('.')[0].split('_')[-1]) for i in check_path_list
+                                 if prefix in Path(i).name and Path(i).name.split('.')[0].split('_')[-1].isdigit()]
+                else:
+                    condition = [int(Path(i).name.split('.')[0].split('_')[-1]) for i in check_path_list
+                                 if prefix in Path(i).name and Path(i).name.split('.')[0].split('_')[-1].isdigit()
+                                 and str(i).endswith(self.temp_chunk_suffix)]
+
+                max_id = max(condition)
 
             except ValueError:
                 max_id = 0
@@ -209,17 +245,20 @@ class BinaryMatrixSerializer:
         merged_indices = []
         merged_fields = []
 
-        # 初始化文件路径
+        # Initialize file path.
         file_path = self.database_path_parent / f'{self.database_name_prefix}_{prefix}_{max_id}.mvdb'
 
-        # 读取最后一个文件的数据
+        if as_temp:
+            file_path = file_path.with_suffix(self.temp_chunk_suffix)
+
+        # Read data from the last file.
         if Path(file_path).exists():
             with open(file_path, 'rb') as f:
                 old_data = np.load(f)
                 old_indices = np.load(f, allow_pickle=True).tolist()
                 old_fields = np.load(f, allow_pickle=True).tolist()
 
-            # 如果最后一个文件的数据量大于等于chunk_size，则新建一个文件
+            # If the data size of the last file is greater than or equal to chunk_size, create a new file.
             if old_data.shape[0] >= self.chunk_size:
                 max_id += 1
 
@@ -236,34 +275,38 @@ class BinaryMatrixSerializer:
 
             del old_data, old_indices, old_fields
         else:
-            # 如果最后一个文件不存在，则直接将新数据写入
+            # If the last file does not exist, write the new data directly into it.
             merged_data = np.vstack(new_data)
             merged_indices = new_indices
             merged_fields = new_fields
 
         def save_data():
             nonlocal merged_data, merged_indices, merged_fields, max_id, file_path, saved_paths
-            # 保存数据
+            # save
             with open(file_path, 'wb') as file:
                 np.save(file, merged_data[:self.chunk_size, :])
                 np.save(file, merged_indices[:self.chunk_size], allow_pickle=True)
                 np.save(file, merged_fields[:self.chunk_size], allow_pickle=True)
 
-            # 更新数据
+            # update
             merged_data = merged_data[self.chunk_size:, :]
             merged_indices = merged_indices[self.chunk_size:]
             merged_fields = merged_fields[self.chunk_size:]
 
-            # 更新文件路径
+            # append saved path
             saved_paths.append(file_path)
 
-            # 更新max_id
+            # update max_id
             if merged_data.shape[0] > 0:
                 max_id += 1
                 file_path = self.database_path_parent / f'{self.database_name_prefix}_{prefix}_{max_id}.mvdb'
+                if as_temp:
+                    file_path = file_path.with_suffix(self.temp_chunk_suffix)
 
-        # 更新文件路径
+        # update file path
         file_path = self.database_path_parent / f'{self.database_name_prefix}_{prefix}_{max_id}.mvdb'
+        if as_temp:
+            file_path = file_path.with_suffix(self.temp_chunk_suffix)
         saved_paths = []
         merged_data = np.asarray(merged_data)
         while merged_data.shape[0] > 0:
@@ -272,7 +315,7 @@ class BinaryMatrixSerializer:
         return saved_paths
 
     @io_checker
-    def save_chunk_immediately(self):
+    def save_chunk_immediately(self, as_temp=True):
         """
         Save the current state of the database to a .mvdb file.
 
@@ -289,12 +332,9 @@ class BinaryMatrixSerializer:
             self.database,
             self.indices,
             self.fields,
-            self.database_chunk_path
+            self.database_chunk_path,
+            as_temp=as_temp
         )
-
-        # update database shape
-        old_length = self.database_shape[0]
-        self.database_shape = (len(self.database) + old_length, self.dim)
 
         self.reset_database()  # reset database, indices and fields
 
@@ -304,13 +344,105 @@ class BinaryMatrixSerializer:
 
         return paths
 
-    def auto_save_chunk(self):
+    def auto_save_chunk(self, as_temp=True):
         self._length_checker()
         paths = []
         if len(self.database) >= self.chunk_size:
-            paths = self.save_chunk_immediately()
+            paths = self.save_chunk_immediately(as_temp=as_temp)
 
         return paths
+
+    def _merge_local_file(self):
+        last_data = None
+        last_indices = None
+        last_fields = None
+
+        min_temp_chunk_id = min([int(Path(i).name.split('.')[0].split('_')[-1]) for i in self.database_chunk_path
+                                 if str(i).endswith(self.temp_chunk_suffix)])
+        min_temp_file_path = self.database_path_parent / (f'{self.database_name_prefix}_chunk_'
+                                                          f'{min_temp_chunk_id}{self.temp_chunk_suffix}')
+        try:
+            max_mvdb_chunk_id = max([int(Path(i).name.split('.')[0].split('_')[-1]) for i in self.database_chunk_path
+                                     if not str(i).endswith(self.temp_chunk_suffix)])
+        except Exception:
+            max_mvdb_chunk_id = 0
+
+        max_mvdb_file_path = self.database_path_parent / f'{self.database_name_prefix}_chunk_{max_mvdb_chunk_id}.mvdb'
+
+        # First, merge the critical files.
+        if max_mvdb_file_path.exists():
+            # Here, ensure it is always the last .mvdb file.
+            with open(max_mvdb_file_path, 'rb') as f:
+                mvdb_data = np.load(f)
+                mvdb_indices = np.load(f, allow_pickle=True).tolist()
+                mvdb_fields = np.load(f, allow_pickle=True).tolist()
+
+            if mvdb_data.shape[0] < self.chunk_size:
+                # If the .mvdb file size has not reached chunk_size, merge the .temp file slices into the .mvdb file.
+                with open(min_temp_file_path, 'rb') as f:
+                    temp_data = np.load(f)
+                    temp_indices = np.load(f, allow_pickle=True).tolist()
+                    temp_fields = np.load(f, allow_pickle=True).tolist()
+
+                data = np.vstack((mvdb_data, temp_data[:self.chunk_size - mvdb_data.shape[0], :]))
+                indices = mvdb_indices + temp_indices[:self.chunk_size - mvdb_data.shape[0]]
+                fields = mvdb_fields + temp_fields[:self.chunk_size - mvdb_data.shape[0]]
+
+                with open(max_mvdb_file_path, 'wb') as f:
+                    np.save(f, data)
+                    np.save(f, indices, allow_pickle=True)
+                    np.save(f, fields, allow_pickle=True)
+
+                last_data = temp_data[self.chunk_size - mvdb_data.shape[0]:, :]
+                last_indices = temp_indices[self.chunk_size - mvdb_data.shape[0]:]
+                last_fields = temp_fields[self.chunk_size - mvdb_data.shape[0]:]
+
+                os.remove(min_temp_file_path)
+
+                self._remove_from_list_without_conflict(min_temp_file_path, self.database_chunk_path)
+                self._append_to_list_without_conflict(max_mvdb_file_path, self.database_chunk_path)
+
+        # sorted paths
+        sorted_paths = sorted([i for i in self.database_chunk_path if str(i).endswith(self.temp_chunk_suffix)],
+                              key=lambda x: int(Path(x).name.split('.')[0].split('_')[-1]))
+
+        for i in sorted_paths:
+            if last_data:
+                # If there are remaining .temp file slices, merge them into the .mvdb file.
+                with open(i, 'rb') as f:
+                    temp_data = np.load(f)
+                    temp_indices = np.load(f, allow_pickle=True).tolist()
+                    temp_fields = np.load(f, allow_pickle=True).tolist()
+
+                data = np.vstack((last_data, temp_data[:self.chunk_size - last_data.shape[0], :]))
+                indices = last_indices + temp_indices[:self.chunk_size - len(last_indices)]
+                fields = last_fields + temp_fields[:self.chunk_size - len(last_fields)]
+
+                max_mvdb_chunk_id += 1
+
+                max_mvdb_file_path = (self.database_path_parent /
+                                      f'{self.database_name_prefix}_chunk_{max_mvdb_chunk_id}.mvdb')
+
+                with open(max_mvdb_file_path, 'wb') as f:
+                    np.save(f, data)
+                    np.save(f, indices, allow_pickle=True)
+                    np.save(f, fields, allow_pickle=True)
+
+                last_data = temp_data[self.chunk_size - last_data.shape[0]:, :]
+                last_indices = temp_indices[self.chunk_size - len(last_indices):]
+                last_fields = temp_fields[self.chunk_size - len(last_fields):]
+
+                os.remove(i)
+            else:
+                max_mvdb_chunk_id += 1
+
+                max_mvdb_file_path = (self.database_path_parent /
+                                      f'{self.database_name_prefix}_chunk_{max_mvdb_chunk_id}.mvdb')
+
+                os.rename(i, max_mvdb_file_path)
+
+            self._remove_from_list_without_conflict(i, self.database_chunk_path)
+            self._append_to_list_without_conflict(max_mvdb_file_path, self.database_chunk_path)
 
     def commit(self):
         """
@@ -320,28 +452,37 @@ class BinaryMatrixSerializer:
         # If this method is called, the part that meets the chunk size will be saved first,
         #  and the part that does not meet the chunk size will be directly saved as the last chunk.
         if not self._COMMIT_FLAG:
-            self.save_chunk_immediately()
+            self.save_chunk_immediately(as_temp=True)
 
             # save bloom filter
             self.id_filter.to_file(self._bloom_filter_path)
 
-            self.build_index()
-
-            # save ivf index and k-means model
-            self.ann_model.save(self.database_path_parent / 'ann_model.mvdb')
-
-            self.ivf_index.save(self.database_path_parent / 'ivf_index.mvdb')
-
-            # del .mvdb files
-            for i in self.database_chunk_path:
-                os.remove(i)
-
-            self.database_chunk_path = []
-
-            length = 0
-            for database, *_ in self.data_loader(self.database_cluster_path):
+            length = self.database_shape[0]
+            for database, *_ in self.data_loader(
+                    [i for i in self.database_chunk_path if str(i).endswith(self.temp_chunk_suffix)]
+            ):
                 length += database.shape[0]
+
             self.database_shape = (length, self.dim)
+
+            self._merge_local_file()
+
+            if self.database_shape[0] >= 100000:
+                # build index
+                self.build_index()
+
+                # save ivf index and k-means model
+                self.ann_model.save(self.database_path_parent / 'ann_model.mvdb')
+
+                self.ivf_index.save(self.database_path_parent / 'ivf_index.mvdb')
+
+                # del .mvdb files
+                for i in self.database_chunk_path:
+                    os.remove(i)
+
+                self.database_chunk_path = []
+
+            self.reset_database()
 
             self._COMMIT_FLAG = True
 
@@ -394,7 +535,8 @@ class BinaryMatrixSerializer:
         raise_if(ValueError, not all(1 <= len(i) <= 3 and isinstance(i, tuple) for i in vectors),
                  f'vectors must be tuple of (vector, id, field), got {vectors}')
 
-        batch_size = 10000
+        batch_size = get_env_variable('BULK_ADD_BATCH_SIZE', 10000, int)
+
         new_ids = []
 
         for i in range(0, len(vectors), batch_size):
@@ -426,7 +568,7 @@ class BinaryMatrixSerializer:
             self.fields.extend(temp_fields)
             new_ids.extend(temp_indices)
 
-            self.save_chunk_immediately() if save_immediately else self.auto_save_chunk()
+            self.save_chunk_immediately(as_temp=True) if save_immediately else self.auto_save_chunk(as_temp=True)
 
         if self._COMMIT_FLAG:
             self._COMMIT_FLAG = False
@@ -477,10 +619,7 @@ class BinaryMatrixSerializer:
         self.indices.append(index)
         self.fields.append(field)
 
-        if save_immediately:
-            self.save_chunk_immediately()
-        else:
-            self.auto_save_chunk()
+        self.save_chunk_immediately(as_temp=True) if save_immediately else self.auto_save_chunk(as_temp=True)
 
         if self._COMMIT_FLAG:
             self._COMMIT_FLAG = False
@@ -494,9 +633,12 @@ class BinaryMatrixSerializer:
 
         try:
             shutil.rmtree(self.database_path_parent)
+
         except FileNotFoundError:
             pass
 
+        self.database_chunk_path = []
+        self.database_cluster_path = []
         self.reset_database()
 
     def _kmeans_clustering(self, data):
@@ -506,7 +648,7 @@ class BinaryMatrixSerializer:
         return self.ann_model.cluster_centers_, self.ann_model.labels_
 
     def _predict_next_cluster_file_path(self, cluster_id):
-        """预估下一个聚类文件的路径"""
+        """Estimate the path of the next cluster file."""
         # {cluster_id: {file_path1: length, file_path2: length}}
         # find max file path
         if not self.current_cluster_data_msg.get(cluster_id):
@@ -529,12 +671,12 @@ class BinaryMatrixSerializer:
         return str(max_cluster_id_path)
 
     def _insert_ivf_index(self, data, indices, fields):
-        # 执行K-means聚类
+        # Perform K-means clustering.
         self.cluster_centers, labels = self._kmeans_clustering(data)
 
-        # 当前批次的ivf索引
+        # Current batch's IVF index.
         ivf_index = {i: [] for i in range(self.n_clusters)}
-        # 将数据分配到各个聚类中心
+        # Allocate data to various cluster centers.
         for idx, label in enumerate(labels):
             self.ivf_index.add_to_cluster(label, indices[idx], fields[idx],
                                           self._predict_next_cluster_file_path(label))
@@ -545,9 +687,9 @@ class BinaryMatrixSerializer:
     def _build_index(self):
         _database = []
         for database, indices, fields in self.data_loader(self.database_chunk_path):
-            # 创建IVF索引
+            # Create an IVF index.
             ivf_index = self._insert_ivf_index(database, indices, fields)
-            # 重排文件
+            # reorganize files
             self.reorganize_files(database, ivf_index)
             if len(database) > 100:
                 random_length = int(len(database) * 0.1)
@@ -556,7 +698,7 @@ class BinaryMatrixSerializer:
             else:
                 random_length = 1
 
-            # 随机生成一部分数据索引
+            # Randomly generate a portion of data indices.
             random_indices = np.random.choice(len(database), size=random_length, replace=False)
 
             _database.append(database[random_indices, :])
@@ -591,9 +733,9 @@ class BinaryMatrixSerializer:
 
     def evaluate_clustering(self, data):
         """
-        使用轮廓系数评估聚类质量
+        Evaluate the quality of clustering using the silhouette coefficient.
         """
-        threshold = float(os.environ.get("MVDB_CLUSTERING_QUALITY_THRESHOLD", "0.3"))
+        threshold = get_env_variable("MVDB_CLUSTERING_QUALITY_THRESHOLD", 0.3, float)
 
         labels = self.ann_model.predict(data)
         score = silhouette_score(data, labels)
@@ -602,17 +744,19 @@ class BinaryMatrixSerializer:
 
     def reindex_if_appropriate(self):
         """
-        如果聚类质量不好，则重新建立索引
+        If the quality of clustering is poor, re-establish the index.
         """
         self.ann_model = KMeans(n_clusters=self.n_clusters, random_state=0,
-                                batch_size=10240, device=self.device)
+                                batch_size=10240, device=self.device,
+                                epochs=get_env_variable('MVDB_KMEANS_EPOCHS', 500, int),
+                                distance=self.distance)
 
         self.ivf_index = CompactIVFIndex(n_clusters=self.n_clusters)
         self._build_index()
 
     def reorganize_files(self, database, ivf_index):
         """
-        根据IVF索引重排文件。
+        Rearrange files according to the IVF index.
         """
         for cluster_id in range(self.n_clusters):
             all_vectors, all_indices, all_fields = [], [], []
@@ -622,7 +766,7 @@ class BinaryMatrixSerializer:
                     continue
                 vec_idx, index, field = zip(*_)
                 if cid == cluster_id:
-                    # 提取当前聚类中心的所有向量、索引和字段
+                    # Extract all vectors, indices, and fields from the current cluster center.
                     all_vectors.extend([database[i] for i in vec_idx])
                     all_indices.extend(index)
                     all_fields.extend(field)
@@ -635,14 +779,15 @@ class BinaryMatrixSerializer:
     @io_checker
     def _load_and_merge_cluster_file(self, cluster_id, database, indices, fields):
         """
-        从已有的.mvdb文件中加载数据，然后混合新数据重新写入文件。
+        Load data from existing .mvdb files, then mix with new data and rewrite into the file.
         """
         paths = self.save_and_merge_data(
             f'cluster_{cluster_id}',
             database,
             indices,
             fields,
-            self.database_cluster_path
+            self.database_cluster_path,
+            as_temp=False
         )
 
         for i in paths:

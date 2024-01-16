@@ -62,3 +62,21 @@ def silhouette_score(X, labels, metric='cosine'):
 
     all_silhouettes = np.concatenate(silhouette_scores)
     return np.mean(all_silhouettes)
+
+
+def get_env_variable(name, default=None, default_type=str):
+    import os
+
+    def type_cast(value):
+        if default_type == str:
+            return value  # include None
+        else:
+            try:
+                return default_type(value)  # will raise Exception if None
+            except Exception:
+                return default  # include None
+
+    if default is None:
+        return type_cast(os.environ.get(name))
+    else:
+        return type_cast(os.environ.get(name, default))

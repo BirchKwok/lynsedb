@@ -48,7 +48,8 @@ class MinVectorDB:
             chunk_size=chunk_size,
             dtypes=dtypes,
             bloom_filter_size=bloom_filter_size,
-            device=device
+            device=device,
+            distance=distance
         )
         # binary_matrix_serializer functions
         self.add_item = self._binary_matrix_serializer.add_item
@@ -118,10 +119,20 @@ class MinVectorDB:
         """
         self.check_commit()
 
-        if len(self._binary_matrix_serializer.database_cluster_path) == 0:
+        if len(self._binary_matrix_serializer.database_cluster_path) == 0 and \
+                len(self._binary_matrix_serializer.database_chunk_path) == 0:
             return None
 
-        return self._get_n_elements(returns, n, self._binary_matrix_serializer.database_cluster_path)
+        if len(self._binary_matrix_serializer.database_cluster_path) == 0:
+            path = [str(i) for i in self._binary_matrix_serializer.database_chunk_path]
+            path = sorted(path)
+        else:
+            path = [str(i) for i in self._binary_matrix_serializer.database_cluster_path]
+            path = sorted(path)
+
+        # print("sorted path: ", path)
+
+        return self._get_n_elements(returns, n, path)
 
     @ParameterTypeAssert({'n': int, 'returns': str})
     @ParameterValuesAssert({'returns': ('database', 'indices', 'fields')})

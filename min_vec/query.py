@@ -15,6 +15,8 @@ class DatabaseQuery:
         # attributes
         self.dtypes = dtypes
         self.distance = distance
+        self.distance_func = cosine_distance if distance == 'cosine' else euclidean_distance
+        self.is_reversed = -1 if distance == 'cosine' else 1
         self.device = get_device(device)
         self.chunk_size = chunk_size
 
@@ -58,6 +60,7 @@ class DatabaseQuery:
 
         return index_chunk, scores
 
+
     @ParameterValuesAssert({'vector': lambda s: s.ndim == 1})
     @ParameterTypeAssert({
         'vector': np.ndarray, 'k': int, 'fields': (None, list),
@@ -82,7 +85,8 @@ class DatabaseQuery:
         """
         self.binary_matrix_serializer.check_commit()
 
-        if len(self.binary_matrix_serializer.database_cluster_path) == 0:
+        if (len(self.binary_matrix_serializer.database_cluster_path) == 0 and
+                len(self.binary_matrix_serializer.database_chunk_path) == 0):
             raise ValueError('database is empty.')
 
         if k > self.binary_matrix_serializer.database_shape[0]:
@@ -93,25 +97,16 @@ class DatabaseQuery:
         vector = to_normalize(vector) if normalize else vector
         vector = vector.reshape(1, -1)
 
-        vector_cluster_id = self.binary_matrix_serializer.ann_model.predict(vector)[0]
-
-        topk = 0
         all_scores = []
         all_index = []
-        searched_id = set()
-        while topk < k:
-            _, _, vector_cluster_paths = self.binary_matrix_serializer.ivf_index.search(
-                vector_cluster_id, fields=fields, indices=subset_indices
-            )
-            searched_id.add(vector_cluster_id)
 
-            vector_cluster_paths = list(set(vector_cluster_paths))
-
+        def batch_query(vec_path, vector, k: int = 12, fields: str | list = None, subset_indices=None):
+            nonlocal all_scores, all_index
             batch_size = 10 if self.chunk_size > 100000 else 50
 
             with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-                for i in range(0, len(vector_cluster_paths), batch_size):
-                    batch_paths = vector_cluster_paths[i:i + batch_size]
+                for i in range(0, len(vec_path), batch_size):
+                    batch_paths = vec_path[i:i + batch_size]
                     futures = [
                         executor.submit(self._query_chunk, database, index, vector,
                                         fields, subset_indices, vector_field)
@@ -126,20 +121,41 @@ class DatabaseQuery:
 
             all_scores_inside = np.asarray(all_scores)
             all_index_inside = np.asarray(all_index)
-            top_k_indices = np.argsort(-all_scores_inside)[:k]
+            top_k_indices = np.argsort(self.is_reversed * all_scores_inside)[:k]
 
-            topk = len(top_k_indices)
+            return all_index_inside, all_scores_inside, top_k_indices
 
-            if topk == k:
+        if len(self.binary_matrix_serializer.database_cluster_path) == 0:
+            all_index_inside, all_scores_inside, top_k_indices =\
+                batch_query(self.binary_matrix_serializer.database_chunk_path, vector, k, fields, subset_indices)
+            if len(top_k_indices) == k:
                 return all_index_inside[top_k_indices], all_scores_inside[top_k_indices]
+        else:
+            vector_cluster_id = self.binary_matrix_serializer.ann_model.predict(vector)[0]
 
-            min_dis = 1e10
+            topk = 0
+            searched_id = set()
+            while topk < k:
+                _, _, vector_cluster_paths = self.binary_matrix_serializer.ivf_index.search(
+                    vector_cluster_id, fields=fields, indices=subset_indices
+                )
+                searched_id.add(vector_cluster_id)
 
-            for cluster_id, cluster_center in enumerate(self.binary_matrix_serializer.ann_model.cluster_centers_):
-                if cluster_id in searched_id:
-                    continue
+                vector_cluster_paths = list(set(vector_cluster_paths))
 
-                dis = euclidean_distance(vector, cluster_center)
-                if dis < min_dis:
-                    min_dis = dis
-                    vector_cluster_id = cluster_id
+                all_index_inside, all_scores_inside, top_k_indices = \
+                    batch_query(vector_cluster_paths, vector, k, fields, subset_indices)
+
+                if len(top_k_indices) == k:
+                    return all_index_inside[top_k_indices], all_scores_inside[top_k_indices]
+
+                min_dis = 1e10
+
+                for cluster_id, cluster_center in enumerate(self.binary_matrix_serializer.ann_model.cluster_centers_):
+                    if cluster_id in searched_id:
+                        continue
+
+                    dis = self.distance_func(vector, cluster_center)
+                    if dis < min_dis:
+                        min_dis = dis
+                        vector_cluster_id = cluster_id
