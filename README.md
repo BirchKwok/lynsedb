@@ -1,19 +1,17 @@
 # MinVectorDB
 
-
-<b>MinVectorDB</b> is a simple vector storage and query database implementation, providing clear and concise Python APIs aimed at lowering the barrier to using vector databases. More practical features will be added in the future. 
-
-It is important to note that MinVectorDB is not designed for efficiency and thus does not include built-in algorithms like approximate nearest neighbors for efficient searching. 
-
-It originated from the author's need to demonstrate a large language model demo, designed for 100% recall. 
-
-Additionally, it has not undergone rigorous code testing, so caution is advised when using it in a production environment.
+<b>MinVectorDB</b> is a simple vector storage and query database implementation that offers clear and concise Python APIs, aimed at lowering the barrier to using vector databases. More practical features will be added in the future.
+<br>
+It is important to note that MinVectorDB is not designed for efficiency, and therefore does not include built-in algorithms like approximate nearest neighbors for efficient searching.
+<br>
+Originally created to demonstrate large language model demos with a goal of 100% recall, the library will no longer be actively maintained due to adjustments in the author's current work.
+<br>
 <br>
 <b>MinVectorDB</b> 是简易实现的向量存储和查询数据库，提供简洁明了的python API，旨在降低向量数据库的使用门槛。未来将添加更多实用功能。
-
+<br>
 需要注意的是，MinVectorDB并非为追求效率而生，因此，并没有内置近似最近邻等高效查找算法。
-
-它起源于作者需要演示大语言模型Demo的契机，为了追求100%召回率而设计，此外，也没有经过严格的代码测试，因此如果将其用于生产环境需要特别谨慎。
+<br>
+它起源于作者需要演示大语言模型Demo的契机，为了追求100%召回率而设计，**因目前工作有调整，此库将不再积极维护**。
 
 ## Install
 
@@ -115,13 +113,13 @@ db.delete()
 *Demo 1* -- **Sequentially add vectors**
 
 
-    100%|████████████████████████████| 100000/100000 [00:01<00:00, 53068.92vector/s]
+    100%|████████████████████████████| 100000/100000 [00:01<00:00, 55170.10vector/s]
     MinVectorDB - The clustering quality is: -0.05378091335296631
     MinVectorDB - The clustering quality is not good, reindexing...
 
 
     
-    * [Insert data] Time cost 6.6291 s.
+    * [Insert data] Time cost 6.4356 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Query id:  0
@@ -129,7 +127,7 @@ db.delete()
       - Similarity of top 10 results:  [1.0000002  0.78101647 0.77775997 0.77591014 0.77581763 0.77578723
      0.77570754 0.77500904 0.77420104 0.77413327]
     
-    * [Query data] Time cost 0.0020 s.
+    * [Query data] Time cost 0.0017 s.
 
 
 ### Bulk add vectors
@@ -177,7 +175,7 @@ with db.insert_session():
         # ID increments by 1 with each loop iteration.
         id += 1
         
-    # Here, normalization can be directly specified, achieving the same effect as `t = t / np.linalg.norm(t) `.
+#     # Here, normalization can be directly specified, achieving the same effect as `t = t / np.linalg.norm(t) `.
     db.bulk_add_items(vectors, normalize=True, save_immediately=False)
 
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
@@ -213,7 +211,7 @@ db.delete()
 
 
     
-    * [Insert data] Time cost 9.3522 s.
+    * [Insert data] Time cost 8.9953 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Query id:  0
@@ -221,7 +219,7 @@ db.delete()
       - Similarity of top 10 results:  [1.0000002  0.78101647 0.77775997 0.77591014 0.77581763 0.77578723
      0.77570754 0.77500904 0.77420104 0.77413327]
     
-    * [Query data] Time cost 0.0017 s.
+    * [Query data] Time cost 0.0016 s.
 
 
 ### Use field to improve Searching Recall
@@ -305,7 +303,7 @@ db.delete()
 
 
     
-    * [Insert data] Time cost 9.4705 s.
+    * [Insert data] Time cost 9.0212 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Query id:  0
@@ -314,7 +312,7 @@ db.delete()
       - Similarity of top 10 results:  [1.         0.75745714 0.75445515 0.75418174 0.75279343 0.7514601
      0.75065786 0.7492904  0.7480291  0.7465518 ]
     
-    * [Query data] Time cost 0.0867 s.
+    * [Query data] Time cost 0.0789 s.
 
 
 ### Use subset_indices to narrow down the search range
@@ -400,7 +398,7 @@ db.delete()
 
 
     
-    * [Insert data] Time cost 9.5864 s.
+    * [Insert data] Time cost 8.9559 s.
       - Database shape:  (100001, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Query id:  0
@@ -409,5 +407,5 @@ db.delete()
       - Similarity of top 10 results:  [1.         0.7724291  0.7651854  0.76278293 0.7601607  0.75745714
      0.7572401  0.7563845  0.75574833 0.7540937 ]
     
-    * [Query data] Time cost 0.0090 s.
+    * [Query data] Time cost 0.0089 s.
 
