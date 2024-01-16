@@ -142,4 +142,4 @@ class BloomTrie:
             if max_value == "" or int(value) > int(max_value):
                 max_value = value
 
-        return int(max_value) if max_value != "" else 0
+        return int(max_value) if max_value != "" else -1
