@@ -6,7 +6,8 @@ from min_vec.engine import get_device
 
 
 class KMeans:
-    def __init__(self, n_clusters, distance='cosine', random_state=42, epochs=100, learning_rate=0.1, batch_size=1000, device='auto'):
+    def __init__(self, n_clusters, distance='cosine', random_state=42, epochs=100, learning_rate=0.1,
+                 batch_size=1000, device='auto'):
         seed_everything(random_state)
 
         self.device = get_device(device)
@@ -16,6 +17,7 @@ class KMeans:
         self.batch_size = batch_size
         self.centroids = None
         self._labels = None
+        self.distance = distance
 
         self.distance_func = self.cosine_distance if distance == 'cosine' else self.euclidean_distance
 
