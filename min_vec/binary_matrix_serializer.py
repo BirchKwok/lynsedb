@@ -66,6 +66,9 @@ class BinaryMatrixSerializer:
 
         self.device = device
 
+        # To prevent duplicate naming of chunk_id.mvdb files in the same MinVectorDB instance when using build_index.
+        self.mvdb_files_in_current_instance = []
+
         if Path(self.database_path_parent / 'ivf_index.mvdb').exists():
             self.ivf_index = (CompactIVFIndex(n_clusters=self.n_clusters).
                               load(self.database_path_parent / 'ivf_index.mvdb'))
@@ -179,8 +182,8 @@ class BinaryMatrixSerializer:
 
             yield database, index, field
 
-    @staticmethod
-    def _append_to_list_without_conflict(path, plist):
+    # @staticmethod
+    def _append_to_list_without_conflict(self, path, plist):
         """
         Add a new chunk's path to the list of database chunks.
 
@@ -442,6 +445,7 @@ class BinaryMatrixSerializer:
                 os.rename(i, max_mvdb_file_path)
 
             self._remove_from_list_without_conflict(i, self.database_chunk_path)
+
             self._append_to_list_without_conflict(max_mvdb_file_path, self.database_chunk_path)
 
     def commit(self):
@@ -685,6 +689,7 @@ class BinaryMatrixSerializer:
         return ivf_index
 
     def _build_index(self):
+
         _database = []
         for database, indices, fields in self.data_loader(self.database_chunk_path):
             # Create an IVF index.
@@ -711,18 +716,24 @@ class BinaryMatrixSerializer:
 
         """
         sample_data = self._build_index()
+
+        # delete chunk_id.mvdb files
+        for i in self.database_chunk_path:
+            os.remove(i)
+        self.database_chunk_path = []
+
         is_quality_good = self.evaluate_clustering(sample_data)
 
         if not is_quality_good:
             logger.print('The clustering quality is not good, reindexing...')
-            if self.database_cluster_path:
-                max_chunk_id = max([int(Path(i).name.split('.')[0].split('_')[-1]) for i in self.database_chunk_path
-                                    if Path(i).name.split('.')[0].split('_')[-1].isdigit()])
-            else:
-                max_chunk_id = 0
+            max_chunk_id = 0
 
             for i in self.database_cluster_path:
-                os.rename(i, self.database_path_parent / f'{self.database_name_prefix}_chunk_{max_chunk_id + 1}.mvdb')
+                os.rename(i, self.database_path_parent / f'{self.database_name_prefix}_chunk_{max_chunk_id}.mvdb')
+                self._append_to_list_without_conflict(
+                    self.database_path_parent / f'{self.database_name_prefix}_chunk_{max_chunk_id}.mvdb',
+                    self.database_chunk_path
+                )
                 max_chunk_id += 1
 
             self.database_cluster_path = []
