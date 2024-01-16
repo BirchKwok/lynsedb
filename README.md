@@ -34,12 +34,14 @@ except ImportError:
         print(text)
 
 import numpy as np
+from tqdm import tqdm
 
 from spinesUtils.utils import Timer
 from min_vec import MinVectorDB
 
 timer = Timer()
 
+vectors = 100000
 
 
 # ===================================================================
@@ -49,7 +51,8 @@ timer = Timer()
 # Create a MinVectorDB instance.
 display_markdown("*Demo 1* -- **Sequentially add vectors**", raw=True)
 
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, device='cpu')
+# distance can be 'L2' or 'cosine'
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=vectors // 10, device='cpu', distance='cosine')
 
 np.random.seed(23)
 
@@ -59,57 +62,52 @@ def get_test_vectors(shape):
 
 timer.start()
 # ========== Use automatic commit statements. Recommended. =============
+# You can perform this operation multiple times, and the data will be appended to the database.
 with db.insert_session():
     # Define the initial ID.
     id = 0
-    for t in get_test_vectors((100000, 1024)):
+    for t in tqdm(get_test_vectors((vectors, 1024)), total=vectors, unit="vector"):
         # Vectors need to be normalized before writing to the database.
         # t = t / np.linalg.norm(t) 
         # Here, normalization can be directly specified, achieving the same effect as the previous sentence.
-        db.add_item(t, id=id, normalize=True)
+        # print("id: ", id)
+        db.add_item(t, index=id, normalize=True, save_immediately=False)
 
         # ID increments by 1 with each loop iteration.
         id += 1
 
-# You can perform this operation multiple times, and the data will be appended to the database.
-# with db.insert_session():
-#     # Define the initial ID.
-#     for t in get_test_vectors((100000, 1024)):
-#         # Vectors need to be normalized before writing to the database.
-#         # t = t / np.linalg.norm(t) 
-#         # Here, normalization can be directly specified, achieving the same effect as the previous sentence.
-#         db.add_item(t, id=id, normalize=True)
-#         
-#         # ID increments by 1 with each loop iteration.
-#         id += 1
-
 # ============== Or use manual commit statements. =================
 # id = 0
-# for t in get_test_vectors((100000, 1024)):
+# for t in get_test_vectors((vectors, 1024)):
 #     # Vectors need to be normalized before writing to the database.
 #     # t = t / np.linalg.norm(t) 
 #     # Here, normalization can be directly specified, achieving the same effect as the previous sentence.
-#     db.add_item(t, id=id, normalize=True)
-#     
+#     db.add_item(t, index=id, normalize=True)
+    
 #     # ID increments by 1 with each loop iteration.
 #     id += 1
 # db.commit()
-        
+
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
 query = db.head(10)[0]
+query_id = db.head(10, returns='indices')[0]
 
 timer.middle_point()
 res = db.query(query, k=10)
+
+query_time_cost = timer.last_timestamp_diff()
 print("  - Database shape: ", db.shape)
 print("  - Query vector: ", query)
-print("  - Database index of top 10 results: ", res[0])
-print("  - Cosine similarity of top 10 results: ", res[1])
-print(f"\n* [Query data] Time cost {timer.last_timestamp_diff():>.4f} s.")
+print("  - Query id: ", query_id)
+print("  - Database index of top 10 results: ", res[0][:10])
+print("  - Similarity of top 10 results: ", res[1][:10])
+print(f"\n* [Query data] Time cost {query_time_cost :>.4f} s.")
 timer.end()
 
-
-# This sentence is for demo demonstration purposes, to clear the currently created .mvdb files from the database, but this is optional in actual use.
+# This sentence is for demo demonstration purposes, 
+# to clear the currently created .mvdb files from the database, 
+# but this is optional in actual use.
 db.delete()
 ```
 
@@ -117,15 +115,21 @@ db.delete()
 *Demo 1* -- **Sequentially add vectors**
 
 
+    100%|████████████████████████████| 100000/100000 [00:01<00:00, 53068.92vector/s]
+    MinVectorDB - The clustering quality is: -0.05378091335296631
+    MinVectorDB - The clustering quality is not good, reindexing...
+
+
     
-    * [Insert data] Time cost 8.7585 s.
+    * [Insert data] Time cost 6.6291 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
-      - Database index of top 10 results:  [    0 67927 53447 47665 64134 13859 41949  5788 38082 18507]
-      - Cosine similarity of top 10 results:  [1.0000002  0.78101647 0.77775997 0.77717626 0.77591014 0.77581763
-     0.77578723 0.77570754 0.77500904 0.77420104]
+      - Query id:  0
+      - Database index of top 10 results:  [    0 67927 53447 64134 13859 41949  5788 38082 18507 82013]
+      - Similarity of top 10 results:  [1.0000002  0.78101647 0.77775997 0.77591014 0.77581763 0.77578723
+     0.77570754 0.77500904 0.77420104 0.77413327]
     
-    * [Query data] Time cost 0.1690 s.
+    * [Query data] Time cost 0.0020 s.
 
 
 ### Bulk add vectors
@@ -160,6 +164,8 @@ def get_test_vectors(shape):
         yield np.random.random(shape[1])
 
 timer.start()
+
+# You can perform this operation multiple times, and the data will be appended to the database.
 with db.insert_session():  
     # Define the initial ID.
     id = 0
@@ -172,37 +178,29 @@ with db.insert_session():
         id += 1
         
     # Here, normalization can be directly specified, achieving the same effect as `t = t / np.linalg.norm(t) `.
-    db.bulk_add_items(vectors, normalize=True)
-
-# You can perform this operation multiple times, and the data will be appended to the database.
-# with db.insert_session():  
-#     # Define the initial ID.
-#     vectors = []
-#     for t in get_test_vectors((100000, 1024)):
-#         # Vectors need to be normalized before writing to the database.
-#         # t = t / np.linalg.norm(t) 
-#         vectors.append((t, id))
-#         # ID increments by 1 with each loop iteration.
-#         id += 1
-#         
-#     # Here, normalization can be directly specified, achieving the same effect as `t = t / np.linalg.norm(t) `.
-#     db.bulk_add_items(vectors, normalize=True)
+    db.bulk_add_items(vectors, normalize=True, save_immediately=False)
 
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
+
 query = db.head(10)[0]
+query_id = db.head(10, returns='indices')[0]
 
 timer.middle_point()
 res = db.query(query, k=10)
+query_time_cost = timer.last_timestamp_diff()
 print("  - Database shape: ", db.shape)
 print("  - Query vector: ", query)
-print("  - Database index of top 10 results: ", res[0])
-print("  - Cosine similarity of top 10 results: ", res[1])
-print(f"\n* [Query data] Time cost {timer.last_timestamp_diff():>.4f} s.")
+print("  - Query id: ", query_id)
+print("  - Database index of top 10 results: ", res[0][:10])
+print("  - Similarity of top 10 results: ", res[1][:10])
+print(f"\n* [Query data] Time cost {query_time_cost :>.4f} s.")
 
 
 timer.end()
 
-# This sentence is for demo demonstration purposes, to clear the currently created .mvdb files from the database, but this is optional in actual use.
+# This sentence is for demo demonstration purposes, 
+# to clear the currently created .mvdb files from the database, 
+# but this is optional in actual use.
 db.delete()
 ```
 
@@ -210,15 +208,20 @@ db.delete()
 *Demo 2* -- **Bulk add vectors**
 
 
+    MinVectorDB - The clustering quality is: -0.05378091335296631
+    MinVectorDB - The clustering quality is not good, reindexing...
+
+
     
-    * [Insert data] Time cost 1.4038 s.
+    * [Insert data] Time cost 9.3522 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
-      - Database index of top 10 results:  [    0 67927 53447 47665 64134 13859 41949  5788 38082 18507]
-      - Cosine similarity of top 10 results:  [1.0000002  0.78101647 0.77775997 0.77717626 0.77591014 0.77581763
-     0.77578723 0.77570754 0.77500904 0.77420104]
+      - Query id:  0
+      - Database index of top 10 results:  [    0 67927 53447 64134 13859 41949  5788 38082 18507 82013]
+      - Similarity of top 10 results:  [1.0000002  0.78101647 0.77775997 0.77591014 0.77581763 0.77578723
+     0.77570754 0.77500904 0.77420104 0.77413327]
     
-    * [Query data] Time cost 0.1626 s.
+    * [Query data] Time cost 0.0017 s.
 
 
 ### Use field to improve Searching Recall
@@ -270,19 +273,26 @@ with db.insert_session():
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
 query = db.head(10)[0]
+query_id = db.head(10, returns='indices')[0]
+query_field = db.head(10, returns='fields')[0]
 
 timer.middle_point()
 
-res = db.query(query, k=10, field=['test_0', 'test_3'])
+res = db.query(query, k=10, fields=[query_field])
+query_time_cost = timer.last_timestamp_diff()
 print("  - Database shape: ", db.shape)
 print("  - Query vector: ", query)
-print("  - Database index of top 10 results: ", res[0])
-print("  - Cosine similarity of top 10 results: ", res[1])
-print(f"\n* [Query data] Time cost {timer.last_timestamp_diff():>.4f} s.")
+print("  - Query id: ", query_id)
+print("  - Query field: ", query_field)
+print("  - Database index of top 10 results: ", res[0][:10])
+print("  - Similarity of top 10 results: ", res[1][:10])
+print(f"\n* [Query data] Time cost {query_time_cost :>.4f} s.")
 
 timer.end()
 
-# This sentence is for demo demonstration purposes, to clear the currently created .mvdb files from the database, but this is optional in actual use.
+# This sentence is for demo demonstration purposes, 
+# to clear the currently created .mvdb files from the database, 
+# but this is optional in actual use.
 db.delete()
 ```
 
@@ -290,15 +300,21 @@ db.delete()
 *Demo 3* -- **Use field to improve Searching Recall**
 
 
+    MinVectorDB - The clustering quality is: -0.05378091335296631
+    MinVectorDB - The clustering quality is not good, reindexing...
+
+
     
-    * [Insert data] Time cost 1.5334 s.
+    * [Insert data] Time cost 9.4705 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
-      - Database index of top 10 results:  [  0 396   9 359  98 317  20  66 347 337]
-      - Cosine similarity of top 10 results:  [1.0000002  0.7712989  0.7611679  0.7611464  0.7591923  0.75870526
-     0.7574989  0.7574572  0.75731516 0.7573059 ]
+      - Query id:  0
+      - Query field:  test_0
+      - Database index of top 10 results:  [ 0 66 21 60 91 43 84 52 14 28]
+      - Similarity of top 10 results:  [1.         0.75745714 0.75445515 0.75418174 0.75279343 0.7514601
+     0.75065786 0.7492904  0.7480291  0.7465518 ]
     
-    * [Query data] Time cost 0.1290 s.
+    * [Query data] Time cost 0.0867 s.
 
 
 ### Use subset_indices to narrow down the search range
@@ -351,19 +367,27 @@ with db.insert_session():
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
 query = db.head(10)[0]
+query_id = db.head(10, returns='indices')[0]
+query_field = db.head(10, returns='fields')[0]
 
 timer.middle_point()
 
-res = db.query(query, k=10, field=['test_0', 'test_3'], subset_indices=list(range(1000)))
+# You may define both 'subset_indices' and 'fields'
+res = db.query(query, k=10, subset_indices=list(range(0, query_id + 1000)))
+query_time_cost = timer.last_timestamp_diff()
 print("  - Database shape: ", db.shape)
 print("  - Query vector: ", query)
-print("  - Database index of top 10 results: ", res[0])
-print("  - Cosine similarity of top 10 results: ", res[1])
-print(f"\n* [Query data] Time cost {timer.last_timestamp_diff():>.4f} s.")
+print("  - Query id: ", query_id)
+print("  - Query field: ", query_field)
+print("  - Database index of top 10 results: ", res[0][:10])
+print("  - Similarity of top 10 results: ", res[1][:10])
+print(f"\n* [Query data] Time cost {query_time_cost :>.4f} s.")
 
 timer.end()
 
-# This sentence is for demo demonstration purposes, to clear the currently created .mvdb files from the database, but this is optional in actual use.
+# This sentence is for demo demonstration purposes, 
+# to clear the currently created .mvdb files from the database, 
+# but this is optional in actual use.
 db.delete()
 ```
 
@@ -371,13 +395,19 @@ db.delete()
 *Demo 4* -- **Use subset_indices to narrow down the search range**
 
 
+    MinVectorDB - The clustering quality is: -0.05283166840672493
+    MinVectorDB - The clustering quality is not good, reindexing...
+
+
     
-    * [Insert data] Time cost 1.4955 s.
+    * [Insert data] Time cost 9.5864 s.
       - Database shape:  (100001, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
-      - Database index of top 10 results:  [  0 396   9 359  98 317  20  66 347 337]
-      - Cosine similarity of top 10 results:  [1.0000002  0.7712989  0.7611679  0.7611464  0.7591923  0.75870526
-     0.7574989  0.7574572  0.75731516 0.7573059 ]
+      - Query id:  0
+      - Query field:  test_0
+      - Database index of top 10 results:  [  0 842 431 555 788  66 594 130 764 863]
+      - Similarity of top 10 results:  [1.         0.7724291  0.7651854  0.76278293 0.7601607  0.75745714
+     0.7572401  0.7563845  0.75574833 0.7540937 ]
     
-    * [Query data] Time cost 0.1321 s.
+    * [Query data] Time cost 0.0090 s.
 
