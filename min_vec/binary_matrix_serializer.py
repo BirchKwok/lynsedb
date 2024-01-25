@@ -4,7 +4,7 @@ import shutil
 
 import numpy as np
 from spinesUtils.asserts import raise_if
-from spinesUtils.utils import Logger
+from spinesUtils.logging import Logger
 
 from min_vec.engine import to_normalize
 from min_vec.filter import BloomTrie

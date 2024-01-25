@@ -2,7 +2,7 @@ import shutil
 from pathlib import Path
 
 import numpy as np
-from spinesUtils.utils import Timer
+from spinesUtils.timer import Timer
 from tqdm import trange
 
 from min_vec.model import MinVectorDB
