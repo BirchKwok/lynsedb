@@ -1,9 +1,10 @@
 from functools import wraps
 from pathlib import Path
 import numpy as np
-from sklearn.metrics.pairwise import euclidean_distances, cosine_distances
 
 from spinesUtils.asserts import raise_if
+
+from min_vec.engine import cosine_distance, euclidean_distance
 
 
 class UnKnownError(Exception):
@@ -43,17 +44,17 @@ def silhouette_score(X, labels, metric='cosine'):
         intra_cluster_data = X[intra_cluster_mask]
 
         if metric == 'euclidean':
-            intra_distances = euclidean_distances(intra_cluster_data, intra_cluster_data)
+            intra_distances = euclidean_distance(intra_cluster_data, intra_cluster_data.T)
         else:
-            intra_distances = cosine_distances(intra_cluster_data, intra_cluster_data)
+            intra_distances = cosine_distance(intra_cluster_data, intra_cluster_data.T)
         a = np.mean(intra_distances, axis=1)
 
         inter_cluster_data = X[~intra_cluster_mask]
 
         if metric == 'euclidean':
-            inter_distances = euclidean_distances(intra_cluster_data, inter_cluster_data)
+            inter_distances = euclidean_distance(intra_cluster_data, inter_cluster_data.T)
         else:
-            inter_distances = cosine_distances(intra_cluster_data, inter_cluster_data)
+            inter_distances = cosine_distance(intra_cluster_data, inter_cluster_data.T)
 
         b = np.min(np.mean(inter_distances, axis=1), axis=0)
 

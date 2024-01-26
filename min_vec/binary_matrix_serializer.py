@@ -13,10 +13,10 @@ from min_vec.ivf_index import CompactIVFIndex
 from min_vec.kmeans import KMeans
 
 logger = Logger(
-    verbose=get_env_variable('MVDB_LOG_VERBOSE', True, bool),
     fp=get_env_variable('MVDB_LOG_PATH', None, str),
     name='MinVectorDB', truncate_file=get_env_variable('MVDB_TRUNCATE_LOG', True, bool),
-    with_time=get_env_variable('MVDB_LOG_WITH_TIME', False, bool)
+    with_time=get_env_variable('MVDB_LOG_WITH_TIME', False, bool),
+    level=get_env_variable('MVDB_LOG_LEVEL', 'INFO', str)
 )
 
 
@@ -184,7 +184,6 @@ class BinaryMatrixSerializer:
             PermissionError: If the file cannot be read due to permission issues.
             UnKnownError: If an unknown error occurs.
         """
-        # By default, save the checkpoint first.
         paths = paths if paths is not None else self.database_cluster_path
 
         for i in paths:
@@ -240,6 +239,10 @@ class BinaryMatrixSerializer:
                 raise ValueError('The database, index length and field length not the same.')
 
     def save_and_merge_data(self, prefix, new_data, new_indices, new_fields, check_path_list, as_temp=True):
+        # make sure the path exists
+        if not self.database_path_parent.exists():
+            self.database_path_parent.mkdir(parents=True)
+
         if len(check_path_list) == 0:
             max_id = 0
         else:
@@ -656,6 +659,7 @@ class BinaryMatrixSerializer:
 
         self.database_chunk_path = []
         self.database_cluster_path = []
+        self.id_filter = BloomTrie(bloom_size=self.bloom_filter_size, bloom_hash_count=5)
         self.reset_database()
 
     def _kmeans_clustering(self, data):
@@ -738,7 +742,7 @@ class BinaryMatrixSerializer:
         is_quality_good = self.evaluate_clustering(sample_data)
 
         if not is_quality_good:
-            logger.print('The clustering quality is not good, reindexing...')
+            logger.info('The clustering quality is not good, reindexing...')
             max_chunk_id = 0
 
             for i in self.database_cluster_path:
@@ -763,7 +767,7 @@ class BinaryMatrixSerializer:
 
         labels = self.ann_model.predict(data)
         score = silhouette_score(data, labels)
-        logger.print(f"The clustering quality is: {score}")
+        logger.info(f"The clustering quality is: {score}")
         return score > threshold
 
     def reindex_if_appropriate(self):
