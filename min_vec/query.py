@@ -96,6 +96,7 @@ class DatabaseQuery:
         raise_if(ValueError, not isinstance(subset_indices, list) and subset_indices is not None,
                  'subset_indices must be list or None.')
         raise_if(TypeError, not isinstance(normalize, bool), 'normalize must be bool.')
+        raise_if(ValueError, vector is None, 'vector must be not None.')
         raise_if(ValueError, len(vector) != self.binary_matrix_serializer.database_shape[1],
                  'vector must be same dim with database.')
         raise_if(ValueError, not isinstance(vector, np.ndarray), 'vector must be np.ndarray.')
@@ -115,6 +116,8 @@ class DatabaseQuery:
 
         all_scores = []
         all_index = []
+        unique_indices = set()
+        sorted_indices, sorted_scores = [], []
 
         def batch_query(vec_path, vector, k: int = 12, fields: str | list = None, subset_indices=None):
             nonlocal all_scores, all_index
@@ -130,8 +133,15 @@ class DatabaseQuery:
 
                     for future in futures:
                         index, scores = future.result()
-                        all_scores.extend(scores)
-                        all_index.extend(index)
+                        # 如果index不在unique_indices中，说明是新的index，需要加入到all_index中
+                        index = np.asarray(index)
+                        scores = np.asarray(scores)
+                        if len(index) != 0:
+                            new_index = index[~np.isin(index, list(unique_indices))]
+                            new_scores = scores[~np.isin(index, list(unique_indices))]
+                            all_scores.extend(new_scores)
+                            all_index.extend(new_index)
+                            unique_indices.update(new_index)
 
                     del batch_paths, futures
 
@@ -139,31 +149,32 @@ class DatabaseQuery:
             all_index_inside = np.asarray(all_index)
             top_k_indices = np.argsort(self.is_reversed * all_scores_inside)[:k]
 
-            return all_index_inside, all_scores_inside, top_k_indices
+            return all_index_inside[top_k_indices], all_scores_inside[top_k_indices]
 
         if len(self.binary_matrix_serializer.database_cluster_path) == 0:
-            all_index_inside, all_scores_inside, top_k_indices = \
+            sorted_indices, sorted_scores = \
                 batch_query(self.binary_matrix_serializer.database_chunk_path, vector, k, fields, subset_indices)
-            if len(top_k_indices) == k:
-                return all_index_inside[top_k_indices], all_scores_inside[top_k_indices]
         else:
             vector_cluster_id = self.binary_matrix_serializer.ann_model.predict(vector)[0]
 
             topk = 0
             searched_id = set()
+            search_times = 0
             while topk < k:
                 _, _, vector_cluster_paths = self.binary_matrix_serializer.ivf_index.search(
                     vector_cluster_id, fields=fields, indices=subset_indices
                 )
+
                 searched_id.add(vector_cluster_id)
 
-                vector_cluster_paths = list(set(vector_cluster_paths))
+                if len(vector_cluster_paths) != 0:
+                    vector_cluster_paths = list(set(vector_cluster_paths))
 
-                all_index_inside, all_scores_inside, top_k_indices = \
-                    batch_query(vector_cluster_paths, vector, k, fields, subset_indices)
+                    sorted_indices, sorted_scores = \
+                        batch_query(vector_cluster_paths, vector, k, fields, subset_indices)
 
-                if len(top_k_indices) == k:
-                    return all_index_inside[top_k_indices], all_scores_inside[top_k_indices]
+                    if len(sorted_indices) == k:
+                        break
 
                 min_dis = 1e10
 
@@ -175,3 +186,9 @@ class DatabaseQuery:
                     if dis < min_dis:
                         min_dis = dis
                         vector_cluster_id = cluster_id
+
+                search_times += 1
+                if search_times > self.binary_matrix_serializer.ann_model.n_clusters:
+                    break
+
+        return sorted_indices, sorted_scores
