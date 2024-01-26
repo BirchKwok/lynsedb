@@ -30,6 +30,15 @@ pip install MinVectorDB
 
 ## Qucik Start
 
+
+```python
+import min_vec
+print("MinVectorDB version is: ", min_vec.__version__)
+```
+
+    MinVectorDB version is:  0.1.3
+
+
 ### Sequentially add vectors.
 
 
@@ -43,7 +52,7 @@ except ImportError:
 import numpy as np
 from tqdm import tqdm
 
-from spinesUtils.utils import Timer
+from spinesUtils.timer import Timer
 from min_vec import MinVectorDB
 
 timer = Timer()
@@ -122,13 +131,13 @@ db.delete()
 *Demo 1* -- **Sequentially add vectors**
 
 
-    100%|████████████████████████████| 100000/100000 [00:01<00:00, 55170.10vector/s]
-    MinVectorDB - The clustering quality is: -0.05378091335296631
-    MinVectorDB - The clustering quality is not good, reindexing...
+    100%|██████████| 100000/100000 [00:01<00:00, 53977.38vector/s]
+    MinVectorDB - INFO - The clustering quality is: -0.022005783393979073
+    MinVectorDB - INFO - The clustering quality is not good, reindexing...
 
 
     
-    * [Insert data] Time cost 6.4356 s.
+    * [Insert data] Time cost 7.1591 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Query id:  0
@@ -136,7 +145,7 @@ db.delete()
       - Similarity of top 10 results:  [1.0000002  0.78101647 0.77775997 0.77591014 0.77581763 0.77578723
      0.77570754 0.77500904 0.77420104 0.77413327]
     
-    * [Query data] Time cost 0.0017 s.
+    * [Query data] Time cost 0.0020 s.
 
 
 ### Bulk add vectors
@@ -151,7 +160,7 @@ except ImportError:
 
 import numpy as np
 
-from spinesUtils.utils import Timer
+from spinesUtils.timer import Timer
 from min_vec import MinVectorDB
 
 timer = Timer()
@@ -215,12 +224,12 @@ db.delete()
 *Demo 2* -- **Bulk add vectors**
 
 
-    MinVectorDB - The clustering quality is: -0.05378091335296631
-    MinVectorDB - The clustering quality is not good, reindexing...
+    MinVectorDB - INFO - The clustering quality is: -0.022005783393979073
+    MinVectorDB - INFO - The clustering quality is not good, reindexing...
 
 
     
-    * [Insert data] Time cost 8.9953 s.
+    * [Insert data] Time cost 8.9777 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Query id:  0
@@ -228,7 +237,7 @@ db.delete()
       - Similarity of top 10 results:  [1.0000002  0.78101647 0.77775997 0.77591014 0.77581763 0.77578723
      0.77570754 0.77500904 0.77420104 0.77413327]
     
-    * [Query data] Time cost 0.0016 s.
+    * [Query data] Time cost 0.0020 s.
 
 
 ### Use field to improve Searching Recall
@@ -243,7 +252,7 @@ except ImportError:
 
 import numpy as np
 
-from spinesUtils.utils import Timer
+from spinesUtils.timer import Timer
 from min_vec import MinVectorDB
 
 timer = Timer()
@@ -307,12 +316,12 @@ db.delete()
 *Demo 3* -- **Use field to improve Searching Recall**
 
 
-    MinVectorDB - The clustering quality is: -0.05378091335296631
-    MinVectorDB - The clustering quality is not good, reindexing...
+    MinVectorDB - INFO - The clustering quality is: -0.022005783393979073
+    MinVectorDB - INFO - The clustering quality is not good, reindexing...
 
 
     
-    * [Insert data] Time cost 9.0212 s.
+    * [Insert data] Time cost 9.1629 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Query id:  0
@@ -321,7 +330,7 @@ db.delete()
       - Similarity of top 10 results:  [1.         0.75745714 0.75445515 0.75418174 0.75279343 0.7514601
      0.75065786 0.7492904  0.7480291  0.7465518 ]
     
-    * [Query data] Time cost 0.0789 s.
+    * [Query data] Time cost 0.0364 s.
 
 
 ### Use subset_indices to narrow down the search range
@@ -336,7 +345,7 @@ except ImportError:
 
 import numpy as np
 
-from spinesUtils.utils import Timer
+from spinesUtils.timer import Timer
 from min_vec import MinVectorDB
 
 timer = Timer()
@@ -402,12 +411,12 @@ db.delete()
 *Demo 4* -- **Use subset_indices to narrow down the search range**
 
 
-    MinVectorDB - The clustering quality is: -0.05283166840672493
-    MinVectorDB - The clustering quality is not good, reindexing...
+    MinVectorDB - INFO - The clustering quality is: -0.020339230075478554
+    MinVectorDB - INFO - The clustering quality is not good, reindexing...
 
 
     
-    * [Insert data] Time cost 8.9559 s.
+    * [Insert data] Time cost 9.5728 s.
       - Database shape:  (100001, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Query id:  0
@@ -416,5 +425,99 @@ db.delete()
       - Similarity of top 10 results:  [1.         0.7724291  0.7651854  0.76278293 0.7601607  0.75745714
      0.7572401  0.7563845  0.75574833 0.7540937 ]
     
-    * [Query data] Time cost 0.0089 s.
+    * [Query data] Time cost 0.0018 s.
+
+
+### Conduct searches by specifying both subset_indices and fields simultaneously.
+
+
+```python
+try:
+    from IPython.display import display_markdown
+except ImportError:
+    def display_markdown(text, raw=True):
+        print(text)
+
+import numpy as np
+
+from spinesUtils.timer import Timer
+from min_vec import MinVectorDB
+
+timer = Timer()
+
+# ===================================================================
+# ========================= DEMO 5 ==================================
+# ===================================================================
+display_markdown("*Demo 5* -- **Conduct searches by specifying both subset_indices and fields simultaneously**", raw=True)
+
+timer.start()
+
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, device='cpu')
+
+np.random.seed(23)
+
+
+def get_test_vectors(shape):
+    for i in range(shape[0]):
+        yield np.random.random(shape[1])
+
+with db.insert_session():     
+    # Define the initial ID.
+    id = 0
+    vectors = []
+    for t in get_test_vectors((100000, 1024)):
+        # Vectors need to be normalized before writing to the database.
+        # t = t / np.linalg.norm(t) 
+        vectors.append((t, id, 'test_'+str(id // 100)))
+        # ID increments by 1 with each loop iteration.
+        id += 1
+        
+    db.bulk_add_items(vectors, normalize=True)
+
+print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
+
+query = db.head(10)[0]
+query_id = db.head(10, returns='indices')[0]
+query_field = db.head(10, returns='fields')[0]
+
+timer.middle_point()
+
+# You may define both 'subset_indices' and 'fields'
+res = db.query(query, k=10, subset_indices=list(range(0, query_id + 10000)), fields=['test_0', 'test_2'])
+query_time_cost = timer.last_timestamp_diff()
+print("  - Database shape: ", db.shape)
+print("  - Query vector: ", query)
+print("  - Query id: ", query_id)
+print("  - Query field: ", query_field)
+print("  - Database index of top 10 results: ", res[0][:10])
+print("  - Similarity of top 10 results: ", res[1][:10])
+print(f"\n* [Query data] Time cost {query_time_cost :>.4f} s.")
+
+timer.end()
+
+# This sentence is for demo demonstration purposes, 
+# to clear the currently created .mvdb files from the database, 
+# but this is optional in actual use.
+db.delete()
+```
+
+
+*Demo 5* -- **Conduct searches by specifying both subset_indices and fields simultaneously**
+
+
+    MinVectorDB - INFO - The clustering quality is: -0.022005783393979073
+    MinVectorDB - INFO - The clustering quality is not good, reindexing...
+
+
+    
+    * [Insert data] Time cost 9.4377 s.
+      - Database shape:  (100000, 1024)
+      - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
+      - Query id:  0
+      - Query field:  test_0
+      - Database index of top 10 results:  [  0  66 293 281  84 224 235 262  28  68]
+      - Similarity of top 10 results:  [1.         0.75745714 0.7557113  0.7524824  0.75065786 0.74784184
+     0.7472197  0.7467411  0.7465518  0.7465167 ]
+    
+    * [Query data] Time cost 0.0216 s.
 
