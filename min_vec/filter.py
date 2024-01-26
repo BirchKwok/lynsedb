@@ -128,18 +128,15 @@ class BloomTrie:
             self.trie.root = self._load_trie_node(f)
 
     def find_max_value(self):
-        if self.trie.max_value is not None:
-            return int(self.trie.max_value)
+        max_value = None
+        stack = [(self.trie.root, '')]
 
-        current_value = ""
-        node = self.trie.root
-        max_value = current_value
-        if node.is_end_of_word and (max_value == "" or int(current_value) > int(max_value)):
-            max_value = current_value
+        while stack:
+            node, current_value = stack.pop()
+            if node.is_end_of_word and (max_value is None or int(current_value) > int(max_value)):
+                max_value = current_value
 
-        for char in node.children:
-            value = self.find_max_value()
-            if max_value == "" or int(value) > int(max_value):
-                max_value = value
+            for char, child in node.children.items():
+                stack.append((child, current_value + char))
 
-        return int(max_value) if max_value != "" else -1
+        return int(max_value) if max_value is not None else -1
