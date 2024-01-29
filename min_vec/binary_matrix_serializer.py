@@ -22,7 +22,7 @@ logger = Logger(
 
 class BinaryMatrixSerializer:
     def __init__(self, dim, database_path, distance, n_clusters=8, chunk_size=100_000, dtypes=np.float32,
-                 bloom_filter_size=100_000_000, device='auto') -> None:
+                 bloom_filter_size=100_000_000, device='auto', storage_mode='memory') -> None:
         """
         Initialize the vector database.
 
@@ -33,6 +33,9 @@ class BinaryMatrixSerializer:
             dtypes (str): Data type of the vectors.
                 Default is 'float32'. Options are 'float32', 'float64', 'float16', 'int32', 'int64', 'int16', 'int8'.
             bloom_filter_size (int): The size of the bloom filter. Default is 100_000_000.
+            device (str): The device to use for vector operations.
+                Options are 'auto', 'cpu', 'mps', or 'cuda'. Default is 'auto'.
+            storage_mode (str): The storage mode of the database.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -45,14 +48,15 @@ class BinaryMatrixSerializer:
             'chunk_size': chunk_size,
             'dtypes': dtypes,
             'bloom_filter_size': bloom_filter_size,
-            'device': device
+            'device': device,
+            'storage_mode': storage_mode
         }
         self._initialize_all(**self.initial_params)
 
         self._COMMIT_FLAG = True
 
     def _initialize_all(self, dim, database_path, distance, n_clusters, chunk_size, dtypes,
-                        bloom_filter_size, device):
+                        bloom_filter_size, device, storage_mode):
         if chunk_size <= 1:
             raise ValueError('chunk_size must be greater than 1')
 
@@ -131,6 +135,8 @@ class BinaryMatrixSerializer:
         # If the database is not empty, load the database and index.
         self._initialize_id_filter_and_shape()
 
+        self.storage_mode = storage_mode
+
     def _initialize_id_filter_and_shape(self):
         self.id_filter = BloomTrie(bloom_size=self.bloom_filter_size, bloom_hash_count=5)
 
@@ -194,7 +200,6 @@ class BinaryMatrixSerializer:
 
             yield database, index, field
 
-    # @staticmethod
     def _append_to_list_without_conflict(self, path, plist):
         """
         Add a new chunk's path to the list of database chunks.
@@ -469,8 +474,6 @@ class BinaryMatrixSerializer:
         Save the database, ensuring that all data is written to disk.
         This method is required to be called after saving vectors to query them.
         """
-        # If this method is called, the part that meets the chunk size will be saved first,
-        #  and the part that does not meet the chunk size will be directly saved as the last chunk.
         if not self._COMMIT_FLAG:
             self.save_chunk_immediately(as_temp=True)
 
@@ -487,7 +490,7 @@ class BinaryMatrixSerializer:
 
             self._merge_local_file()
 
-            if self.database_shape[0] >= 100000:
+            if self.database_shape[0] >= 100000 and self.storage_mode != 'memory':
                 # build index
                 self.build_index()
 

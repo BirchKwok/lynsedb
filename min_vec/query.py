@@ -9,7 +9,7 @@ from min_vec.engine import cosine_distance, euclidean_distance, to_normalize, ge
 
 class DatabaseQuery:
     def __init__(self, binary_matrix_serializer, distance='cosine', device='auto', dtypes=np.float32,
-                 chunk_size=10000) -> None:
+                 chunk_size=10000, search_mode='memory') -> None:
         """
         Query the database for the vectors most similar to the given vector.
 
@@ -30,6 +30,11 @@ class DatabaseQuery:
         self.is_reversed = -1 if distance == 'cosine' else 1
         self.device = get_device(device)
         self.chunk_size = chunk_size
+        self.search_mode = search_mode
+
+        self.database = []
+        self.index = []
+        self.vector_field = []
 
     def _query_chunk(self, database_chunk, index_chunk, vector, field, subset_indices, vector_field):
         """
@@ -119,6 +124,29 @@ class DatabaseQuery:
         unique_indices = set()
         sorted_indices, sorted_scores = [], []
 
+        def sort_results(all_s, all_i):
+            all_scores_i = np.asarray(all_s)
+            all_index_i = np.asarray(all_i)
+            top_k_indices = np.argsort(self.is_reversed * all_scores_i)[:k]
+
+            return all_index_i[top_k_indices], all_scores_i[top_k_indices]
+
+        def dataloader():
+            if self.database != len(self.binary_matrix_serializer.database_chunk_path):
+                for database, index, vector_field in self.binary_matrix_serializer.data_loader(
+                        self.binary_matrix_serializer.database_chunk_path):
+                    self.database.append(database)
+                    self.index.extend(index)
+                    self.vector_field.extend(vector_field)
+
+            return np.vstack(self.database), np.asarray(self.index), np.asarray(self.vector_field)
+
+        if self.search_mode == 'memory':
+            database, index, vector_field = dataloader()
+            all_index, all_scores = self._query_chunk(database, index, vector, fields, subset_indices, vector_field)
+            return sort_results(all_scores, all_index)
+
+
         def batch_query(vec_path, vector, k: int = 12, fields: str | list = None, subset_indices=None):
             nonlocal all_scores, all_index
             batch_size = 10 if self.chunk_size > 100000 else 50
@@ -147,9 +175,8 @@ class DatabaseQuery:
 
             all_scores_inside = np.asarray(all_scores)
             all_index_inside = np.asarray(all_index)
-            top_k_indices = np.argsort(self.is_reversed * all_scores_inside)[:k]
 
-            return all_index_inside[top_k_indices], all_scores_inside[top_k_indices]
+            return sort_results(all_scores_inside, all_index_inside)
 
         if len(self.binary_matrix_serializer.database_cluster_path) == 0:
             sorted_indices, sorted_scores = \

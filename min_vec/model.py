@@ -17,9 +17,10 @@ class MinVectorDB:
     @ParameterValuesAssert({
         'database_path': lambda s: s.endswith('.mvdb'),
         'distance': ('cosine', 'L2'),
+        'storage_mode': ('memory', 'disk')
     }, func_name='MinVectorDB')
     def __init__(self, dim, database_path, n_cluster=8, chunk_size=100_000, dtypes=np.float32, distance='cosine',
-                 bloom_filter_size=100_000_000, device='auto') -> None:
+                 bloom_filter_size=100_000_000, device='auto', storage_mode='memory') -> None:
         """
         Initialize the vector database.
 
@@ -49,7 +50,8 @@ class MinVectorDB:
             dtypes=dtypes,
             bloom_filter_size=bloom_filter_size,
             device=device,
-            distance=distance
+            distance=distance,
+            storage_mode=storage_mode
         )
         # binary_matrix_serializer functions
         self.add_item = self._binary_matrix_serializer.add_item
@@ -65,7 +67,8 @@ class MinVectorDB:
             distance=distance,
             device=device,
             dtypes=dtypes,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
+            search_mode=storage_mode
         )
         # matrix_query functions
         self.query = self._matrix_query.query
