@@ -132,7 +132,7 @@ class DatabaseQuery:
             return all_index_i[top_k_indices], all_scores_i[top_k_indices]
 
         def dataloader():
-            if self.database != len(self.binary_matrix_serializer.database_chunk_path):
+            if len(self.database) != len(self.binary_matrix_serializer.database_chunk_path):
                 for database, index, vector_field in self.binary_matrix_serializer.data_loader(
                         self.binary_matrix_serializer.database_chunk_path):
                     self.database.append(database)
