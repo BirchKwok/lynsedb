@@ -30,13 +30,43 @@ pip install MinVectorDB
 
 ## Qucik Start
 
+### Environment setup (optional, Each instance can only be set once, and needs to be set before instantiation)
+
+
+```python
+import os
+# logger settings
+# logger level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+os.environ['MVDB_LOG_LEVEL'] = 'INFO'  # default: INFO
+
+# log path
+os.environ['MVDB_LOG_PATH'] = './min_vec_db.log'  # default: None
+
+# whether to truncate log file
+os.environ['MVDB_TRUNCATE_LOG'] = 'True'  # default: True
+
+# whether to add time to log
+os.environ['MVDB_LOG_WITH_TIME'] = 'False'  # default: False
+
+# clustering settings
+# kmeans epochs
+os.environ['MVDB_KMEANS_EPOCHS'] = '500'  # default: 500
+
+# clustering quality threshold
+os.environ['MVDB_CLUSTERING_QUALITY_THRESHOLD'] = '0.3'  # default: 0.3
+
+# bulk add batch size
+os.environ['MVDB_BULK_ADD_BATCH_SIZE'] = '10000'  # default: 10000
+
+```
+
 
 ```python
 import min_vec
 print("MinVectorDB version is: ", min_vec.__version__)
 ```
 
-    MinVectorDB version is:  0.1.3
+    MinVectorDB version is:  0.1.5
 
 
 ### Sequentially add vectors.
@@ -68,7 +98,8 @@ vectors = 100000
 display_markdown("*Demo 1* -- **Sequentially add vectors**", raw=True)
 
 # distance can be 'L2' or 'cosine'
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=vectors // 10, device='cpu', distance='cosine')
+# storage_mode can be 'disk' or 'memory'
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=vectors // 10, device='cpu', distance='cosine', storage_mode='disk')
 
 np.random.seed(23)
 
@@ -131,13 +162,14 @@ db.delete()
 *Demo 1* -- **Sequentially add vectors**
 
 
-    100%|██████████| 100000/100000 [00:01<00:00, 53977.38vector/s]
-    MinVectorDB - INFO - The clustering quality is: -0.022005783393979073
-    MinVectorDB - INFO - The clustering quality is not good, reindexing...
+    2024-01-29 18:50:40 - MinVectorDB - INFO - Initializing MinVectorDB with dim=1024, database_path='test_min_vec.mvdb', n_cluster=8, chunk_size=10000, dtypes=<class 'numpy.float32'>, distance='cosine', bloom_filter_size=100000000, device='cpu', storage_mode='disk'
+    100%|██████████| 100000/100000 [00:01<00:00, 54008.05vector/s]
+    2024-01-29 18:50:45 - MinVectorDB - INFO - The clustering quality is: -0.022005783393979073
+    2024-01-29 18:50:45 - MinVectorDB - INFO - The clustering quality is not good, reindexing...
 
 
     
-    * [Insert data] Time cost 7.1591 s.
+    * [Insert data] Time cost 7.3625 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Query id:  0
@@ -145,7 +177,7 @@ db.delete()
       - Similarity of top 10 results:  [1.0000002  0.78101647 0.77775997 0.77591014 0.77581763 0.77578723
      0.77570754 0.77500904 0.77420104 0.77413327]
     
-    * [Query data] Time cost 0.0020 s.
+    * [Query data] Time cost 0.0035 s.
 
 
 ### Bulk add vectors
@@ -224,12 +256,13 @@ db.delete()
 *Demo 2* -- **Bulk add vectors**
 
 
-    MinVectorDB - INFO - The clustering quality is: -0.022005783393979073
-    MinVectorDB - INFO - The clustering quality is not good, reindexing...
+    2024-01-29 18:50:54 - MinVectorDB - INFO - Initializing MinVectorDB with dim=1024, database_path='test_min_vec.mvdb', n_cluster=8, chunk_size=10000, dtypes=<class 'numpy.float32'>, distance='cosine', bloom_filter_size=100000000, device='cpu', storage_mode='disk'
+    2024-01-29 18:51:00 - MinVectorDB - INFO - The clustering quality is: -0.022005783393979073
+    2024-01-29 18:51:00 - MinVectorDB - INFO - The clustering quality is not good, reindexing...
 
 
     
-    * [Insert data] Time cost 8.9777 s.
+    * [Insert data] Time cost 9.2694 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Query id:  0
@@ -237,7 +270,7 @@ db.delete()
       - Similarity of top 10 results:  [1.0000002  0.78101647 0.77775997 0.77591014 0.77581763 0.77578723
      0.77570754 0.77500904 0.77420104 0.77413327]
     
-    * [Query data] Time cost 0.0020 s.
+    * [Query data] Time cost 0.0028 s.
 
 
 ### Use field to improve Searching Recall
@@ -316,12 +349,13 @@ db.delete()
 *Demo 3* -- **Use field to improve Searching Recall**
 
 
-    MinVectorDB - INFO - The clustering quality is: -0.022005783393979073
-    MinVectorDB - INFO - The clustering quality is not good, reindexing...
+    2024-01-29 18:51:03 - MinVectorDB - INFO - Initializing MinVectorDB with dim=1024, database_path='test_min_vec.mvdb', n_cluster=8, chunk_size=10000, dtypes=<class 'numpy.float32'>, distance='cosine', bloom_filter_size=100000000, device='cpu', storage_mode='disk'
+    2024-01-29 18:51:10 - MinVectorDB - INFO - The clustering quality is: -0.022005783393979073
+    2024-01-29 18:51:10 - MinVectorDB - INFO - The clustering quality is not good, reindexing...
 
 
     
-    * [Insert data] Time cost 9.1629 s.
+    * [Insert data] Time cost 9.4631 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Query id:  0
@@ -330,7 +364,7 @@ db.delete()
       - Similarity of top 10 results:  [1.         0.75745714 0.75445515 0.75418174 0.75279343 0.7514601
      0.75065786 0.7492904  0.7480291  0.7465518 ]
     
-    * [Query data] Time cost 0.0364 s.
+    * [Query data] Time cost 0.0349 s.
 
 
 ### Use subset_indices to narrow down the search range
@@ -382,7 +416,7 @@ with db.insert_session():
 
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
-query = db.head(10)[0]
+query = db.head(10)[1]
 query_id = db.head(10, returns='indices')[0]
 query_field = db.head(10, returns='fields')[0]
 
@@ -411,21 +445,22 @@ db.delete()
 *Demo 4* -- **Use subset_indices to narrow down the search range**
 
 
-    MinVectorDB - INFO - The clustering quality is: -0.020339230075478554
-    MinVectorDB - INFO - The clustering quality is not good, reindexing...
+    2024-01-29 18:51:13 - MinVectorDB - INFO - Initializing MinVectorDB with dim=1024, database_path='test_min_vec.mvdb', n_cluster=8, chunk_size=10000, dtypes=<class 'numpy.float32'>, distance='cosine', bloom_filter_size=100000000, device='cpu', storage_mode='disk'
+    2024-01-29 18:51:20 - MinVectorDB - INFO - The clustering quality is: -0.020339230075478554
+    2024-01-29 18:51:20 - MinVectorDB - INFO - The clustering quality is not good, reindexing...
 
 
     
-    * [Insert data] Time cost 9.5728 s.
+    * [Insert data] Time cost 9.5953 s.
       - Database shape:  (100001, 1024)
-      - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
+      - Query vector:  [0.02089841 0.01518081 0.03332409 ... 0.01748978 0.01588354 0.00640359]
       - Query id:  0
       - Query field:  test_0
-      - Database index of top 10 results:  [  0 842 431 555 788  66 594 130 764 863]
-      - Similarity of top 10 results:  [1.         0.7724291  0.7651854  0.76278293 0.7601607  0.75745714
-     0.7572401  0.7563845  0.75574833 0.7540937 ]
+      - Database index of top 10 results:  [431   0 842  66 764 788 130 313 555 863]
+      - Similarity of top 10 results:  [0.99999994 0.7651854  0.75583184 0.75225186 0.75125563 0.750734
+     0.7507172  0.748871   0.7422094  0.7416878 ]
     
-    * [Query data] Time cost 0.0018 s.
+    * [Query data] Time cost 0.0022 s.
 
 
 ### Conduct searches by specifying both subset_indices and fields simultaneously.
@@ -505,12 +540,13 @@ db.delete()
 *Demo 5* -- **Conduct searches by specifying both subset_indices and fields simultaneously**
 
 
-    MinVectorDB - INFO - The clustering quality is: -0.022005783393979073
-    MinVectorDB - INFO - The clustering quality is not good, reindexing...
+    2024-01-29 18:51:22 - MinVectorDB - INFO - Initializing MinVectorDB with dim=1024, database_path='test_min_vec.mvdb', n_cluster=8, chunk_size=10000, dtypes=<class 'numpy.float32'>, distance='cosine', bloom_filter_size=100000000, device='cpu', storage_mode='disk'
+    2024-01-29 18:51:29 - MinVectorDB - INFO - The clustering quality is: -0.022005783393979073
+    2024-01-29 18:51:29 - MinVectorDB - INFO - The clustering quality is not good, reindexing...
 
 
     
-    * [Insert data] Time cost 9.4377 s.
+    * [Insert data] Time cost 9.5274 s.
       - Database shape:  (100000, 1024)
       - Query vector:  [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658326 0.04808333]
       - Query id:  0
@@ -519,5 +555,5 @@ db.delete()
       - Similarity of top 10 results:  [1.         0.75745714 0.7557113  0.7524824  0.75065786 0.74784184
      0.7472197  0.7467411  0.7465518  0.7465167 ]
     
-    * [Query data] Time cost 0.0216 s.
+    * [Query data] Time cost 0.0217 s.
 
