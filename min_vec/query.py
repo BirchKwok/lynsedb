@@ -8,8 +8,8 @@ from min_vec.engine import cosine_distance, euclidean_distance, to_normalize, ge
 
 
 class DatabaseQuery:
-    def __init__(self, binary_matrix_serializer, distance='cosine', device='auto', dtypes=np.float32,
-                 chunk_size=10000, search_mode='memory') -> None:
+    def __init__(self, binary_matrix_serializer, logger, distance='cosine', device='auto', dtypes=np.float32,
+                 chunk_size=10000, search_mode='disk') -> None:
         """
         Query the database for the vectors most similar to the given vector.
 
@@ -19,8 +19,10 @@ class DatabaseQuery:
             device (str, optional): The device to use. Options are 'cpu', 'cuda', or 'auto'.
             dtypes (np.dtype, optional): The data type of the vectors in the database.
             chunk_size (int, optional): The number of vectors to load into memory at a time.
-
+            search_mode (str, optional): The search mode. Options are 'disk' or 'memory'.
         """
+        self.logger = logger
+
         self.binary_matrix_serializer = binary_matrix_serializer
 
         # attributes
@@ -93,6 +95,12 @@ class DatabaseQuery:
         Raises:
             ValueError: If the database is empty.
         """
+        self.logger.debug(f'Query vector: {vector.tolist()}')
+        self.logger.debug(f'Query k: {k}')
+        self.logger.debug(f'Query fields: {fields}')
+        self.logger.debug(f'Query normalize: {normalize}')
+        self.logger.debug(f'Query subset_indices: {subset_indices}')
+
         raise_if(TypeError, not isinstance(k, int) and not (isinstance(k, str) and k != 'all'),
                  'k must be int or "all".')
         raise_if(ValueError, k <= 0, 'k must be greater than 0.')
@@ -147,7 +155,7 @@ class DatabaseQuery:
             return sort_results(all_scores, all_index)
 
 
-        def batch_query(vec_path, vector, k: int = 12, fields: str | list = None, subset_indices=None):
+        def batch_query(vec_path, vector, fields: str | list = None, subset_indices=None):
             nonlocal all_scores, all_index
             batch_size = 10 if self.chunk_size > 100000 else 50
 
@@ -180,7 +188,7 @@ class DatabaseQuery:
 
         if len(self.binary_matrix_serializer.database_cluster_path) == 0:
             sorted_indices, sorted_scores = \
-                batch_query(self.binary_matrix_serializer.database_chunk_path, vector, k, fields, subset_indices)
+                batch_query(self.binary_matrix_serializer.database_chunk_path, vector, fields, subset_indices)
         else:
             vector_cluster_id = self.binary_matrix_serializer.ann_model.predict(vector)[0]
 
@@ -198,7 +206,7 @@ class DatabaseQuery:
                     vector_cluster_paths = list(set(vector_cluster_paths))
 
                     sorted_indices, sorted_scores = \
-                        batch_query(vector_cluster_paths, vector, k, fields, subset_indices)
+                        batch_query(vector_cluster_paths, vector, fields, subset_indices)
 
                     if len(sorted_indices) == k:
                         break

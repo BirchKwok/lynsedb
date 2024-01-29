@@ -4,7 +4,6 @@ import shutil
 
 import numpy as np
 from spinesUtils.asserts import raise_if
-from spinesUtils.logging import Logger
 
 from min_vec.engine import to_normalize
 from min_vec.filter import BloomTrie
@@ -12,17 +11,14 @@ from min_vec.utils import io_checker, silhouette_score, get_env_variable
 from min_vec.ivf_index import CompactIVFIndex
 from min_vec.kmeans import KMeans
 
-logger = Logger(
-    fp=get_env_variable('MVDB_LOG_PATH', None, str),
-    name='MinVectorDB', truncate_file=get_env_variable('MVDB_TRUNCATE_LOG', True, bool),
-    with_time=get_env_variable('MVDB_LOG_WITH_TIME', False, bool),
-    level=get_env_variable('MVDB_LOG_LEVEL', 'INFO', str)
-)
+MVDB_KMEANS_EPOCHS = get_env_variable('MVDB_KMEANS_EPOCHS', 500, int)
+MVDB_CLUSTERING_QUALITY_THRESHOLD = get_env_variable("MVDB_CLUSTERING_QUALITY_THRESHOLD", 0.3, float)
+MVDB_BULK_ADD_BATCH_SIZE = get_env_variable('MVDB_BULK_ADD_BATCH_SIZE', 10000, int)
 
 
 class BinaryMatrixSerializer:
-    def __init__(self, dim, database_path, distance, n_clusters=8, chunk_size=100_000, dtypes=np.float32,
-                 bloom_filter_size=100_000_000, device='auto', storage_mode='memory') -> None:
+    def __init__(self, dim, database_path, distance, logger, n_clusters=8, chunk_size=100_000, dtypes=np.float32,
+                 bloom_filter_size=100_000_000, device='auto', storage_mode='disk') -> None:
         """
         Initialize the vector database.
 
@@ -36,6 +32,7 @@ class BinaryMatrixSerializer:
             device (str): The device to use for vector operations.
                 Options are 'auto', 'cpu', 'mps', or 'cuda'. Default is 'auto'.
             storage_mode (str): The storage mode of the database.
+                Options are 'memory' or 'disk'. Default is 'disk'.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -52,6 +49,7 @@ class BinaryMatrixSerializer:
             'storage_mode': storage_mode
         }
         self._initialize_all(**self.initial_params)
+        self.logger = logger
 
         self._COMMIT_FLAG = True
 
@@ -75,17 +73,17 @@ class BinaryMatrixSerializer:
         self.n_clusters = n_clusters
         self.ann_model = KMeans(n_clusters=self.n_clusters, random_state=0,
                                 batch_size=10240, device=device,
-                                epochs=get_env_variable('MVDB_KMEANS_EPOCHS', 500, int),
+                                epochs=MVDB_KMEANS_EPOCHS,
                                 distance=self.distance)
 
         if Path(self.database_path_parent / 'ann_model.mvdb').exists():
             self.ann_model = self.ann_model.load(self.database_path_parent / 'ann_model.mvdb')
             if (self.ann_model.n_clusters != self.n_clusters or self.ann_model.distance != self.distance or
-                    self.ann_model.epochs != get_env_variable('MVDB_KMEANS_EPOCHS', 500, int) or
+                    self.ann_model.epochs != MVDB_KMEANS_EPOCHS or
                     self.ann_model.batch_size != 10240):
                 self.ann_model = KMeans(n_clusters=self.n_clusters, random_state=0,
                                         batch_size=10240, device=device,
-                                        epochs=get_env_variable('MVDB_KMEANS_EPOCHS', 500, int),
+                                        epochs=MVDB_KMEANS_EPOCHS,
                                         distance=self.distance)
 
         self.device = device
@@ -474,6 +472,7 @@ class BinaryMatrixSerializer:
         Save the database, ensuring that all data is written to disk.
         This method is required to be called after saving vectors to query them.
         """
+        self.logger.debug(f'Committing database, database shape: {self.database_shape}')
         if not self._COMMIT_FLAG:
             self.save_chunk_immediately(as_temp=True)
 
@@ -508,6 +507,8 @@ class BinaryMatrixSerializer:
             self.reset_database()
 
             self._COMMIT_FLAG = True
+
+        self.logger.debug(f'Committed database, database shape: {self.database_shape}')
 
     def _generate_new_id(self):
         """
@@ -558,7 +559,7 @@ class BinaryMatrixSerializer:
         raise_if(ValueError, not all(1 <= len(i) <= 3 and isinstance(i, tuple) for i in vectors),
                  f'vectors must be tuple of (vector, id, field), got {vectors}')
 
-        batch_size = get_env_variable('BULK_ADD_BATCH_SIZE', 10000, int)
+        batch_size = MVDB_BULK_ADD_BATCH_SIZE
 
         new_ids = []
 
@@ -745,7 +746,7 @@ class BinaryMatrixSerializer:
         is_quality_good = self.evaluate_clustering(sample_data)
 
         if not is_quality_good:
-            logger.info('The clustering quality is not good, reindexing...')
+            self.logger.info('The clustering quality is not good, reindexing...')
             max_chunk_id = 0
 
             for i in self.database_cluster_path:
@@ -766,11 +767,11 @@ class BinaryMatrixSerializer:
         """
         Evaluate the quality of clustering using the silhouette coefficient.
         """
-        threshold = get_env_variable("MVDB_CLUSTERING_QUALITY_THRESHOLD", 0.3, float)
+        threshold = MVDB_CLUSTERING_QUALITY_THRESHOLD
 
         labels = self.ann_model.predict(data)
         score = silhouette_score(data, labels)
-        logger.info(f"The clustering quality is: {score}")
+        self.logger.info(f"The clustering quality is: {score}")
         return score > threshold
 
     def reindex_if_appropriate(self):
@@ -779,7 +780,7 @@ class BinaryMatrixSerializer:
         """
         self.ann_model = KMeans(n_clusters=self.n_clusters, random_state=0,
                                 batch_size=10240, device=self.device,
-                                epochs=get_env_variable('MVDB_KMEANS_EPOCHS', 500, int),
+                                epochs=MVDB_KMEANS_EPOCHS,
                                 distance=self.distance)
 
         self.ivf_index = CompactIVFIndex(n_clusters=self.n_clusters)
