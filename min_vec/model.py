@@ -1,9 +1,11 @@
 import numpy as np
 from spinesUtils.asserts import ParameterValuesAssert, ParameterTypeAssert
+from spinesUtils.logging import Logger
 
 from min_vec.query import DatabaseQuery
 from min_vec.session import DatabaseSession
 from min_vec.binary_matrix_serializer import BinaryMatrixSerializer
+from min_vec.utils import get_env_variable
 
 
 class MinVectorDB:
@@ -20,7 +22,7 @@ class MinVectorDB:
         'storage_mode': ('memory', 'disk')
     }, func_name='MinVectorDB')
     def __init__(self, dim, database_path, n_cluster=8, chunk_size=100_000, dtypes=np.float32, distance='cosine',
-                 bloom_filter_size=100_000_000, device='auto', storage_mode='memory') -> None:
+                 bloom_filter_size=100_000_000, device='auto', storage_mode='disk') -> None:
         """
         Initialize the vector database.
 
@@ -35,10 +37,25 @@ class MinVectorDB:
             bloom_filter_size (int): The size of the bloom filter. Default is 100_000_000.
             device (str): The device to use for vector operations.
                 Options are 'auto', 'cpu', 'mps', or 'cuda'. Default is 'auto'.
+            storage_mode (str): The storage mode of the database.
+                Options are 'memory' or 'disk'. Default is 'disk'.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
         """
+        logger = Logger(
+            fp=get_env_variable('MVDB_LOG_PATH', None, str),
+            name='MinVectorDB',
+            truncate_file=get_env_variable('MVDB_TRUNCATE_LOG', True, bool),
+            with_time=get_env_variable('MVDB_LOG_WITH_TIME', False, bool),
+            level=get_env_variable('MVDB_LOG_LEVEL', 'INFO', str)
+        )
+
+        logger.info(f"Initializing MinVectorDB with dim={dim}, database_path='{database_path}', "
+                    f"n_cluster={n_cluster}, chunk_size={chunk_size}, dtypes={dtypes}, "
+                    f"distance='{distance}', bloom_filter_size={bloom_filter_size}, device='{device}', "
+                    f"storage_mode='{storage_mode}'")
+
         if chunk_size <= 1:
             raise ValueError('chunk_size must be greater than 1')
 
@@ -51,7 +68,8 @@ class MinVectorDB:
             bloom_filter_size=bloom_filter_size,
             device=device,
             distance=distance,
-            storage_mode=storage_mode
+            storage_mode=storage_mode,
+            logger=logger
         )
         # binary_matrix_serializer functions
         self.add_item = self._binary_matrix_serializer.add_item
@@ -68,7 +86,8 @@ class MinVectorDB:
             device=device,
             dtypes=dtypes,
             chunk_size=chunk_size,
-            search_mode=storage_mode
+            search_mode=storage_mode,
+            logger=logger
         )
         # matrix_query functions
         self.query = self._matrix_query.query
