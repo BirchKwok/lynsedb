@@ -8,7 +8,7 @@ from min_vec.engine import cosine_distance, euclidean_distance, to_normalize, ge
 
 
 class DatabaseQuery:
-    def __init__(self, binary_matrix_serializer, logger, distance='cosine', device='auto', dtypes=np.float32,
+    def __init__(self, binary_matrix_serializer, logger, distance='cosine', device='auto', dtypes=np.float64,
                  chunk_size=10000, search_mode='disk') -> None:
         """
         Query the database for the vectors most similar to the given vector.
@@ -57,12 +57,12 @@ class DatabaseQuery:
                 field = [field]
 
             database_chunk = database_chunk[np.isin(vector_field, field)]
-            index_chunk = index_chunk[np.isin(vector_field, field)]
+            index_chunk = np.array(index_chunk)[np.isin(vector_field, field)]
 
         if subset_indices is not None:
             subset_indices = list(set(subset_indices))
             database_chunk = database_chunk[np.isin(index_chunk, subset_indices)]
-            index_chunk = index_chunk[np.isin(index_chunk, subset_indices)]
+            index_chunk = np.array(index_chunk)[np.isin(index_chunk, subset_indices)]
 
         if len(index_chunk) == 0:
             return [], []
@@ -122,10 +122,11 @@ class DatabaseQuery:
         if k > self.binary_matrix_serializer.database_shape[0]:
             k = self.binary_matrix_serializer.database_shape[0]
 
-        vector = vector.astype(self.dtypes)
+        vector = vector.astype(self.dtypes) if vector.dtype != self.dtypes else vector
 
         vector = to_normalize(vector) if normalize else vector
-        vector = vector.reshape(1, -1)
+
+        vector = vector.reshape(1, -1) if vector.ndim == 1 else vector
 
         all_scores = []
         all_index = []
@@ -133,25 +134,19 @@ class DatabaseQuery:
         sorted_indices, sorted_scores = [], []
 
         def sort_results(all_s, all_i):
-            all_scores_i = np.asarray(all_s)
-            all_index_i = np.asarray(all_i)
+            all_scores_i = np.array(all_s)
+            all_index_i = np.array(all_i)
             top_k_indices = np.argsort(self.is_reversed * all_scores_i)[:k]
 
             return all_index_i[top_k_indices], all_scores_i[top_k_indices]
 
-        def dataloader():
-            if len(self.database) != len(self.binary_matrix_serializer.database_chunk_path):
-                for database, index, vector_field in self.binary_matrix_serializer.data_loader(
-                        self.binary_matrix_serializer.database_chunk_path):
-                    self.database.append(database)
-                    self.index.extend(index)
-                    self.vector_field.extend(vector_field)
-
-            return np.vstack(self.database), np.asarray(self.index), np.asarray(self.vector_field)
-
         if self.search_mode == 'memory':
-            database, index, vector_field = dataloader()
-            all_index, all_scores = self._query_chunk(database, index, vector, fields, subset_indices, vector_field)
+            for database, index, vector_field in self.binary_matrix_serializer.data_loader(
+                    self.binary_matrix_serializer.database_chunk_path, mmap_mode='r+'):
+                _ai, _as = self._query_chunk(database, index, vector, fields, subset_indices, vector_field)
+                all_scores.extend(_as)
+                all_index.extend(_ai)
+
             return sort_results(all_scores, all_index)
 
 
@@ -165,13 +160,14 @@ class DatabaseQuery:
                     futures = [
                         executor.submit(self._query_chunk, database, index, vector,
                                         fields, subset_indices, vector_field)
-                        for database, index, vector_field in self.binary_matrix_serializer.data_loader(batch_paths)]
+                        for database, index, vector_field in
+                        self.binary_matrix_serializer.data_loader(batch_paths, mmap_mode='r+')]
 
                     for future in futures:
                         index, scores = future.result()
                         # 如果index不在unique_indices中，说明是新的index，需要加入到all_index中
-                        index = np.asarray(index)
-                        scores = np.asarray(scores)
+                        index = np.array(index)
+                        scores = np.array(scores)
                         if len(index) != 0:
                             new_index = index[~np.isin(index, list(unique_indices))]
                             new_scores = scores[~np.isin(index, list(unique_indices))]
@@ -181,8 +177,8 @@ class DatabaseQuery:
 
                     del batch_paths, futures
 
-            all_scores_inside = np.asarray(all_scores)
-            all_index_inside = np.asarray(all_index)
+            all_scores_inside = np.array(all_scores)
+            all_index_inside = np.array(all_index)
 
             return sort_results(all_scores_inside, all_index_inside)
 
