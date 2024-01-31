@@ -21,7 +21,7 @@ class MinVectorDB:
         'distance': ('cosine', 'L2'),
         'storage_mode': ('memory', 'disk')
     }, func_name='MinVectorDB')
-    def __init__(self, dim, database_path, n_cluster=8, chunk_size=100_000, dtypes=np.float32, distance='cosine',
+    def __init__(self, dim, database_path, n_cluster=8, chunk_size=100_000, dtypes=np.float64, distance='cosine',
                  bloom_filter_size=100_000_000, device='auto', storage_mode='disk') -> None:
         """
         Initialize the vector database.
@@ -151,8 +151,6 @@ class MinVectorDB:
         else:
             path = [str(i) for i in self._binary_matrix_serializer.database_cluster_path]
             path = sorted(path)
-
-        # print("sorted path: ", path)
 
         return self._get_n_elements(returns, n, path)
 
