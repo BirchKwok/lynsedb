@@ -8,16 +8,16 @@ from spinesUtils.asserts import raise_if
 from min_vec.engine import to_normalize
 from min_vec.filter import BloomTrie
 from min_vec.utils import io_checker, silhouette_score, get_env_variable
-from min_vec.ivf_index import CompactIVFIndex
+from min_vec.ivf_index import CompactIVFIndex, StringPool
 from min_vec.kmeans import KMeans
 
 MVDB_KMEANS_EPOCHS = get_env_variable('MVDB_KMEANS_EPOCHS', 500, int)
 MVDB_CLUSTERING_QUALITY_THRESHOLD = get_env_variable("MVDB_CLUSTERING_QUALITY_THRESHOLD", 0.3, float)
-MVDB_BULK_ADD_BATCH_SIZE = get_env_variable('MVDB_BULK_ADD_BATCH_SIZE', 10000, int)
+MVDB_BULK_ADD_BATCH_SIZE = get_env_variable('MVDB_BULK_ADD_BATCH_SIZE', 100000, int)
 
 
 class BinaryMatrixSerializer:
-    def __init__(self, dim, database_path, distance, logger, n_clusters=8, chunk_size=100_000, dtypes=np.float32,
+    def __init__(self, dim, database_path, distance, logger, n_clusters=8, chunk_size=1_000_000, dtypes=np.float64,
                  bloom_filter_size=100_000_000, device='auto', storage_mode='disk') -> None:
         """
         Initialize the vector database.
@@ -98,13 +98,21 @@ class BinaryMatrixSerializer:
             self.ivf_index = CompactIVFIndex(n_clusters=self.n_clusters)
 
         self.bloom_filter_size = bloom_filter_size
-        self.dim = dim
+        self.dim = dim + 1
         self.dtypes = dtypes
 
         # database shape
-        self.database_shape = (0, self.dim)
+        # the first dimension is the indices of vectors
+        self.database_shape = (0, self.dim - 1)
 
         self.chunk_size = chunk_size
+
+        # fields string pool
+        if Path(self.database_path_parent / 'fields_string_pool.mvdb').exists():
+            print('load string pool')
+            self.fields_pool = StringPool().load_from_disk(self.database_path_parent / 'fields_string_pool.mvdb')
+        else:
+            self.fields_pool = StringPool()
 
         # cluster meta data
         self.current_cluster_data_msg = dict()
@@ -143,7 +151,7 @@ class BinaryMatrixSerializer:
 
         # Initialize the shape of the database.
         if len(self.database_cluster_path) == 0 and len(self.database_chunk_path) == 0:
-            self.database_shape = (0, self.dim)
+            self.database_shape = (0, self.dim - 1)
         else:
             length = 0
             for database, index, _ in self.data_loader(
@@ -154,7 +162,7 @@ class BinaryMatrixSerializer:
                         self.id_filter.add(idx)
                     length += 1
 
-            self.database_shape = (length, self.dim)
+            self.database_shape = (length, self.dim - 1)
 
         self.last_id = self.id_filter.find_max_value()
 
@@ -172,7 +180,7 @@ class BinaryMatrixSerializer:
         self.fields = []
 
     @io_checker
-    def data_loader(self, paths=None):
+    def data_loader(self, paths=None, mmap_mode='r'):
         """
         Generator for loading the database and index.
 
@@ -191,10 +199,11 @@ class BinaryMatrixSerializer:
         paths = paths if paths is not None else self.database_cluster_path
 
         for i in paths:
-            with open(i, 'rb') as f:
-                database = np.load(f)
-                index = np.load(f, allow_pickle=True)
-                field = np.load(f, allow_pickle=True)
+            database = np.load(i, mmap_mode=mmap_mode)
+            index = [int(i) for i in database[:, 0].tolist()]
+            database = database[:, 1:]
+
+            field = [self.fields_pool.get_string(id) for id in index]
 
             yield database, index, field
 
@@ -228,7 +237,7 @@ class BinaryMatrixSerializer:
         Returns:
             bool: True if the database is reset, False otherwise.
         """
-        return self.database == [] and self.indices == [] and self.fields == []
+        return not (self.database and self.indices and self.fields)
 
     def _length_checker(self):
         """
@@ -275,10 +284,11 @@ class BinaryMatrixSerializer:
 
         # Read data from the last file.
         if Path(file_path).exists():
-            with open(file_path, 'rb') as f:
-                old_data = np.load(f)
-                old_indices = np.load(f, allow_pickle=True).tolist()
-                old_fields = np.load(f, allow_pickle=True).tolist()
+            old_data = np.load(file_path, mmap_mode='r')
+            old_indices = old_data[:, 0].astype(int)
+            old_data = old_data[:, 1:]
+
+            old_fields = [self.fields_pool.get_string(i) for i in old_indices]
 
             # If the data size of the last file is greater than or equal to chunk_size, create a new file.
             if old_data.shape[0] >= self.chunk_size:
@@ -304,11 +314,14 @@ class BinaryMatrixSerializer:
 
         def save_data():
             nonlocal merged_data, merged_indices, merged_fields, max_id, file_path, saved_paths
+
             # save
             with open(file_path, 'wb') as file:
-                np.save(file, merged_data[:self.chunk_size, :])
-                np.save(file, merged_indices[:self.chunk_size], allow_pickle=True)
-                np.save(file, merged_fields[:self.chunk_size], allow_pickle=True)
+                np.save(file, np.hstack((np.array(merged_indices[:self.chunk_size]).reshape(-1, 1),
+                                         merged_data[:self.chunk_size, :]), dtype=self.dtypes))
+
+            for zip_id, zip_field in zip(merged_indices[:self.chunk_size], merged_fields[:self.chunk_size]):
+                self.fields_pool.intern(zip_field, id=int(zip_id))
 
             # update
             merged_data = merged_data[self.chunk_size:, :]
@@ -394,26 +407,28 @@ class BinaryMatrixSerializer:
         # First, merge the critical files.
         if max_mvdb_file_path.exists():
             # Here, ensure it is always the last .mvdb file.
-            with open(max_mvdb_file_path, 'rb') as f:
-                mvdb_data = np.load(f)
-                mvdb_indices = np.load(f, allow_pickle=True).tolist()
-                mvdb_fields = np.load(f, allow_pickle=True).tolist()
+            mvdb_data = np.load(max_mvdb_file_path, mmap_mode='r')
+            mvdb_indices = mvdb_data[:, 0].astype(int)
+            mvdb_data = mvdb_data[:, 1:]
+
+            mvdb_fields = [self.fields_pool.get_string(i) for i in mvdb_indices]
 
             if mvdb_data.shape[0] < self.chunk_size:
                 # If the .mvdb file size has not reached chunk_size, merge the .temp file slices into the .mvdb file.
-                with open(min_temp_file_path, 'rb') as f:
-                    temp_data = np.load(f)
-                    temp_indices = np.load(f, allow_pickle=True).tolist()
-                    temp_fields = np.load(f, allow_pickle=True).tolist()
+                temp_data = np.load(min_temp_file_path, mmap_mode='r')
+                temp_indices = temp_data[:, 0].astype(int)
+                temp_data = temp_data[:, 1:]
+                temp_fields = [self.fields_pool.get_string(i) for i in temp_indices]
 
                 data = np.vstack((mvdb_data, temp_data[:self.chunk_size - mvdb_data.shape[0], :]))
                 indices = mvdb_indices + temp_indices[:self.chunk_size - mvdb_data.shape[0]]
                 fields = mvdb_fields + temp_fields[:self.chunk_size - mvdb_data.shape[0]]
 
                 with open(max_mvdb_file_path, 'wb') as f:
-                    np.save(f, data)
-                    np.save(f, indices, allow_pickle=True)
-                    np.save(f, fields, allow_pickle=True)
+                    np.save(f, np.hstack((np.array(indices).reshape(-1, 1), data), dtype=self.dtypes))
+
+                for zip_id, zip_field in zip(indices, fields):
+                    self.fields_pool.intern(zip_field, zip_id)
 
                 last_data = temp_data[self.chunk_size - mvdb_data.shape[0]:, :]
                 last_indices = temp_indices[self.chunk_size - mvdb_data.shape[0]:]
@@ -431,10 +446,10 @@ class BinaryMatrixSerializer:
         for i in sorted_paths:
             if last_data:
                 # If there are remaining .temp file slices, merge them into the .mvdb file.
-                with open(i, 'rb') as f:
-                    temp_data = np.load(f)
-                    temp_indices = np.load(f, allow_pickle=True).tolist()
-                    temp_fields = np.load(f, allow_pickle=True).tolist()
+                temp_data = np.load(i, mmap_mode='r')
+                temp_indices = temp_data[:, 0].astype(int)
+                temp_data = temp_data[:, 1:]
+                temp_fields = [self.fields_pool.get_string(i) for i in temp_indices]
 
                 data = np.vstack((last_data, temp_data[:self.chunk_size - last_data.shape[0], :]))
                 indices = last_indices + temp_indices[:self.chunk_size - len(last_indices)]
@@ -446,9 +461,10 @@ class BinaryMatrixSerializer:
                                       f'{self.database_name_prefix}_chunk_{max_mvdb_chunk_id}.mvdb')
 
                 with open(max_mvdb_file_path, 'wb') as f:
-                    np.save(f, data)
-                    np.save(f, indices, allow_pickle=True)
-                    np.save(f, fields, allow_pickle=True)
+                    np.save(f, np.hstack((np.array(indices).reshape(-1, 1), data), dtype=self.dtypes))
+                    
+                for zip_id, zip_field in zip(indices, fields):
+                    self.fields_pool.intern(zip_field, zip_id)
 
                 last_data = temp_data[self.chunk_size - last_data.shape[0]:, :]
                 last_indices = temp_indices[self.chunk_size - len(last_indices):]
@@ -473,8 +489,12 @@ class BinaryMatrixSerializer:
         This method is required to be called after saving vectors to query them.
         """
         self.logger.debug(f'Committing database, database shape: {self.database_shape}')
+
         if not self._COMMIT_FLAG:
             self.save_chunk_immediately(as_temp=True)
+
+            # save string pool
+            self.fields_pool.save_to_disk(self.database_path_parent / 'fields_string_pool.mvdb')
 
             # save bloom filter
             self.id_filter.to_file(self._bloom_filter_path)
@@ -485,7 +505,7 @@ class BinaryMatrixSerializer:
             ):
                 length += database.shape[0]
 
-            self.database_shape = (length, self.dim)
+            self.database_shape = (length, self.dim - 1)
 
             self._merge_local_file()
 
@@ -525,8 +545,8 @@ class BinaryMatrixSerializer:
         if index in self.id_filter:
             raise ValueError(f'id {index} already exists')
 
-        if len(vector) != self.dim:
-            raise ValueError(f'vector dim error, expect {self.dim}, got {len(vector)}')
+        if len(vector) != self.dim - 1:
+            raise ValueError(f'vector dim error, expect {self.dim - 1}, got {len(vector)}')
 
         vector = vector.astype(self.dtypes)
 
@@ -618,8 +638,8 @@ class BinaryMatrixSerializer:
         Raises:
             ValueError: If the vector dimensions don't match or the ID already exists.
         """
-        raise_if(ValueError, len(vector) != self.dim,
-                 f'vector dim error, expect {self.dim}, got {len(vector)}')
+        raise_if(ValueError, len(vector) != self.dim - 1,
+                 f'vector dim error, expect {self.dim - 1}, got {len(vector)}')
         raise_if(ValueError, index in self.id_filter, f'id {index} already exists')
         raise_if(ValueError, vector.ndim != 1, f'vector dim error, expect 1, got {vector.ndim}')
         raise_if(ValueError, field is not None and not isinstance(field, str),
@@ -710,9 +730,8 @@ class BinaryMatrixSerializer:
         return ivf_index
 
     def _build_index(self):
-
         _database = []
-        for database, indices, fields in self.data_loader(self.database_chunk_path):
+        for database, indices, fields in self.data_loader(self.database_chunk_path, mmap_mode='r+'):
             # Create an IVF index.
             ivf_index = self._insert_ivf_index(database, indices, fields)
             # reorganize files
