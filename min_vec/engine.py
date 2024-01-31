@@ -28,13 +28,32 @@ def to_normalize(vec: np.ndarray):
 
 def cosine_distance(vec1, vec2, device='auto'):
     device = get_device(device)
-    vec1 = torch.from_numpy(vec1).to(device).squeeze()
-    vec2 = torch.from_numpy(vec2).to(device).squeeze()
-    return torch.matmul(vec1, vec2).detach().cpu().numpy()
+
+    if vec1.ndim == 2:
+        vec1 = vec1.squeeze()
+
+    if vec2.ndim == 2:
+        vec2 = vec2.squeeze()
+
+    if device.type != 'cpu':
+        return torch.matmul(torch.tensor(vec1).to(device),
+                            torch.tensor(vec2).to(device)).cpu().numpy()
+
+    return torch.matmul(torch.tensor(vec1),
+                            torch.tensor(vec2)).numpy()
 
 
 def euclidean_distance(vec1, vec2, device='auto'):
     device = get_device(device)
-    vec1 = torch.from_numpy(vec1).to(device)
-    vec2 = torch.from_numpy(vec2).to(device)
-    return torch.norm(vec1 - vec2, dim=1).detach().cpu().numpy()
+    if vec1.ndim == 2:
+        vec1 = vec1.squeeze()
+
+    if vec2.ndim == 2:
+        vec2 = vec2.squeeze()
+
+    if device.type != 'cpu':
+        return torch.norm(torch.tensor(vec1).to(device) -
+                            torch.tensor(vec2).to(device), dim=1).cpu().numpy()
+
+    return torch.norm(torch.tensor(vec1) -
+                            torch.tensor(vec2), dim=1).numpy()
