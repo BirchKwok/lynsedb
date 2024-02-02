@@ -4,14 +4,14 @@
 <br>
 It is important to note that MinVectorDB is not designed for efficiency, and therefore does not include built-in algorithms like approximate nearest neighbors for efficient searching.
 <br>
-Originally created to demonstrate large language model demos with a goal of 100% recall, **the library will no longer be actively maintained due to adjustments in the author's current work**.
+Originally created to demonstrate large language model demos with a goal of 100% recall.
 <br>
 <br>
 <b>MinVectorDB</b> 是简易实现的向量存储和查询数据库，提供简洁明了的python API，旨在降低向量数据库的使用门槛。未来将添加更多实用功能。
 <br>
 需要注意的是，MinVectorDB并非为追求效率而生，因此，并没有内置近似最近邻等高效查找算法。
 <br>
-它起源于作者需要演示大语言模型Demo的契机，为了追求100%召回率而设计，**因目前工作有调整，此库将不再积极维护**。
+它起源于作者需要演示大语言模型Demo的契机，为了追求100%召回率而设计。
 
 ## TODO
 - [x] Sequentially add vectors.
