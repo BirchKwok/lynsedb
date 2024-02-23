@@ -5,13 +5,11 @@ from test import MinVectorDB
 import numpy as np
 
 
-def get_database(dim=100, database_path='test_min_vec.mvdb', chunk_size=1000, dtypes=np.float32):
+def get_database(dim=100, database_path='test_min_vec.mvdb', chunk_size=1000, dtypes='float32'):
     if Path('.mvdb'.join(Path(database_path).name.split('.mvdb')[:-1])).exists():
         shutil.rmtree(Path('.mvdb'.join(Path(database_path).name.split('.mvdb')[:-1])))
 
     database = MinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
-    # clear database
-    database.delete()
     return database
 
 
@@ -32,9 +30,9 @@ def test_add_single_item_without_id_and_field():
     database = get_database()
     id = database.add_item(np.ones(100), save_immediately=True)
 
-    assert database._binary_matrix_serializer.database == []
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.database == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     database.commit()
 
@@ -47,9 +45,9 @@ def test_add_single_item_with_id_and_field():
     database = get_database()
     id = database.add_item(np.ones(100), index=1, field="test", save_immediately=True)
 
-    assert database._binary_matrix_serializer.database == []
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.database == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     database.commit()
 
@@ -66,9 +64,9 @@ def test_bulk_add_item_without_id_and_field():
 
     database.bulk_add_items(items, save_immediately=True)
 
-    assert database._binary_matrix_serializer.database == []
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.database == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     database.commit()
 
@@ -81,9 +79,9 @@ def test_add_single_item_with_vector_normalize():
     database = get_database()
     id = database.add_item(np.ones(100), index=1, field="test", save_immediately=True, normalize=True)
 
-    assert database._binary_matrix_serializer.database == []
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.database == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     database.commit()
 
@@ -100,9 +98,9 @@ def test_add_bulk_item_with_id_and_field():
 
     database.bulk_add_items(items, save_immediately=True)
 
-    assert database._binary_matrix_serializer.database == []
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.database == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     database.commit()
 
@@ -119,9 +117,9 @@ def test_add_bulk_item_with_normalize():
 
     database.bulk_add_items(items, save_immediately=True, normalize=True)
 
-    assert database._binary_matrix_serializer.database == []
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.database == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     database.commit()
 
@@ -138,9 +136,9 @@ def test_add_bulk_item_with_id_and_chinese_field():
 
     database.bulk_add_items(items, save_immediately=True)
 
-    assert database._binary_matrix_serializer.database == []
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.database == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     database.commit()
 
@@ -152,6 +150,7 @@ def test_add_bulk_item_with_id_and_chinese_field():
 def test_query_without_field():
     database = get_database_for_query(with_field=False)
 
+    print(database.shape)
     vec = np.random.random(100)
     n, d = database.query(vec, k=6)
 
@@ -315,15 +314,15 @@ def test_multiple_bulk_add_items():
         items.append((np.ones(100), ))
 
     database.bulk_add_items(items, save_immediately=False)
-    assert len(database._binary_matrix_serializer.fields) == 101
-    assert database._binary_matrix_serializer.indices == list(range(101))
+    assert len(database._matrix_serializer.fields) == 101
+    assert database._matrix_serializer.indices == list(range(101))
 
     database.commit()
     assert database.shape == (101, 100)
 
     database.bulk_add_items(items, save_immediately=True)
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     database.commit()
     assert database.shape == (202, 100)
@@ -337,15 +336,15 @@ def test_multiple_bulk_add_items_with_insert_session():
         items.append((np.ones(100), ))
 
     database.bulk_add_items(items, save_immediately=False)
-    assert len(database._binary_matrix_serializer.fields) == 101
-    assert database._binary_matrix_serializer.indices == list(range(101))
+    assert len(database._matrix_serializer.fields) == 101
+    assert database._matrix_serializer.indices == list(range(101))
 
     database.commit()
     assert database.shape == (101, 100)
 
     database.bulk_add_items(items, save_immediately=True)
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     database.commit()
     assert database.shape == (202, 100)
@@ -354,7 +353,7 @@ def test_multiple_bulk_add_items_with_insert_session():
 
 
 # Test if secondary initialization can properly initialize and query
-def test_multiple_initialization(dim=100, database_path='test_min_vec.mvdb', chunk_size=1000, dtypes=np.float32):
+def test_multiple_initialization(dim=100, database_path='test_min_vec.mvdb', chunk_size=1000, dtypes='float32'):
     database = MinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
     items = []
     for i in range(101):
@@ -362,8 +361,8 @@ def test_multiple_initialization(dim=100, database_path='test_min_vec.mvdb', chu
 
     with database.insert_session():
         database.bulk_add_items(items, save_immediately=False)
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     assert database.shape == (101, 100)
     del database
@@ -377,15 +376,15 @@ def test_multiple_initialization(dim=100, database_path='test_min_vec.mvdb', chu
     with database.insert_session():
         database.bulk_add_items(items, save_immediately=True)
 
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     assert database.shape == (202, 100)
     database.delete()
 
 
 # Test if secondary initialization can properly initialize and insert
-def test_multiple_initialization_with_insert_session(dim=100, database_path='test_min_vec.mvdb', chunk_size=1000, dtypes=np.float32):
+def test_multiple_initialization_with_insert_session(dim=100, database_path='test_min_vec.mvdb', chunk_size=1000, dtypes='float32'):
     database = MinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
     items = []
     for i in range(101):
@@ -393,8 +392,8 @@ def test_multiple_initialization_with_insert_session(dim=100, database_path='tes
 
     with database.insert_session():
         database.bulk_add_items(items, save_immediately=False)
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     assert database.shape == (101, 100)
     del database
@@ -407,8 +406,8 @@ def test_multiple_initialization_with_insert_session(dim=100, database_path='tes
     # insert
     with database.insert_session():
         database.bulk_add_items(items, save_immediately=True)
-    assert database._binary_matrix_serializer.fields == []
-    assert database._binary_matrix_serializer.indices == []
+    assert database._matrix_serializer.fields == []
+    assert database._matrix_serializer.indices == []
 
     assert database.shape == (202, 100)
     database.delete()
