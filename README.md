@@ -82,12 +82,17 @@ print("MinVectorDB version is: ", min_vec.__version__)
 
 
 ```python
+# define the display function, this is optional in actual use.
 try:
     from IPython.display import display_markdown
 except ImportError:
     def display_markdown(text, raw=True):
         print(text)
+        
+```
 
+
+```python
 import numpy as np
 from tqdm import tqdm
 
@@ -98,11 +103,6 @@ timer = Timer()
 
 vectors = 10_0000
 
-# ===================================================================
-# ========================= DEMO 1 ==================================
-# ===================================================================
-# Demo 1 -- Sequentially add vectors.
-# Create a MinVectorDB instance.
 display_markdown("*Demo 1* -- **Sequentially add vectors**", raw=True)
 
 # distance can be 'L2' or 'cosine'
@@ -125,7 +125,6 @@ with db.insert_session():
         # Vectors need to be normalized before writing to the database.
         # t = t / np.linalg.norm(t) 
         # Here, normalization can be directly specified, achieving the same effect as the previous sentence.
-        # print("id: ", id)
         db.add_item(t, index=id, normalize=True, save_immediately=False)
 
         # ID increments by 1 with each loop iteration.
@@ -207,12 +206,6 @@ db.delete()
 
 
 ```python
-try:
-    from IPython.display import display_markdown
-except ImportError:
-    def display_markdown(text, raw=True):
-        print(text)
-
 import numpy as np
 
 from spinesUtils.timer import Timer
@@ -220,10 +213,6 @@ from min_vec import MinVectorDB
 
 timer = Timer()
 
-# ===================================================================
-# ========================= DEMO 2 ==================================
-# ===================================================================
-# Demo 2 -- Bulk add vectors.
 display_markdown("*Demo 2* -- **Bulk add vectors**", raw=True)
 
 db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, n_cluster=8, index_mode='FLAT')
@@ -248,7 +237,7 @@ with db.insert_session():
         # ID increments by 1 with each loop iteration.
         id += 1
         
-#     # Here, normalization can be directly specified, achieving the same effect as `t = t / np.linalg.norm(t) `.
+    # Here, normalization can be directly specified, achieving the same effect as `t = t / np.linalg.norm(t) `.
     db.bulk_add_items(vectors, normalize=True, save_immediately=False)
 
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
@@ -311,12 +300,6 @@ db.delete()
 
 
 ```python
-try:
-    from IPython.display import display_markdown
-except ImportError:
-    def display_markdown(text, raw=True):
-        print(text)
-
 import numpy as np
 
 from spinesUtils.timer import Timer
@@ -324,10 +307,6 @@ from min_vec import MinVectorDB
 
 timer = Timer()
 
-# ===================================================================
-# ========================= DEMO 3 ==================================
-# ===================================================================
-# Demo 3 -- Use field to improve Searching Recall
 display_markdown("*Demo 3* -- **Use field to improve Searching Recall**", raw=True)
 
 db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000)
@@ -418,12 +397,6 @@ db.delete()
 
 
 ```python
-try:
-    from IPython.display import display_markdown
-except ImportError:
-    def display_markdown(text, raw=True):
-        print(text)
-
 import numpy as np
 
 from spinesUtils.timer import Timer
@@ -431,10 +404,6 @@ from min_vec import MinVectorDB
 
 timer = Timer()
 
-# ===================================================================
-# ========================= DEMO 4 ==================================
-# ===================================================================
-# Demo 4 -- Use subset_indices to narrow down the search range
 display_markdown("*Demo 4* -- **Use subset_indices to narrow down the search range**", raw=True)
 
 timer.start()
@@ -526,12 +495,6 @@ db.delete()
 
 
 ```python
-try:
-    from IPython.display import display_markdown
-except ImportError:
-    def display_markdown(text, raw=True):
-        print(text)
-
 import numpy as np
 
 from spinesUtils.timer import Timer
@@ -539,9 +502,6 @@ from min_vec import MinVectorDB
 
 timer = Timer()
 
-# ===================================================================
-# ========================= DEMO 5 ==================================
-# ===================================================================
 display_markdown("*Demo 5* -- **Conduct searches by specifying both subset_indices and fields simultaneously**", raw=True)
 
 timer.start()
