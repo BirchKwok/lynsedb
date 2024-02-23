@@ -1,5 +1,5 @@
-import msgpack
-from spinesUtils.asserts import raise_if_not
+"""ivf_index.py: This module contains the implementation of the IVF index,
+which is used to speed up the search process."""
 
 
 class StringPool:
@@ -10,6 +10,8 @@ class StringPool:
         self.next_id = 0  # 下一个可用的数字标识符
 
     def intern(self, string, id=None):
+        from spinesUtils.asserts import raise_if_not
+
         raise_if_not(TypeError, isinstance(id, int) or id is None, "id must be an integer or None")
 
         if id is not None:
@@ -26,7 +28,6 @@ class StringPool:
 
         self.next_id = next_id + 1
 
-
         return self.pool[string]
 
     def get_id(self, string):
@@ -39,8 +40,9 @@ class StringPool:
         id = str(id)
         return self.reverse_pool[self.ids[id]]
 
-
     def save_to_disk(self, filename):
+        import msgpack
+
         with open(filename, 'wb') as file:
             data_to_save = {
                 'pool': self.pool,
@@ -52,6 +54,8 @@ class StringPool:
             file.write(packed_data)
 
     def load_from_disk(self, filename):
+        import msgpack
+
         with open(filename, 'rb') as file:
             data_loaded = msgpack.unpackb(file.read(), strict_map_key=False, raw=False, use_list=False)
             self.pool = data_loaded['pool']
@@ -64,40 +68,40 @@ class StringPool:
 
 class IndexNode:
     def __init__(self):
-        self.data = {}  # 使用一个字典来存储数据，键为(primary_key, attachment_msg)元组，值为路径
+        self.data = {}  # 使用一个字典来存储数据，键为(primary_key, attachment_msg)元组，值为文件索引
 
-    def add(self, index, field, path_id):
-        self.data[(index, field)] = path_id
+    def add(self, index, field, file_index):
+        self.data[(index, field)] = file_index
 
     def search(self, indices, fields, string_pool):
         # 将fields转换为数字标识符
         fields_set = None if fields is None else ({string_pool.get_id(f) for f in fields} if isinstance(fields, list)
-                                                 else {string_pool.get_id(fields)})
+                                                  else {string_pool.get_id(fields)})
 
         # 如果没有任何搜索条件，直接返回所有记录
         if indices is None and fields is None:
-            return [(k[0], string_pool.get_string(k[1]), string_pool.get_string(v)) for k, v in self.data.items()]
+            return [(k[0], string_pool.get_string(k[1]), v) for k, v in self.data.items()]
 
         filtered_data = []
 
         if indices is not None and fields is None:
             indices_set = set(indices) if isinstance(indices, list) else {indices}
-            for (id, fd), path_id in self.data.items():
+            for (id, fd), file_index in self.data.items():
                 if id in indices_set:
-                    filtered_data.append((id, string_pool.get_string(fd), string_pool.get_string(path_id)))
+                    filtered_data.append((id, string_pool.get_string(fd), file_index))
             return filtered_data
 
         if fields is not None and indices is None:
-            for (id, fd), path_id in self.data.items():
+            for (id, fd), file_index in self.data.items():
                 if fd in fields_set:
-                    filtered_data.append((id, string_pool.get_string(fd), string_pool.get_string(path_id)))
+                    filtered_data.append((id, string_pool.get_string(fd), file_index))
             return filtered_data
 
         if indices is not None and fields is not None:
             indices_set = set(indices) if isinstance(indices, list) else {indices}
-            for (id, fd), path_id in self.data.items():
+            for (id, fd), file_index in self.data.items():
                 if id in indices_set and fd in fields_set:
-                    filtered_data.append((id, string_pool.get_string(fd), string_pool.get_string(path_id)))
+                    filtered_data.append((id, string_pool.get_string(fd), file_index))
             return filtered_data
 
 
@@ -105,10 +109,10 @@ class HashIndex:
     def __init__(self):
         self.index = {}
 
-    def insert(self, cluster_id, primary_key, attachment_msg, path):
+    def insert(self, cluster_id, primary_key, attachment_msg, file_index):
         if cluster_id not in self.index:
             self.index[cluster_id] = IndexNode()
-        self.index[cluster_id].add(primary_key, attachment_msg, path)
+        self.index[cluster_id].add(primary_key, attachment_msg, file_index)
 
     def search(self, cluster_id, indices, fields, string_pool):
         if cluster_id not in self.index:
@@ -117,23 +121,22 @@ class HashIndex:
         if len(res) == 0:
             return [], [], []
 
-        idx, f, p = zip(*res)
-        return idx, f, p
+        idx, f, fidx = zip(*res)
+        return idx, f, fidx
 
 
-class CompactIVFIndex:
+class IVFIndex:
     def __init__(self, n_clusters):
         self.index_ivf = {str(i): HashIndex() for i in range(n_clusters)}
         self.string_pool = StringPool()  # 使用StringPool类
 
-    def add_to_cluster(self, cluster_id, index, field, path):
+    def add_to_cluster(self, cluster_id, index, field, file_index):
         cluster_id = str(cluster_id)
         index = str(index)
         field_id = self.string_pool.intern(str(field))
-        path_id = self.string_pool.intern(str(path))
         if cluster_id not in self.index_ivf:
             raise ValueError(f"Cluster ID {cluster_id} does not exist")
-        self.index_ivf[cluster_id].insert(cluster_id, index, field_id, path_id)
+        self.index_ivf[cluster_id].insert(cluster_id, index, field_id, file_index)
 
     def search(self, cluster_id, indices=None, fields=None):
         cluster_id = str(cluster_id)
@@ -149,6 +152,8 @@ class CompactIVFIndex:
                                                  string_pool=self.string_pool)
 
     def save(self, filename):
+        import msgpack
+
         filename = str(filename)
         try:
             with open(filename, 'wb') as f:
@@ -165,6 +170,8 @@ class CompactIVFIndex:
             print(f"An error occurred while saving to {filename}: {e}")
 
     def load(self, filename):
+        import msgpack
+
         filename = str(filename)
         try:
             with open(filename, 'rb') as f:
