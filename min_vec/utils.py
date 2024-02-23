@@ -1,6 +1,9 @@
 """utils.py: this file contains some useful functions and decorators."""
 
 
+import os
+
+
 class UnKnownError(Exception):
     pass
 
@@ -32,9 +35,10 @@ def io_checker(func):
 
 
 def get_env_variable(name, default=None, default_type=str):
-    import os
 
     def type_cast(value):
+        if default_type == bool and isinstance(name, str):
+            return value.lower() == 'true'
         if default_type == str:
             return value  # include None
         else:
