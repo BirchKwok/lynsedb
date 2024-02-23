@@ -96,7 +96,6 @@ from min_vec import MinVectorDB
 
 timer = Timer()
 
-vectors = 5400_0000
 vectors = 10_0000
 
 # ===================================================================
@@ -202,7 +201,6 @@ db.delete()
     | - Top 10 results similarity: [1.         0.78499    0.7844205  0.78379464 0.7836677  0.7836211
      0.7835463  0.78324085 0.78320646 0.78291345]
     * - END OF REPORT -
-    
 
 
 ### Bulk add vectors
@@ -307,7 +305,6 @@ db.delete()
     | - Top 10 results similarity: [0.99999994 0.7895216  0.78557634 0.7839494  0.78385794 0.78378147
      0.78375924 0.78356993 0.7831306  0.78296286]
     * - END OF REPORT -
-    
 
 
 ### Use field to improve Searching Recall
@@ -415,7 +412,6 @@ db.delete()
     | - Top 10 results similarity: [0.9999999  0.771406   0.7689647  0.7684603  0.76826066 0.767176
      0.7662252  0.7654011  0.7649375  0.76457   ]
     * - END OF REPORT -
-    
 
 
 ### Use subset_indices to narrow down the search range
@@ -524,7 +520,6 @@ db.delete()
     | - Top 10 results similarity: [0.9999999  0.771406   0.7662252  0.7649375  0.7639904  0.7635061
      0.76331264 0.75842524 0.75825465 0.75766325]
     * - END OF REPORT -
-    
 
 
 ### Conduct searches by specifying both subset_indices and fields simultaneously.
@@ -631,5 +626,4 @@ db.delete()
     | - Top 10 results index: []
     | - Top 10 results similarity: []
     * - END OF REPORT -
-    
 
