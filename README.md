@@ -71,18 +71,6 @@ os.environ['MVDB_REINDEX_CHECKING_SAMPLES'] = '10000' # default 10000
 
 
 ```python
-os.environ['MVDB_LOG_WITH_TIME']
-```
-
-
-
-
-    'False'
-
-
-
-
-```python
 import min_vec
 print("MinVectorDB version is: ", min_vec.__version__)
 ```
