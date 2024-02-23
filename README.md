@@ -71,6 +71,18 @@ os.environ['MVDB_REINDEX_CHECKING_SAMPLES'] = '10000' # default 10000
 
 
 ```python
+os.environ['MVDB_LOG_WITH_TIME']
+```
+
+
+
+
+    'False'
+
+
+
+
+```python
 import min_vec
 print("MinVectorDB version is: ", min_vec.__version__)
 ```
@@ -166,31 +178,31 @@ db.delete()
 *Demo 1* -- **Sequentially add vectors**
 
 
-    2024-02-23 17:12:43 - MinVectorDB - INFO - Initializing MinVectorDB with: 
+    MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
     //    n_cluster=8, chunk_size=10000,
     //    distance='cosine', bloom_filter_size=100000000, 
     //    index_mode='IVF-FLAT', dtypes='float32',
     //    use_cache=True, reindex_if_conflict=False
     
-    100%|██████████| 100000/100000 [00:01<00:00, 51415.99vector/s]
-    2024-02-23 17:12:45 - MinVectorDB - INFO - Saving chunk immediately...
-    2024-02-23 17:12:45 - MinVectorDB - INFO - Saving id filter...
-    2024-02-23 17:12:45 - MinVectorDB - INFO - Building index...
-    2024-02-23 17:12:48 - MinVectorDB - INFO - The clustering quality is: -0.022148462012410164
-    2024-02-23 17:12:48 - MinVectorDB - INFO - The clustering quality is not good, reindexing...
-    2024-02-23 17:12:49 - MinVectorDB - INFO - Saving ann model...
-    2024-02-23 17:12:49 - MinVectorDB - INFO - Saving ivf index...
+    100%|██████████| 100000/100000 [00:01<00:00, 50558.65vector/s]
+    MinVectorDB - INFO - Saving chunk immediately...
+    MinVectorDB - INFO - Saving id filter...
+    MinVectorDB - INFO - Building index...
+    MinVectorDB - INFO - The clustering quality is: -0.022148462012410164
+    MinVectorDB - INFO - The clustering quality is not good, reindexing...
+    MinVectorDB - INFO - Saving ann model...
+    MinVectorDB - INFO - Saving ivf index...
 
 
     
-    * [Insert data] Time cost 5.6480 s.
+    * [Insert data] Time cost 5.7919 s.
       - Query sample id:  6849
       - Query sample field:  
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.17522 s
+    | - Query time: 0.17717 s
     | - Query vector: [0.04436826 0.02498281 0.00122129 ... 0.01926835 0.04222433 0.03094637]
     | - Query K: 10
     | - Query fields: None
@@ -200,6 +212,7 @@ db.delete()
     | - Top 10 results similarity: [1.         0.78499    0.7844205  0.78379464 0.7836677  0.7836211
      0.7835463  0.78324085 0.78320646 0.78291345]
     * - END OF REPORT -
+    
 
 
 ### Bulk add vectors
@@ -266,25 +279,25 @@ db.delete()
 *Demo 2* -- **Bulk add vectors**
 
 
-    2024-02-23 17:12:49 - MinVectorDB - INFO - Initializing MinVectorDB with: 
+    MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
     //    n_cluster=8, chunk_size=10000,
     //    distance='cosine', bloom_filter_size=100000000, 
     //    index_mode='FLAT', dtypes='float32',
     //    use_cache=True, reindex_if_conflict=False
     
-    2024-02-23 17:12:54 - MinVectorDB - INFO - Saving chunk immediately...
-    2024-02-23 17:12:54 - MinVectorDB - INFO - Saving id filter...
+    MinVectorDB - INFO - Saving chunk immediately...
+    MinVectorDB - INFO - Saving id filter...
 
 
     
-    * [Insert data] Time cost 4.2270 s.
+    * [Insert data] Time cost 4.1978 s.
       - Query sample id:  2
       - Query sample field:  
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.16281 s
+    | - Query time: 0.16266 s
     | - Query vector: [0.04493065 0.00245387 0.03883836 ... 0.02070636 0.05214242 0.03655052]
     | - Query K: 10
     | - Query fields: None
@@ -294,6 +307,7 @@ db.delete()
     | - Top 10 results similarity: [0.99999994 0.7895216  0.78557634 0.7839494  0.78385794 0.78378147
      0.78375924 0.78356993 0.7831306  0.78296286]
     * - END OF REPORT -
+    
 
 
 ### Use field to improve Searching Recall
@@ -358,30 +372,30 @@ db.delete()
 *Demo 3* -- **Use field to improve Searching Recall**
 
 
-    2024-02-23 17:12:54 - MinVectorDB - INFO - Initializing MinVectorDB with: 
+    MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
     //    n_cluster=8, chunk_size=10000,
     //    distance='cosine', bloom_filter_size=100000000, 
     //    index_mode='IVF-FLAT', dtypes='float32',
     //    use_cache=True, reindex_if_conflict=False
     
-    2024-02-23 17:12:58 - MinVectorDB - INFO - Saving chunk immediately...
-    2024-02-23 17:12:58 - MinVectorDB - INFO - Saving id filter...
-    2024-02-23 17:12:58 - MinVectorDB - INFO - Building index...
-    2024-02-23 17:13:00 - MinVectorDB - INFO - The clustering quality is: -0.022148462012410164
-    2024-02-23 17:13:00 - MinVectorDB - INFO - The clustering quality is not good, reindexing...
-    2024-02-23 17:13:02 - MinVectorDB - INFO - Saving ann model...
-    2024-02-23 17:13:02 - MinVectorDB - INFO - Saving ivf index...
+    MinVectorDB - INFO - Saving chunk immediately...
+    MinVectorDB - INFO - Saving id filter...
+    MinVectorDB - INFO - Building index...
+    MinVectorDB - INFO - The clustering quality is: -0.022148462012410164
+    MinVectorDB - INFO - The clustering quality is not good, reindexing...
+    MinVectorDB - INFO - Saving ann model...
+    MinVectorDB - INFO - Saving ivf index...
 
 
     
-    * [Insert data] Time cost 7.8755 s.
+    * [Insert data] Time cost 7.9241 s.
       - Query sample id:  6849
       - Query sample field:  test_68
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.12755 s
+    | - Query time: 0.12244 s
     | - Query vector: [0.04436826 0.02498281 0.00122129 ... 0.01926835 0.04222433 0.03094637]
     | - Query K: 10
     | - Query fields: ['test_68']
@@ -391,6 +405,7 @@ db.delete()
     | - Top 10 results similarity: [0.9999999  0.771406   0.7689647  0.7684603  0.76826066 0.767176
      0.7662252  0.7654011  0.7649375  0.76457   ]
     * - END OF REPORT -
+    
 
 
 ### Use subset_indices to narrow down the search range
@@ -456,30 +471,30 @@ db.delete()
 *Demo 4* -- **Use subset_indices to narrow down the search range**
 
 
-    2024-02-23 17:13:02 - MinVectorDB - INFO - Initializing MinVectorDB with: 
+    MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
     //    n_cluster=8, chunk_size=10000,
     //    distance='cosine', bloom_filter_size=100000000, 
     //    index_mode='IVF-FLAT', dtypes='float32',
     //    use_cache=True, reindex_if_conflict=False
     
-    2024-02-23 17:13:06 - MinVectorDB - INFO - Saving chunk immediately...
-    2024-02-23 17:13:06 - MinVectorDB - INFO - Saving id filter...
-    2024-02-23 17:13:06 - MinVectorDB - INFO - Building index...
-    2024-02-23 17:13:08 - MinVectorDB - INFO - The clustering quality is: -0.022148462012410164
-    2024-02-23 17:13:08 - MinVectorDB - INFO - The clustering quality is not good, reindexing...
-    2024-02-23 17:13:10 - MinVectorDB - INFO - Saving ann model...
-    2024-02-23 17:13:10 - MinVectorDB - INFO - Saving ivf index...
+    MinVectorDB - INFO - Saving chunk immediately...
+    MinVectorDB - INFO - Saving id filter...
+    MinVectorDB - INFO - Building index...
+    MinVectorDB - INFO - The clustering quality is: -0.022148462012410164
+    MinVectorDB - INFO - The clustering quality is not good, reindexing...
+    MinVectorDB - INFO - Saving ann model...
+    MinVectorDB - INFO - Saving ivf index...
 
 
     
-    * [Insert data] Time cost 8.0041 s.
+    * [Insert data] Time cost 7.9787 s.
       - Query sample id:  6849
       - Query sample field:  test_68
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.10887 s
+    | - Query time: 0.11177 s
     | - Query vector: [0.04436826 0.02498281 0.00122129 ... 0.01926835 0.04222433 0.03094637]
     | - Query K: 10
     | - Query fields: None
@@ -489,6 +504,7 @@ db.delete()
     | - Top 10 results similarity: [0.9999999  0.771406   0.7662252  0.7649375  0.7639904  0.7635061
      0.76331264 0.75842524 0.75825465 0.75766325]
     * - END OF REPORT -
+    
 
 
 ### Conduct searches by specifying both subset_indices and fields simultaneously.
@@ -554,30 +570,30 @@ db.delete()
 *Demo 5* -- **Conduct searches by specifying both subset_indices and fields simultaneously**
 
 
-    2024-02-23 17:13:10 - MinVectorDB - INFO - Initializing MinVectorDB with: 
+    MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
     //    n_cluster=8, chunk_size=10000,
     //    distance='cosine', bloom_filter_size=100000000, 
     //    index_mode='IVF-FLAT', dtypes='float32',
     //    use_cache=True, reindex_if_conflict=False
     
-    2024-02-23 17:13:14 - MinVectorDB - INFO - Saving chunk immediately...
-    2024-02-23 17:13:14 - MinVectorDB - INFO - Saving id filter...
-    2024-02-23 17:13:14 - MinVectorDB - INFO - Building index...
-    2024-02-23 17:13:16 - MinVectorDB - INFO - The clustering quality is: -0.022148462012410164
-    2024-02-23 17:13:16 - MinVectorDB - INFO - The clustering quality is not good, reindexing...
-    2024-02-23 17:13:18 - MinVectorDB - INFO - Saving ann model...
-    2024-02-23 17:13:18 - MinVectorDB - INFO - Saving ivf index...
+    MinVectorDB - INFO - Saving chunk immediately...
+    MinVectorDB - INFO - Saving id filter...
+    MinVectorDB - INFO - Building index...
+    MinVectorDB - INFO - The clustering quality is: -0.022148462012410164
+    MinVectorDB - INFO - The clustering quality is not good, reindexing...
+    MinVectorDB - INFO - Saving ann model...
+    MinVectorDB - INFO - Saving ivf index...
 
 
     
-    * [Insert data] Time cost 7.7911 s.
+    * [Insert data] Time cost 8.1352 s.
       - Query sample id:  6849
       - Query sample field:  test_68
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.12052 s
+    | - Query time: 0.11655 s
     | - Query vector: [0.04436826 0.02498281 0.00122129 ... 0.01926835 0.04222433 0.03094637]
     | - Query K: 10
     | - Query fields: ['test_0', 'test_2']
@@ -586,4 +602,5 @@ db.delete()
     | - Top 10 results index: []
     | - Top 10 results similarity: []
     * - END OF REPORT -
+    
 
