@@ -1,6 +1,9 @@
 """api.py - The MinVectorDB API."""
 
 
+from min_vec.config import *
+
+
 class MinVectorDB:
     """
     A class for managing a vector database stored in .mvdb files and computing vectors similarity.
@@ -42,14 +45,13 @@ class MinVectorDB:
 
         from min_vec.query import DatabaseQuery
         from min_vec.matrix_serializer import MatrixSerializer
-        from min_vec.utils import get_env_variable
 
         logger = Logger(
-            fp=get_env_variable('MVDB_LOG_PATH', None, str),
+            fp=MVDB_LOG_PATH,
             name='MinVectorDB',
-            truncate_file=get_env_variable('MVDB_TRUNCATE_LOG', True, bool),
-            with_time=get_env_variable('MVDB_LOG_WITH_TIME', False, bool),
-            level=get_env_variable('MVDB_LOG_LEVEL', 'INFO', str)
+            truncate_file=MVDB_TRUNCATE_LOG,
+            with_time=MVDB_LOG_WITH_TIME,
+            level=MVDB_LOG_LEVEL
         )
         logger.info("Initializing MinVectorDB with: \n "
                     f"\r//    dim={dim}, database_path='{database_path}', \n"
@@ -233,11 +235,11 @@ class MinVectorDB:
         db_report = {
             'Database shape': self.shape,
             'Database last_commit_time': self._matrix_serializer.last_commit_time,
-            'Database commit status': self._matrix_serializer._COMMIT_FLAG,
+            'Database commit status': self._matrix_serializer.COMMIT_FLAG,
             'Database index_mode': self._matrix_serializer.index_mode,
             'Database distance': self.distance,
             'Database use_cache': self.use_cache,
-            'Database reindex_if_conflict': self._matrix_serializer._reindex_if_conflict
+            'Database reindex_if_conflict': self._matrix_serializer.reindex_if_conflict
         }
 
         for key, value in db_report.items():
@@ -252,7 +254,7 @@ class MinVectorDB:
                f"n_cluster={self._matrix_serializer.n_clusters}, chunk_size={self._matrix_serializer.chunk_size}, \n" \
                f"distance='{self.distance}', bloom_filter_size={self._matrix_serializer.bloom_filter_size}, \n" \
                f"index_mode='{self._matrix_serializer.index_mode}', dtypes='{self._matrix_serializer.dtypes}', \n" \
-               f"use_cache={self.use_cache}, reindex_if_conflict={self._matrix_serializer._reindex_if_conflict})"
+               f"use_cache={self.use_cache}, reindex_if_conflict={self._matrix_serializer.reindex_if_conflict})"
 
     def __str__(self):
         return self.__repr__()
