@@ -8,16 +8,12 @@ import numpy as np
 import h5py
 from spinesUtils.asserts import raise_if
 
-from min_vec.engines import to_normalize, silhouette_score
+from min_vec.engines import to_normalize
 from min_vec.filter import BloomTrie
-from min_vec.utils import io_checker, get_env_variable
+from min_vec.utils import io_checker
+from min_vec.config import *
 from min_vec.ivf_index import IVFIndex
-from min_vec.kmeans import KMeans
-
-MVDB_KMEANS_EPOCHS = get_env_variable('MVDB_KMEANS_EPOCHS', 100, int)
-MVDB_CLUSTERING_QUALITY_THRESHOLD = get_env_variable("MVDB_CLUSTERING_QUALITY_THRESHOLD", 0.3, float)
-MVDB_BULK_ADD_BATCH_SIZE = get_env_variable('MVDB_BULK_ADD_BATCH_SIZE', 100000, int)
-MVDB_REINDEX_CHECKING_SAMPLES = get_env_variable('MVDB_REINDEX_CHECKING_SAMPLES', 10000, int)
+from min_vec.kmeans import BatchKMeans
 
 
 class MatrixSerializer:
@@ -42,7 +38,7 @@ class MatrixSerializer:
                 Options are 'FLAT' or 'IVF-FLAT'. Default is 'IVF-FLAT'.
             dtypes (str): The data type of the vectors. Default is 'float32'.
                 Options are 'float16', 'float32' or 'float64'.
-            reindex_if_conflict (bool): Whether to reindex the database if there is a index mode conflict.
+            reindex_if_conflict (bool): Whether to reindex the database if there is an index mode conflict.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -62,10 +58,9 @@ class MatrixSerializer:
         raise_if(ValueError, not isinstance(reindex_if_conflict, bool), 'reindex_if_conflict must be bool')
 
         self.last_commit_time = None
-        self._reindex_if_conflict = reindex_if_conflict
-        self._REINDEX_FLAG = False
+        self.reindex_if_conflict = reindex_if_conflict
         # set commit flag, if the flag is True, the database will not be saved
-        self._COMMIT_FLAG = True
+        self.COMMIT_FLAG = True
 
         self.logger = logger
 
@@ -96,13 +91,17 @@ class MatrixSerializer:
         self._str_dtype = h5py.special_dtype(vlen=str)
         # set open file handler
         self._open_file_handler = None
+        # set device
+        self.device = torch.device(MVDB_COMPUTE_DEVICE)
 
         # set database path
         self.database_path = self.database_path_parent / Path(database_path).name
 
         # ============== Loading or create one empty database ==============
         # first of all, initialize a database
-        self.reset_database()
+        self.database = []
+        self.indices = []
+        self.fields = []
 
         # initialize the database shape ( not the real shape, only for the first time )
         self._added_data_rows = self.shape[0] if self.database_path.exists() else 0
@@ -150,10 +149,12 @@ class MatrixSerializer:
                     self.dim = dim
 
                 if chunk_size != self.chunk_size:
-                    self.logger.warning(f'* chunk_size={chunk_size} in the file is not '
-                                        f'equal to the chunk_size={self.chunk_size}'
-                                        f'in the parameters, the parameter chunk_size will be covered by the chunk_size '
-                                        f'in the file.')
+                    self.logger.warning(
+                        f'* chunk_size={chunk_size} in the file is not '
+                        f'equal to the chunk_size={self.chunk_size}'
+                        f'in the parameters, the parameter chunk_size will be covered by the chunk_size '
+                        f'in the file.'
+                    )
                     self.chunk_size = chunk_size
 
                 if distance != self.distance:
@@ -185,7 +186,7 @@ class MatrixSerializer:
                             f'the database.')
 
                         # self._CHANGE_INDEX_MODE_FLAG = True
-                        self._COMMIT_FLAG = False
+                        self.COMMIT_FLAG = False
                     else:
                         self.logger.warning(
                             f'* index_mode=\'{old_index_mode}\' in the file is not equal to the index_mode='
@@ -211,16 +212,16 @@ class MatrixSerializer:
     def _initialize_ann_model(self):
         """initialize ann model"""
         if self.index_mode == 'IVF-FLAT':
-            self.ann_model = KMeans(n_clusters=self.n_clusters, random_state=0,
-                                    batch_size=10240, epochs=MVDB_KMEANS_EPOCHS, distance=self.distance)
+            self.ann_model = BatchKMeans(n_clusters=self.n_clusters, random_state=0,
+                                         batch_size=10240, epochs=MVDB_KMEANS_EPOCHS, distance=self.distance)
 
             if Path(self.database_path_parent / 'ann_model.mvdb').exists() and self.index_mode == 'IVF-FLAT':
                 self.ann_model = self.ann_model.load(self.database_path_parent / 'ann_model.mvdb')
                 if (self.ann_model.n_clusters != self.n_clusters or self.ann_model.distance != self.distance or
                         self.ann_model.epochs != MVDB_KMEANS_EPOCHS or
                         self.ann_model.batch_size != 10240):
-                    self.ann_model = KMeans(n_clusters=self.n_clusters, random_state=0,
-                                            batch_size=10240, epochs=MVDB_KMEANS_EPOCHS, distance=self.distance)
+                    self.ann_model = BatchKMeans(n_clusters=self.n_clusters, random_state=0,
+                                                 batch_size=10240, epochs=MVDB_KMEANS_EPOCHS, distance=self.distance)
         else:
             self.ann_model = None
 
@@ -250,7 +251,7 @@ class MatrixSerializer:
         self.id_filter.to_file(self._bloom_filter_path)
 
     def check_commit(self):
-        if not self._COMMIT_FLAG:
+        if not self.COMMIT_FLAG:
             raise ValueError("Did you forget to run `commit()` function ? Try to run `commit()` first.")
 
     def reset_database(self):
@@ -389,7 +390,7 @@ class MatrixSerializer:
         Raises:
             ValueError: If the lengths of the database, indices, and fields are not the same.
         """
-        if not self._is_database_reset() and not self._COMMIT_FLAG:
+        if not self._is_database_reset() and not self.COMMIT_FLAG:
             if not (len(self.database) == len(self.indices) == len(self.fields)):
                 raise ValueError('The database, index length and field length not the same.')
 
@@ -424,9 +425,9 @@ class MatrixSerializer:
             dataset_path = 'chunk'
             metadata_group_path = 'chunk_msg'
         else:
-            group_name = 'cluster' if not self._REINDEX_FLAG else 'cluster_new'
+            group_name = 'cluster'
             dataset_path = f"{group_name}/cluster_id_{str(cluster_id)}"
-            metadata_group_path = "cluster_msg" if not self._REINDEX_FLAG else "cluster_msg_new"
+            metadata_group_path = "cluster_msg"
 
         # Update or create dataset
         if dataset_path in f:
@@ -481,7 +482,6 @@ class MatrixSerializer:
         if not self.database_path.exists():
             return 0
 
-        cluster_dataset_num = 0
         with self._get_h5py_file_handler() as f:
             if 'cluster' not in f:
                 return 0
@@ -492,7 +492,7 @@ class MatrixSerializer:
         Save the database, ensuring that all data is written to disk.
         This method is required to be called after saving vectors to query them.
         """
-        if not self._COMMIT_FLAG:
+        if not self.COMMIT_FLAG:
             self.logger.info('Saving chunk immediately...')
             self.save_chunk_immediately()
 
@@ -511,18 +511,6 @@ class MatrixSerializer:
                 # build index
                 self.build_index()
 
-                # del old cluster files
-                if self._REINDEX_FLAG:
-                    f = self._get_h5py_file_handler()
-                    if 'cluster' in f:
-                        del f['cluster']
-                        del f['cluster_msg']
-
-                    # rename cluster_new to cluster
-                    f.move('cluster_new', 'cluster')
-                    f.move('cluster_msg_new', 'cluster_msg')
-                    self._REINDEX_FLAG = False
-
                 # save ivf index and k-means model
                 self.logger.info('Saving ann model...')
                 self.ann_model.save(self.database_path_parent / 'ann_model.mvdb')
@@ -532,11 +520,12 @@ class MatrixSerializer:
 
             self.reset_database()
 
+            f = self._get_h5py_file_handler()
             # save params
             f.attrs['index_mode'] = self.index_mode
             self._reset_h5py_file_handler()
 
-            self._COMMIT_FLAG = True
+            self.COMMIT_FLAG = True
 
             self.last_commit_time = datetime.now()
 
@@ -624,8 +613,8 @@ class MatrixSerializer:
 
             self.save_chunk_immediately() if save_immediately else self.auto_save_chunk()
 
-        if self._COMMIT_FLAG:
-            self._COMMIT_FLAG = False
+        if self.COMMIT_FLAG:
+            self.COMMIT_FLAG = False
 
         self._added_samples += len(new_ids)
 
@@ -676,8 +665,8 @@ class MatrixSerializer:
 
         self.save_chunk_immediately() if save_immediately else self.auto_save_chunk()
 
-        if self._COMMIT_FLAG:
-            self._COMMIT_FLAG = False
+        if self.COMMIT_FLAG:
+            self.COMMIT_FLAG = False
 
         self._added_samples += 1
 
@@ -703,7 +692,7 @@ class MatrixSerializer:
 
         return self.ann_model.cluster_centers_, self.ann_model.labels_
 
-    def _insert_ivf_index(self, data, indices, fields, reindex=False):
+    def _insert_ivf_index(self, data, indices, fields):
         # Perform K-means clustering.
         self.cluster_centers, labels = self._kmeans_clustering(data)
 
@@ -712,14 +701,9 @@ class MatrixSerializer:
             current_file_rows[i] = 0
 
         f = self._get_h5py_file_handler()
-        if not reindex:
-            if 'cluster' in f:
-                for j in f['cluster']:
-                    current_file_rows[int(j.split('_')[-1])] = f['cluster'][j].shape[0] - 1
-        else:
-            if 'cluster_new' in f:
-                for j in f['cluster_new']:
-                    current_file_rows[int(j.split('_')[-1])] = f['cluster_new'][j].shape[0] - 1
+        if 'cluster' in f:
+            for j in f['cluster']:
+                current_file_rows[int(j.split('_')[-1])] = f['cluster'][j].shape[0] - 1
 
         # Current batch's IVF index.
         ivf_index = {i: [] for i in range(self.n_clusters)}
@@ -737,76 +721,20 @@ class MatrixSerializer:
         return ivf_index
 
     def _build_index(self):
-        _database = []
         for database, indices, fields in self.iterable_dataloader(read_chunk_only=True):
             # Create an IVF index.
             ivf_index = self._insert_ivf_index(database, indices, fields)
             # reorganize files
             self.reorganize_cluster_partitions(database, ivf_index)
 
-            if len(database) > 100:
-                random_length = int(len(database) * 0.1)
-            elif 10 < len(database) <= 100:
-                random_length = 10
-            else:
-                random_length = 1
-
-            # Randomly generate a portion of data indices to evaluate the clustering quality.
-            random_indices = np.random.choice(len(database), size=random_length, replace=False)
-
-            _database.append(database[random_indices, :])
-
-        return np.vstack(_database)
-
     def build_index(self):
         """
         Build the IVF index.
         """
-        sample_data = self._build_index()
+        self._build_index()
 
         # delete chunk_id.mvdb files
         self.reset_chunk_partition()
-
-        is_quality_good = self.evaluate_clustering(sample_data)
-
-        if not is_quality_good and self._added_samples >= MVDB_REINDEX_CHECKING_SAMPLES:
-            self.logger.info('The clustering quality is not good, reindexing...')
-            self._REINDEX_FLAG = True
-            self.reindex_if_appropriate()
-            if self._added_data_rows != 'fulfilled' and isinstance(self._added_data_rows, int):
-                self._added_data_rows += self._added_samples
-
-                if self._added_data_rows > 10000:
-                    self._added_data_rows = 'fulfilled'
-
-            self._added_samples = 0  # reset added samples
-
-    def evaluate_clustering(self, data):
-        """
-        Evaluate the quality of clustering using the silhouette coefficient.
-        """
-        threshold = MVDB_CLUSTERING_QUALITY_THRESHOLD
-
-        labels = self.ann_model.predict(data)
-        score = silhouette_score(data, labels)
-        self.logger.info(f"The clustering quality is: {score}")
-        return score > threshold
-
-    def reindex_if_appropriate(self):
-        """
-        If the quality of clustering is poor, re-establish the index.
-        """
-        self.ann_model = KMeans(n_clusters=self.n_clusters, random_state=0,
-                                batch_size=10240, epochs=MVDB_KMEANS_EPOCHS, distance=self.distance)
-
-        self.ivf_index = IVFIndex(n_clusters=self.n_clusters)
-
-        _database = []
-        for database, indices, fields in self.iterable_dataloader(read_chunk_only=False):
-            # Create an IVF index.
-            ivf_index = self._insert_ivf_index(database, indices, fields, reindex=True)
-            # reorganize files
-            self.reorganize_cluster_partitions(database, ivf_index)
 
     def reorganize_cluster_partitions(self, database, ivf_index):
         """
