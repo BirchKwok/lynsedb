@@ -1,8 +1,10 @@
 """query.py: this file is used to query the database for the vectors most similar to the given vector."""
 
+from min_vec.config import *
+
 
 class DatabaseQuery:
-    from min_vec.utils import vectors_cache
+    from min_vec.utils import VectorCache
 
     def __init__(self, matrix_serializer) -> None:
         """
@@ -24,6 +26,7 @@ class DatabaseQuery:
         self.chunk_size = self.matrix_serializer.chunk_size
         self.index_mode = self.matrix_serializer.index_mode if (self.matrix_serializer.ann_model is not None
                                                                 and self.matrix_serializer.ann_model.fitted) else 'FLAT'
+        self.device = self.matrix_serializer.device
 
         self.database = []
         self.index = []
@@ -65,14 +68,14 @@ class DatabaseQuery:
             return [], []
 
         # Distance calculation core code
-        scores = self.distance_func(database_chunk, vector).squeeze()
+        scores = self.distance_func(database_chunk, vector, device=self.device).squeeze()
 
         if scores.ndim == 0:
             scores = [scores]
 
         return index_chunk, scores
 
-    @vectors_cache(10000)
+    @VectorCache(MVDB_CACHE_SIZE)
     def query(self, vector, k: int | str = 12,
               fields: list = None, normalize: bool = False, subset_indices=None, **kwargs):
         """
@@ -133,7 +136,6 @@ class DatabaseQuery:
         all_scores = []
         all_index = []
         unique_indices = set()
-        sorted_indices, sorted_scores = [], []
 
         def sort_results(all_s, all_i):
             all_scores_i = np.array(all_s)
@@ -185,7 +187,8 @@ class DatabaseQuery:
             return batch_query(vector, fields, subset_indices, False)
 
         # otherwise, use IVF-FLAT
-        cluster_distances = self.distance_func(vector, self.matrix_serializer.ann_model.cluster_centers_.T).squeeze()
+        cluster_distances = self.distance_func(vector, self.matrix_serializer.ann_model.cluster_centers_.T,
+                                               device=self.device).squeeze()
 
         cluster_id_sorted = np.argsort(cluster_distances)[::-1]
 
