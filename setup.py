@@ -12,7 +12,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name='MinVectorDB',
-    version="0.2.1",
+    version="0.2.2",
     description='MinVectorDB is a pure Python-implemented, lightweight, stateless vector, locally deployed database' \
                 'that offers clear and concise Python APIs, aimed at lowering the barrier to ' \
                 'the use of vector databases.',
@@ -42,7 +42,9 @@ setup(
         'mmh3>=3.0.0',
         'torch>=2.0.0',
         'msgpack>=1.0.2',
-        'h5py>=3.4.0'
+        'h5py>=3.4.0',
+        'scikit-learn>=1.0.0',
+        'cloudpickle>=2.0.0',
     ],
     zip_safe=False,
 )
