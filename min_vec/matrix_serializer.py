@@ -9,18 +9,19 @@ import h5py
 from spinesUtils.asserts import raise_if
 
 from min_vec.engines import to_normalize
-from min_vec.filter import BloomTrie
+from min_vec.filter import IDFilter
 from min_vec.utils import io_checker
 from min_vec.config import *
-from min_vec.ivf_index import IVFIndex
 from min_vec.kmeans import BatchKMeans
+from min_vec.scaler import ScalarQuantization
+from min_vec.fields_mapper import FieldsMapper
 
 
 class MatrixSerializer:
     def __init__(
             self, dim, database_path, distance, logger, n_clusters=8, chunk_size=1_000_000,
-            bloom_filter_size=100_000_000, index_mode='IVF-FLAT', dtypes='float32',
-            reindex_if_conflict=False
+            index_mode='IVF-FLAT', dtypes='float64',
+            reindex_if_conflict=False, scaler_bits=8
     ) -> None:
         """
         Initialize the vector database.
@@ -33,12 +34,15 @@ class MatrixSerializer:
             logger (Logger): The logger object.
             n_clusters (int): The number of clusters for the IVF-FLAT index. Default is 8.
             chunk_size (int): The size of each data chunk. Default is 1_000_000.
-            bloom_filter_size (int): The size of the bloom filter. Default is 100_000_000.
             index_mode (str): The index mode of the database.
                 Options are 'FLAT' or 'IVF-FLAT'. Default is 'IVF-FLAT'.
             dtypes (str): The data type of the vectors. Default is 'float32'.
                 Options are 'float16', 'float32' or 'float64'.
             reindex_if_conflict (bool): Whether to reindex the database if there is an index mode conflict.
+                Default is False.
+            scaler_bits (int): The number of bits for scalar quantization. Default is 8.
+                Options are 8, 16, 32. If None, scalar quantization will not be used.
+                The 8 bits for uint8, 16 bits for uint16, 32 bits for uint32.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -53,14 +57,17 @@ class MatrixSerializer:
                  'dtypes must be "float16", "float32" or "float64')
         raise_if(ValueError, not isinstance(n_clusters, int) or n_clusters <= 0,
                  'n_clusters must be int and greater than 0')
-        raise_if(ValueError, not isinstance(bloom_filter_size, int) or bloom_filter_size <= 0,
-                 'bloom_filter_size must be int and greater than 0')
         raise_if(ValueError, not isinstance(reindex_if_conflict, bool), 'reindex_if_conflict must be bool')
+        raise_if(ValueError, scaler_bits not in (8, 16, 32, None), 'sq_bits must be 8, 16, 32 or None')
 
         self.last_commit_time = None
         self.reindex_if_conflict = reindex_if_conflict
         # set commit flag, if the flag is True, the database will not be saved
         self.COMMIT_FLAG = True
+        # set flag for scalar quantization, if the flag is True, the database will be rescanned for scalar quantization
+        self.RESCAN_FOR_SQ_FLAG = False
+
+        self.IS_DELETED = None
 
         self.logger = logger
 
@@ -69,12 +76,8 @@ class MatrixSerializer:
 
         self._dtypes_map = {'float16': np.float16, 'float32': np.float32, 'float64': np.float64}
 
-        # set added samples
-        self._added_samples = 0
         # set distance
         self.distance = distance
-        # set bloom filter size
-        self.bloom_filter_size = bloom_filter_size
         # set dtypes
         self.dtypes = self._dtypes_map[dtypes]
         # set index mode
@@ -85,17 +88,21 @@ class MatrixSerializer:
         self.dim = dim
         # set chunk size
         self.chunk_size = chunk_size
-        # set bloom filter path
-        self._bloom_filter_path = self.database_path_parent / 'id_filter'
-        # set string dtype
-        self._str_dtype = h5py.special_dtype(vlen=str)
+        # set filter path
+        self._filter_path = self.database_path_parent / 'id_filter.mvdb'
         # set open file handler
         self._open_file_handler = None
         # set device
         self.device = torch.device(MVDB_COMPUTE_DEVICE)
+        # set scalar quantization bits
+        self.scaler_bits = scaler_bits
 
         # set database path
         self.database_path = self.database_path_parent / Path(database_path).name
+
+        self.logger.info(f"Initializing database folder path: '{'.mvdb'.join(database_path.split('.mvdb')[:-1])}/',"
+                         " database file path: "
+                         f"'{'.mvdb'.join(database_path.split('.mvdb')[:-1]) + '/' + database_path}'")
 
         # ============== Loading or create one empty database ==============
         # first of all, initialize a database
@@ -107,14 +114,22 @@ class MatrixSerializer:
         self._added_data_rows = self.shape[0] if self.database_path.exists() else 0
 
         if self._added_data_rows > 10000:
+            # if _added_data_rows is equal to 'fulfilled',
+            # the database will be used for IVF-FLAT index, if index_mode is IVF-FLAT
             self._added_data_rows = 'fulfilled'
 
         # check initialize params
         self._check_initialize_params(dtypes, reindex_if_conflict)
 
+        if self.scaler_bits is not None:
+            self._initialize_scalar_quantization()
+
+        self._initialize_fields_mapper()
         self._initialize_ann_model()
         self._initialize_id_filter()
-        self._initialize_ivf_index()
+
+        # save initial parameters
+        self._write_params(self._get_h5py_file_handler(), dtypes=dtypes)
 
         if self._get_cluster_dataset_num() > 0 and self.index_mode == 'FLAT':
             # cause the index mode is FLAT, but the cluster dataset is not empty,
@@ -122,31 +137,34 @@ class MatrixSerializer:
             self.logger.warning('The index mode is FLAT, but the cluster dataset is not empty, '
                                 'so the clustered datasets will also be traversed during querying.')
 
+    def _write_params(self, f, dtypes):
+        f.attrs['dim'] = self.dim
+        f.attrs['chunk_size'] = self.chunk_size
+        f.attrs['distance'] = self.distance
+        f.attrs['dtypes'] = dtypes
+
+        if self.scaler_bits is not None:
+            f.attrs['sq_bits'] = self.scaler_bits
+
     def _check_initialize_params(self, dtypes, reindex_if_conflict):
         """check initialize params"""
-
-        def _write_params(f):
-            f.attrs['dim'] = self.dim
-            f.attrs['chunk_size'] = self.chunk_size
-            f.attrs['distance'] = self.distance
-            f.attrs['dtypes'] = dtypes
-            f.attrs['bloom_filter_size'] = self.bloom_filter_size
-
+        write_params_flag = False
         if self.database_path.exists():
             self.logger.info('Database file exists, reading parameters...')
-            with self._get_h5py_file_handler() as f:
+            with self._get_h5py_file_handler(open_for_only_read=True) as f:
                 dim = f.attrs.get('dim', self.dim)
                 chunk_size = f.attrs.get('chunk_size', self.chunk_size)
                 distance = f.attrs.get('distance', self.distance)
                 file_dtypes = f.attrs.get('dtypes', dtypes)
-                bloom_filter_size = f.attrs.get('bloom_filter_size', self.bloom_filter_size)
-                old_index_mode = f.attrs.get('index_mode', self.index_mode)
+                old_index_mode = f.attrs.get('index_mode', None)
+                old_sq_bits = f.attrs.get('sq_bits', self.scaler_bits)
 
                 if dim != self.dim:
                     self.logger.warning(
                         f'* dim={dim} in the file is not equal to the dim={self.dim} in the parameters, '
                         f'the parameter dim will be covered by the dim in the file.')
                     self.dim = dim
+                    write_params_flag = True
 
                 if chunk_size != self.chunk_size:
                     self.logger.warning(
@@ -156,6 +174,7 @@ class MatrixSerializer:
                         f'in the file.'
                     )
                     self.chunk_size = chunk_size
+                    write_params_flag = True
 
                 if distance != self.distance:
                     self.logger.warning(f'* distance=\'{distance}\' in the file is not '
@@ -163,6 +182,7 @@ class MatrixSerializer:
                                         f'in the parameters, the parameter distance will be covered by the distance '
                                         f'in the file.')
                     self.distance = distance
+                    write_params_flag = True
 
                 if file_dtypes != dtypes:
                     self.logger.warning(
@@ -170,12 +190,7 @@ class MatrixSerializer:
                         f'in the parameters, the parameter dtypes will be covered by the dtypes '
                         f'in the file.')
                     self.dtypes = self._dtypes_map[f.attrs.get('dtypes', dtypes)]
-
-                if bloom_filter_size != self.bloom_filter_size:
-                    self.logger.warning(f'* bloom_filter_size={bloom_filter_size} in the file is not equal to the '
-                                        f'bloom_filter_size={self.bloom_filter_size} in the parameters, the parameter '
-                                        f'bloom_filter_size will be covered by the bloom_filter_size in the file.')
-                    self.bloom_filter_size = bloom_filter_size
+                    write_params_flag = True
 
                 if old_index_mode != self.index_mode and self.index_mode == 'IVF-FLAT':
                     if reindex_if_conflict:
@@ -185,7 +200,6 @@ class MatrixSerializer:
                             f'index_mode to \'IVF-FLAT\', you need to run `commit()` function after initializing '
                             f'the database.')
 
-                        # self._CHANGE_INDEX_MODE_FLAG = True
                         self.COMMIT_FLAG = False
                     else:
                         self.logger.warning(
@@ -194,12 +208,17 @@ class MatrixSerializer:
                             f'index_mode to \'IVF-FLAT\', you need to set `reindex_if_conflict=True` first '
                             f'and run `commit()` function after initializing the database.')
 
-                _write_params(f)
+                if self.scaler_bits is not None and old_sq_bits != self.scaler_bits:
+                    self.logger.warning(f'* sq_bits={old_sq_bits} in the file is not equal to the sq_bits='
+                                        f'{self.scaler_bits} in the parameters, '
+                                        f'the sq_bits in the file will be covered by the sq_bits in the parameters.')
+                    self.RESCAN_FOR_SQ_FLAG = True
+
+            if write_params_flag:
+                with self._get_h5py_file_handler() as f:
+                    self._write_params(f, dtypes=dtypes)
 
             self.logger.info('Reading parameters done.')
-        else:
-            with self._get_h5py_file_handler() as f:
-                _write_params(f)
 
     def _initialize_parent_path(self, database_path):
         """make directory if not exist"""
@@ -208,6 +227,16 @@ class MatrixSerializer:
 
         if not self.database_path_parent.exists():
             self.database_path_parent.mkdir(parents=True)
+
+    def _initialize_scalar_quantization(self):
+        if Path(self.database_path_parent / 'sq_model.mvdb').exists():
+            self.scaler = ScalarQuantization.load(self.database_path_parent / 'sq_model.mvdb')
+        else:
+            self.scaler = ScalarQuantization(bits=self.scaler_bits, decode_dtype=self.dtypes)
+            # if the database file exists, the model will be fitted
+            if self.database_path.exists() and self.RESCAN_FOR_SQ_FLAG:
+                for i in self.iterable_dataloader(read_chunk_only=False, open_for_only_read=True):
+                    self.scaler.partial_fit(i[0])
 
     def _initialize_ann_model(self):
         """initialize ann model"""
@@ -225,30 +254,26 @@ class MatrixSerializer:
         else:
             self.ann_model = None
 
-    def _initialize_ivf_index(self):
-        """initialize ivf index"""
-        if Path(self.database_path_parent / 'ivf_index.mvdb').exists():
-            self.ivf_index = (IVFIndex(n_clusters=self.n_clusters).
-                              load(self.database_path_parent / 'ivf_index.mvdb'))
+    def _initialize_fields_mapper(self):
+        """initialize fields mapper"""
+        if Path(self.database_path_parent / 'fields_mapper.mvdb').exists():
+            self.fields_mapper = FieldsMapper().load(self.database_path_parent / 'fields_mapper.mvdb')
         else:
-            self.ivf_index = IVFIndex(n_clusters=self.n_clusters)
+            self.fields_mapper = FieldsMapper()
 
     def _initialize_id_filter(self):
         """initialize id filter and shape"""
-        self.id_filter = BloomTrie(bloom_size=self.bloom_filter_size, bloom_hash_count=5)
+        self.id_filter = IDFilter()
 
-        if self._bloom_filter_path.exists():
-            self.id_filter.from_file(self._bloom_filter_path)
+        if self._filter_path.exists():
+            self.id_filter.from_file(self._filter_path)
         else:
             if self.database_path.exists():
                 for database, indices, fields in self.iterable_dataloader(read_chunk_only=False,
                                                                           open_for_only_read=True):
-                    self.id_filter.add(tuple(indices))
+                    self.id_filter.add(indices)
 
         self.last_id = self.id_filter.find_max_value()
-
-        # save id filter
-        self.id_filter.to_file(self._bloom_filter_path)
 
     def check_commit(self):
         if not self.COMMIT_FLAG:
@@ -292,6 +317,11 @@ class MatrixSerializer:
             PermissionError: If the file cannot be read due to permission issues.
             UnKnownError: If an unknown error occurs.
         """
+        if self.scaler_bits is not None:
+            raise_if(ValueError, not self.scaler.fitted, 'The model must be fitted before decoding.')
+            decoder = self.scaler.decode
+        else:
+            decoder = lambda x: x
 
         def yield_data_chunking(f, key, msg_grp, index_key, field_key, reverse=False):
             dataset = f[key]
@@ -309,11 +339,7 @@ class MatrixSerializer:
                 indices_slice = msg_grp[index_key][start:end]
                 fields_slice = msg_grp[field_key][start:end]
 
-                # yield np.array(data_slice), np.array(indices_slice), list(
-                #     map(lambda s: s.decode('utf-8'), fields_slice))
-
-                yield data_slice, indices_slice, list(
-                    map(lambda s: s.decode('utf-8'), fields_slice))
+                yield decoder(data_slice), indices_slice, self.fields_mapper.decode(fields_slice)
 
         with (self._get_h5py_file_handler(open_for_only_read=open_for_only_read) as f):
             if not from_tail:
@@ -356,23 +382,29 @@ class MatrixSerializer:
             PermissionError: If the file cannot be read due to permission issues.
             UnKnownError: If an unknown error occurs.
         """
+        if self.scaler_bits is not None:
+            raise_if(ValueError, not self.scaler.fitted, 'The model must be fitted before decoding.')
+            decoder = self.scaler.decode
+        else:
+            decoder = lambda x: x
+
         with self._get_h5py_file_handler(open_for_only_read=True) as f:
             datashape = f['cluster'][f'cluster_id_{cluster_id}'].shape[0]
             if datashape // self.chunk_size == 0:
                 data = f['cluster'][f'cluster_id_{cluster_id}']
                 indices = f['cluster_msg'][f'cluster_id_{cluster_id}_indices']
-                fields = f['cluster_msg'][f'cluster_id_{cluster_id}_fields']
+                fields_slice = f['cluster_msg'][f'cluster_id_{cluster_id}_fields']
 
-                yield data, indices, [i.decode('utf-8') for i in fields]
+                yield decoder(data), indices, self.fields_mapper.decode(fields_slice)
             else:
                 for i in range(datashape // self.chunk_size + 1):
                     data = f['cluster'][f'cluster_id_{cluster_id}'][i * self.chunk_size:(i + 1) * self.chunk_size]
                     indices = f['cluster_msg'][f'cluster_id_{cluster_id}_indices'][
                               i * self.chunk_size:(i + 1) * self.chunk_size]
-                    fields = f['cluster_msg'][f'cluster_id_{cluster_id}_fields'][
-                             i * self.chunk_size:(i + 1) * self.chunk_size]
+                    fields_slice = f['cluster_msg'][f'cluster_id_{cluster_id}_fields'][
+                                   i * self.chunk_size:(i + 1) * self.chunk_size]
 
-                    yield data, indices, [i.decode('utf-8') for i in fields]
+                    yield decoder(data), indices, self.fields_mapper.decode(fields_slice)
 
     def _is_database_reset(self):
         """
@@ -404,6 +436,12 @@ class MatrixSerializer:
 
     def save_data(self, data, indices, fields, to_chunk=True, cluster_id=None):
         """Optimized method to save data to chunk or cluster group with reusable logic."""
+        data_type = self.dtypes
+
+        if self.scaler_bits is not None:
+            self.scaler.partial_fit(data)
+            data = self.scaler.encode(data)
+            data_type = self.scaler.decode_dtype
 
         def update_dataset(dataset, data):
             """Resize and update dataset with new data."""
@@ -418,7 +456,7 @@ class MatrixSerializer:
                 dataset[-len(data):] = data
             else:
                 group.create_dataset(name, shape=(len(data),), maxshape=maxshape, dtype=dtype, data=data,
-                                     chunks=(self.chunk_size,), compression='gzip')
+                                     chunks=(self.chunk_size,))
 
         f = self._get_h5py_file_handler()
         if to_chunk:
@@ -433,7 +471,7 @@ class MatrixSerializer:
         if dataset_path in f:
             update_dataset(f[dataset_path], data)
         else:
-            f.create_dataset(dataset_path, shape=(len(data), self.dim), maxshape=(None, self.dim), dtype=np.float32,
+            f.create_dataset(dataset_path, shape=(len(data), self.dim), maxshape=(None, self.dim), dtype=data_type,
                              data=np.vstack(data), chunks=(self.chunk_size, self.dim))
 
         # Ensure the metadata group exists
@@ -444,9 +482,10 @@ class MatrixSerializer:
                         'indices' if to_chunk else f"cluster_id_{str(cluster_id)}_indices",
                         indices, (None,), np.uint64)
 
+        fields_indices = self.fields_mapper.encode(fields)
         update_metadata(metadata_group,
                         'fields' if to_chunk else f"cluster_id_{str(cluster_id)}_fields",
-                        fields, (None,), self._str_dtype)
+                        fields_indices, (None,), np.uint64)
 
     @io_checker
     def save_chunk_immediately(self):
@@ -482,7 +521,7 @@ class MatrixSerializer:
         if not self.database_path.exists():
             return 0
 
-        with self._get_h5py_file_handler() as f:
+        with self._get_h5py_file_handler(open_for_only_read=True) as f:
             if 'cluster' not in f:
                 return 0
             return len([i for i in f['cluster'] if isinstance(f['cluster'][i], h5py.Dataset)])
@@ -497,8 +536,17 @@ class MatrixSerializer:
             self.save_chunk_immediately()
 
             self.logger.info('Saving id filter...')
-            # save bloom filter
-            self.id_filter.to_file(self._bloom_filter_path)
+            # save filter
+            self.id_filter.to_file(self._filter_path)
+
+            # save scalar quantization model
+            if self.scaler_bits is not None:
+                self.logger.info('Saving scalar quantization model...')
+                self.scaler.save(self.database_path_parent / 'sq_model.mvdb')
+
+            # save fields mapper
+            self.logger.info('Saving fields mapper...')
+            self.fields_mapper.save(self.database_path_parent / 'fields_mapper.mvdb')
 
             f = self._get_h5py_file_handler()
             if 'chunk' in f:
@@ -514,9 +562,6 @@ class MatrixSerializer:
                 # save ivf index and k-means model
                 self.logger.info('Saving ann model...')
                 self.ann_model.save(self.database_path_parent / 'ann_model.mvdb')
-
-                self.logger.info('Saving ivf index...')
-                self.ivf_index.save(self.database_path_parent / 'ivf_index.mvdb')
 
             self.reset_database()
 
@@ -616,8 +661,6 @@ class MatrixSerializer:
         if self.COMMIT_FLAG:
             self.COMMIT_FLAG = False
 
-        self._added_samples += len(new_ids)
-
         return new_ids
 
     def add_item(self, vector, index: int = None, field: str = None, normalize: bool = False,
@@ -656,7 +699,7 @@ class MatrixSerializer:
 
         vector, index, field = self._process_vector_item(vector, index, field, normalize)
 
-        # Add the id to then bloom filter.
+        # Add the id to then filter.
         self.id_filter.add(index)
 
         self.database.append(vector)
@@ -668,8 +711,6 @@ class MatrixSerializer:
         if self.COMMIT_FLAG:
             self.COMMIT_FLAG = False
 
-        self._added_samples += 1
-
         return index
 
     def delete(self):
@@ -679,11 +720,11 @@ class MatrixSerializer:
 
         try:
             shutil.rmtree(self.database_path_parent)
-
+            self.IS_DELETED = True
         except FileNotFoundError:
             pass
 
-        self.id_filter = BloomTrie(bloom_size=self.bloom_filter_size, bloom_hash_count=5)
+        self.id_filter = IDFilter()
         self.reset_database()
 
     def _kmeans_clustering(self, data):
@@ -711,7 +752,6 @@ class MatrixSerializer:
         for idx, label in enumerate(labels):
             current_file_rows[label] += 1
             try:
-                self.ivf_index.add_to_cluster(label, indices[idx], fields[idx], current_file_rows[label])
                 ivf_index[label].append([idx, indices[idx], fields[idx]])
             except Exception as e:
                 self.logger.error(f"Error in adding to cluster: {e}")
@@ -733,7 +773,6 @@ class MatrixSerializer:
         """
         self._build_index()
 
-        # delete chunk_id.mvdb files
         self.reset_chunk_partition()
 
     def reorganize_cluster_partitions(self, database, ivf_index):
@@ -767,8 +806,6 @@ class MatrixSerializer:
         Returns:
             tuple: The number of vectors and the dimension of each vector in the database.
         """
-        self.check_commit()
-
         dim = self.dim
         total = 0
 
