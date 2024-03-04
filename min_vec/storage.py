@@ -4,156 +4,157 @@ from spinesUtils.asserts import raise_if
 
 
 class StorageWorker:
-    """A class to read and write data to a file."""
+    """A class to read and write data to a file, with optimized file handle management."""
 
     def __init__(self, database_path, dimension, chunk_size):
         self.database_path = database_path
         self.dimension = dimension
         self.chunk_size = chunk_size
+        self._open_file_handler = None
+
+    def file_handle(self, mode='a'):
+        """Context manager to open and close the file."""
+        # None or closed
+        if self._open_file_handler is None or not self._open_file_handler.id.valid:
+            self._open_file_handler = h5py.File(self.database_path, mode=mode)
+
+        return self._open_file_handler
 
     def get_partition_shape(self, partition_name):
         """Get the shape of the data."""
-        with h5py.File(self.database_path, 'r') as f:
+        with self.file_handle() as f:
             return f[partition_name].shape
 
     def chunk_read(self, reverse=False):
         """Read the data from the file."""
-        with h5py.File(self.database_path, 'r') as file:
+        with self.file_handle() as file:
             if 'chunk_data' not in file:
                 return
-            # sort the keys to ensure the order of the data/indices/fields
-            for key in sorted(
-                file['chunk_data'].keys(), key=lambda s: int(s) * (-1 if reverse else 1)
-            ):
+
+            for key in sorted(file['chunk_data'].keys(), key=lambda s: int(s) * (-1 if reverse else 1)):
                 data = file[f'chunk_data/{key}']
                 indices = file[f'chunk_indices/{key}']
                 fields = file[f'chunk_fields/{key}']
-                yield data, indices, fields
+                yield data[...], indices[...], fields[...]
 
-    def _write_chunk(self, file, data, indices, fields, data_dtype, chunk_num, resize=False):
-        """Write the chunk to the file."""
-        if resize:
-            file[f'chunk_data/{chunk_num}'].resize((file[f'chunk_data/{chunk_num}'].shape[0] + len(data)), axis=0)
-            file[f'chunk_indices/{chunk_num}'].resize((file[f'chunk_indices/{chunk_num}'].shape[0] + len(indices)),
-                                                      axis=0)
-            file[f'chunk_fields/{chunk_num}'].resize((file[f'chunk_fields/{chunk_num}'].shape[0] + len(fields)), axis=0)
+    def _ensure_dataset(self, file, path, shape, maxshape, dtype, data=None, resize=False):
+        """Ensure that a dataset exists and is of the correct size, creating or resizing it as necessary."""
+        if path in file:
+            if resize:
+                file[path].resize((file[path].shape[0] + shape[0]), axis=0)
+                if data is not None:
+                    file[path][-shape[0]:] = data
+        else:
+            file.create_dataset(path, data=data, shape=shape, dtype=dtype, maxshape=maxshape)
 
-        file.create_dataset(f'chunk_data/{chunk_num}',
-                            data=data, shape=(len(data), self.dimension), dtype=data_dtype,
-                            maxshape=(None, self.dimension))
-        file.create_dataset(f'chunk_indices/{chunk_num}',
-                            data=indices, shape=(len(indices),), dtype=np.int64, maxshape=(None,))
-        file.create_dataset(f'chunk_fields/{chunk_num}',
-                            data=fields, shape=(len(fields),), dtype=np.int64, maxshape=(None,))
+    def _write_data(self, file, data, indices, fields, data_dtype, base_path, num, resize=False, is_cluster=False):
+        """Write data, indices, and fields to the file."""
+        file_name1 = f'{base_path}_data/{num}' if not is_cluster else f'{base_path[0]}/{num}'
+        file_name2 = f'{base_path}_indices/{num}' if not is_cluster else f'{base_path[1]}/{num}'
+        file_name3 = f'{base_path}_fields/{num}' if not is_cluster else f'{base_path[2]}/{num}'
+
+        self._ensure_dataset(
+            file, file_name1, (len(data), self.dimension), (None, self.dimension),
+            data_dtype, data=data, resize=resize
+        )
+        self._ensure_dataset(
+            file, file_name2, (len(indices),), (None,), np.int64, data=indices, resize=resize
+        )
+        self._ensure_dataset(
+            file, file_name3, (len(fields),), (None,), np.int64, data=fields, resize=resize
+        )
 
     def chunk_write(self, data, indices, fields, data_dtype):
-        """Write the data to the file."""
-        with (h5py.File(self.database_path, 'a') as file):
+        """Write the data to the file, filling up the last chunk before creating a new one."""
+        with self.file_handle('a') as file:
             if 'chunk_data' not in file:
                 file.create_group('chunk_data')
                 file.create_group('chunk_indices')
                 file.create_group('chunk_fields')
 
-            while len(data) > 0:
-                if 'chunk_data' in file:
-                    if len(file['chunk_data']) == 0:
-                        last_chunk_shape = (0, self.dimension)
-                    else:
-                        last_chunk_shape = file[f'chunk_data/{len(file["chunk_data"])}'].shape
-                else:
-                    last_chunk_shape = (0, self.dimension)
-
-                if last_chunk_shape[0] >= self.chunk_size:
-                    chunk_num = len(file['chunk_data']) + 1
+            chunk_num = len(file['chunk_data'])
+            if chunk_num > 0:
+                last_chunk_size = file[f'chunk_data/{chunk_num}'].shape[0]
+                if last_chunk_size < self.chunk_size:
                     resize = True
                 else:
-                    chunk_num = len(file['chunk_data'])
+                    chunk_num += 1
                     resize = False
+            else:
+                resize = False  # 新块，不需要resize
 
-                data_chunk = data[:self.chunk_size]
-                indices_chunk = indices[:self.chunk_size]
-                fields_chunk = fields[:self.chunk_size]
-                data = data[self.chunk_size:]
-                indices = indices[self.chunk_size:]
-                fields = fields[self.chunk_size:]
-                self._write_chunk(file=file, data=data_chunk, indices=indices_chunk, fields=fields_chunk,
-                                  data_dtype=data_dtype, chunk_num=chunk_num, resize=resize)
+            while len(data) > 0:
+                remaining_space = self.chunk_size - last_chunk_size if resize else self.chunk_size
+                data_chunk = data[:remaining_space]
+                indices_chunk = indices[:remaining_space]
+                fields_chunk = fields[:remaining_space]
+
+                self._write_data(file, data_chunk, indices_chunk, fields_chunk, data_dtype, 'chunk', chunk_num, resize)
+
+                data = data[remaining_space:]
+                indices = indices[remaining_space:]
+                fields = fields[remaining_space:]
+
+                chunk_num += 1
+                resize = False  # 新创建的块之后不需要resize
+                last_chunk_size = 0  # 重置为新块的初始大小
 
     def cluster_read(self, cluster_id=None, reverse=False):
         """Read the data from the file."""
-        with h5py.File(self.database_path, 'r') as file:
+        with self.file_handle() as file:
             if 'cluster_data' not in file:
                 return
 
-            if cluster_id is None:
-                cluster_ids = file['cluster_data'].keys() if not reverse else reversed(file['cluster_data'].keys())
-            else:
-                cluster_ids = [cluster_id]
-            # sort the keys to ensure the order of the data/indices/fields
-            for cluster_id in cluster_ids:
-                for key in sorted(
-                    file['cluster_data'][cluster_id].keys(), key=lambda s:
-                    int(s) * (-1 if reverse else 1)
-                ):
-                    data = file[f'cluster_data/{cluster_id}/{key}']
-                    indices = file[f'cluster_indices/{cluster_id}/{key}']
-                    fields = file[f'cluster_fields/{cluster_id}/{key}']
-                    yield data, indices, fields
+            cluster_ids = [cluster_id] if cluster_id is not None else file['cluster_data'].keys()
+            if reverse:
+                cluster_ids = reversed(list(cluster_ids))
 
-    def _write_cluster(self, file, cluster_id, data, indices, fields, data_dtype, cluster_num, resize=False):
-        """Write the cluster to the file."""
-        if resize:
-            file[f'cluster_data/{cluster_id}/{cluster_num}'].resize(
-                (file[f'cluster_data/{cluster_id}/{cluster_num}'].shape[0] + len(data)), axis=0
-            )
-            file[f'cluster_indices/{cluster_id}/{cluster_num}'].resize(
-                (file[f'cluster_indices/{cluster_id}/{cluster_num}'].shape[0] + len(indices)), axis=0
-            )
-            file[f'cluster_fields/{cluster_id}/{cluster_num}'].resize(
-                (file[f'cluster_fields/{cluster_id}/{cluster_num}'].shape[0] + len(fields)), axis=0
-            )
-
-        file.create_dataset(f'cluster_data/{cluster_id}/{cluster_num}',
-                            data=data, shape=(len(data), self.dimension), dtype=data_dtype,
-                            maxshape=(None, self.dimension))
-        file.create_dataset(f'cluster_indices/{cluster_id}/{cluster_num}',
-                            data=indices, shape=(len(indices),), dtype=np.int64, maxshape=(None,))
-        file.create_dataset(f'cluster_fields/{cluster_id}/{cluster_num}',
-                            data=fields, shape=(len(fields),), dtype=np.int64, maxshape=(None,))
+            for cid in cluster_ids:
+                for key in sorted(file[f'cluster_data/{cid}'].keys(), key=lambda s: int(s) * (-1 if reverse else 1)):
+                    data = file[f'cluster_data/{cid}/{key}']
+                    indices = file[f'cluster_indices/{cid}/{key}']
+                    fields = file[f'cluster_fields/{cid}/{key}']
+                    yield data[...], indices[...], fields[...]
 
     def cluster_write(self, cluster_id, data, indices, fields, data_dtype):
-        """Write the data to the file."""
-        with h5py.File(self.database_path, 'a') as file:
-            if 'cluster_data' not in file:
-                file.create_group('cluster_data')
-                file.create_group('cluster_indices')
-                file.create_group('cluster_fields')
+        """Write the data to the file, filling up the last cluster before creating a new one."""
+        with self.file_handle('a') as file:
+            base_data_path = f'cluster_data/{cluster_id}'
+            base_indices_path = f'cluster_indices/{cluster_id}'
+            base_fields_path = f'cluster_fields/{cluster_id}'
 
-            while len(data) > 0:
-                if f'cluster_data/{cluster_id}' in file:
-                    if len(file[f'cluster_data/{cluster_id}']) == 0:
-                        last_cluster_shape = (0, self.dimension)
-                    else:
-                        last_cluster_shape = file[(f'cluster_data/{cluster_id}/'
-                                                   f'{len(file["cluster_data"][cluster_id])}')].shape
-                else:
-                    last_cluster_shape = (0, self.dimension)
+            file.require_group(base_data_path)
+            file.require_group(base_indices_path)
+            file.require_group(base_fields_path)
 
-                if last_cluster_shape[0] >= self.chunk_size:
-                    cluster_num = len(file[f'cluster_data/{cluster_id}']) + 1
+            cluster_num = len(file[base_data_path])
+            if cluster_num > 0:
+                last_cluster_size = file[f'{base_data_path}/{cluster_num}'].shape[0]
+                if last_cluster_size < self.chunk_size:
                     resize = True
                 else:
-                    cluster_num = len(file[f'cluster_data/{cluster_id}'])
+                    cluster_num += 1
                     resize = False
+            else:
+                resize = False  # 新的cluster，不需要resize
 
-                data_chunk = data[:self.chunk_size]
-                indices_chunk = indices[:self.chunk_size]
-                fields_chunk = fields[:self.chunk_size]
-                data = data[self.chunk_size:]
-                indices = indices[self.chunk_size:]
-                fields = fields[self.chunk_size:]
-                self._write_cluster(file=file, cluster_id=cluster_id, data=data_chunk, indices=indices_chunk,
-                                    fields=fields_chunk, data_dtype=data_dtype, cluster_num=cluster_num, resize=resize)
+            while len(data) > 0:
+                remaining_space = self.chunk_size - last_cluster_size if resize else self.chunk_size
+                data_chunk = data[:remaining_space]
+                indices_chunk = indices[:remaining_space]
+                fields_chunk = fields[:remaining_space]
+
+                self._write_data(file, data_chunk, indices_chunk, fields_chunk, data_dtype,
+                                 [base_data_path, base_indices_path, base_fields_path],
+                                 cluster_num, resize, is_cluster=True)
+
+                data = data[remaining_space:]
+                indices = indices[remaining_space:]
+                fields = fields[remaining_space:]
+
+                cluster_num += 1
+                resize = False  # 新创建的cluster之后不需要resize
+                last_cluster_size = 0  # 重置为新cluster的初始大小
 
     def read(self, read_type='chunk', cluster_id=None, reverse=False):
         """Read the data from the file."""
@@ -179,38 +180,39 @@ class StorageWorker:
 
     def write_file_attributes(self, attributes):
         """Write the attributes to the file."""
-        with h5py.File(self.database_path, 'a') as file:
+        with self.file_handle('a') as file:
             for key, value in attributes.items():
                 file.attrs[key] = value
 
     def read_file_attributes(self):
         """Read the attributes from the file."""
-        with h5py.File(self.database_path, 'r') as file:
+        with self.file_handle() as file:
             return dict(file.attrs)
 
     def delete_chunk(self):
         """Delete the chunk from the file."""
-        with h5py.File(self.database_path, 'a') as file:
+        with self.file_handle('a') as file:
             del file['chunk_data']
             del file['chunk_indices']
             del file['chunk_fields']
 
     def get_cluster_dataset_num(self):
         """Get the number of datasets in the cluster."""
-        with h5py.File(self.database_path, 'r') as file:
+        with self.file_handle() as file:
             if 'cluster_data' not in file:
                 return 0
             return len(file['cluster_data'])
 
     def get_shape(self, read_type='chunk'):
-        """Get the shape of the data."""
+        """Get the shape of the data.
+
+        parameters:
+            read_type (str): The type of data to read. Must be 'chunk' or 'cluster' or 'all'.
+        """
+
         dim = self.dimension
         total = 0
-
-        if not self.database_path.exists():
-            return total, dim
-
-        with h5py.File(self.database_path, 'r') as f:
+        with self.file_handle() as f:
             if read_type == 'chunk':
                 if 'chunk_data' in f:
                     for _ in f['chunk_data']:
@@ -234,7 +236,11 @@ class StorageWorker:
 
     def print_file_structure(self):
         """Print the file structure."""
-        with h5py.File(self.database_path, 'r') as f:
+
+        def print_name(name):
+            print(name)
+
+        with self.file_handle() as f:
             print(f'File structure of {self.database_path}')
             print(f'Attributes: {f.attrs}')
             print(f'Keys: {list(f.keys())}')
@@ -244,6 +250,10 @@ class StorageWorker:
                 print(f'Cluster data: {list(f["cluster_data"].keys())}')
                 for cluster_id in f['cluster_data']:
                     print(f'Cluster {cluster_id} keys: {list(f["cluster_data"][cluster_id].keys())}')
+
+            print("-" * 20)
+            print(f'File structure of {self.database_path} start')
+            f.visit(print_name)
+            print("-" * 20)
             print(f'File structure of {self.database_path} end')
             print()
-
