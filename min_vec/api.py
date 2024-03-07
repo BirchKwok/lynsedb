@@ -1,6 +1,5 @@
 """api.py - The MinVectorDB API."""
 
-
 from min_vec.config import *
 
 
@@ -16,8 +15,8 @@ class MinVectorDB:
     }, func_name='MinVectorDB')
     def __init__(
             self, dim, database_path, n_cluster=8, chunk_size=100_000, distance='cosine',
-            bloom_filter_size=100_000_000, index_mode='IVF-FLAT', dtypes='float32',
-            use_cache=True, reindex_if_conflict=False
+            index_mode='IVF-FLAT', dtypes='float64',
+            use_cache=True, reindex_if_conflict=False, scaler_bits=8
     ) -> None:
         """
         Initialize the vector database.
@@ -29,13 +28,15 @@ class MinVectorDB:
             chunk_size (int): The size of each data chunk. Default is 100_000.
             distance (str): Method for calculating vector distance.
                 Options are 'cosine' or 'L2' for Euclidean distance. Default is 'cosine'.
-            bloom_filter_size (int): The size of the bloom filter. Default is 100_000_000.
             index_mode (str): The storage mode of the database.
                 Options are 'FLAT' or 'IVF-FLAT'. Default is 'IVF-FLAT'.
             dtypes (str): The data type of the vectors. Default is 'float32'.
                 Options are 'float16', 'float32' or 'float64'.
             use_cache (bool): Whether to use cache for query. Default is True.
             reindex_if_conflict (bool): Whether to reindex if there is a conflict. Default is False.
+            scaler_bits (int): The number of bits for scalar quantization. Default is 8.
+                Options are 8, 16, or 32. The default is None, which means no scalar quantization.
+                The 8 for 8-bit, 16 for 16-bit, and 32 for 32-bit.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -56,9 +57,10 @@ class MinVectorDB:
         logger.info("Initializing MinVectorDB with: \n "
                     f"\r//    dim={dim}, database_path='{database_path}', \n"
                     f"\r//    n_cluster={n_cluster}, chunk_size={chunk_size},\n"
-                    f"\r//    distance='{distance}', bloom_filter_size={bloom_filter_size}, \n"
-                    f"\r//    index_mode='{index_mode}', dtypes='{dtypes}',\n"
-                    f"\r//    use_cache={use_cache}, reindex_if_conflict={reindex_if_conflict}\n")
+                    f"\r//    distance='{distance}', index_mode='{index_mode}', \n"
+                    f"\r//    dtypes='{dtypes}', use_cache={use_cache}, \n"
+                    f"\r//    reindex_if_conflict={reindex_if_conflict}, scaler_bits={scaler_bits}\n"
+                    )
 
         if chunk_size <= 1:
             raise ValueError('chunk_size must be greater than 1')
@@ -68,12 +70,12 @@ class MinVectorDB:
             database_path=database_path,
             n_clusters=n_cluster,
             chunk_size=chunk_size,
-            bloom_filter_size=bloom_filter_size,
             distance=distance,
             index_mode=index_mode,
             logger=logger,
             dtypes=dtypes,
-            reindex_if_conflict=reindex_if_conflict
+            reindex_if_conflict=reindex_if_conflict,
+            scaler_bits=scaler_bits
         )
         # matrix_serializer functions
         self.add_item = self._matrix_serializer.add_item
@@ -85,9 +87,7 @@ class MinVectorDB:
         self.commit = self._matrix_serializer.commit
 
         self._timer = Timer()
-
         self.use_cache = use_cache
-
         self.distance = distance
 
         self._matrix_query = DatabaseQuery(
@@ -143,8 +143,7 @@ class MinVectorDB:
         _database = None
         _indices = []
         _fields = []
-        for database, indices, fields in self._data_loader(read_chunk_only=False,
-                                                           from_tail=from_tail, open_for_only_read=True):
+        for database, indices, fields in self._data_loader(read_chunk_only=False, from_tail=from_tail):
             if _database is None:
                 _database = database
             else:
@@ -227,34 +226,31 @@ class MinVectorDB:
 
         return report
 
-    def status_report(self):
+    @property
+    def status_report_(self):
         """
         Return the database report.
         """
-        report = '\n* - DATABASE STATUS REPORT -\n'
-        db_report = {
-            'Database shape': self.shape,
+        db_report = {'DATABASE STATUS REPORT':{
+            'Database shape': (0, self._matrix_serializer.dim) if self._matrix_serializer.IS_DELETED else self.shape,
             'Database last_commit_time': self._matrix_serializer.last_commit_time,
             'Database commit status': self._matrix_serializer.COMMIT_FLAG,
             'Database index_mode': self._matrix_serializer.index_mode,
             'Database distance': self.distance,
             'Database use_cache': self.use_cache,
-            'Database reindex_if_conflict': self._matrix_serializer.reindex_if_conflict
-        }
+            'Database reindex_if_conflict': self._matrix_serializer.reindex_if_conflict,
+            'Database status': 'DELETED' if self._matrix_serializer.IS_DELETED else 'ACTIVE'
+        }}
 
-        for key, value in db_report.items():
-            report += f'| - {key}: {value}\n'
-
-        report += '* - END OF REPORT -\n'
-
-        return report
+        return db_report
 
     def __repr__(self):
-        return f"MinVectorDB(dim={self.shape[1]}, database_path='{self._matrix_serializer.database_path}', \n" \
-               f"n_cluster={self._matrix_serializer.n_clusters}, chunk_size={self._matrix_serializer.chunk_size}, \n" \
-               f"distance='{self.distance}', bloom_filter_size={self._matrix_serializer.bloom_filter_size}, \n" \
-               f"index_mode='{self._matrix_serializer.index_mode}', dtypes='{self._matrix_serializer.dtypes}', \n" \
-               f"use_cache={self.use_cache}, reindex_if_conflict={self._matrix_serializer.reindex_if_conflict})"
+        title = "MinVectorDB object with status: \n"
+        report = '\n* - DATABASE STATUS REPORT -\n'
+        for key, value in self.status_report_['DATABASE STATUS REPORT'].items():
+            report += f'| - {key}: {value}\n'
+
+        return title + report
 
     def __str__(self):
         return self.__repr__()
