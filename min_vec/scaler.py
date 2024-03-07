@@ -1,6 +1,5 @@
 """scaler.py - Scalar Quantization module"""
 
-
 import numpy as np
 import numexpr as ne
 import cloudpickle
@@ -36,31 +35,29 @@ class ScalarQuantization:
         self.fitted = True
 
     def encode(self, vectors):
+        raise_if(ValueError, not self.fitted, 'The model must be fitted before encoding.')
         epsilon = 1e-9
         n_levels_minus_1 = self.n_levels - 1
         min_vals = self.min_vals
         max_vals = self.max_vals
 
-        # normalized = ne.evaluate("(vectors - min_vals) / (max_vals - min_vals + epsilon)")
-
         quantized = ne.evaluate(
-            "((vectors - min_vals) / (max_vals - min_vals + epsilon)) * n_levels_minus_1",
-            local_dict={'vectors': vectors, 'min_vals': min_vals, 'max_vals': max_vals,
-                        'n_levels_minus_1': n_levels_minus_1, 'epsilon': epsilon}
+            "((vectors - min_vals) / (max_vals - min_vals + epsilon)) * n_levels_minus_1", optimization='aggressive',
+            truediv=False
         ).astype(self.bits)
 
         return quantized
 
     def decode(self, quantized_vectors):
         raise_if(ValueError, not self.fitted, 'The model must be fitted before decoding.')
-
         n_levels_minus_1 = self.n_levels - 1
-        range_vals = self.range_vals  # 确保已经在类初始化或其他地方计算了 range_vals = self.max_vals - self.min_vals
+        range_vals = self.range_vals
         min_vals = self.min_vals
 
-        decoded = ne.evaluate("(quantized_vectors / n_levels_minus_1) * range_vals + min_vals",
-                              local_dict={'quantized_vectors': quantized_vectors, 'n_levels_minus_1': n_levels_minus_1,
-                                          'range_vals': range_vals, 'min_vals': min_vals})
+        decoded = ne.evaluate(
+            "(quantized_vectors / n_levels_minus_1) * range_vals + min_vals", optimization='aggressive',
+            truediv=False
+        )
 
         if decoded.dtype != self.decode_dtype:
             decoded = decoded.astype(self.decode_dtype)
