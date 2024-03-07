@@ -8,6 +8,8 @@
     <a href="https://pypi.org/project/MinVectorDB/"><img src="https://img.shields.io/pypi/dm/MinVectorDB" alt="PyPI - Downloads"></a>
     <a href="https://pypi.org/project/MinVectorDB/"><img src="https://img.shields.io/pypi/implementation/MinVectorDB" alt="PyPI - Implementation"></a>
     <a href="https://pypi.org/project/MinVectorDB/"><img src="https://img.shields.io/pypi/wheel/MinVectorDB" alt="PyPI - Wheel"></a>
+    
+    <a href="https://pypi.org/project/MinVectorDB/"><img src="https://img.shields.io/pypi/v/MinVectorDB" alt="test"></a>
   </p>
 </div>
 
@@ -162,6 +164,7 @@ with db.insert_session():
 #     id += 1
 # db.commit()
 
+# 45:40 -> 36:06
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
 res = db.query(query, k=10)
