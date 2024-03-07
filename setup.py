@@ -34,7 +34,7 @@ setup(
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
     ],
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     url='https://github.com/BirchKwok/MinVectorDB',
     author='Birch Kwok',
     author_email='birchkwok@gmail.com',
