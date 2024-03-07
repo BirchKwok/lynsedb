@@ -162,7 +162,6 @@ with db.insert_session():
 #     id += 1
 # db.commit()
 
-# 45:40 -> 36:06
 print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
 res = db.query(query, k=10)
