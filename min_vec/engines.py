@@ -28,6 +28,11 @@ def cosine_distance(vec1, vec2, device=torch.device('cpu')):
         return torch.matmul(torch.from_numpy(vec1).to(device),
                             torch.from_numpy(vec2).to(device)).cpu().numpy()
 
+    if vec1.dtype == np.float16:
+        vec1 = vec1.astype(np.float32)
+    if vec2.dtype == np.float16:
+        vec2 = vec2.astype(np.float32)
+
     return torch.matmul(torch.from_numpy(vec1),
                         torch.from_numpy(vec2)).numpy()
 
@@ -42,6 +47,11 @@ def euclidean_distance(vec1, vec2, device=torch.device('cpu')):
     if device.type != 'cpu':
         return torch.norm(torch.from_numpy(vec1).to(device) -
                           torch.from_numpy(vec2).to(device), dim=1).cpu().numpy()
+
+    if vec1.dtype == np.float16:
+        vec1 = vec1.astype(np.float32)
+    if vec2.dtype == np.float16:
+        vec2 = vec2.astype(np.float32)
 
     return torch.norm(torch.from_numpy(vec1) -
                       torch.from_numpy(vec2), dim=1).numpy()
