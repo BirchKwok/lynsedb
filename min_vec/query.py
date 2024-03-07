@@ -1,4 +1,5 @@
 """query.py: this file is used to query the database for the vectors most similar to the given vector."""
+from spinesUtils.asserts import raise_if_not
 
 from min_vec.config import *
 
@@ -24,9 +25,9 @@ class DatabaseQuery:
         self.distance_func = cosine_distance if self.distance == 'cosine' else euclidean_distance
         self.is_reversed = -1 if self.distance == 'cosine' else 1
         self.chunk_size = self.matrix_serializer.chunk_size
-        self.index_mode = self.matrix_serializer.index_mode if (self.matrix_serializer.ann_model is not None
-                                                                and self.matrix_serializer.ann_model.fitted) else 'FLAT'
         self.device = self.matrix_serializer.device
+
+        self.fields_mapper = self.matrix_serializer.fields_mapper
 
         self.database = []
         self.index = []
@@ -49,18 +50,31 @@ class DatabaseQuery:
         """
         import numpy as np
 
+        field_condition = None
+        si_condition = None
+
         if field is not None:
             if isinstance(field, str):
-                field = [field]
+                field = [self.fields_mapper.fields_str_mapper.get(field, -1)]
+            else:
+                field = [self.fields_mapper.fields_str_mapper.get(f, -1) for f in field]
 
-            condition = np.isin(vector_field, field)
-            database_chunk = database_chunk[condition]
-            index_chunk = np.array(index_chunk)[condition]
+            field_condition = np.isin(vector_field, field)
 
         if subset_indices is not None:
-            subset_indices = list(set(subset_indices))
+            subset_indices = sorted(list(set(subset_indices)))
+            si_condition = np.isin(index_chunk, subset_indices)
 
-            condition = np.isin(index_chunk, subset_indices)
+        if field_condition is not None and si_condition is not None:
+            condition = np.logical_and(field_condition, si_condition)
+            database_chunk = database_chunk[condition]
+            index_chunk = np.array(index_chunk)[condition]
+        elif field_condition is not None:
+            condition = field_condition
+            database_chunk = database_chunk[condition]
+            index_chunk = np.array(index_chunk)[condition]
+        elif si_condition is not None:
+            condition = si_condition
             database_chunk = database_chunk[condition]
             index_chunk = np.array(index_chunk)[condition]
 
@@ -68,10 +82,12 @@ class DatabaseQuery:
             return [], []
 
         # Distance calculation core code
-        scores = self.distance_func(database_chunk, vector, device=self.device).squeeze()
+        scores = self.distance_func(database_chunk, vector, device=self.device)
 
         if scores.ndim == 0:
             scores = [scores]
+        elif scores.ndim == 2:
+            scores = scores.squeeze()
 
         return index_chunk, scores
 
@@ -147,9 +163,12 @@ class DatabaseQuery:
         def batch_query(vector, fields=None, subset_indices=None, is_ivf=True, cluster_id=None):
             nonlocal all_scores, all_index
 
-            dataloader = self.matrix_serializer.cluster_dataloader(cluster_id) \
+            dataloader = self.matrix_serializer.cluster_dataloader(cluster_id, mode='lazy') \
                 if is_ivf and self.matrix_serializer.ann_model \
-                else self.matrix_serializer.iterable_dataloader(open_for_only_read=True)
+                else self.matrix_serializer.iterable_dataloader(mode='lazy')
+
+            # for i in dataloader:
+            #     print(i)
 
             futures = list(filter(lambda x: len(x[0]) != 0, map(
                 lambda x: self._query_chunk(x[0], x[1], x[2], vector, fields, subset_indices),
@@ -183,7 +202,7 @@ class DatabaseQuery:
             return sort_results(all_scores_inside, all_index_inside)
 
         # if the index mode is FLAT, use FLAT
-        if self.index_mode == 'FLAT':
+        if not (self.matrix_serializer.ann_model is not None and self.matrix_serializer.ann_model.fitted):
             return batch_query(vector, fields, subset_indices, False)
 
         # otherwise, use IVF-FLAT
@@ -193,7 +212,7 @@ class DatabaseQuery:
         cluster_id_sorted = np.argsort(cluster_distances)[::-1]
 
         for cluster_id in cluster_id_sorted:
-            batch_query(vector, fields, subset_indices, cluster_id=cluster_id)
+            batch_query(vector, fields, subset_indices, cluster_id=str(cluster_id))
 
             if len(all_index) >= k:
                 break
