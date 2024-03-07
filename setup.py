@@ -7,6 +7,9 @@ def read_requirements(path):
     return list(Path(path).read_text().splitlines())
 
 
+reqs = read_requirements(Path('.').parent.joinpath("requirements.txt"))
+
+
 with open("README.md", "r") as fh:
     long_description = fh.read()
 
@@ -35,16 +38,6 @@ setup(
     url='https://github.com/BirchKwok/MinVectorDB',
     author='Birch Kwok',
     author_email='birchkwok@gmail.com',
-    install_requires=[
-        'numpy>=1.17.0',
-        'spinesUtils>=0.3.13',
-        'torch>=2.0.0',
-        'msgpack>=1.0.2',
-        'h5py>=3.4.0',
-        'scikit-learn>=1.0.0',
-        'cloudpickle>=2.0.0',
-        'numexpr>=2.7.3',
-        'pyroaring>=0.4.5',
-    ],
+    install_requires=reqs,
     zip_safe=False,
 )

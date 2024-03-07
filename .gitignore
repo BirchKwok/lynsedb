@@ -141,7 +141,7 @@ cython_debug/
 
 # files
 *.csv
-*.txt
+#*.txt
 *.tsv
 *.pkl
 
