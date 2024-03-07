@@ -1,159 +1,34 @@
-"""filter.py: this file is used to filter database index to avoid
-the conflict of the same index in the database."""
+from pyroaring import BitMap
 
 
-class TrieNode:
+class IDFilter:
     def __init__(self):
-        self.children = {}
-        self.is_end_of_word = False
+        self.ids = BitMap()
 
+    def add(self, items):
+        if isinstance(items, int):  # 如果items是单个整数
+            self.ids.add(items)
+        else:  # 如果items是可迭代的整数集合
+            self.ids.update(items)
 
-class IDTrie:
-    def __init__(self):
-        self.root = TrieNode()
-        self.max_value = None
-
-    def insert(self, word):
-        node = self.root
-        for char in word:
-            if char not in node.children:
-                node.children[char] = TrieNode()
-            node = node.children[char]
-        node.is_end_of_word = True
-
-        # 更新最大值
-        if self.max_value is None or int(word) > int(self.max_value):
-            self.max_value = word
-
-    def search(self, word):
-        node = self.root
-        for char in word:
-            if char not in node.children:
-                return False
-            node = node.children[char]
-        return node.is_end_of_word
-
-    def starts_with(self, prefix):
-        node = self.root
-        for char in prefix:
-            if char not in node.children:
-                return False
-            node = node.children[char]
-        return True
-
-    def get_max_value(self):
-        return self.max_value
-
-
-class BloomFilter:
-    def __init__(self, size, hash_count):
-        from bitarray import bitarray
-
-        self.size = size
-        self.hash_count = hash_count
-        self.bit_array = bitarray(size)
-        self.bit_array.setall(0)
-
-    def add(self, item):
-        import mmh3
-
-        item = str(item)
-        for i in range(self.hash_count):
-            index = mmh3.hash(item, i) % self.size
-            self.bit_array[index] = 1
+    def drop(self, item):
+        self.ids.discard(item)
 
     def __contains__(self, item):
-        import mmh3
+        return item in self.ids
 
-        item = str(item)
-        for i in range(self.hash_count):
-            index = mmh3.hash(item, i) % self.size
-            if self.bit_array[index] == 0:
-                return False
-        return True
+    def to_file(self, filepath):
+        # 使用serialize方法序列化BitMap为bytes，然后写入文件
+        with open(filepath, 'wb') as file:
+            file.write(self.ids.serialize())
 
-    def to_file(self, path):
-        with open(path, 'wb') as f:
-            self.bit_array.tofile(f)
-
-    def from_file(self, path):
-        from bitarray import bitarray
-
-        self.bit_array = bitarray()
-        with open(path, 'rb') as f:
-            self.bit_array.fromfile(f)
-
-        if len(self.bit_array) != self.size:
-            raise ValueError('The size of the bit array is not equal to the size of the Bloom filter, '
-                             f'excepted {self.size} but got {len(self.bit_array)}. '
-                             f'Perhaps you want to delete the file {path},  to recreate a new Bloom filter?')
-
-
-class BloomTrie:
-    def __init__(self, bloom_size, bloom_hash_count):
-        self.bloom_filter = BloomFilter(bloom_size, bloom_hash_count)
-        self.trie = IDTrie()
-
-    def add(self, item):
-        if isinstance(item, (list, tuple)):
-            list(map(self._pool_add, item))
-        else:
-            self._pool_add(item)
-
-    def _pool_add(self, single_item):
-        str_item = str(single_item)
-        self.bloom_filter.add(str_item)
-        self.trie.insert(str_item)
-
-    def __contains__(self, item):
-        str_item = str(item)
-        if str_item in self.bloom_filter:
-            return self.trie.search(str_item)
-        return False
-
-    def _save_trie_node(self, node, f):
-        import struct
-
-        f.write(struct.pack('B', len(node.children)))
-        f.write(struct.pack('?', node.is_end_of_word))
-        for char, child in node.children.items():
-            f.write(struct.pack('c', char.encode('utf-8')))
-            self._save_trie_node(child, f)
-
-    def to_file(self, path):
-        path = str(path)
-        self.bloom_filter.to_file(path + '.bloom.mvdb')
-        with open(path + '.trie.mvdb', 'wb') as f:
-            self._save_trie_node(self.trie.root, f)
-
-    def _load_trie_node(self, f):
-        import struct
-
-        node = TrieNode()
-        children_count = struct.unpack('B', f.read(1))[0]
-        node.is_end_of_word = struct.unpack('?', f.read(1))[0]
-        for _ in range(children_count):
-            char = struct.unpack('c', f.read(1))[0].decode('utf-8')
-            child = self._load_trie_node(f)
-            node.children[char] = child
-        return node
-
-    def from_file(self, path):
-        path = str(path)
-        self.bloom_filter.from_file(path + '.bloom.mvdb')
-        with open(path + '.trie.mvdb', 'rb') as f:
-            self.trie.root = self._load_trie_node(f)
+    def from_file(self, filepath):
+        try:
+            with open(filepath, 'rb') as file:
+                # 从文件读取bytes，然后使用deserialize方法反序列化为BitMap对象
+                self.ids = BitMap.deserialize(file.read())
+        except FileNotFoundError:
+            self.ids = BitMap()
 
     def find_max_value(self):
-        max_value = None
-        stack = [(self.trie.root, '')]
-
-        while stack:
-            node, current_value = stack.pop()
-            if node.is_end_of_word and (max_value is None or int(current_value) > int(max_value)):
-                max_value = current_value
-
-            for char, child in node.children.items():
-                stack.append((child, current_value + char))
-
-        return int(max_value) if max_value is not None else -1
+        return max(self.ids) if self.ids else -1
