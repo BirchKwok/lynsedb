@@ -5,7 +5,6 @@ from pathlib import Path
 import shutil
 
 import numpy as np
-import h5py
 from spinesUtils.asserts import raise_if
 
 from min_vec.engines import to_normalize
@@ -15,11 +14,12 @@ from min_vec.config import *
 from min_vec.kmeans import BatchKMeans
 from min_vec.scaler import ScalarQuantization
 from min_vec.fields_mapper import FieldsMapper
+from min_vec.storage import StorageWorker
 
 
 class MatrixSerializer:
     def __init__(
-            self, dim, database_path, distance, logger, n_clusters=8, chunk_size=1_000_000,
+            self, dim, database_path, distance, logger, n_clusters=16, chunk_size=1_000_000,
             index_mode='IVF-FLAT', dtypes='float64',
             reindex_if_conflict=False, scaler_bits=8
     ) -> None:
@@ -32,7 +32,7 @@ class MatrixSerializer:
             distance (str): Method for calculating vector distance.
                 Options are 'cosine' or 'L2' for Euclidean distance.
             logger (Logger): The logger object.
-            n_clusters (int): The number of clusters for the IVF-FLAT index. Default is 8.
+            n_clusters (int): The number of clusters for the IVF-FLAT index. Default is 16.
             chunk_size (int): The size of each data chunk. Default is 1_000_000.
             index_mode (str): The index mode of the database.
                 Options are 'FLAT' or 'IVF-FLAT'. Default is 'IVF-FLAT'.
@@ -90,15 +90,16 @@ class MatrixSerializer:
         self.chunk_size = chunk_size
         # set filter path
         self._filter_path = self.database_path_parent / 'id_filter.mvdb'
-        # set open file handler
-        self._open_file_handler = None
         # set device
         self.device = torch.device(MVDB_COMPUTE_DEVICE)
         # set scalar quantization bits
-        self.scaler_bits = scaler_bits
+        self.scaler_bits = scaler_bits if scaler_bits is not None else None
 
         # set database path
         self.database_path = self.database_path_parent / Path(database_path).name
+
+        # initialize the storage worker
+        self.storage_worker = StorageWorker(self.database_path, self.dim, self.chunk_size)
 
         self.logger.info(f"Initializing database folder path: '{'.mvdb'.join(database_path.split('.mvdb')[:-1])}/',"
                          " database file path: "
@@ -109,14 +110,6 @@ class MatrixSerializer:
         self.database = []
         self.indices = []
         self.fields = []
-
-        # initialize the database shape ( not the real shape, only for the first time )
-        self._added_data_rows = self.shape[0] if self.database_path.exists() else 0
-
-        if self._added_data_rows > 10000:
-            # if _added_data_rows is equal to 'fulfilled',
-            # the database will be used for IVF-FLAT index, if index_mode is IVF-FLAT
-            self._added_data_rows = 'fulfilled'
 
         # check initialize params
         self._check_initialize_params(dtypes, reindex_if_conflict)
@@ -129,7 +122,7 @@ class MatrixSerializer:
         self._initialize_id_filter()
 
         # save initial parameters
-        self._write_params(self._get_h5py_file_handler(), dtypes=dtypes)
+        self._write_params(dtypes=dtypes)
 
         if self._get_cluster_dataset_num() > 0 and self.index_mode == 'FLAT':
             # cause the index mode is FLAT, but the cluster dataset is not empty,
@@ -137,88 +130,92 @@ class MatrixSerializer:
             self.logger.warning('The index mode is FLAT, but the cluster dataset is not empty, '
                                 'so the clustered datasets will also be traversed during querying.')
 
-    def _write_params(self, f, dtypes):
-        f.attrs['dim'] = self.dim
-        f.attrs['chunk_size'] = self.chunk_size
-        f.attrs['distance'] = self.distance
-        f.attrs['dtypes'] = dtypes
+    def _write_params(self, dtypes):
+        attrs = {
+            'dim': self.dim,
+            'chunk_size': self.chunk_size,
+            'distance': self.distance,
+            'dtypes': dtypes
+        }
 
         if self.scaler_bits is not None:
-            f.attrs['sq_bits'] = self.scaler_bits
+            attrs['sq_bits'] = self.scaler_bits
+
+        self.storage_worker.write_file_attributes(attrs)
 
     def _check_initialize_params(self, dtypes, reindex_if_conflict):
         """check initialize params"""
         write_params_flag = False
         if self.database_path.exists():
             self.logger.info('Database file exists, reading parameters...')
-            with self._get_h5py_file_handler(open_for_only_read=True) as f:
-                dim = f.attrs.get('dim', self.dim)
-                chunk_size = f.attrs.get('chunk_size', self.chunk_size)
-                distance = f.attrs.get('distance', self.distance)
-                file_dtypes = f.attrs.get('dtypes', dtypes)
-                old_index_mode = f.attrs.get('index_mode', None)
-                old_sq_bits = f.attrs.get('sq_bits', self.scaler_bits)
 
-                if dim != self.dim:
+            attrs = self.storage_worker.read_file_attributes()
+            dim = attrs.get('dim', self.dim)
+            chunk_size = attrs.get('chunk_size', self.chunk_size)
+            distance = attrs.get('distance', self.distance)
+            file_dtypes = attrs.get('dtypes', dtypes)
+            old_index_mode = attrs.get('index_mode', None)
+            old_sq_bits = attrs.get('sq_bits', self.scaler_bits)
+
+            if dim != self.dim:
+                self.logger.warning(
+                    f'* dim={dim} in the file is not equal to the dim={self.dim} in the parameters, '
+                    f'the parameter dim will be covered by the dim in the file.')
+                self.dim = dim
+                write_params_flag = True
+
+            if chunk_size != self.chunk_size:
+                self.logger.warning(
+                    f'* chunk_size={chunk_size} in the file is not '
+                    f'equal to the chunk_size={self.chunk_size}'
+                    f'in the parameters, the parameter chunk_size will be covered by the chunk_size '
+                    f'in the file.'
+                )
+                self.chunk_size = chunk_size
+                write_params_flag = True
+
+            if distance != self.distance:
+                self.logger.warning(f'* distance=\'{distance}\' in the file is not '
+                                    f'equal to the distance=\'{self.distance}\' '
+                                    f'in the parameters, the parameter distance will be covered by the distance '
+                                    f'in the file.')
+                self.distance = distance
+                write_params_flag = True
+
+            if file_dtypes != dtypes:
+                self.logger.warning(
+                    f'* dtypes=\'{file_dtypes}\' in the file is not equal to the dtypes=\'{dtypes}\' '
+                    f'in the parameters, the parameter dtypes will be covered by the dtypes '
+                    f'in the file.')
+                self.dtypes = self._dtypes_map[attrs.get('dtypes', dtypes)]
+                write_params_flag = True
+
+            if old_index_mode != self.index_mode and self.index_mode == 'IVF-FLAT':
+                if reindex_if_conflict:
                     self.logger.warning(
-                        f'* dim={dim} in the file is not equal to the dim={self.dim} in the parameters, '
-                        f'the parameter dim will be covered by the dim in the file.')
-                    self.dim = dim
-                    write_params_flag = True
+                        f'* index_mode=\'{old_index_mode}\' in the file is not equal to the index_mode='
+                        f'\'{self.index_mode}\' in the parameters, if you really want to change the '
+                        f'index_mode to \'IVF-FLAT\', you need to run `commit()` function after initializing '
+                        f'the database.')
 
-                if chunk_size != self.chunk_size:
+                    self.COMMIT_FLAG = False
+                else:
                     self.logger.warning(
-                        f'* chunk_size={chunk_size} in the file is not '
-                        f'equal to the chunk_size={self.chunk_size}'
-                        f'in the parameters, the parameter chunk_size will be covered by the chunk_size '
-                        f'in the file.'
-                    )
-                    self.chunk_size = chunk_size
-                    write_params_flag = True
+                        f'* index_mode=\'{old_index_mode}\' in the file is not equal to the index_mode='
+                        f'\'{self.index_mode}\' in the parameters, if you really want to change the '
+                        f'index_mode to \'IVF-FLAT\', you need to set `reindex_if_conflict=True` first '
+                        f'and run `commit()` function after initializing the database.')
 
-                if distance != self.distance:
-                    self.logger.warning(f'* distance=\'{distance}\' in the file is not '
-                                        f'equal to the distance=\'{self.distance}\' '
-                                        f'in the parameters, the parameter distance will be covered by the distance '
-                                        f'in the file.')
-                    self.distance = distance
-                    write_params_flag = True
-
-                if file_dtypes != dtypes:
-                    self.logger.warning(
-                        f'* dtypes=\'{file_dtypes}\' in the file is not equal to the dtypes=\'{dtypes}\' '
-                        f'in the parameters, the parameter dtypes will be covered by the dtypes '
-                        f'in the file.')
-                    self.dtypes = self._dtypes_map[f.attrs.get('dtypes', dtypes)]
-                    write_params_flag = True
-
-                if old_index_mode != self.index_mode and self.index_mode == 'IVF-FLAT':
-                    if reindex_if_conflict:
-                        self.logger.warning(
-                            f'* index_mode=\'{old_index_mode}\' in the file is not equal to the index_mode='
-                            f'\'{self.index_mode}\' in the parameters, if you really want to change the '
-                            f'index_mode to \'IVF-FLAT\', you need to run `commit()` function after initializing '
-                            f'the database.')
-
-                        self.COMMIT_FLAG = False
-                    else:
-                        self.logger.warning(
-                            f'* index_mode=\'{old_index_mode}\' in the file is not equal to the index_mode='
-                            f'\'{self.index_mode}\' in the parameters, if you really want to change the '
-                            f'index_mode to \'IVF-FLAT\', you need to set `reindex_if_conflict=True` first '
-                            f'and run `commit()` function after initializing the database.')
-
-                if self.scaler_bits is not None and old_sq_bits != self.scaler_bits:
-                    self.logger.warning(f'* sq_bits={old_sq_bits} in the file is not equal to the sq_bits='
-                                        f'{self.scaler_bits} in the parameters, '
-                                        f'the sq_bits in the file will be covered by the sq_bits in the parameters.')
-                    self.RESCAN_FOR_SQ_FLAG = True
-
-            if write_params_flag:
-                with self._get_h5py_file_handler() as f:
-                    self._write_params(f, dtypes=dtypes)
+            if self.scaler_bits is not None and old_sq_bits != self.scaler_bits:
+                self.logger.warning(f'* sq_bits={old_sq_bits} in the file is not equal to the sq_bits='
+                                    f'{self.scaler_bits} in the parameters, '
+                                    f'the sq_bits in the file will be covered by the sq_bits in the parameters.')
+                self.RESCAN_FOR_SQ_FLAG = True
 
             self.logger.info('Reading parameters done.')
+
+        if write_params_flag or not self.database_path.exists():
+            self._write_params(dtypes)
 
     def _initialize_parent_path(self, database_path):
         """make directory if not exist"""
@@ -235,7 +232,7 @@ class MatrixSerializer:
             self.scaler = ScalarQuantization(bits=self.scaler_bits, decode_dtype=self.dtypes)
             # if the database file exists, the model will be fitted
             if self.database_path.exists() and self.RESCAN_FOR_SQ_FLAG:
-                for i in self.iterable_dataloader(read_chunk_only=False, open_for_only_read=True):
+                for i in self.iterable_dataloader(read_chunk_only=False):
                     self.scaler.partial_fit(i[0])
 
     def _initialize_ann_model(self):
@@ -269,8 +266,7 @@ class MatrixSerializer:
             self.id_filter.from_file(self._filter_path)
         else:
             if self.database_path.exists():
-                for database, indices, fields in self.iterable_dataloader(read_chunk_only=False,
-                                                                          open_for_only_read=True):
+                for database, indices, fields in self.storage_worker.read(read_type='all'):
                     self.id_filter.add(indices)
 
         self.last_id = self.id_filter.find_max_value()
@@ -285,28 +281,15 @@ class MatrixSerializer:
         self.indices = []
         self.fields = []
 
-    def _get_h5py_file_handler(self, open_for_only_read=False):
-        read_method = 'r' if open_for_only_read else 'a'
-        # None or closed
-        if self._open_file_handler is None or not self._open_file_handler.id.valid:
-            self._open_file_handler = h5py.File(self.database_path, read_method)
-
-        return self._open_file_handler
-
-    def _reset_h5py_file_handler(self):
-        if self._open_file_handler is not None:
-            self._open_file_handler.close()
-            self._open_file_handler = None
-
     @io_checker
-    def iterable_dataloader(self, read_chunk_only=False, from_tail=False, open_for_only_read=False):
+    def iterable_dataloader(self, read_chunk_only=False, from_tail=False, mode='eager'):
         """
         Generator for loading the database and index.
 
         Parameters:
             read_chunk_only (bool): Whether to read only the chunk.
             from_tail (bool): Whether to read from the end of the file.
-            open_for_only_read (bool): Whether to open the file for only reading.
+            mode (str): The mode of the generator. Options are 'eager' or 'lazy'. Default is 'eager'.
 
         Yields:
             tuple: A tuple of (database, index, field).
@@ -318,60 +301,25 @@ class MatrixSerializer:
             UnKnownError: If an unknown error occurs.
         """
         if self.scaler_bits is not None:
-            raise_if(ValueError, not self.scaler.fitted, 'The model must be fitted before decoding.')
             decoder = self.scaler.decode
         else:
             decoder = lambda x: x
 
-        def yield_data_chunking(f, key, msg_grp, index_key, field_key, reverse=False):
-            dataset = f[key]
-            num_chunks = dataset.chunks[0]
-            total_size = dataset.shape[0]
-            chunk_ranges = range(0, total_size, num_chunks)
+        read_type = 'all' if not read_chunk_only else 'chunk'
 
-            if reverse:
-                chunk_ranges = reversed(chunk_ranges)
-
-            for start in chunk_ranges:
-                end = min(start + num_chunks, total_size)
-
-                data_slice = dataset[start:end]
-                indices_slice = msg_grp[index_key][start:end]
-                fields_slice = msg_grp[field_key][start:end]
-
-                yield decoder(data_slice), indices_slice, self.fields_mapper.decode(fields_slice)
-
-        with (self._get_h5py_file_handler(open_for_only_read=open_for_only_read) as f):
-            if not from_tail:
-                if 'chunk' in f and 'chunk_msg' in f:
-                    if (self.index_mode == 'FLAT' or read_chunk_only) or \
-                            (self.index_mode == 'IVF-FLAT' and self._added_data_rows != 'fulfilled'):
-                        yield from yield_data_chunking(f, 'chunk', f['chunk_msg'], 'indices', 'fields')
-
-                if not read_chunk_only:
-                    if 'cluster' in f:
-                        for j in f['cluster']:
-                            yield from yield_data_chunking(f['cluster'], j, f['cluster_msg'], f'{j}_indices',
-                                                           f'{j}_fields')
+        for data, indices, fields in self.storage_worker.read(read_type=read_type, reverse=from_tail):
+            if mode == 'lazy':
+                yield decoder(data), indices, fields
             else:
-                if not read_chunk_only and 'cluster' in f:
-                    for j in reversed(list(f['cluster'].keys())):
-                        yield from yield_data_chunking(f['cluster'], j, f['cluster_msg'], f'{j}_indices', f'{j}_fields',
-                                                       reverse=True)
+                yield decoder(data), indices, self.fields_mapper.decode(fields)
 
-                if 'chunk' in f and 'chunk_msg' in f:
-                    if (self.index_mode == 'FLAT' or read_chunk_only) or \
-                            (self.index_mode == 'IVF-FLAT' and self._added_data_rows != 'fulfilled'):
-                        yield from yield_data_chunking(f, 'chunk', f['chunk_msg'], 'indices', 'fields', reverse=True)
-
-        self._reset_h5py_file_handler()
-
-    def cluster_dataloader(self, cluster_id):
+    def cluster_dataloader(self, cluster_id, mode='eager'):
         """
         Generator for loading the database and index. Only used for querying when index_mode is IVF-FLAT.
 
         Parameters:
             cluster_id (int): The cluster id.
+            mode (str): The mode of the generator. Options are 'eager' or 'lazy'. Default is 'eager'.
 
         Yields:
             tuple: A tuple of (database, index, field).
@@ -388,23 +336,11 @@ class MatrixSerializer:
         else:
             decoder = lambda x: x
 
-        with self._get_h5py_file_handler(open_for_only_read=True) as f:
-            datashape = f['cluster'][f'cluster_id_{cluster_id}'].shape[0]
-            if datashape // self.chunk_size == 0:
-                data = f['cluster'][f'cluster_id_{cluster_id}']
-                indices = f['cluster_msg'][f'cluster_id_{cluster_id}_indices']
-                fields_slice = f['cluster_msg'][f'cluster_id_{cluster_id}_fields']
-
-                yield decoder(data), indices, self.fields_mapper.decode(fields_slice)
+        for data, indices, fields in self.storage_worker.read(read_type='cluster', cluster_id=str(cluster_id)):
+            if mode == 'lazy':
+                yield decoder(data), indices, fields
             else:
-                for i in range(datashape // self.chunk_size + 1):
-                    data = f['cluster'][f'cluster_id_{cluster_id}'][i * self.chunk_size:(i + 1) * self.chunk_size]
-                    indices = f['cluster_msg'][f'cluster_id_{cluster_id}_indices'][
-                              i * self.chunk_size:(i + 1) * self.chunk_size]
-                    fields_slice = f['cluster_msg'][f'cluster_id_{cluster_id}_fields'][
-                                   i * self.chunk_size:(i + 1) * self.chunk_size]
-
-                    yield decoder(data), indices, self.fields_mapper.decode(fields_slice)
+                yield decoder(data), indices, self.fields_mapper.decode(fields)
 
     def _is_database_reset(self):
         """
@@ -430,9 +366,7 @@ class MatrixSerializer:
         """
         Reset the chunk partition.
         """
-        f = self._get_h5py_file_handler()
-        del f['chunk']
-        del f['chunk_msg']
+        self.storage_worker.delete_chunk()
 
     def save_data(self, data, indices, fields, to_chunk=True, cluster_id=None):
         """Optimized method to save data to chunk or cluster group with reusable logic."""
@@ -441,51 +375,17 @@ class MatrixSerializer:
         if self.scaler_bits is not None:
             self.scaler.partial_fit(data)
             data = self.scaler.encode(data)
-            data_type = self.scaler.decode_dtype
+            data_type = self.scaler.bits
 
-        def update_dataset(dataset, data):
-            """Resize and update dataset with new data."""
-            dataset.resize((dataset.shape[0] + len(data), self.dim))
-            dataset[-len(data):, :] = np.vstack(data)
-
-        def update_metadata(group, name, data, maxshape, dtype):
-            """Create or update metadata dataset."""
-            if name in group:
-                dataset = group[name]
-                dataset.resize((dataset.shape[0] + len(data),))
-                dataset[-len(data):] = data
-            else:
-                group.create_dataset(name, shape=(len(data),), maxshape=maxshape, dtype=dtype, data=data,
-                                     chunks=(self.chunk_size,))
-
-        f = self._get_h5py_file_handler()
-        if to_chunk:
-            dataset_path = 'chunk'
-            metadata_group_path = 'chunk_msg'
+        if isinstance(fields, str) or all(isinstance(i, str) for i in fields):
+            fields_indices = self.fields_mapper.encode(fields)
         else:
-            group_name = 'cluster'
-            dataset_path = f"{group_name}/cluster_id_{str(cluster_id)}"
-            metadata_group_path = "cluster_msg"
+            fields_indices = fields
 
-        # Update or create dataset
-        if dataset_path in f:
-            update_dataset(f[dataset_path], data)
-        else:
-            f.create_dataset(dataset_path, shape=(len(data), self.dim), maxshape=(None, self.dim), dtype=data_type,
-                             data=np.vstack(data), chunks=(self.chunk_size, self.dim))
-
-        # Ensure the metadata group exists
-        metadata_group = f.require_group(metadata_group_path)
-
-        # Update indices and fields metadata
-        update_metadata(metadata_group,
-                        'indices' if to_chunk else f"cluster_id_{str(cluster_id)}_indices",
-                        indices, (None,), np.uint64)
-
-        fields_indices = self.fields_mapper.encode(fields)
-        update_metadata(metadata_group,
-                        'fields' if to_chunk else f"cluster_id_{str(cluster_id)}_fields",
-                        fields_indices, (None,), np.uint64)
+        self.storage_worker.write(data, indices, fields_indices,
+                                  write_type='chunk' if to_chunk else 'cluster',
+                                  cluster_id=str(cluster_id) if cluster_id is not None else cluster_id,
+                                  data_dtype=data_type)
 
     @io_checker
     def save_chunk_immediately(self):
@@ -521,10 +421,7 @@ class MatrixSerializer:
         if not self.database_path.exists():
             return 0
 
-        with self._get_h5py_file_handler(open_for_only_read=True) as f:
-            if 'cluster' not in f:
-                return 0
-            return len([i for i in f['cluster'] if isinstance(f['cluster'][i], h5py.Dataset)])
+        return self.storage_worker.get_cluster_dataset_num()
 
     def commit(self):
         """
@@ -548,12 +445,7 @@ class MatrixSerializer:
             self.logger.info('Saving fields mapper...')
             self.fields_mapper.save(self.database_path_parent / 'fields_mapper.mvdb')
 
-            f = self._get_h5py_file_handler()
-            if 'chunk' in f:
-                chunk_partition_size = f['chunk'].shape[0]
-            else:
-                chunk_partition_size = 0
-
+            chunk_partition_size = self.storage_worker.get_shape(read_type='chunk')[0]
             if chunk_partition_size >= 100000 and self.index_mode != 'FLAT':
                 self.logger.info('Building index...')
                 # build index
@@ -565,10 +457,8 @@ class MatrixSerializer:
 
             self.reset_database()
 
-            f = self._get_h5py_file_handler()
             # save params
-            f.attrs['index_mode'] = self.index_mode
-            self._reset_h5py_file_handler()
+            self.storage_worker.write_file_attributes({'index_mode': self.index_mode})
 
             self.COMMIT_FLAG = True
 
@@ -682,7 +572,6 @@ class MatrixSerializer:
         """
         raise_if(ValueError, len(vector) != self.dim,
                  f'vector dim error, expect {self.dim}, got {len(vector)}')
-        raise_if(ValueError, index in self.id_filter, f'id {index} already exists')
         raise_if(ValueError, vector.ndim != 1, f'vector dim error, expect 1, got {vector.ndim}')
         raise_if(ValueError, field is not None and not isinstance(field, str),
                  f'field must be str, got {type(field)}')
@@ -696,6 +585,8 @@ class MatrixSerializer:
                  f'save_immediately must be bool, got {type(save_immediately)}')
 
         index = self._generate_new_id() if index is None else index
+
+        raise_if(ValueError, index in self.id_filter, f'id {index} already exists')
 
         vector, index, field = self._process_vector_item(vector, index, field, normalize)
 
@@ -724,8 +615,15 @@ class MatrixSerializer:
         except FileNotFoundError:
             pass
 
-        self.id_filter = IDFilter()
         self.reset_database()
+
+        # reinitialize
+        if self.scaler_bits is not None:
+            self._initialize_scalar_quantization()
+
+        self._initialize_fields_mapper()
+        self._initialize_ann_model()
+        self._initialize_id_filter()
 
     def _kmeans_clustering(self, data):
         """kmeans clustering"""
@@ -733,39 +631,28 @@ class MatrixSerializer:
 
         return self.ann_model.cluster_centers_, self.ann_model.labels_
 
-    def _insert_ivf_index(self, data, indices, fields):
+    def _clustering_for_ivf(self, data, indices, fields):
         # Perform K-means clustering.
         self.cluster_centers, labels = self._kmeans_clustering(data)
-
-        current_file_rows = {}
-        for i in range(self.n_clusters):
-            current_file_rows[i] = 0
-
-        f = self._get_h5py_file_handler()
-        if 'cluster' in f:
-            for j in f['cluster']:
-                current_file_rows[int(j.split('_')[-1])] = f['cluster'][j].shape[0] - 1
 
         # Current batch's IVF index.
         ivf_index = {i: [] for i in range(self.n_clusters)}
         # Allocate data to various cluster centers.
         for idx, label in enumerate(labels):
-            current_file_rows[label] += 1
             try:
                 ivf_index[label].append([idx, indices[idx], fields[idx]])
             except Exception as e:
                 self.logger.error(f"Error in adding to cluster: {e}")
-                current_file_rows[label] -= 1
                 raise e
 
         return ivf_index
 
     def _build_index(self):
-        for database, indices, fields in self.iterable_dataloader(read_chunk_only=True):
+        for database, indices, fields in self.iterable_dataloader(read_chunk_only=True, mode='lazy'):
             # Create an IVF index.
-            ivf_index = self._insert_ivf_index(database, indices, fields)
+            ivf_index = self._clustering_for_ivf(database, indices, fields)
             # reorganize files
-            self.reorganize_cluster_partitions(database, ivf_index)
+            self.save_cluster_partitions(database, ivf_index)
 
     def build_index(self):
         """
@@ -775,7 +662,7 @@ class MatrixSerializer:
 
         self.reset_chunk_partition()
 
-    def reorganize_cluster_partitions(self, database, ivf_index):
+    def save_cluster_partitions(self, database, ivf_index):
         """
         Rearrange files according to the IVF index.
         """
@@ -806,22 +693,7 @@ class MatrixSerializer:
         Returns:
             tuple: The number of vectors and the dimension of each vector in the database.
         """
-        dim = self.dim
-        total = 0
-
-        if not self.database_path.exists():
-            return total, dim
-
-        with self._get_h5py_file_handler() as f:
-            if 'chunk' in f:
-                total += f['chunk'].shape[0]
-
-            if 'cluster' in f:
-                grp = f['cluster']
-                for i in grp:
-                    total += grp[i].shape[0]
-
-        return total, dim
+        return self.storage_worker.get_shape(read_type='all')
 
     @property
     def shape(self):
