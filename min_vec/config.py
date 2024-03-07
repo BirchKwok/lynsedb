@@ -44,6 +44,8 @@ else:
 
 MVDB_COMPUTE_DEVICE = get_env_variable('MVDB_COMPUTE_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu', str)
 
+MVDB_USER_MESSAGE_PATH = get_env_variable('MVDB_USER_MESSAGE_PATH', None, str)
+
 
 def get_all_configs():
     return {
@@ -57,3 +59,4 @@ def get_all_configs():
         'MVDB_COSINE_SIMILARITY_THRESHOLD': MVDB_COSINE_SIMILARITY_THRESHOLD,
         'MVDB_COMPUTE_DEVICE': MVDB_COMPUTE_DEVICE
     }
+
