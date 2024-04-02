@@ -2,7 +2,7 @@
 
 from functools import wraps
 
-from min_vec.config import MVDB_COSINE_SIMILARITY_THRESHOLD
+from min_vec.configs.config import MVDB_COSINE_SIMILARITY_THRESHOLD
 
 
 class UnKnownError(Exception):
@@ -35,14 +35,14 @@ def io_checker(func):
     return wrapper
 
 
-class VectorCache:
+class QueryVectorCache:
     """A decorator that caches the results of a function call with the same arguments.
         Only use for DatabaseQuery.query function.
     """
 
     def __init__(self, max_size=1000):
         from collections import OrderedDict
-        from min_vec.engines import cosine_distance
+        from min_vec.computational_layer.engines import cosine_distance
 
         self.cache = OrderedDict()
         self.max_size = max_size

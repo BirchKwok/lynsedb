@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>MinVectorDB</h1>
+  <h1><a href="https://github.com/BirchKwok/MinVectorDB"><img src="https://github.com/BirchKwok/MinVectorDB/blob/main/pic/logo.png" alt="MinVectorDB"></a></h1>
   <h3>A pure Python-implemented, lightweight, stateless, locally deployed vector database.</h3>
   <p>
     <a href="https://badge.fury.io/py/MinVectorDB"><img src="https://badge.fury.io/py/MinVectorDB.svg" alt="PyPI version"></a>
@@ -26,7 +26,7 @@
 - **Facilitating Vector Modifications and Deletions**: We will introduce features to modify and delete vectors, allowing for more flexible data management.
 - **Implementing Rollback Strategies**: To increase database robustness and data security, rollback strategies will be added, helping users recover from incorrect operations or system failures easily.
 
-Additionally, we are introducing a query caching feature, with a default cache for the most recent 10,000 query results. In cases where a query does not hit the cache, the system will calculate the cosine similarity between the given vector and cached vectors. If the similarity is greater than 0.8, it will return the result of the closest cached vector directly.
+Additionally, we are introducing a query caching feature, with a default cache for the most recent 10,000 query results. In cases where a query does not hit the cache, the system will calculate the cosine similarity between the given vector and cached vectors. If the similarity is greater than 0.85, it will return the result of the closest cached vector directly.
 
 MinVectorDB focuses on achieving a 100% recall rate, prioritizing recall accuracy over high-speed search performance. This approach ensures that users can reliably retrieve all relevant vector data, making MinVectorDB particularly suitable for applications requiring responses within 100 milliseconds.
 
@@ -63,17 +63,17 @@ os.environ['MVDB_LOG_WITH_TIME'] = 'False'  # default: False
 # kmeans epochs
 os.environ['MVDB_KMEANS_EPOCHS'] = '500'  # default: 100
 
-# bulk add batch size
-os.environ['MVDB_BULK_ADD_BATCH_SIZE'] = '100000'  # default: 100000
-
-# cache size
-os.environ['MVDB_CACHE_SIZE'] = '10000'  # default: 10000
+# query cache size
+os.environ['MVDB_QUERY_CACHE_SIZE'] = '10000'  # default: 10000
 
 # cosine similarity threshold for cache result matching 
-os.environ['MVDB_COSINE_SIMILARITY_THRESHOLD'] = '0.9'  # 'None' for disable this feature, default to 0.8
+os.environ['MVDB_COSINE_SIMILARITY_THRESHOLD'] = '0.9'  # 'None' for disable this feature, default to 0.85
 
 # computing platform, can be set to platforms supported by torch.device 
-os.environ['MVDB_COMPUTE_DEVICE'] = 'cpu' # default to 'cpu', torch.device
+os.environ['MVDB_COMPUTE_DEVICE'] = 'mps' # default to 'cpu', torch.device
+
+# specify the number of chunks in the memory cache
+os.environ['MVDB_DATALOADER_BUFFER_SIZE'] = '20'  # default to '20', must be integer-like string
 ```
 
 
@@ -90,21 +90,12 @@ print("MinVectorDB all configs: ", '\n - ' + '\n - '.join([f'{k}: {v}' for k, v 
      - MVDB_TRUNCATE_LOG: True
      - MVDB_LOG_WITH_TIME: False
      - MVDB_KMEANS_EPOCHS: 500
-     - MVDB_BULK_ADD_BATCH_SIZE: 100000
-     - MVDB_CACHE_SIZE: 10000
+     - MVDB_QUERY_CACHE_SIZE: 10000
      - MVDB_COSINE_SIMILARITY_THRESHOLD: 0.9
      - MVDB_COMPUTE_DEVICE: cpu
+     - MVDB_USER_MESSAGE_PATH: None
+     - MVDB_DATALOADER_BUFFER_SIZE: 20
 
-
-
-```python
-# define the display function, this is optional in actual use.
-try:
-    from IPython.display import display_markdown
-except ImportError:
-    def display_markdown(text, raw=True):
-        print(text)
-```
 
 ### Sequentially add vectors.
 
@@ -113,60 +104,34 @@ except ImportError:
 import numpy as np
 from tqdm import tqdm
 
-from spinesUtils.timer import Timer
 from min_vec import MinVectorDB
 
-timer = Timer()
 
-vectors = 10_0000
-
-display_markdown("*Demo 1* -- **Sequentially add vectors**", raw=True)
-
-# distance can be 'L2' or 'cosine'
-# index_mode can be 'FLAT' or 'IVF-FLAT', default is 'IVF-FLAT'
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', distance='cosine',
-                 index_mode='IVF-FLAT', chunk_size=100000, use_cache=False, scaler_bits=8)
-
+# Generate vectors that need to be saved, this code is only for this demo
 np.random.seed(23)
-
 def get_test_vectors(shape):
     for i in range(shape[0]):
         yield np.random.random(shape[1])
 
-timer.start()
+# distance can be 'L2' or 'cosine'
+# index_mode can be 'FLAT' or 'IVF-FLAT', default is 'IVF-FLAT'
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', distance='cosine',
+                 index_mode='FLAT', chunk_size=100000, use_cache=False, scaler_bits=8)
+
 # ========== Use automatic commit statements. Recommended. =============
 # You can perform this operation multiple times, and the data will be appended to the database.
 with db.insert_session():
     # Define the initial ID.
     id = 0
-    for t in tqdm(get_test_vectors((vectors, 1024)), total=vectors, unit="vector"):
+    for t in tqdm(get_test_vectors((1000000, 1024)), total=1000000, unit="vector"):
         if id == 0:
             query = t / np.linalg.norm(t)
             query_id = 0
             query_field = None
-            # break
         # Vectors need to be normalized before writing to the database.
-        # t = t / np.linalg.norm(t) 
-        # Here, normalization can be directly specified, achieving the same effect as the previous sentence.
         db.add_item(t, index=id, normalize=True, save_immediately=False)
-        
-        # ID increments by 1 with each loop iteration.
+
         id += 1
-
-# ============== Or use manual commit statements. =================
-# id = 0
-# for t in get_test_vectors((vectors, 1024)):
-#     # Vectors need to be normalized before writing to the database.
-#     # t = t / np.linalg.norm(t) 
-#     # Here, normalization can be directly specified, achieving the same effect as the previous sentence.
-#     db.add_item(t, index=id, normalize=True)
-    
-#     # ID increments by 1 with each loop iteration.
-#     id += 1
-# db.commit()
-
-# 45:40 -> 36:06
-print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
 res = db.query(query, k=10)
 
@@ -182,46 +147,30 @@ print(db.query_report_)
 db.delete()
 ```
 
-
-*Demo 1* -- **Sequentially add vectors**
-
-
     MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
-    //    n_cluster=8, chunk_size=100000,
-    //    distance='cosine', index_mode='IVF-FLAT', 
-    //    dtypes='float64', use_cache=False, 
+    //    n_cluster=16, chunk_size=100000,
+    //    distance='cosine', index_mode='FLAT', 
+    //    dtypes='float32', use_cache=False, 
     //    reindex_if_conflict=False, scaler_bits=8
     
-    MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/', database file path: 'test_min_vec/test_min_vec.mvdb'
-    100%|██████████| 100000/100000 [00:02<00:00, 39194.40vector/s]
-    MinVectorDB - INFO - Saving chunk immediately...
-    MinVectorDB - INFO - Saving id filter...
-    MinVectorDB - INFO - Saving scalar quantization model...
-    MinVectorDB - INFO - Saving fields mapper...
-    MinVectorDB - INFO - Building index...
+    MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
+    100%|██████████| 1000000/1000000 [00:15<00:00, 65961.24vector/s]
 
 
-    
-    * [Insert data] Time cost 5.0081 s.
       - Query sample id:  0
       - Query sample field:  None
     
     * - MOST RECENT QUERY REPORT -
-    | - Database shape: (100000, 1024)
-    | - Query time: 0.02220 s
-    | - Query vector: [0.02898663 0.05306277 0.04289231 ... 0.0143056  0.01658325 0.04808333]
+    | - Database shape: (1000000, 1024)
+    | - Query time: 0.34045 s
     | - Query K: 10
-    | - Query fields: None
     | - Query normalize: False
-    | - Query subset_indices: None
-    | - Top 10 results index: [    0 82013 72370 69565 59036 98630 75948 27016  6658 38440]
-    | - Top 10 results similarity: [0.9910508  0.76508979 0.7644585  0.76421338 0.76404578 0.76316689
-     0.76315354 0.76276408 0.7627276  0.76228611]
+    | - Top 10 results index: [     0 126163 934623 376250 136782  67927 927723 454821 909201 283657]
+    | - Top 10 results similarity: [1.         0.7866893  0.7823357  0.78192943 0.78141373 0.78101647
+     0.78069043 0.7806051  0.78056455 0.78041667]
     * - END OF REPORT -
-
-
-    MinVectorDB - INFO - Saving ann model...
+    
 
 
 ### Bulk add vectors
@@ -230,43 +179,33 @@ db.delete()
 ```python
 import numpy as np
 
-from spinesUtils.timer import Timer
 from min_vec import MinVectorDB
 
-timer = Timer()
-
-display_markdown("*Demo 2* -- **Bulk add vectors**", raw=True)
-
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, n_cluster=8, index_mode='FLAT')
-
+# Generate vectors that need to be saved, this code is only for this demo
 np.random.seed(23)
-
 def get_test_vectors(shape):
     for i in range(shape[0]):
         yield np.random.random(shape[1])
-
-timer.start()
+        
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, index_mode='FLAT')
 
 # You can perform this operation multiple times, and the data will be appended to the database.
 with db.insert_session():  
     # Define the initial ID.
     id = 0
     vectors = []
-    for t in get_test_vectors((100003, 1024)):
+    for t in get_test_vectors((100000, 1024)):
         # Vectors need to be normalized before writing to the database.
-        # t = t / np.linalg.norm(t) 
         vectors.append((t, id))
-        # ID increments by 1 with each loop iteration.
         id += 1
         
     # Here, normalization can be directly specified, achieving the same effect as `t = t / np.linalg.norm(t) `.
     db.bulk_add_items(vectors, normalize=True, save_immediately=False)
 
-print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
-query = db.head(10)[2]
-query_id = db.head(10, returns='indices')[2]
-query_field = db.head(10, returns='fields')[2]
+query = db.head(10)[0]
+query_id = db.head(10, returns='indices')[0]
+query_field = db.head(10, returns='fields')[0]
 
 res = db.query(query, k=10)
 print("  - Query sample id: ", query_id)
@@ -275,52 +214,35 @@ print("  - Query sample field: ", query_field)
 # Query report
 print(db.query_report_)
 
-
-timer.end()
-
 # This sentence is for demo demonstration purposes, 
 # to clear the currently created .mvdb files from the database, 
 # but this is optional in actual use.
 db.delete()
 ```
 
-
-*Demo 2* -- **Bulk add vectors**
-
-
     MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
-    //    n_cluster=8, chunk_size=10000,
+    //    n_cluster=16, chunk_size=10000,
     //    distance='cosine', index_mode='FLAT', 
-    //    dtypes='float64', use_cache=True, 
-    //    reindex_if_conflict=False, scaler_bits=8
+    //    dtypes='float32', use_cache=True, 
+    //    reindex_if_conflict=False, scaler_bits=None
     
-    MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/', database file path: 'test_min_vec/test_min_vec.mvdb'
+    MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
 
 
-    
-    * [Insert data] Time cost 4.8161 s.
-      - Query sample id:  2
+      - Query sample id:  0
       - Query sample field:  
     
     * - MOST RECENT QUERY REPORT -
-    | - Database shape: (100003, 1024)
-    | - Query time: 0.13812 s
-    | - Query vector: [0.04471495 0.00244354 0.03863426 ... 0.02068288 0.05212677 0.03638766]
+    | - Database shape: (100000, 1024)
+    | - Query time: 0.03720 s
     | - Query K: 10
-    | - Query fields: None
     | - Query normalize: False
-    | - Query subset_indices: None
-    | - Top 10 results index: [    2 91745 34952 73172 56017 16234 21556  3534   440 20005]
-    | - Top 10 results similarity: [0.99395035 0.7834744  0.77941584 0.77786743 0.77772982 0.77767259
-     0.77766295 0.77743496 0.77707587 0.77678738]
+    | - Top 10 results index: [    0 67927 53447 47665 64134 13859 41949  5788 38082 18507]
+    | - Top 10 results similarity: [1.0000002  0.78101647 0.77775997 0.7771763  0.77591014 0.77581763
+     0.77578723 0.77570754 0.77500904 0.77420104]
     * - END OF REPORT -
-
-
-    MinVectorDB - INFO - Saving chunk immediately...
-    MinVectorDB - INFO - Saving id filter...
-    MinVectorDB - INFO - Saving scalar quantization model...
-    MinVectorDB - INFO - Saving fields mapper...
+    
 
 
 ### Use field to improve Searching Recall
@@ -329,37 +251,27 @@ db.delete()
 ```python
 import numpy as np
 
-from spinesUtils.timer import Timer
 from min_vec import MinVectorDB
 
-timer = Timer()
 
-display_markdown("*Demo 3* -- **Use field to improve Searching Recall**", raw=True)
-
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000)
-
+# Generate vectors that need to be saved, this code is only for this demo
 np.random.seed(23)
-
-
 def get_test_vectors(shape):
     for i in range(shape[0]):
         yield np.random.random(shape[1])
 
-timer.start()
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000)
+
 with db.insert_session():     
     # Define the initial ID.
     id = 0
     vectors = []
     for t in get_test_vectors((100000, 1024)):
         # Vectors need to be normalized before writing to the database.
-        # t = t / np.linalg.norm(t) 
         vectors.append((t, id, 'test_'+str(id // 100)))
-        # ID increments by 1 with each loop iteration.
         id += 1
         
     db.bulk_add_items(vectors, normalize=True)
-
-print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
 query = db.head(10)[0]
 query_id = db.head(10, returns='indices')[0]
@@ -373,53 +285,35 @@ print("  - Query sample field: ", query_field)
 # Query report
 print(db.query_report_)
 
-timer.end()
-
 # This sentence is for demo demonstration purposes, 
 # to clear the currently created .mvdb files from the database, 
 # but this is optional in actual use.
 db.delete()
 ```
 
-
-*Demo 3* -- **Use field to improve Searching Recall**
-
-
     MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
-    //    n_cluster=8, chunk_size=10000,
+    //    n_cluster=16, chunk_size=10000,
     //    distance='cosine', index_mode='IVF-FLAT', 
-    //    dtypes='float64', use_cache=True, 
-    //    reindex_if_conflict=False, scaler_bits=8
+    //    dtypes='float32', use_cache=True, 
+    //    reindex_if_conflict=False, scaler_bits=None
     
-    MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/', database file path: 'test_min_vec/test_min_vec.mvdb'
-    MinVectorDB - INFO - Saving chunk immediately...
-    MinVectorDB - INFO - Saving id filter...
-    MinVectorDB - INFO - Saving scalar quantization model...
-    MinVectorDB - INFO - Saving fields mapper...
-    MinVectorDB - INFO - Building index...
+    MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
 
 
-    
-    * [Insert data] Time cost 5.9627 s.
-      - Query sample id:  77
+      - Query sample id:  11
       - Query sample field:  test_0
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.03002 s
-    | - Query vector: [0.04427223 0.05085017 0.05055556 ... 0.03278401 0.00088751 0.03528501]
+    | - Query time: 0.01311 s
     | - Query K: 10
-    | - Query fields: ['test_0']
     | - Query normalize: False
-    | - Query subset_indices: None
-    | - Top 10 results index: [77 24 69 71 97 94 81 48 13 67]
-    | - Top 10 results similarity: [0.98169604 0.75300974 0.74258977 0.74204745 0.74182057 0.74018082
-     0.74005663 0.74002714 0.73858353 0.7351924 ]
+    | - Top 10 results index: [11 11  2 58 71 71 88 88 81 81]
+    | - Top 10 results similarity: [1.         1.         0.7702445  0.76463264 0.764104   0.764104
+     0.7637025  0.7637025  0.7620634  0.7620634 ]
     * - END OF REPORT -
-
-
-    MinVectorDB - INFO - Saving ann model...
+    
 
 
 ### Use subset_indices to narrow down the search range
@@ -428,23 +322,16 @@ db.delete()
 ```python
 import numpy as np
 
-from spinesUtils.timer import Timer
 from min_vec import MinVectorDB
 
-timer = Timer()
 
-display_markdown("*Demo 4* -- **Use subset_indices to narrow down the search range**", raw=True)
-
-timer.start()
-
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, index_mode='IVF-FLAT')
-
+# Generate vectors that need to be saved, this code is only for this demo
 np.random.seed(23)
-
-
 def get_test_vectors(shape):
     for i in range(shape[0]):
         yield np.random.random(shape[1])
+
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, index_mode='IVF-FLAT')
 
 with db.insert_session():     
     # Define the initial ID.
@@ -452,14 +339,10 @@ with db.insert_session():
     vectors = []
     for t in get_test_vectors((100000, 1024)):
         # Vectors need to be normalized before writing to the database.
-        # t = t / np.linalg.norm(t) 
         vectors.append((t, id, 'test_'+str(id // 100)))
-        # ID increments by 1 with each loop iteration.
         id += 1
         
     db.bulk_add_items(vectors, normalize=True)
-
-print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
 query = db.head(10)[0]
 query_id = db.head(10, returns='indices')[0]
@@ -473,53 +356,35 @@ print("  - Query sample field: ", query_field)
 # Query report
 print(db.query_report_)
 
-timer.end()
-
 # This sentence is for demo demonstration purposes, 
 # to clear the currently created .mvdb files from the database, 
 # but this is optional in actual use.
 db.delete()
 ```
 
-
-*Demo 4* -- **Use subset_indices to narrow down the search range**
-
-
     MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
-    //    n_cluster=8, chunk_size=10000,
+    //    n_cluster=16, chunk_size=10000,
     //    distance='cosine', index_mode='IVF-FLAT', 
-    //    dtypes='float64', use_cache=True, 
-    //    reindex_if_conflict=False, scaler_bits=8
+    //    dtypes='float32', use_cache=True, 
+    //    reindex_if_conflict=False, scaler_bits=None
     
-    MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/', database file path: 'test_min_vec/test_min_vec.mvdb'
-    MinVectorDB - INFO - Saving chunk immediately...
-    MinVectorDB - INFO - Saving id filter...
-    MinVectorDB - INFO - Saving scalar quantization model...
-    MinVectorDB - INFO - Saving fields mapper...
-    MinVectorDB - INFO - Building index...
+    MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
 
 
-    
-    * [Insert data] Time cost 5.9423 s.
-      - Query sample id:  77
+      - Query sample id:  11
       - Query sample field:  test_0
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.02989 s
-    | - Query vector: [0.04427223 0.05085017 0.05055556 ... 0.03278401 0.00088751 0.03528501]
+    | - Query time: 0.01752 s
     | - Query K: 10
-    | - Query fields: None
     | - Query normalize: False
-    | - Query subset_indices: [57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96]
-    | - Top 10 results index: [77 69 71 94 81 67 65 62 88 59]
-    | - Top 10 results similarity: [0.98169604 0.74258977 0.74204745 0.74018082 0.74005663 0.7351924
-     0.73376908 0.73177266 0.73129947 0.72831082]
+    | - Top 10 results index: [11 11  2 25  4 19 21 29 30 13]
+    | - Top 10 results similarity: [1.         1.         0.7702445  0.7628149  0.7586509  0.75613594
+     0.7559968  0.7528333  0.74891967 0.7427169 ]
     * - END OF REPORT -
-
-
-    MinVectorDB - INFO - Saving ann model...
+    
 
 
 ### Conduct searches by specifying both subset_indices and fields simultaneously.
@@ -528,23 +393,16 @@ db.delete()
 ```python
 import numpy as np
 
-from spinesUtils.timer import Timer
 from min_vec import MinVectorDB
 
-timer = Timer()
-
-display_markdown("*Demo 5* -- **Conduct searches by specifying both subset_indices and fields simultaneously**", raw=True)
-
-timer.start()
-
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000)
-
+# Generate vectors that need to be saved, this code is only for this demo
 np.random.seed(23)
-
-
 def get_test_vectors(shape):
     for i in range(shape[0]):
         yield np.random.random(shape[1])
+
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, distance='L2')
+
 
 with db.insert_session():     
     # Define the initial ID.
@@ -553,17 +411,10 @@ with db.insert_session():
     last_field = None
     for t in get_test_vectors((100000, 1024)):
         # Vectors need to be normalized before writing to the database.
-        # t = t / np.linalg.norm(t) 
         vectors.append((t, id, 'test_'+str(id // 100)))
-        # if 'test_'+str(id // 100) != last_field:
-        #     print('test_'+str(id // 100))
-        #     last_field = 'test_'+str(id // 100)
-        # ID increments by 1 with each loop iteration.
         id += 1
         
     db.bulk_add_items(vectors, normalize=True)
-
-print(f"\n* [Insert data] Time cost {timer.last_timestamp_diff():>.4f} s.")
 
 query = db.head(10)[0]
 query_id = db.head(10, returns='indices')[0]
@@ -572,7 +423,7 @@ query_field = db.head(10, returns='fields')[0]
 # You may define both 'subset_indices' and 'fields'
 # If there is no intersection between subset_indices and fields, there will be no result. 
 # If there is an intersection, the query results within the intersection will be returned.
-res = db.query(query, k=10, subset_indices=list(range(query_id-20, query_id + 20)), fields=['test_0', 'test_1'])
+res = db.query(query, k=10, subset_indices=list(range(query_id-20, query_id + 20)), fields=[query_field])
 print("  - Query sample id: ", query_id)
 print("  - Query sample field: ", query_field)
 
@@ -585,43 +436,27 @@ print(db.query_report_)
 db.delete()
 ```
 
-
-*Demo 5* -- **Conduct searches by specifying both subset_indices and fields simultaneously**
-
-
     MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
-    //    n_cluster=8, chunk_size=10000,
-    //    distance='cosine', index_mode='IVF-FLAT', 
-    //    dtypes='float64', use_cache=True, 
-    //    reindex_if_conflict=False, scaler_bits=8
+    //    n_cluster=16, chunk_size=10000,
+    //    distance='L2', index_mode='IVF-FLAT', 
+    //    dtypes='float32', use_cache=True, 
+    //    reindex_if_conflict=False, scaler_bits=None
     
-    MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/', database file path: 'test_min_vec/test_min_vec.mvdb'
-    MinVectorDB - INFO - Saving chunk immediately...
-    MinVectorDB - INFO - Saving id filter...
-    MinVectorDB - INFO - Saving scalar quantization model...
-    MinVectorDB - INFO - Saving fields mapper...
-    MinVectorDB - INFO - Building index...
+    MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
 
 
-    
-    * [Insert data] Time cost 5.9817 s.
-      - Query sample id:  77
+      - Query sample id:  11
       - Query sample field:  test_0
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.02898 s
-    | - Query vector: [0.04427223 0.05085017 0.05055556 ... 0.03278401 0.00088751 0.03528501]
+    | - Query time: 0.02081 s
     | - Query K: 10
-    | - Query fields: ['test_0', 'test_1']
     | - Query normalize: False
-    | - Query subset_indices: [57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96]
-    | - Top 10 results index: [77 69 71 94 81 67 65 62 88 59]
-    | - Top 10 results similarity: [0.98169604 0.74258977 0.74204745 0.74018082 0.74005663 0.7351924
-     0.73376908 0.73177266 0.73129947 0.72831082]
+    | - Top 10 results index: [11 11  2 25  4 19 21 29 30  1]
+    | - Top 10 results similarity: [0.         0.         0.6778725  0.68874544 0.69476485 0.6983754
+     0.69857436 0.7030885  0.70863307 0.70987064]
     * - END OF REPORT -
-
-
-    MinVectorDB - INFO - Saving ann model...
+    
 

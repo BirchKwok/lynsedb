@@ -1,6 +1,7 @@
 """api.py - The MinVectorDB API."""
+import gc
 
-from min_vec.config import *
+from min_vec.configs.config import *
 
 
 class MinVectorDB:
@@ -14,9 +15,9 @@ class MinVectorDB:
         'use_cache': bool, 'reindex_if_conflict': bool
     }, func_name='MinVectorDB')
     def __init__(
-            self, dim, database_path, n_cluster=8, chunk_size=100_000, distance='cosine',
-            index_mode='IVF-FLAT', dtypes='float64',
-            use_cache=True, reindex_if_conflict=False, scaler_bits=8
+            self, dim, database_path, n_cluster=16, chunk_size=100_000, distance='cosine',
+            index_mode='IVF-FLAT', dtypes='float32',
+            use_cache=True, reindex_if_conflict=False, scaler_bits=None, n_threads=None
     ) -> None:
         """
         Initialize the vector database.
@@ -34,9 +35,11 @@ class MinVectorDB:
                 Options are 'float16', 'float32' or 'float64'.
             use_cache (bool): Whether to use cache for query. Default is True.
             reindex_if_conflict (bool): Whether to reindex if there is a conflict. Default is False.
-            scaler_bits (int): The number of bits for scalar quantization. Default is 8.
+            scaler_bits (int): The number of bits for scalar quantization.
                 Options are 8, 16, or 32. The default is None, which means no scalar quantization.
                 The 8 for 8-bit, 16 for 16-bit, and 32 for 32-bit.
+            n_threads (int): The number of threads to use for parallel processing. Default is None,
+                which means the number of CPUs.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -44,8 +47,8 @@ class MinVectorDB:
         from spinesUtils.logging import Logger
         from spinesUtils.timer import Timer
 
-        from min_vec.query import DatabaseQuery
-        from min_vec.matrix_serializer import MatrixSerializer
+        from min_vec.execution_layer.query import DatabaseQuery
+        from min_vec.execution_layer.matrix_serializer import MatrixSerializer
 
         logger = Logger(
             fp=MVDB_LOG_PATH,
@@ -75,12 +78,12 @@ class MinVectorDB:
             logger=logger,
             dtypes=dtypes,
             reindex_if_conflict=reindex_if_conflict,
-            scaler_bits=scaler_bits
+            scaler_bits=scaler_bits,
+            n_threads=n_threads
         )
         # matrix_serializer functions
         self.add_item = self._matrix_serializer.add_item
         self.bulk_add_items = self._matrix_serializer.bulk_add_items
-        self.delete = self._matrix_serializer.delete
         self._data_loader = self._matrix_serializer.iterable_dataloader
         self.check_commit = self._matrix_serializer.check_commit
         self._id_filter = self._matrix_serializer.id_filter
@@ -116,11 +119,8 @@ class MinVectorDB:
         time_cost = self._timer.last_timestamp_diff()
         self._most_recent_query_report['Database shape'] = self.shape
         self._most_recent_query_report['Query time'] = f"{time_cost :>.5f} s"
-        self._most_recent_query_report['Query vector'] = vector
         self._most_recent_query_report['Query K'] = k
-        self._most_recent_query_report['Query fields'] = fields
         self._most_recent_query_report['Query normalize'] = normalize
-        self._most_recent_query_report['Query subset_indices'] = subset_indices
         self._most_recent_query_report[f'Top {k} results index'] = res[0]
         self._most_recent_query_report[f'Top {k} results similarity'] = res[1]
 
@@ -143,7 +143,8 @@ class MinVectorDB:
         _database = None
         _indices = []
         _fields = []
-        for database, indices, fields in self._data_loader(read_chunk_only=False, from_tail=from_tail):
+        for database, indices, fields in self._data_loader(read_chunk_only=False, from_tail=from_tail,
+                                                           order_read=True):
             if _database is None:
                 _database = database
             else:
@@ -207,9 +208,18 @@ class MinVectorDB:
         """
         Create a session to insert data, which will automatically commit the data when the session ends.
         """
-        from min_vec.session import DatabaseSession
+        from min_vec.execution_layer.session import DatabaseSession
 
         return DatabaseSession(self)
+
+    def delete(self):
+        """
+        Delete the database.
+        """
+        self._matrix_serializer.delete()
+        self._matrix_query.query.clear_cache()
+
+        gc.collect()
 
     @property
     def query_report_(self):
@@ -245,7 +255,7 @@ class MinVectorDB:
         return db_report
 
     def __repr__(self):
-        title = "MinVectorDB object with status: \n"
+        title = "Deleted MinVectorDB object with status: \n"
         report = '\n* - DATABASE STATUS REPORT -\n'
         for key, value in self.status_report_['DATABASE STATUS REPORT'].items():
             report += f'| - {key}: {value}\n'
@@ -254,3 +264,9 @@ class MinVectorDB:
 
     def __str__(self):
         return self.__repr__()
+
+    def __len__(self):
+        return self.shape[0]
+
+    def is_deleted(self):
+        return self._matrix_serializer.IS_DELETED

@@ -1,11 +1,15 @@
 """query.py: this file is used to query the database for the vectors most similar to the given vector."""
-from spinesUtils.asserts import raise_if_not
+import os
+from concurrent.futures import ThreadPoolExecutor
 
-from min_vec.config import *
+from pyroaring import BitMap
+
+from min_vec.configs.config import *
+from min_vec.computational_layer.engines import argsort_topk
 
 
 class DatabaseQuery:
-    from min_vec.utils import VectorCache
+    from min_vec.utils.utils import QueryVectorCache
 
     def __init__(self, matrix_serializer) -> None:
         """
@@ -14,7 +18,7 @@ class DatabaseQuery:
         Parameters:
             matrix_serializer (MatrixSerializer): The database to be queried.
         """
-        from min_vec.engines import cosine_distance, euclidean_distance
+        from min_vec.computational_layer.engines import cosine_distance, euclidean_distance
 
         self.matrix_serializer = matrix_serializer
 
@@ -68,21 +72,21 @@ class DatabaseQuery:
         if field_condition is not None and si_condition is not None:
             condition = np.logical_and(field_condition, si_condition)
             database_chunk = database_chunk[condition]
-            index_chunk = np.array(index_chunk)[condition]
+            index_chunk = index_chunk[condition]
         elif field_condition is not None:
             condition = field_condition
             database_chunk = database_chunk[condition]
-            index_chunk = np.array(index_chunk)[condition]
+            index_chunk = index_chunk[condition]
         elif si_condition is not None:
             condition = si_condition
             database_chunk = database_chunk[condition]
-            index_chunk = np.array(index_chunk)[condition]
+            index_chunk = index_chunk[condition]
 
         if len(index_chunk) == 0:
             return [], []
 
         # Distance calculation core code
-        scores = self.distance_func(database_chunk, vector, device=self.device)
+        scores = self.distance_func(vector, database_chunk, device=self.device)
 
         if scores.ndim == 0:
             scores = [scores]
@@ -91,7 +95,7 @@ class DatabaseQuery:
 
         return index_chunk, scores
 
-    @VectorCache(MVDB_CACHE_SIZE)
+    @QueryVectorCache(MVDB_QUERY_CACHE_SIZE)
     def query(self, vector, k: int | str = 12,
               fields: list = None, normalize: bool = False, subset_indices=None, **kwargs):
         """
@@ -114,7 +118,7 @@ class DatabaseQuery:
         import numpy as np
         from spinesUtils.asserts import raise_if
 
-        from min_vec.engines import to_normalize
+        from min_vec.computational_layer.engines import to_normalize
 
         self.logger.debug(f'Query vector: {vector.tolist()}')
         self.logger.debug(f'Query k: {k}')
@@ -151,34 +155,33 @@ class DatabaseQuery:
 
         all_scores = []
         all_index = []
-        unique_indices = set()
+        unique_indices = BitMap()
 
         def sort_results(all_s, all_i):
             all_scores_i = np.array(all_s)
             all_index_i = np.array(all_i)
-            top_k_indices = np.argsort(self.is_reversed * all_scores_i)[:k]
+
+            top_k_indices = argsort_topk(self.is_reversed * all_scores_i, k)
 
             return all_index_i[top_k_indices], all_scores_i[top_k_indices]
 
-        def batch_query(vector, fields=None, subset_indices=None, is_ivf=True, cluster_id=None):
+        def batch_query(vector, fields=None, subset_indices=None, is_ivf=True, cluster_id=None, sort=True):
             nonlocal all_scores, all_index
 
             dataloader = self.matrix_serializer.cluster_dataloader(cluster_id, mode='lazy') \
                 if is_ivf and self.matrix_serializer.ann_model \
                 else self.matrix_serializer.iterable_dataloader(mode='lazy')
 
-            # for i in dataloader:
-            #     print(i)
+            with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+                futures = [i for i in executor.map(
+                    lambda x: self._query_chunk(x[0], x[1], x[2], vector, fields, subset_indices), dataloader)
+                    if len(i[0]) != 0]
 
-            futures = list(filter(lambda x: len(x[0]) != 0, map(
-                lambda x: self._query_chunk(x[0], x[1], x[2], vector, fields, subset_indices),
-                dataloader
-            )))
-
-            if len(futures) == 0:
+            if not futures:
                 return [], []
 
             index, scores = zip(*futures)
+
             # if index[0] is iterable, then index is a tuple of numpy ndarray, so we need to flatten it
             if len(index[0].shape) > 0:
                 index = [item for sublist in index for item in sublist]
@@ -188,33 +191,29 @@ class DatabaseQuery:
             scores = np.array(scores)
 
             if len(index) != 0:
-                new_index = index[~np.isin(index, list(unique_indices))]
-                new_scores = scores[~np.isin(index, list(unique_indices))]
+                new_index = index[~np.isin(index, unique_indices.to_array())]
+                new_scores = scores[~np.isin(index, unique_indices.to_array())]
                 all_scores.extend(new_scores)
                 all_index.extend(new_index)
                 unique_indices.update(new_index)
 
-            del futures
-
-            all_scores_inside = np.array(all_scores)
-            all_index_inside = np.array(all_index)
-
-            return sort_results(all_scores_inside, all_index_inside)
+            return sort_results(all_scores, all_index) if sort else None
 
         # if the index mode is FLAT, use FLAT
         if not (self.matrix_serializer.ann_model is not None and self.matrix_serializer.ann_model.fitted):
             return batch_query(vector, fields, subset_indices, False)
 
         # otherwise, use IVF-FLAT
-        cluster_distances = self.distance_func(vector, self.matrix_serializer.ann_model.cluster_centers_.T,
+        cluster_distances = self.distance_func(vector, self.matrix_serializer.ann_model.cluster_centers_,
                                                device=self.device).squeeze()
 
-        cluster_id_sorted = np.argsort(cluster_distances)[::-1]
+        cluster_id_sorted = np.argsort(cluster_distances)[::-1] if self.distance == 'cosine' else np.argsort(
+            cluster_distances)
 
         for cluster_id in cluster_id_sorted:
-            batch_query(vector, fields, subset_indices, cluster_id=str(cluster_id))
+            batch_query(vector, fields, subset_indices, cluster_id=str(cluster_id), sort=False)
 
             if len(all_index) >= k:
                 break
 
-        return sort_results(np.array(all_scores), np.array(all_index))
+        return sort_results(all_scores, all_index)

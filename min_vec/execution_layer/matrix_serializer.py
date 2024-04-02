@@ -1,27 +1,25 @@
-import os.path
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 import shutil
 
 import numpy as np
 from spinesUtils.asserts import raise_if
 
-from min_vec.engines import to_normalize
-from min_vec.filter import IDFilter
-from min_vec.utils import io_checker
-from min_vec.config import *
-from min_vec.kmeans import BatchKMeans
-from min_vec.scaler import ScalarQuantization
-from min_vec.fields_mapper import FieldsMapper
-from min_vec.storage import StorageWorker
+from min_vec.computational_layer.engines import to_normalize
+from min_vec.data_structures.filter import IDFilter
+from min_vec.utils.utils import io_checker
+from min_vec.configs.config import *
+from min_vec.data_structures.kmeans import BatchKMeans
+from min_vec.data_structures.scaler import ScalarQuantization
+from min_vec.data_structures.fields_mapper import FieldsMapper
+from min_vec.storage_layer.storage import StorageWorker
 
 
 class MatrixSerializer:
     def __init__(
             self, dim, database_path, distance, logger, n_clusters=16, chunk_size=1_000_000,
-            index_mode='IVF-FLAT', dtypes='float64',
-            reindex_if_conflict=False, scaler_bits=8
+            index_mode='IVF-FLAT', dtypes='float32',
+            reindex_if_conflict=False, scaler_bits=None, n_threads=10
     ) -> None:
         """
         Initialize the vector database.
@@ -40,9 +38,10 @@ class MatrixSerializer:
                 Options are 'float16', 'float32' or 'float64'.
             reindex_if_conflict (bool): Whether to reindex the database if there is an index mode conflict.
                 Default is False.
-            scaler_bits (int): The number of bits for scalar quantization. Default is 8.
+            scaler_bits (int): The number of bits for scalar quantization. Default is None.
                 Options are 8, 16, 32. If None, scalar quantization will not be used.
                 The 8 bits for uint8, 16 bits for uint16, 32 bits for uint32.
+            n_threads (int): The number of threads to use for reading and writing the database. Default is 10.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -67,7 +66,7 @@ class MatrixSerializer:
         # set flag for scalar quantization, if the flag is True, the database will be rescanned for scalar quantization
         self.RESCAN_FOR_SQ_FLAG = False
 
-        self.IS_DELETED = None
+        self.IS_DELETED = False
 
         self.logger = logger
 
@@ -96,14 +95,14 @@ class MatrixSerializer:
         self.scaler_bits = scaler_bits if scaler_bits is not None else None
 
         # set database path
-        self.database_path = self.database_path_parent / Path(database_path).name
+        self.database_path = self.database_path_parent / Path(database_path).name.split('.mvdb')[0]
 
         # initialize the storage worker
-        self.storage_worker = StorageWorker(self.database_path, self.dim, self.chunk_size)
+        self.storage_worker = StorageWorker(self.database_path_parent, self.dim, self.chunk_size, n_threads=n_threads)
 
-        self.logger.info(f"Initializing database folder path: '{'.mvdb'.join(database_path.split('.mvdb')[:-1])}/',"
-                         " database file path: "
-                         f"'{'.mvdb'.join(database_path.split('.mvdb')[:-1]) + '/' + database_path}'")
+        self.logger.info(f"Initializing database folder path: '{'.mvdb'.join(database_path.split('.mvdb')[:-1])}/'")
+        if MVDB_COMPUTE_DEVICE != 'cpu':
+            self.logger.info(f"Using device: {MVDB_COMPUTE_DEVICE}")
 
         # ============== Loading or create one empty database ==============
         # first of all, initialize a database
@@ -282,7 +281,7 @@ class MatrixSerializer:
         self.fields = []
 
     @io_checker
-    def iterable_dataloader(self, read_chunk_only=False, from_tail=False, mode='eager'):
+    def iterable_dataloader(self, read_chunk_only=False, from_tail=False, mode='eager', order_read=False):
         """
         Generator for loading the database and index.
 
@@ -301,17 +300,22 @@ class MatrixSerializer:
             UnKnownError: If an unknown error occurs.
         """
         if self.scaler_bits is not None:
-            decoder = self.scaler.decode
-        else:
-            decoder = lambda x: x
+            # decoder = self.scaler.decode
+            self.storage_worker.update_scaler(self.scaler)
+        # else:
+        #     decoder = lambda x: x
 
         read_type = 'all' if not read_chunk_only else 'chunk'
 
-        for data, indices, fields in self.storage_worker.read(read_type=read_type, reverse=from_tail):
+        for data, indices, fields in self.storage_worker.read(read_type=read_type, reverse=from_tail,
+                                                              order_read=order_read):
+            if data is None:
+                continue
+
             if mode == 'lazy':
-                yield decoder(data), indices, fields
+                yield data, indices, fields
             else:
-                yield decoder(data), indices, self.fields_mapper.decode(fields)
+                yield data, indices, self.fields_mapper.decode(fields)
 
     def cluster_dataloader(self, cluster_id, mode='eager'):
         """
@@ -332,15 +336,16 @@ class MatrixSerializer:
         """
         if self.scaler_bits is not None:
             raise_if(ValueError, not self.scaler.fitted, 'The model must be fitted before decoding.')
-            decoder = self.scaler.decode
-        else:
-            decoder = lambda x: x
+            # decoder = self.scaler.decode
+            self.storage_worker.update_scaler(self.scaler)
+        # else:
+        #     decoder = lambda x: x
 
         for data, indices, fields in self.storage_worker.read(read_type='cluster', cluster_id=str(cluster_id)):
             if mode == 'lazy':
-                yield decoder(data), indices, fields
+                yield data, indices, fields
             else:
-                yield decoder(data), indices, self.fields_mapper.decode(fields)
+                yield data, indices, self.fields_mapper.decode(fields)
 
     def _is_database_reset(self):
         """
@@ -370,12 +375,8 @@ class MatrixSerializer:
 
     def save_data(self, data, indices, fields, to_chunk=True, cluster_id=None):
         """Optimized method to save data to chunk or cluster group with reusable logic."""
-        data_type = self.dtypes
-
         if self.scaler_bits is not None:
-            self.scaler.partial_fit(data)
-            data = self.scaler.encode(data)
-            data_type = self.scaler.bits
+            self.storage_worker.update_scaler(self.scaler)
 
         if isinstance(fields, str) or all(isinstance(i, str) for i in fields):
             fields_indices = self.fields_mapper.encode(fields)
@@ -384,8 +385,7 @@ class MatrixSerializer:
 
         self.storage_worker.write(data, indices, fields_indices,
                                   write_type='chunk' if to_chunk else 'cluster',
-                                  cluster_id=str(cluster_id) if cluster_id is not None else cluster_id,
-                                  data_dtype=data_type)
+                                  cluster_id=str(cluster_id) if cluster_id is not None else cluster_id)
 
     @io_checker
     def save_chunk_immediately(self):
@@ -429,30 +429,30 @@ class MatrixSerializer:
         This method is required to be called after saving vectors to query them.
         """
         if not self.COMMIT_FLAG:
-            self.logger.info('Saving chunk immediately...')
+            self.logger.debug('Saving chunk immediately...')
             self.save_chunk_immediately()
 
-            self.logger.info('Saving id filter...')
+            self.logger.debug('Saving id filter...')
             # save filter
             self.id_filter.to_file(self._filter_path)
 
             # save scalar quantization model
             if self.scaler_bits is not None:
-                self.logger.info('Saving scalar quantization model...')
+                self.logger.debug('Saving scalar quantization model...')
                 self.scaler.save(self.database_path_parent / 'sq_model.mvdb')
 
             # save fields mapper
-            self.logger.info('Saving fields mapper...')
+            self.logger.debug('Saving fields mapper...')
             self.fields_mapper.save(self.database_path_parent / 'fields_mapper.mvdb')
 
             chunk_partition_size = self.storage_worker.get_shape(read_type='chunk')[0]
             if chunk_partition_size >= 100000 and self.index_mode != 'FLAT':
-                self.logger.info('Building index...')
+                self.logger.debug('Building index...')
                 # build index
                 self.build_index()
 
                 # save ivf index and k-means model
-                self.logger.info('Saving ann model...')
+                self.logger.debug('Saving ann model...')
                 self.ann_model.save(self.database_path_parent / 'ann_model.mvdb')
 
             self.reset_database()
@@ -482,7 +482,8 @@ class MatrixSerializer:
         if len(vector) != self.dim:
             raise ValueError(f'vector dim error, expect {self.dim}, got {len(vector)}')
 
-        vector = vector.astype(self.dtypes)
+        if vector.dtype != self.dtypes:
+            vector = vector.astype(self.dtypes)
 
         if vector.ndim == 1:
             vector = vector.reshape(1, -1)
@@ -492,14 +493,14 @@ class MatrixSerializer:
 
         return vector, index, field if field is not None else ''
 
-    def bulk_add_items(self, vectors, normalize: bool = False, save_immediately=False):
+    def bulk_add_items(self, vectors, *, normalize: bool = False, save_immediately=False):
         """
         Bulk add vectors to the database in batches.
 
         Parameters: vectors (list or tuple): A list or tuple of vectors to be saved. Each vector can be a tuple of (
             vector, id, field).
-        normalize (bool): Whether to normalize the input vector.
-        save_immediately (bool): Whether to save the database immediately.
+        normalize (bool, optional, keyword-only): Whether to normalize the input vectors. Default is False.
+        save_immediately (bool, optional, keyword-only): Whether to save the database immediately. Default is False.
 
         Returns:
             list: A list of indices where the vectors are stored.
@@ -510,16 +511,13 @@ class MatrixSerializer:
                  f'normalize must be bool, got {type(normalize)}')
         raise_if(ValueError, not isinstance(save_immediately, bool),
                  f'save_immediately must be bool, got {type(save_immediately)}')
-        raise_if(ValueError, not all(1 <= len(i) <= 3 and isinstance(i, tuple) for i in vectors),
-                 f'vectors must be tuple of (vector, id, field), got {vectors}')
-
-        batch_size = MVDB_BULK_ADD_BATCH_SIZE
+        raise_if(ValueError, not all(isinstance(i, tuple) for i in vectors),
+                 f'vectors must be tuple of (vector, id[optional], field[optional]).')
 
         new_ids = []
 
-        for i in range(0, len(vectors), batch_size):
-            batch = vectors[i:i + batch_size]
-            # temp_vectors, temp_indices, temp_fields = [], [], []
+        for i in range(0, len(vectors), self.chunk_size):
+            batch = vectors[i:i + self.chunk_size]
 
             for sample in batch:
                 if len(sample) == 1:
@@ -530,6 +528,8 @@ class MatrixSerializer:
                     vector, index = sample
                     field = ''
                 else:
+                    raise_if(ValueError, len(sample) != 3,
+                             f'vectors must be tuple of (vector, id[optional], field[optional]).')
                     vector, index, field = sample
 
                 index = self._generate_new_id() if index is None else index
@@ -553,17 +553,18 @@ class MatrixSerializer:
 
         return new_ids
 
-    def add_item(self, vector, index: int = None, field: str = None, normalize: bool = False,
+    def add_item(self, vector, *, index: int = None, field: str = None, normalize: bool = False,
                  save_immediately=False) -> int:
         """
         Add a single vector to the database.
 
         Parameters:
             vector (np.ndarray): The vector to be added.
-            index (int, optional): Optional ID for the vector.
-            field (str, optional): Optional field for the vector.
-            normalize (bool): Whether to normalize the input vector.
-            save_immediately (bool): Whether to save the database immediately.
+            index (int, optional, keyword-only): The ID of the vector. If None, a new ID will be generated.
+            field (str, optional, keyword-only): The field of the vector. Default is None. If None, the field will be
+                set to an empty string.
+            normalize (bool, optional, keyword-only): Whether to normalize the input vector. Default is False.
+            save_immediately (bool, optional, keyword-only): Whether to save the database immediately. Default is False.
         Returns:
             int: The ID of the added vector.
 
@@ -611,10 +612,10 @@ class MatrixSerializer:
 
         try:
             shutil.rmtree(self.database_path_parent)
-            self.IS_DELETED = True
         except FileNotFoundError:
             pass
 
+        self.IS_DELETED = True
         self.reset_database()
 
         # reinitialize
@@ -624,6 +625,10 @@ class MatrixSerializer:
         self._initialize_fields_mapper()
         self._initialize_ann_model()
         self._initialize_id_filter()
+
+        # clear cache
+        self.storage_worker.clear_cache()
+
 
     def _kmeans_clustering(self, data):
         """kmeans clustering"""
@@ -685,17 +690,7 @@ class MatrixSerializer:
             self.save_data(all_vectors, all_indices, all_fields, to_chunk=False,
                            cluster_id=cluster_id)
 
-    @lru_cache(maxsize=1)
-    def _get_shape(self, mtime):
-        """
-        Return the shape of the entire database.
-
-        Returns:
-            tuple: The number of vectors and the dimension of each vector in the database.
-        """
-        return self.storage_worker.get_shape(read_type='all')
-
     @property
     def shape(self):
         self.check_commit()
-        return self._get_shape(int(os.path.getmtime(self.database_path) * 1000))
+        return tuple(self.storage_worker.get_shape(read_type='all'))

@@ -1,4 +1,4 @@
 
-__version__ = '0.2.3'
+__version__ = '0.2.4'
 
-from .api import MinVectorDB, get_all_configs
+from min_vec.api.api import MinVectorDB, get_all_configs
