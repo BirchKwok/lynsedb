@@ -87,7 +87,7 @@ class ScalarQuantization:
         if decoded.dtype != self.decode_dtype:
             decoded = decoded.astype(self.decode_dtype)
 
-        return to_normalize(decoded)
+        return decoded
 
     def save(self, filepath):
         raise_if(ValueError, not self.fitted, 'The model must be fitted before saving.')
