@@ -5,6 +5,8 @@ import cloudpickle
 
 from spinesUtils.asserts import raise_if
 
+from min_vec.computational_layer.engines import to_normalize
+
 
 class ScalarQuantization:
     bits_map = {8: np.uint8, 16: np.uint16, 32: np.uint32}
@@ -80,7 +82,7 @@ class ScalarQuantization:
         if decoded.dtype != self.decode_dtype:
             decoded = decoded.astype(self.decode_dtype)
 
-        return decoded
+        return to_normalize(decoded)
 
     def save(self, filepath):
         raise_if(ValueError, not self.fitted, 'The model must be fitted before saving.')

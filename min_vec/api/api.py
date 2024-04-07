@@ -1,7 +1,9 @@
 """api.py - The MinVectorDB API."""
 import gc
 
-from min_vec.configs.config import *
+from spinesUtils.asserts import raise_if
+
+from min_vec.configs.config import config
 
 
 class MinVectorDB:
@@ -16,8 +18,8 @@ class MinVectorDB:
     }, func_name='MinVectorDB')
     def __init__(
             self, dim, database_path, n_cluster=16, chunk_size=100_000, distance='cosine',
-            index_mode='IVF-FLAT', dtypes='float32',
-            use_cache=True, reindex_if_conflict=False, scaler_bits=None, n_threads=None
+            index_mode='FLAT', dtypes='float32',
+            use_cache=True, reindex_if_conflict=False, scaler_bits=8, n_threads=None
     ) -> None:
         """
         Initialize the vector database.
@@ -36,7 +38,7 @@ class MinVectorDB:
             use_cache (bool): Whether to use cache for query. Default is True.
             reindex_if_conflict (bool): Whether to reindex if there is a conflict. Default is False.
             scaler_bits (int): The number of bits for scalar quantization.
-                Options are 8, 16, or 32. The default is None, which means no scalar quantization.
+                Options are 8, 16, or 32. The default is 8, which means 8-bit scalar quantization.
                 The 8 for 8-bit, 16 for 16-bit, and 32 for 32-bit.
             n_threads (int): The number of threads to use for parallel processing. Default is None,
                 which means the number of CPUs.
@@ -44,6 +46,8 @@ class MinVectorDB:
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
         """
+
+        raise_if(ValueError, index_mode == 'IVF-FLAT', '"IVF-FLAT" index mode is not supported yet.')
         from spinesUtils.logging import Logger
         from spinesUtils.timer import Timer
 
@@ -51,11 +55,11 @@ class MinVectorDB:
         from min_vec.execution_layer.matrix_serializer import MatrixSerializer
 
         logger = Logger(
-            fp=MVDB_LOG_PATH,
+            fp=config.MVDB_LOG_PATH,
             name='MinVectorDB',
-            truncate_file=MVDB_TRUNCATE_LOG,
-            with_time=MVDB_LOG_WITH_TIME,
-            level=MVDB_LOG_LEVEL
+            truncate_file=config.MVDB_TRUNCATE_LOG,
+            with_time=config.MVDB_LOG_WITH_TIME,
+            level=config.MVDB_LOG_LEVEL
         )
         logger.info("Initializing MinVectorDB with: \n "
                     f"\r//    dim={dim}, database_path='{database_path}', \n"
@@ -143,8 +147,7 @@ class MinVectorDB:
         _database = None
         _indices = []
         _fields = []
-        for database, indices, fields in self._data_loader(read_chunk_only=False, from_tail=from_tail,
-                                                           order_read=True):
+        for database, indices, fields in self._data_loader(read_chunk_only=False, from_tail=from_tail):
             if _database is None:
                 _database = database
             else:

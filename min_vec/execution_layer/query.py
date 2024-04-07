@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from pyroaring import BitMap
 
-from min_vec.configs.config import *
+from min_vec.configs.config import config
 from min_vec.computational_layer.engines import argsort_topk
 
 
@@ -95,7 +95,7 @@ class DatabaseQuery:
 
         return index_chunk, scores
 
-    @QueryVectorCache(MVDB_QUERY_CACHE_SIZE)
+    @QueryVectorCache(config.MVDB_QUERY_CACHE_SIZE)
     def query(self, vector, k: int | str = 12,
               fields: list = None, normalize: bool = False, subset_indices=None, **kwargs):
         """

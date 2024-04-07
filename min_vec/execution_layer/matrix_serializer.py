@@ -2,13 +2,14 @@ from datetime import datetime
 from pathlib import Path
 import shutil
 
+import torch
 import numpy as np
 from spinesUtils.asserts import raise_if
 
 from min_vec.computational_layer.engines import to_normalize
 from min_vec.data_structures.filter import IDFilter
 from min_vec.utils.utils import io_checker
-from min_vec.configs.config import *
+from min_vec.configs.config import config
 from min_vec.data_structures.kmeans import BatchKMeans
 from min_vec.data_structures.scaler import ScalarQuantization
 from min_vec.data_structures.fields_mapper import FieldsMapper
@@ -90,7 +91,8 @@ class MatrixSerializer:
         # set filter path
         self._filter_path = self.database_path_parent / 'id_filter.mvdb'
         # set device
-        self.device = torch.device(MVDB_COMPUTE_DEVICE)
+        device = config.MVDB_COMPUTE_DEVICE
+        self.device = torch.device(device)
         # set scalar quantization bits
         self.scaler_bits = scaler_bits if scaler_bits is not None else None
 
@@ -101,8 +103,8 @@ class MatrixSerializer:
         self.storage_worker = StorageWorker(self.database_path_parent, self.dim, self.chunk_size, n_threads=n_threads)
 
         self.logger.info(f"Initializing database folder path: '{'.mvdb'.join(database_path.split('.mvdb')[:-1])}/'")
-        if MVDB_COMPUTE_DEVICE != 'cpu':
-            self.logger.info(f"Using device: {MVDB_COMPUTE_DEVICE}")
+        if device != 'cpu':
+            self.logger.info(f"Using device: {device}")
 
         # ============== Loading or create one empty database ==============
         # first of all, initialize a database
@@ -237,6 +239,7 @@ class MatrixSerializer:
     def _initialize_ann_model(self):
         """initialize ann model"""
         if self.index_mode == 'IVF-FLAT':
+            MVDB_KMEANS_EPOCHS = config.MVDB_KMEANS_EPOCHS
             self.ann_model = BatchKMeans(n_clusters=self.n_clusters, random_state=0,
                                          batch_size=10240, epochs=MVDB_KMEANS_EPOCHS, distance=self.distance)
 
@@ -281,7 +284,7 @@ class MatrixSerializer:
         self.fields = []
 
     @io_checker
-    def iterable_dataloader(self, read_chunk_only=False, from_tail=False, mode='eager', order_read=False):
+    def iterable_dataloader(self, read_chunk_only=False, from_tail=False, mode='eager'):
         """
         Generator for loading the database and index.
 
@@ -300,15 +303,11 @@ class MatrixSerializer:
             UnKnownError: If an unknown error occurs.
         """
         if self.scaler_bits is not None:
-            # decoder = self.scaler.decode
             self.storage_worker.update_scaler(self.scaler)
-        # else:
-        #     decoder = lambda x: x
 
         read_type = 'all' if not read_chunk_only else 'chunk'
 
-        for data, indices, fields in self.storage_worker.read(read_type=read_type, reverse=from_tail,
-                                                              order_read=order_read):
+        for data, indices, fields in self.storage_worker.read(read_type=read_type, reverse=from_tail):
             if data is None:
                 continue
 
@@ -336,10 +335,7 @@ class MatrixSerializer:
         """
         if self.scaler_bits is not None:
             raise_if(ValueError, not self.scaler.fitted, 'The model must be fitted before decoding.')
-            # decoder = self.scaler.decode
             self.storage_worker.update_scaler(self.scaler)
-        # else:
-        #     decoder = lambda x: x
 
         for data, indices, fields in self.storage_worker.read(read_type='cluster', cluster_id=str(cluster_id)):
             if mode == 'lazy':
@@ -628,7 +624,6 @@ class MatrixSerializer:
 
         # clear cache
         self.storage_worker.clear_cache()
-
 
     def _kmeans_clustering(self, data):
         """kmeans clustering"""

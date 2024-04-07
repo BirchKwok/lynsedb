@@ -2,7 +2,7 @@
 
 from functools import wraps
 
-from min_vec.configs.config import MVDB_COSINE_SIMILARITY_THRESHOLD
+from min_vec.configs.config import config
 
 
 class UnKnownError(Exception):
@@ -93,7 +93,7 @@ class QueryVectorCache:
             if key in self.cache:
                 return self.cache[key]
             else:
-                if MVDB_COSINE_SIMILARITY_THRESHOLD is not None:
+                if config.MVDB_COSINE_SIMILARITY_THRESHOLD is not None:
                     # 遍历缓存中的向量，找到最相似的向量
                     for cached_key, cached_vec in self.cache.items():
                         for cv in cached_vec:
@@ -101,7 +101,7 @@ class QueryVectorCache:
                                 cached_vec = np.frombuffer(cv, dtype=np.float32)
 
                                 similarity = self._cosine_similarity(query_vec, cached_vec)
-                                if similarity > MVDB_COSINE_SIMILARITY_THRESHOLD:
+                                if similarity > config.MVDB_COSINE_SIMILARITY_THRESHOLD:
                                     if similarity > best_similarity:
                                         best_similarity = similarity
                                         best_result = self.cache[key]
