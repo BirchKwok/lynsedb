@@ -1,7 +1,18 @@
 """api.py - The MinVectorDB API."""
-import gc
+from spinesUtils.asserts import raise_if
+from spinesUtils.logging import Logger
 
-from min_vec.configs.config import *
+from min_vec.configs.config import config
+from min_vec.configs.parameters_validator import ParametersValidator
+
+
+logger = Logger(
+    fp=config.MVDB_LOG_PATH,
+    name='MinVectorDB',
+    truncate_file=config.MVDB_TRUNCATE_LOG,
+    with_time=config.MVDB_LOG_WITH_TIME,
+    level=config.MVDB_LOG_LEVEL
+)
 
 
 class MinVectorDB:
@@ -14,10 +25,14 @@ class MinVectorDB:
     @ParameterTypeAssert({
         'use_cache': bool, 'reindex_if_conflict': bool
     }, func_name='MinVectorDB')
+    @ParametersValidator(
+        update_configs=['dim', 'database_path', 'n_cluster', 'chunk_size', 'index_mode', 'dtypes', 'scaler_bits'],
+        logger=logger
+    )
     def __init__(
             self, dim, database_path, n_cluster=16, chunk_size=100_000, distance='cosine',
             index_mode='IVF-FLAT', dtypes='float32',
-            use_cache=True, reindex_if_conflict=False, scaler_bits=None, n_threads=None
+            use_cache=True, reindex_if_conflict=False, scaler_bits=8, n_threads=10
     ) -> None:
         """
         Initialize the vector database.
@@ -38,25 +53,19 @@ class MinVectorDB:
             scaler_bits (int): The number of bits for scalar quantization.
                 Options are 8, 16, or 32. The default is None, which means no scalar quantization.
                 The 8 for 8-bit, 16 for 16-bit, and 32 for 32-bit.
-            n_threads (int): The number of threads to use for parallel processing. Default is None,
-                which means the number of CPUs.
+            n_threads (int): The number of threads to use for parallel processing. Default is 10.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
         """
-        from spinesUtils.logging import Logger
+
         from spinesUtils.timer import Timer
 
-        from min_vec.execution_layer.query import DatabaseQuery
+        from min_vec.execution_layer.query import Query
         from min_vec.execution_layer.matrix_serializer import MatrixSerializer
 
-        logger = Logger(
-            fp=MVDB_LOG_PATH,
-            name='MinVectorDB',
-            truncate_file=MVDB_TRUNCATE_LOG,
-            with_time=MVDB_LOG_WITH_TIME,
-            level=MVDB_LOG_LEVEL
-        )
+        raise_if(NotImplementedError, distance != 'cosine', "Only 'cosine' distance is supported for now.")
+
         logger.info("Initializing MinVectorDB with: \n "
                     f"\r//    dim={dim}, database_path='{database_path}', \n"
                     f"\r//    n_cluster={n_cluster}, chunk_size={chunk_size},\n"
@@ -78,51 +87,104 @@ class MinVectorDB:
             logger=logger,
             dtypes=dtypes,
             reindex_if_conflict=reindex_if_conflict,
-            scaler_bits=scaler_bits,
-            n_threads=n_threads
+            scaler_bits=scaler_bits
         )
-        # matrix_serializer functions
-        self.add_item = self._matrix_serializer.add_item
-        self.bulk_add_items = self._matrix_serializer.bulk_add_items
         self._data_loader = self._matrix_serializer.iterable_dataloader
-        self.check_commit = self._matrix_serializer.check_commit
         self._id_filter = self._matrix_serializer.id_filter
-        self.commit = self._matrix_serializer.commit
 
         self._timer = Timer()
-        self.use_cache = use_cache
-        self.distance = distance
+        self._use_cache = use_cache
+        self._distance = distance
 
-        self._matrix_query = DatabaseQuery(
-            matrix_serializer=self._matrix_serializer
+        raise_if(TypeError, not isinstance(n_threads, int), "n_threads must be an integer.")
+        raise_if(ValueError, n_threads <= 0, "n_threads must be greater than 0.")
+
+        self._matrix_query = Query(
+            matrix_serializer=self._matrix_serializer,
+            n_threads=n_threads
         )
 
         self._matrix_query.query.clear_cache()
 
         self._most_recent_query_report = {}
 
-    def query(self, vector, k: int | str = 12, *, fields: list = None, normalize: bool = False, subset_indices=None):
+    def add_item(self, vector, *, index: int = None, field: str = None) -> int:
+        """
+        Add a single vector to the database.
+
+        Parameters:
+            vector (np.ndarray): The vector to be added.
+            index (int, optional, keyword-only): The ID of the vector. If None, a new ID will be generated.
+            field (str, optional, keyword-only): The field of the vector. Default is None. If None, the field will be
+                set to an empty string.
+
+        Returns:
+            int: The ID of the added vector.
+
+        Raises:
+            ValueError: If the vector dimensions don't match or the ID already exists.
+        """
+        return self._matrix_serializer.add_item(vector, index=index, field=field)
+
+    def bulk_add_items(self, vectors):
+        """
+        Bulk add vectors to the database in batches.
+
+        Parameters: vectors (list or tuple): A list or tuple of vectors to be saved. Each vector can be a tuple of (
+            vector, id, field).
+
+        Returns:
+            list: A list of indices where the vectors are stored.
+        """
+        return self._matrix_serializer.bulk_add_items(vectors)
+
+    def commit(self):
+        """
+        Save the database, ensuring that all data is written to disk.
+        This method is required to be called after saving vectors to query them.
+        """
+        self._matrix_serializer.commit()
+
+    def query(self, vector, k: int | str = 12, *, fields: list = None, subset_indices=None,
+              return_similarity=True):
+        """
+        Query the database for the vectors most similar to the given vector in batches.
+
+        Parameters:
+            vector (np.ndarray): The query vector.
+            k (int or str): The number of nearest vectors to return. if be 'all', return all vectors.
+            fields (list, optional): The target of the vector.
+            subset_indices (list, optional): The subset of indices to query.
+            return_similarity (bool): Whether to return the similarity scores.Default is True.
+
+        Returns:
+            Tuple: The indices and similarity scores of the top k nearest vectors.
+
+        Raises:
+            ValueError: If the database is empty.
+        """
         import datetime
 
         self._most_recent_query_report = {}
 
         self._timer.start()
-        if self.use_cache:
-            res = self._matrix_query.query(vector=vector, k=k, fields=fields, normalize=normalize,
+        if self._use_cache:
+            res = self._matrix_query.query(vector=vector, k=k, fields=fields,
                                            subset_indices=subset_indices, index_mode=self._matrix_serializer.index_mode,
-                                           distance=self.distance)
+                                           distance=self._distance, return_similarity=return_similarity)
         else:
-            res = self._matrix_query.query(vector=vector, k=k, fields=fields, normalize=normalize,
+            res = self._matrix_query.query(vector=vector, k=k, fields=fields,
                                            subset_indices=subset_indices, index_mode=self._matrix_serializer.index_mode,
-                                           now_time=datetime.datetime.now().timestamp(), distance=self.distance)
+                                           now_time=datetime.datetime.now().timestamp(), distance=self._distance,
+                                           return_similarity=return_similarity)
 
         time_cost = self._timer.last_timestamp_diff()
         self._most_recent_query_report['Database shape'] = self.shape
         self._most_recent_query_report['Query time'] = f"{time_cost :>.5f} s"
         self._most_recent_query_report['Query K'] = k
-        self._most_recent_query_report['Query normalize'] = normalize
         self._most_recent_query_report[f'Top {k} results index'] = res[0]
-        self._most_recent_query_report[f'Top {k} results similarity'] = res[1]
+        if return_similarity:
+            self._most_recent_query_report[f'Top {k} results similarity'] = res[1]
 
         return res
 
@@ -136,74 +198,6 @@ class MinVectorDB:
         """
         return self._matrix_serializer.shape
 
-    def _get_n_elements(self, returns, n, from_tail=False):
-        """get the first/last n vectors/indices/fields in the database."""
-        import numpy as np
-
-        _database = None
-        _indices = []
-        _fields = []
-        for database, indices, fields in self._data_loader(read_chunk_only=False, from_tail=from_tail,
-                                                           order_read=True):
-            if _database is None:
-                _database = database
-            else:
-                _database = np.vstack((_database, database))
-
-            _indices.extend(indices)
-            _fields.extend(fields)
-
-            if _database.shape[0] >= n:
-                break
-
-        if _database is None:
-            return None
-
-        if returns == 'database':
-            return _database[:n, :]
-        elif returns == 'indices':
-            return [int(i) for i in _indices[:n]]
-        else:
-            return _fields[:n]
-
-    @ParameterTypeAssert({'n': int, 'returns': str})
-    @ParameterValuesAssert({'returns': ('database', 'indices', 'fields')})
-    def head(self, n=10, returns='database'):
-        """Return the first n vectors/indices/fields in the database.
-
-        Parameters:
-            n (int): The number of vectors to return.
-            returns (str): The type of data to return. Options are 'database', 'indices', or 'fields'.
-
-        Returns:
-            The first n vectors in the database.
-        """
-        self.check_commit()
-
-        if self._matrix_serializer.shape[0] == 0:
-            return None
-
-        return self._get_n_elements(returns, n, from_tail=False)
-
-    @ParameterTypeAssert({'n': int, 'returns': str})
-    @ParameterValuesAssert({'returns': ('database', 'indices', 'fields')})
-    def tail(self, n=10, returns='database'):
-        """Return the last n vectors/indices/fields in the database.
-
-        Parameters:
-            n (int): The number of vectors to return.
-            returns (str): The type of data to return. Options are 'database', 'indices', or 'fields'.
-
-        Returns:
-            The last n vectors/indices/fields in the database.
-        """
-        self.check_commit()
-
-        if self._matrix_serializer.shape[0] == 0:
-            return None
-
-        return self._get_n_elements(returns, n, from_tail=True)
-
     def insert_session(self):
         """
         Create a session to insert data, which will automatically commit the data when the session ends.
@@ -216,8 +210,11 @@ class MinVectorDB:
         """
         Delete the database.
         """
+        import gc
+
         self._matrix_serializer.delete()
         self._matrix_query.query.clear_cache()
+        self._matrix_query.delete()
 
         gc.collect()
 
@@ -246,8 +243,8 @@ class MinVectorDB:
             'Database last_commit_time': self._matrix_serializer.last_commit_time,
             'Database commit status': self._matrix_serializer.COMMIT_FLAG,
             'Database index_mode': self._matrix_serializer.index_mode,
-            'Database distance': self.distance,
-            'Database use_cache': self.use_cache,
+            'Database distance': self._distance,
+            'Database use_cache': self._use_cache,
             'Database reindex_if_conflict': self._matrix_serializer.reindex_if_conflict,
             'Database status': 'DELETED' if self._matrix_serializer.IS_DELETED else 'ACTIVE'
         }}
@@ -269,4 +266,5 @@ class MinVectorDB:
         return self.shape[0]
 
     def is_deleted(self):
+        """To check if the database is deleted."""
         return self._matrix_serializer.IS_DELETED
