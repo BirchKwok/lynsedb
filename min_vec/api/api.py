@@ -1,10 +1,12 @@
 """api.py - The MinVectorDB API."""
+from typing import Union, List, Tuple
+
+import numpy as np
 from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
 
 from min_vec.configs.config import config
 from min_vec.configs.parameters_validator import ParametersValidator
-
 
 logger = Logger(
     fp=config.MVDB_LOG_PATH,
@@ -30,9 +32,9 @@ class MinVectorDB:
         logger=logger
     )
     def __init__(
-            self, dim, database_path, n_cluster=16, chunk_size=100_000, distance='cosine',
-            index_mode='IVF-FLAT', dtypes='float32',
-            use_cache=True, reindex_if_conflict=False, scaler_bits=8, n_threads=10
+            self, dim: int, database_path: str, n_cluster: int = 16, chunk_size: int = 100_000,
+            distance: str = 'cosine', index_mode: str = 'IVF-FLAT', dtypes: str = 'float32',
+            use_cache: bool = True, reindex_if_conflict: bool = False, scaler_bits: int = 8, n_threads: int = 10
     ) -> None:
         """
         Initialize the vector database.
@@ -99,16 +101,16 @@ class MinVectorDB:
         raise_if(TypeError, not isinstance(n_threads, int), "n_threads must be an integer.")
         raise_if(ValueError, n_threads <= 0, "n_threads must be greater than 0.")
 
-        self._matrix_query = Query(
+        self._query = Query(
             matrix_serializer=self._matrix_serializer,
             n_threads=n_threads
         )
 
-        self._matrix_query.query.clear_cache()
+        self._query.query.clear_cache()
 
         self._most_recent_query_report = {}
 
-    def add_item(self, vector, *, index: int = None, field: str = None) -> int:
+    def add_item(self, vector: np.ndarray, *, index: int = None, field: str = None) -> int:
         """
         Add a single vector to the database.
 
@@ -126,7 +128,7 @@ class MinVectorDB:
         """
         return self._matrix_serializer.add_item(vector, index=index, field=field)
 
-    def bulk_add_items(self, vectors):
+    def bulk_add_items(self, vectors: List[Tuple[np.ndarray, int, str]]):
         """
         Bulk add vectors to the database in batches.
 
@@ -145,8 +147,8 @@ class MinVectorDB:
         """
         self._matrix_serializer.commit()
 
-    def query(self, vector, k: int | str = 12, *, fields: list = None, subset_indices=None,
-              return_similarity=True):
+    def query(self, vector: np.ndarray, k: Union[int, str] = 12, *, fields: List = None, subset_indices: List = None,
+              return_similarity: bool = True):
         """
         Query the database for the vectors most similar to the given vector in batches.
 
@@ -169,14 +171,14 @@ class MinVectorDB:
 
         self._timer.start()
         if self._use_cache:
-            res = self._matrix_query.query(vector=vector, k=k, fields=fields,
-                                           subset_indices=subset_indices, index_mode=self._matrix_serializer.index_mode,
-                                           distance=self._distance, return_similarity=return_similarity)
+            res = self._query.query(vector=vector, k=k, fields=fields,
+                                    subset_indices=subset_indices, index_mode=self._matrix_serializer.index_mode,
+                                    distance=self._distance, return_similarity=return_similarity)
         else:
-            res = self._matrix_query.query(vector=vector, k=k, fields=fields,
-                                           subset_indices=subset_indices, index_mode=self._matrix_serializer.index_mode,
-                                           now_time=datetime.datetime.now().timestamp(), distance=self._distance,
-                                           return_similarity=return_similarity)
+            res = self._query.query(vector=vector, k=k, fields=fields,
+                                    subset_indices=subset_indices, index_mode=self._matrix_serializer.index_mode,
+                                    now_time=datetime.datetime.now().timestamp(), distance=self._distance,
+                                    return_similarity=return_similarity)
 
         time_cost = self._timer.last_timestamp_diff()
         self._most_recent_query_report['Database shape'] = self.shape
@@ -213,8 +215,8 @@ class MinVectorDB:
         import gc
 
         self._matrix_serializer.delete()
-        self._matrix_query.query.clear_cache()
-        self._matrix_query.delete()
+        self._query.query.clear_cache()
+        self._query.delete()
 
         gc.collect()
 
@@ -238,7 +240,7 @@ class MinVectorDB:
         """
         Return the database report.
         """
-        db_report = {'DATABASE STATUS REPORT':{
+        db_report = {'DATABASE STATUS REPORT': {
             'Database shape': (0, self._matrix_serializer.dim) if self._matrix_serializer.IS_DELETED else self.shape,
             'Database last_commit_time': self._matrix_serializer.last_commit_time,
             'Database commit status': self._matrix_serializer.COMMIT_FLAG,

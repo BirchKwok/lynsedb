@@ -30,7 +30,7 @@ class ParametersValidator:
             with open(configs_json, 'r') as f:
                 configs = json.load(f)
             return configs
-        except FileNotFoundError | json.JSONDecodeError | PermissionError | OSError as e:
+        except (FileNotFoundError, json.JSONDecodeError, PermissionError, OSError) as e:
             self.logger.error(f"Failed to load the MinVectorDB configurations.")
             raise e
 
@@ -39,7 +39,7 @@ class ParametersValidator:
         try:
             with open(configs_json, 'w') as f:
                 json.dump(configs, f)
-        except PermissionError | OSError as e:
+        except (PermissionError, OSError) as e:
             self.logger.error(f"Failed to save the MinVectorDB configurations.")
             raise e
 

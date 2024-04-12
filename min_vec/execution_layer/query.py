@@ -104,8 +104,8 @@ class Query:
         return index_chunk, scores
 
     @QueryVectorCache(config.MVDB_QUERY_CACHE_SIZE)
-    def query(self, vector, k: int | str = 12,
-              fields: list = None, subset_indices=None, return_similarity=False, **kwargs):
+    def query(self, vector, k = 12,
+              fields = None, subset_indices=None, return_similarity=False, **kwargs):
         """
         Query the database for the vectors most similar to the given vector in batches.
 
