@@ -7,3 +7,5 @@ scikit-learn>=1.0.0
 cloudpickle>=2.0.0
 numexpr>=2.7.3
 pyroaring>=0.4.5
+jax>=0.4.25
+numba>=0.54.0
