@@ -70,9 +70,6 @@ os.environ['MVDB_QUERY_CACHE_SIZE'] = '10000'  # default: 10000
 # cosine similarity threshold for cache result matching 
 os.environ['MVDB_COSINE_SIMILARITY_THRESHOLD'] = '0.9'  # 'None' for disable this feature, default to 0.85
 
-# computing platform, can be set to platforms supported by torch.device 
-os.environ['MVDB_COMPUTE_DEVICE'] = 'mps' # default to 'cpu', torch.device
-
 # specify the number of chunks in the memory cache
 os.environ['MVDB_DATALOADER_BUFFER_SIZE'] = '20'  # default to '20', must be integer-like string
 ```
@@ -84,7 +81,7 @@ print("MinVectorDB version is: ", min_vec.__version__)
 print("MinVectorDB all configs: ", '\n - ' + '\n - '.join([f'{k}: {v}' for k, v in min_vec.get_all_configs().items()]))
 ```
 
-    MinVectorDB version is:  0.2.3
+    MinVectorDB version is:  0.2.5
     MinVectorDB all configs:  
      - MVDB_LOG_LEVEL: INFO
      - MVDB_LOG_PATH: ./min_vec_db.log
@@ -93,8 +90,6 @@ print("MinVectorDB all configs: ", '\n - ' + '\n - '.join([f'{k}: {v}' for k, v 
      - MVDB_KMEANS_EPOCHS: 500
      - MVDB_QUERY_CACHE_SIZE: 10000
      - MVDB_COSINE_SIMILARITY_THRESHOLD: 0.9
-     - MVDB_COMPUTE_DEVICE: cpu
-     - MVDB_USER_MESSAGE_PATH: None
      - MVDB_DATALOADER_BUFFER_SIZE: 20
 
 
@@ -116,25 +111,24 @@ def get_test_vectors(shape):
 
 # distance can be 'L2' or 'cosine'
 # index_mode can be 'FLAT' or 'IVF-FLAT', default is 'IVF-FLAT'
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', distance='cosine',
-                 index_mode='FLAT', chunk_size=100000, use_cache=False, scaler_bits=8)
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', index_mode='FLAT', chunk_size=100000, use_cache=False, scaler_bits=8)
 
 # ========== Use automatic commit statements. Recommended. =============
 # You can perform this operation multiple times, and the data will be appended to the database.
 with db.insert_session():
     # Define the initial ID.
     id = 0
-    for t in tqdm(get_test_vectors((1000000, 1024)), total=1000000, unit="vector"):
+    for t in tqdm(get_test_vectors((5000000, 1024)), total=5000000, unit="vector"):
         if id == 0:
-            query = t / np.linalg.norm(t)
+            query = t
             query_id = 0
             query_field = None
-        # Vectors need to be normalized before writing to the database.
-        db.add_item(t, index=id, normalize=True, save_immediately=False)
+        # Vectors will be normalized after writing to the database.
+        db.add_item(t, index=id)
 
         id += 1
 
-res = db.query(query, k=10)
+res = db.query(query, k=10, return_similarity=True)
 
 print("  - Query sample id: ", query_id)
 print("  - Query sample field: ", query_field)
@@ -156,20 +150,20 @@ db.delete()
     //    reindex_if_conflict=False, scaler_bits=8
     
     MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
-    100%|██████████| 1000000/1000000 [00:15<00:00, 65961.24vector/s]
+    100%|██████████| 5000000/5000000 [01:01<00:00, 81902.68vector/s] 
 
 
       - Query sample id:  0
       - Query sample field:  None
     
     * - MOST RECENT QUERY REPORT -
-    | - Database shape: (1000000, 1024)
-    | - Query time: 0.34045 s
+    | - Database shape: (5000000, 1024)
+    | - Query time: 1.12399 s
     | - Query K: 10
-    | - Query normalize: False
-    | - Top 10 results index: [     0 126163 934623 376250 136782  67927 927723 454821 909201 283657]
-    | - Top 10 results similarity: [1.         0.7866893  0.7823357  0.78192943 0.78141373 0.78101647
-     0.78069043 0.7806051  0.78056455 0.78041667]
+    | - Top 10 results index: [      0  126163 2995566 1455136 3285759 3671500 2498399 4372617 2141370
+     3401650]
+    | - Top 10 results similarity: [0.9967977  0.78328276 0.78147084 0.7807232  0.7804502  0.78013766
+     0.77972347 0.77943265 0.7793954  0.779209  ]
     * - END OF REPORT -
     
 
@@ -196,19 +190,17 @@ with db.insert_session():
     id = 0
     vectors = []
     for t in get_test_vectors((100000, 1024)):
-        # Vectors need to be normalized before writing to the database.
+        if id == 0:
+            query = t 
+            query_id = id
+            query_field = None
         vectors.append((t, id))
         id += 1
         
     # Here, normalization can be directly specified, achieving the same effect as `t = t / np.linalg.norm(t) `.
-    db.bulk_add_items(vectors, normalize=True, save_immediately=False)
+    db.bulk_add_items(vectors)
 
-
-query = db.head(10)[0]
-query_id = db.head(10, returns='indices')[0]
-query_field = db.head(10, returns='fields')[0]
-
-res = db.query(query, k=10)
+res = db.query(query, k=10, return_similarity=True)
 print("  - Query sample id: ", query_id)
 print("  - Query sample field: ", query_field)
 
@@ -226,22 +218,21 @@ db.delete()
     //    n_cluster=16, chunk_size=10000,
     //    distance='cosine', index_mode='FLAT', 
     //    dtypes='float32', use_cache=True, 
-    //    reindex_if_conflict=False, scaler_bits=None
+    //    reindex_if_conflict=False, scaler_bits=8
     
     MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
 
 
       - Query sample id:  0
-      - Query sample field:  
+      - Query sample field:  None
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.03720 s
+    | - Query time: 0.04958 s
     | - Query K: 10
-    | - Query normalize: False
-    | - Top 10 results index: [    0 67927 53447 47665 64134 13859 41949  5788 38082 18507]
-    | - Top 10 results similarity: [1.0000002  0.78101647 0.77775997 0.7771763  0.77591014 0.77581763
-     0.77578723 0.77570754 0.77500904 0.77420104]
+    | - Top 10 results index: [    0 67927 53447 47665 13859  5788 41949 64134 38082 18507]
+    | - Top 10 results similarity: [0.9974107  0.7780206  0.77481455 0.7742663  0.7730598  0.77304006
+     0.772899   0.772897   0.7720787  0.7714467 ]
     * - END OF REPORT -
     
 
@@ -261,26 +252,27 @@ def get_test_vectors(shape):
     for i in range(shape[0]):
         yield np.random.random(shape[1])
 
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000)
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, index_mode='IVF-FLAT')
 
 with db.insert_session():     
     # Define the initial ID.
     id = 0
     vectors = []
     for t in get_test_vectors((100000, 1024)):
-        # Vectors need to be normalized before writing to the database.
+        if id == 0:
+            query = t
+            query_id = id
+            query_field = 'test_'+str(id // 100)
         vectors.append((t, id, 'test_'+str(id // 100)))
         id += 1
         
-    db.bulk_add_items(vectors, normalize=True)
+    db.bulk_add_items(vectors)
 
-query = db.head(10)[0]
-query_id = db.head(10, returns='indices')[0]
-query_field = db.head(10, returns='fields')[0]
 
 res = db.query(query, k=10, fields=[query_field])
 
 print("  - Query sample id: ", query_id)
+
 print("  - Query sample field: ", query_field)
 
 # Query report
@@ -297,22 +289,21 @@ db.delete()
     //    n_cluster=16, chunk_size=10000,
     //    distance='cosine', index_mode='IVF-FLAT', 
     //    dtypes='float32', use_cache=True, 
-    //    reindex_if_conflict=False, scaler_bits=None
+    //    reindex_if_conflict=False, scaler_bits=8
     
     MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
 
 
-      - Query sample id:  11
+      - Query sample id:  0
       - Query sample field:  test_0
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.01311 s
+    | - Query time: 0.00236 s
     | - Query K: 10
-    | - Query normalize: False
-    | - Top 10 results index: [11 11  2 58 71 71 88 88 81 81]
-    | - Top 10 results similarity: [1.         1.         0.7702445  0.76463264 0.764104   0.764104
-     0.7637025  0.7637025  0.7620634  0.7620634 ]
+    | - Top 10 results index: [ 0 60 76 63 52 14 27 61 83 79]
+    | - Top 10 results similarity: [0.9974107  0.7515197  0.7489892  0.7483421  0.7466648  0.7452562
+     0.74377525 0.7390184  0.7307658  0.7282359 ]
     * - END OF REPORT -
     
 
@@ -339,15 +330,15 @@ with db.insert_session():
     id = 0
     vectors = []
     for t in get_test_vectors((100000, 1024)):
-        # Vectors need to be normalized before writing to the database.
+        if id == 0:
+            query = t
+            query_id = id
+            query_field = 'test_'+str(id // 100)
+
         vectors.append((t, id, 'test_'+str(id // 100)))
         id += 1
         
-    db.bulk_add_items(vectors, normalize=True)
-
-query = db.head(10)[0]
-query_id = db.head(10, returns='indices')[0]
-query_field = db.head(10, returns='fields')[0]
+    db.bulk_add_items(vectors)
 
 # You may define both 'subset_indices' and 'fields'
 res = db.query(query, k=10, subset_indices=list(range(query_id - 20, query_id + 20)))
@@ -368,22 +359,21 @@ db.delete()
     //    n_cluster=16, chunk_size=10000,
     //    distance='cosine', index_mode='IVF-FLAT', 
     //    dtypes='float32', use_cache=True, 
-    //    reindex_if_conflict=False, scaler_bits=None
+    //    reindex_if_conflict=False, scaler_bits=8
     
     MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
 
 
-      - Query sample id:  11
+      - Query sample id:  0
       - Query sample field:  test_0
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.01752 s
+    | - Query time: 0.00384 s
     | - Query K: 10
-    | - Query normalize: False
-    | - Top 10 results index: [11 11  2 25  4 19 21 29 30 13]
-    | - Top 10 results similarity: [1.         1.         0.7702445  0.7628149  0.7586509  0.75613594
-     0.7559968  0.7528333  0.74891967 0.7427169 ]
+    | - Top 10 results index: [ 0  9 14  7  3  1 19 18  8 17]
+    | - Top 10 results similarity: [0.9974107  0.75857055 0.7452562  0.7420311  0.7413465  0.73768425
+     0.7370884  0.73495173 0.73355234 0.7306047 ]
     * - END OF REPORT -
     
 
@@ -402,7 +392,7 @@ def get_test_vectors(shape):
     for i in range(shape[0]):
         yield np.random.random(shape[1])
 
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, distance='L2')
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', chunk_size=10000, index_mode='IVF-FLAT')
 
 
 with db.insert_session():     
@@ -411,15 +401,14 @@ with db.insert_session():
     vectors = []
     last_field = None
     for t in get_test_vectors((100000, 1024)):
-        # Vectors need to be normalized before writing to the database.
+        if id == 0:
+            query = t
+            query_id = id
+            query_field = 'test_'+str(id // 100)
         vectors.append((t, id, 'test_'+str(id // 100)))
         id += 1
         
-    db.bulk_add_items(vectors, normalize=True)
-
-query = db.head(10)[0]
-query_id = db.head(10, returns='indices')[0]
-query_field = db.head(10, returns='fields')[0]
+    db.bulk_add_items(vectors)
 
 # You may define both 'subset_indices' and 'fields'
 # If there is no intersection between subset_indices and fields, there will be no result. 
@@ -442,22 +431,21 @@ db.delete()
     //    n_cluster=16, chunk_size=10000,
     //    distance='L2', index_mode='IVF-FLAT', 
     //    dtypes='float32', use_cache=True, 
-    //    reindex_if_conflict=False, scaler_bits=None
+    //    reindex_if_conflict=False, scaler_bits=8
     
     MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
 
 
-      - Query sample id:  11
+      - Query sample id:  0
       - Query sample field:  test_0
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.02081 s
+    | - Query time: 0.05352 s
     | - Query K: 10
-    | - Query normalize: False
-    | - Top 10 results index: [11 11  2 25  4 19 21 29 30  1]
-    | - Top 10 results similarity: [0.         0.         0.6778725  0.68874544 0.69476485 0.6983754
-     0.69857436 0.7030885  0.70863307 0.70987064]
+    | - Top 10 results index: [ 0  9 14 13  7  3  1 19 10  8]
+    | - Top 10 results similarity: [0.00545208 0.6913169  0.71014524 0.7103149  0.71466976 0.71513784
+     0.7208866  0.7213987  0.72268754 0.7265912 ]
     * - END OF REPORT -
     
 
