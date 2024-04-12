@@ -4,22 +4,35 @@ import shutil
 
 import numpy as np
 from spinesUtils.asserts import raise_if
+from spinesUtils.logging import Logger
 
 from min_vec.computational_layer.engines import to_normalize
 from min_vec.data_structures.filter import IDFilter
 from min_vec.utils.utils import io_checker
-from min_vec.configs.config import *
+from min_vec.configs.config import config
 from min_vec.data_structures.kmeans import BatchKMeans
 from min_vec.data_structures.scaler import ScalarQuantization
 from min_vec.data_structures.fields_mapper import FieldsMapper
 from min_vec.storage_layer.storage import StorageWorker
+from min_vec.execution_layer.cluster_worker import ClusterWorker
 
 
 class MatrixSerializer:
+    """
+    The MatrixSerializer class is used to serialize and deserialize the matrix data.
+    """
     def __init__(
-            self, dim, database_path, distance, logger, n_clusters=16, chunk_size=1_000_000,
-            index_mode='IVF-FLAT', dtypes='float32',
-            reindex_if_conflict=False, scaler_bits=None, n_threads=10
+            self,
+            dim: int,
+            database_path: str,
+            distance: str,
+            logger: Logger,
+            n_clusters: int = 16,
+            chunk_size: int = 1_000_000,
+            index_mode: str = 'IVF-FLAT',
+            dtypes: str = 'float32',
+            reindex_if_conflict: bool = False,
+            scaler_bits=None
     ) -> None:
         """
         Initialize the vector database.
@@ -41,7 +54,6 @@ class MatrixSerializer:
             scaler_bits (int): The number of bits for scalar quantization. Default is None.
                 Options are 8, 16, 32. If None, scalar quantization will not be used.
                 The 8 bits for uint8, 16 bits for uint16, 32 bits for uint32.
-            n_threads (int): The number of threads to use for reading and writing the database. Default is 10.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -89,20 +101,21 @@ class MatrixSerializer:
         self.chunk_size = chunk_size
         # set filter path
         self._filter_path = self.database_path_parent / 'id_filter.mvdb'
-        # set device
-        self.device = torch.device(MVDB_COMPUTE_DEVICE)
-        # set scalar quantization bits
-        self.scaler_bits = scaler_bits if scaler_bits is not None else None
 
         # set database path
         self.database_path = self.database_path_parent / Path(database_path).name.split('.mvdb')[0]
 
+        # set scalar quantization bits
+        self.scaler_bits = scaler_bits if scaler_bits is not None else None
+        if self.scaler_bits is not None:
+            self._initialize_scalar_quantization()
+
         # initialize the storage worker
-        self.storage_worker = StorageWorker(self.database_path_parent, self.dim, self.chunk_size, n_threads=n_threads)
+        self.storage_worker = StorageWorker(self.database_path_parent, self.dim,
+                                            self.chunk_size,
+                                            quantizer=None if self.scaler_bits is None else self.scaler)
 
         self.logger.info(f"Initializing database folder path: '{'.mvdb'.join(database_path.split('.mvdb')[:-1])}/'")
-        if MVDB_COMPUTE_DEVICE != 'cpu':
-            self.logger.info(f"Using device: {MVDB_COMPUTE_DEVICE}")
 
         # ============== Loading or create one empty database ==============
         # first of all, initialize a database
@@ -113,12 +126,18 @@ class MatrixSerializer:
         # check initialize params
         self._check_initialize_params(dtypes, reindex_if_conflict)
 
-        if self.scaler_bits is not None:
-            self._initialize_scalar_quantization()
-
         self._initialize_fields_mapper()
         self._initialize_ann_model()
         self._initialize_id_filter()
+
+        self.cluster_worker = ClusterWorker(
+            logger=self.logger,
+            iterable_dataloader=self.iterable_dataloader,
+            ann_model=self.ann_model,
+            storage_worker=self.storage_worker,
+            save_data=self.save_data,
+            n_clusters=self.n_clusters
+        )
 
         # save initial parameters
         self._write_params(dtypes=dtypes)
@@ -154,7 +173,6 @@ class MatrixSerializer:
             distance = attrs.get('distance', self.distance)
             file_dtypes = attrs.get('dtypes', dtypes)
             old_index_mode = attrs.get('index_mode', None)
-            old_sq_bits = attrs.get('sq_bits', self.scaler_bits)
 
             if dim != self.dim:
                 self.logger.warning(
@@ -205,12 +223,6 @@ class MatrixSerializer:
                         f'index_mode to \'IVF-FLAT\', you need to set `reindex_if_conflict=True` first '
                         f'and run `commit()` function after initializing the database.')
 
-            if self.scaler_bits is not None and old_sq_bits != self.scaler_bits:
-                self.logger.warning(f'* sq_bits={old_sq_bits} in the file is not equal to the sq_bits='
-                                    f'{self.scaler_bits} in the parameters, '
-                                    f'the sq_bits in the file will be covered by the sq_bits in the parameters.')
-                self.RESCAN_FOR_SQ_FLAG = True
-
             self.logger.info('Reading parameters done.')
 
         if write_params_flag or not self.database_path.exists():
@@ -221,32 +233,28 @@ class MatrixSerializer:
         self.database_path_parent = Path(database_path).parent.absolute() / Path(
             '.mvdb'.join(Path(database_path).absolute().name.split('.mvdb')[:-1]))
 
-        if not self.database_path_parent.exists():
-            self.database_path_parent.mkdir(parents=True)
+        self.database_path_parent.mkdir(parents=True, exist_ok=True)
 
     def _initialize_scalar_quantization(self):
         if Path(self.database_path_parent / 'sq_model.mvdb').exists():
             self.scaler = ScalarQuantization.load(self.database_path_parent / 'sq_model.mvdb')
         else:
             self.scaler = ScalarQuantization(bits=self.scaler_bits, decode_dtype=self.dtypes)
-            # if the database file exists, the model will be fitted
-            if self.database_path.exists() and self.RESCAN_FOR_SQ_FLAG:
-                for i in self.iterable_dataloader(read_chunk_only=False):
-                    self.scaler.partial_fit(i[0])
 
     def _initialize_ann_model(self):
         """initialize ann model"""
         if self.index_mode == 'IVF-FLAT':
+            MVDB_KMEANS_EPOCHS = config.MVDB_KMEANS_EPOCHS
             self.ann_model = BatchKMeans(n_clusters=self.n_clusters, random_state=0,
-                                         batch_size=10240, epochs=MVDB_KMEANS_EPOCHS, distance=self.distance)
+                                         batch_size=10240, epochs=MVDB_KMEANS_EPOCHS)
 
             if Path(self.database_path_parent / 'ann_model.mvdb').exists() and self.index_mode == 'IVF-FLAT':
                 self.ann_model = self.ann_model.load(self.database_path_parent / 'ann_model.mvdb')
-                if (self.ann_model.n_clusters != self.n_clusters or self.ann_model.distance != self.distance or
+                if (self.ann_model.n_clusters != self.n_clusters or
                         self.ann_model.epochs != MVDB_KMEANS_EPOCHS or
                         self.ann_model.batch_size != 10240):
                     self.ann_model = BatchKMeans(n_clusters=self.n_clusters, random_state=0,
-                                                 batch_size=10240, epochs=MVDB_KMEANS_EPOCHS, distance=self.distance)
+                                                 batch_size=10240, epochs=MVDB_KMEANS_EPOCHS)
         else:
             self.ann_model = None
 
@@ -281,7 +289,7 @@ class MatrixSerializer:
         self.fields = []
 
     @io_checker
-    def iterable_dataloader(self, read_chunk_only=False, from_tail=False, mode='eager', order_read=False):
+    def iterable_dataloader(self, read_chunk_only=False, from_tail=False, mode='eager'):
         """
         Generator for loading the database and index.
 
@@ -299,16 +307,9 @@ class MatrixSerializer:
             PermissionError: If the file cannot be read due to permission issues.
             UnKnownError: If an unknown error occurs.
         """
-        if self.scaler_bits is not None:
-            # decoder = self.scaler.decode
-            self.storage_worker.update_scaler(self.scaler)
-        # else:
-        #     decoder = lambda x: x
-
         read_type = 'all' if not read_chunk_only else 'chunk'
 
-        for data, indices, fields in self.storage_worker.read(read_type=read_type, reverse=from_tail,
-                                                              order_read=order_read):
+        for data, indices, fields in self.storage_worker.read(read_type=read_type, reverse=from_tail):
             if data is None:
                 continue
 
@@ -334,13 +335,6 @@ class MatrixSerializer:
             PermissionError: If the file cannot be read due to permission issues.
             UnKnownError: If an unknown error occurs.
         """
-        if self.scaler_bits is not None:
-            raise_if(ValueError, not self.scaler.fitted, 'The model must be fitted before decoding.')
-            # decoder = self.scaler.decode
-            self.storage_worker.update_scaler(self.scaler)
-        # else:
-        #     decoder = lambda x: x
-
         for data, indices, fields in self.storage_worker.read(read_type='cluster', cluster_id=str(cluster_id)):
             if mode == 'lazy':
                 yield data, indices, fields
@@ -367,16 +361,8 @@ class MatrixSerializer:
             if not (len(self.database) == len(self.indices) == len(self.fields)):
                 raise ValueError('The database, index length and field length not the same.')
 
-    def reset_chunk_partition(self):
-        """
-        Reset the chunk partition.
-        """
-        self.storage_worker.delete_chunk()
-
-    def save_data(self, data, indices, fields, to_chunk=True, cluster_id=None):
+    def save_data(self, data, indices, fields, write_chunk=True, cluster_id=None, normalize=False):
         """Optimized method to save data to chunk or cluster group with reusable logic."""
-        if self.scaler_bits is not None:
-            self.storage_worker.update_scaler(self.scaler)
 
         if isinstance(fields, str) or all(isinstance(i, str) for i in fields):
             fields_indices = self.fields_mapper.encode(fields)
@@ -384,11 +370,12 @@ class MatrixSerializer:
             fields_indices = fields
 
         self.storage_worker.write(data, indices, fields_indices,
-                                  write_type='chunk' if to_chunk else 'cluster',
-                                  cluster_id=str(cluster_id) if cluster_id is not None else cluster_id)
+                                  write_type='chunk' if write_chunk else 'cluster',
+                                  cluster_id=str(cluster_id) if cluster_id is not None else cluster_id,
+                                  normalize=normalize)
 
     @io_checker
-    def save_chunk_immediately(self):
+    def save_chunk_immediately(self, normalize=True):
         """
         Save the current state of the database to a .mvdb file.
 
@@ -404,16 +391,17 @@ class MatrixSerializer:
             self.database,
             self.indices,
             self.fields,
-            to_chunk=True,
-            cluster_id=None
+            write_chunk=True,
+            cluster_id=None,
+            normalize=normalize
         )
 
         self.reset_database()  # reset database, indices and fields
 
-    def auto_save_chunk(self):
+    def auto_save_chunk(self, normalize=True):
         self._length_checker()
         if len(self.database) >= self.chunk_size:
-            self.save_chunk_immediately()
+            self.save_chunk_immediately(normalize=normalize)
 
         return
 
@@ -430,16 +418,11 @@ class MatrixSerializer:
         """
         if not self.COMMIT_FLAG:
             self.logger.debug('Saving chunk immediately...')
-            self.save_chunk_immediately()
+            self.save_chunk_immediately(normalize=True)
 
             self.logger.debug('Saving id filter...')
             # save filter
             self.id_filter.to_file(self._filter_path)
-
-            # save scalar quantization model
-            if self.scaler_bits is not None:
-                self.logger.debug('Saving scalar quantization model...')
-                self.scaler.save(self.database_path_parent / 'sq_model.mvdb')
 
             # save fields mapper
             self.logger.debug('Saving fields mapper...')
@@ -475,7 +458,7 @@ class MatrixSerializer:
 
         return self.last_id
 
-    def _process_vector_item(self, vector, index, field, normalize):
+    def _process_vector_item(self, vector, index, field):
         if index in self.id_filter:
             raise ValueError(f'id {index} already exists')
 
@@ -488,29 +471,20 @@ class MatrixSerializer:
         if vector.ndim == 1:
             vector = vector.reshape(1, -1)
 
-        if normalize:
-            vector = to_normalize(vector)
-
         return vector, index, field if field is not None else ''
 
-    def bulk_add_items(self, vectors, *, normalize: bool = False, save_immediately=False):
+    def bulk_add_items(self, vectors):
         """
         Bulk add vectors to the database in batches.
 
         Parameters: vectors (list or tuple): A list or tuple of vectors to be saved. Each vector can be a tuple of (
             vector, id, field).
-        normalize (bool, optional, keyword-only): Whether to normalize the input vectors. Default is False.
-        save_immediately (bool, optional, keyword-only): Whether to save the database immediately. Default is False.
 
         Returns:
             list: A list of indices where the vectors are stored.
         """
         raise_if(ValueError, not isinstance(vectors, (tuple, list)),
                  f'vectors must be tuple or list, got {type(vectors)}')
-        raise_if(ValueError, not isinstance(normalize, bool),
-                 f'normalize must be bool, got {type(normalize)}')
-        raise_if(ValueError, not isinstance(save_immediately, bool),
-                 f'save_immediately must be bool, got {type(save_immediately)}')
         raise_if(ValueError, not all(isinstance(i, tuple) for i in vectors),
                  f'vectors must be tuple of (vector, id[optional], field[optional]).')
 
@@ -537,7 +511,7 @@ class MatrixSerializer:
                 raise_if(ValueError, index < 0, f'id must be greater than 0, got {index}')
 
                 field = '' if field is None else field
-                vector, index, field = self._process_vector_item(vector, index, field, normalize)
+                vector, index, field = self._process_vector_item(vector, index, field)
 
                 self.database.append(vector)
                 internal_id = index if index is not None else self._generate_new_id()
@@ -546,15 +520,14 @@ class MatrixSerializer:
                 self.fields.append(field)
                 self.id_filter.add(index)
 
-            self.save_chunk_immediately() if save_immediately else self.auto_save_chunk()
+            self.auto_save_chunk(normalize=True)
 
         if self.COMMIT_FLAG:
             self.COMMIT_FLAG = False
 
         return new_ids
 
-    def add_item(self, vector, *, index: int = None, field: str = None, normalize: bool = False,
-                 save_immediately=False) -> int:
+    def add_item(self, vector, *, index: int = None, field: str = None) -> int:
         """
         Add a single vector to the database.
 
@@ -563,8 +536,6 @@ class MatrixSerializer:
             index (int, optional, keyword-only): The ID of the vector. If None, a new ID will be generated.
             field (str, optional, keyword-only): The field of the vector. Default is None. If None, the field will be
                 set to an empty string.
-            normalize (bool, optional, keyword-only): Whether to normalize the input vector. Default is False.
-            save_immediately (bool, optional, keyword-only): Whether to save the database immediately. Default is False.
         Returns:
             int: The ID of the added vector.
 
@@ -580,16 +551,12 @@ class MatrixSerializer:
         raise_if(ValueError, index is not None and index < 0, f'id must be greater than 0, got {index}')
         raise_if(ValueError, field is not None and not isinstance(field, str),
                  f'field must be str, got {type(field)}')
-        raise_if(ValueError, not isinstance(normalize, bool),
-                 f'normalize must be bool, got {type(normalize)}')
-        raise_if(ValueError, not isinstance(save_immediately, bool),
-                 f'save_immediately must be bool, got {type(save_immediately)}')
 
         index = self._generate_new_id() if index is None else index
 
         raise_if(ValueError, index in self.id_filter, f'id {index} already exists')
 
-        vector, index, field = self._process_vector_item(vector, index, field, normalize)
+        vector, index, field = self._process_vector_item(vector, index, field)
 
         # Add the id to then filter.
         self.id_filter.add(index)
@@ -598,7 +565,7 @@ class MatrixSerializer:
         self.indices.append(index)
         self.fields.append(field)
 
-        self.save_chunk_immediately() if save_immediately else self.auto_save_chunk()
+        self.auto_save_chunk(normalize=True)
 
         if self.COMMIT_FLAG:
             self.COMMIT_FLAG = False
@@ -629,66 +596,11 @@ class MatrixSerializer:
         # clear cache
         self.storage_worker.clear_cache()
 
-
-    def _kmeans_clustering(self, data):
-        """kmeans clustering"""
-        self.ann_model = self.ann_model.partial_fit(data)
-
-        return self.ann_model.cluster_centers_, self.ann_model.labels_
-
-    def _clustering_for_ivf(self, data, indices, fields):
-        # Perform K-means clustering.
-        self.cluster_centers, labels = self._kmeans_clustering(data)
-
-        # Current batch's IVF index.
-        ivf_index = {i: [] for i in range(self.n_clusters)}
-        # Allocate data to various cluster centers.
-        for idx, label in enumerate(labels):
-            try:
-                ivf_index[label].append([idx, indices[idx], fields[idx]])
-            except Exception as e:
-                self.logger.error(f"Error in adding to cluster: {e}")
-                raise e
-
-        return ivf_index
-
-    def _build_index(self):
-        for database, indices, fields in self.iterable_dataloader(read_chunk_only=True, mode='lazy'):
-            # Create an IVF index.
-            ivf_index = self._clustering_for_ivf(database, indices, fields)
-            # reorganize files
-            self.save_cluster_partitions(database, ivf_index)
-
     def build_index(self):
         """
         Build the IVF index.
         """
-        self._build_index()
-
-        self.reset_chunk_partition()
-
-    def save_cluster_partitions(self, database, ivf_index):
-        """
-        Rearrange files according to the IVF index.
-        """
-        for cluster_id in range(self.n_clusters):
-            all_vectors, all_indices, all_fields = [], [], []
-
-            for cid, _ in ivf_index.items():
-                if len(_) == 0:
-                    continue
-                vec_idx, index, field = zip(*_)
-                if cid == cluster_id:
-                    # Extract all vectors, indices, and fields from the current cluster center.
-                    all_vectors.extend([database[i] for i in vec_idx])
-                    all_indices.extend(index)
-                    all_fields.extend(field)
-
-            if len(all_vectors) == 0:
-                continue
-
-            self.save_data(all_vectors, all_indices, all_fields, to_chunk=False,
-                           cluster_id=cluster_id)
+        self.cluster_worker.build_index(self.scaler, self.distance)
 
     @property
     def shape(self):
