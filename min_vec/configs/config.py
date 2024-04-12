@@ -1,59 +1,86 @@
 import os
 
-import torch
+from spinesUtils.asserts import raise_if, augmented_isinstance
 
 
-def get_env_variable(name, default=None, default_type=str):
+class Config:
+    @staticmethod
+    def get_env_variable(name, default=None, default_type=str, type_allow_list=None):
 
-    def type_cast(value):
-        if value == default:
-            if default is not None:
-                return default_type(default)
-            else:
+        def type_cast(value):
+            if value == 'None':
                 return None
 
-        if default_type == bool and isinstance(name, str):
-            return value.lower() == 'true'
-        if default_type == str:
-            return value  # include None
+            if value == default:
+                return default
+
+            if default_type == bool and isinstance(name, str):
+                return value.lower() == 'true'
+
+            if default_type == str:
+                return value
+            else:
+                try:
+                    return default_type(value)  # will raise Exception if None
+                except Exception:
+                    return default  # include None
+
+        if default is None:
+            value = type_cast(os.environ.get(name))
+            if type_allow_list is not None:
+                raise_if(ValueError, not augmented_isinstance(value, tuple(type_allow_list)),
+                         f"{name} must be in {type_allow_list}")
+            return value
         else:
-            try:
-                return default_type(value)  # will raise Exception if None
-            except Exception:
-                return default  # include None
+            return type_cast(os.environ.get(name, default))
 
-    if default is None:
-        return type_cast(os.environ.get(name))
-    else:
-        return type_cast(os.environ.get(name, default))
+    @property
+    def MVDB_LOG_LEVEL(self):
+        return self.get_env_variable('MVDB_LOG_LEVEL', 'INFO', str, [str])
+
+    @property
+    def MVDB_LOG_PATH(self):
+        return self.get_env_variable('MVDB_LOG_PATH', None, str, [str, None])
+
+    @property
+    def MVDB_TRUNCATE_LOG(self):
+        return self.get_env_variable('MVDB_TRUNCATE_LOG', True, bool, [bool])
+
+    @property
+    def MVDB_LOG_WITH_TIME(self):
+        return self.get_env_variable('MVDB_LOG_WITH_TIME', False, bool, [bool])
+
+    @property
+    def MVDB_KMEANS_EPOCHS(self):
+        return self.get_env_variable('MVDB_KMEANS_EPOCHS', 100, int, [int])
+
+    @property
+    def MVDB_QUERY_CACHE_SIZE(self):
+        return self.get_env_variable('MVDB_QUERY_CACHE_SIZE', 10000, int, [int])
+
+    @property
+    def MVDB_DATALOADER_BUFFER_SIZE(self):
+        return self.get_env_variable('MVDB_DATALOADER_BUFFER_SIZE', 20, int, [int, None])
+
+    @property
+    def MVDB_COSINE_SIMILARITY_THRESHOLD(self):
+        value = os.environ.get('MVDB_COSINE_SIMILARITY_THRESHOLD', 0.85)
+        return None if value == 'None' else float(value)
+
+    def get_all_configs(self):
+        return {
+            'MVDB_LOG_LEVEL': self.MVDB_LOG_LEVEL,
+            'MVDB_LOG_PATH': self.MVDB_LOG_PATH,
+            'MVDB_TRUNCATE_LOG': self.MVDB_TRUNCATE_LOG,
+            'MVDB_LOG_WITH_TIME': self.MVDB_LOG_WITH_TIME,
+            'MVDB_KMEANS_EPOCHS': self.MVDB_KMEANS_EPOCHS,
+            'MVDB_QUERY_CACHE_SIZE': self.MVDB_QUERY_CACHE_SIZE,
+            'MVDB_COSINE_SIMILARITY_THRESHOLD': self.MVDB_COSINE_SIMILARITY_THRESHOLD,
+            # 'MVDB_COMPUTE_DEVICE': self.MVDB_COMPUTE_DEVICE,
+            'MVDB_DATALOADER_BUFFER_SIZE': self.MVDB_DATALOADER_BUFFER_SIZE
+        }
 
 
-MVDB_LOG_LEVEL = get_env_variable('MVDB_LOG_LEVEL', 'INFO', str)
-MVDB_LOG_PATH = get_env_variable('MVDB_LOG_PATH', None, str)
-MVDB_TRUNCATE_LOG = get_env_variable('MVDB_TRUNCATE_LOG', True, bool)
-MVDB_LOG_WITH_TIME = get_env_variable('MVDB_LOG_WITH_TIME', False, bool)
-MVDB_KMEANS_EPOCHS = get_env_variable('MVDB_KMEANS_EPOCHS', 100, int)
-MVDB_QUERY_CACHE_SIZE = get_env_variable('MVDB_QUERY_CACHE_SIZE', 10000, int)
-MVDB_DATALOADER_BUFFER_SIZE = get_env_variable('MVDB_DATALOADER_BUFFER_SIZE', 20, int)
+config = Config()
 
-MVDB_COSINE_SIMILARITY_THRESHOLD = os.environ.get('MVDB_COSINE_SIMILARITY_THRESHOLD', 0.85)
-if MVDB_COSINE_SIMILARITY_THRESHOLD == 'None':
-    MVDB_COSINE_SIMILARITY_THRESHOLD = None
-else:
-    MVDB_COSINE_SIMILARITY_THRESHOLD = float(MVDB_COSINE_SIMILARITY_THRESHOLD)
-
-MVDB_COMPUTE_DEVICE = get_env_variable('MVDB_COMPUTE_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu', str)
-
-
-def get_all_configs():
-    return {
-        'MVDB_LOG_LEVEL': MVDB_LOG_LEVEL,
-        'MVDB_LOG_PATH': MVDB_LOG_PATH,
-        'MVDB_TRUNCATE_LOG': MVDB_TRUNCATE_LOG,
-        'MVDB_LOG_WITH_TIME': MVDB_LOG_WITH_TIME,
-        'MVDB_KMEANS_EPOCHS': MVDB_KMEANS_EPOCHS,
-        'MVDB_QUERY_CACHE_SIZE': MVDB_QUERY_CACHE_SIZE,
-        'MVDB_COSINE_SIMILARITY_THRESHOLD': MVDB_COSINE_SIMILARITY_THRESHOLD,
-        'MVDB_COMPUTE_DEVICE': MVDB_COMPUTE_DEVICE,
-        'MVDB_DATALOADER_BUFFER_SIZE': MVDB_DATALOADER_BUFFER_SIZE
-    }
+get_all_configs = config.get_all_configs
