@@ -5,8 +5,6 @@ import cloudpickle
 
 from spinesUtils.asserts import raise_if
 
-from min_vec.computational_layer.engines import to_normalize
-
 
 class ScalarQuantization:
     bits_map = {8: np.uint8, 16: np.uint16, 32: np.uint32}
