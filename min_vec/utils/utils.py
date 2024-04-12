@@ -2,15 +2,12 @@
 
 from functools import wraps
 
-from min_vec.configs.config import MVDB_COSINE_SIMILARITY_THRESHOLD
-
 
 class UnKnownError(Exception):
     pass
 
 
 def io_checker(func):
-    from functools import wraps
     from pathlib import Path
     from spinesUtils.asserts import raise_if
 
@@ -42,11 +39,9 @@ class QueryVectorCache:
 
     def __init__(self, max_size=1000):
         from collections import OrderedDict
-        from min_vec.computational_layer.engines import cosine_distance
 
         self.cache = OrderedDict()
         self.max_size = max_size
-        self._cosine_similarity = cosine_distance
 
     def clear_cache(self):
         self.cache.clear()
@@ -54,16 +49,6 @@ class QueryVectorCache:
     def __call__(self, func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            import numpy as np
-
-            if len(args) < 2:
-                query_vec = kwargs['vector']
-            else:
-                query_vec = args[1]  # this argument is the query vector
-
-            best_similarity = 0.0
-            best_result = None
-
             # 生成基于参数的唯一键，确保所有部分都是可哈希的
             key_parts = []
             for arg in args[1:]:  # ignore the self parameter
@@ -91,30 +76,10 @@ class QueryVectorCache:
 
             # 检查是否在缓存中找到对应的向量并计算相似度
             if key in self.cache:
-                return self.cache[key]
+                best_result = self.cache[key]
             else:
-                if MVDB_COSINE_SIMILARITY_THRESHOLD is not None:
-                    # 遍历缓存中的向量，找到最相似的向量
-                    for cached_key, cached_vec in self.cache.items():
-                        for cv in cached_vec:
-                            if cv[0] == 'vector':
-                                cached_vec = np.frombuffer(cv, dtype=np.float32)
-
-                                similarity = self._cosine_similarity(query_vec, cached_vec)
-                                if similarity > MVDB_COSINE_SIMILARITY_THRESHOLD:
-                                    if similarity > best_similarity:
-                                        best_similarity = similarity
-                                        best_result = self.cache[key]
-                                        break
-
-            # 如果没有找到足够相似的结果，则执行原函数获取新的结果并更新缓存
-            if best_result is None:
-                if len(self.cache) >= self.max_size:
-                    self.cache.popitem(last=False)
-
-                result = func(*args, **kwargs)
-                best_result = result
-                self.cache[key] = result
+                best_result = func(*args, **kwargs)
+                self.cache[key] = best_result
 
             return best_result
 
