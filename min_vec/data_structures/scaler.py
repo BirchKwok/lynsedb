@@ -58,8 +58,11 @@ class ScalarQuantization:
         max_vals = self.max_vals
 
         quantized = ne.evaluate(
-            "((vectors - min_vals) / (max_vals - min_vals + epsilon)) * n_levels_minus_1", optimization='moderate'
-        ).astype(self.bits)
+            "((vectors - min_vals) / (max_vals - min_vals + epsilon)) * n_levels_minus_1", optimization='moderate',
+            local_dict={'vectors': vectors, 'min_vals': min_vals, 'max_vals': max_vals,
+                        'n_levels_minus_1': n_levels_minus_1, 'epsilon': epsilon}
+        )
+        quantized = np.clip(quantized, 0, n_levels_minus_1).astype(self.bits)
 
         return quantized
 
@@ -74,7 +77,9 @@ class ScalarQuantization:
         min_vals = self.min_vals
 
         decoded = ne.evaluate(
-            "(quantized_vectors / n_levels_minus_1) * range_vals + min_vals", optimization='moderate'
+            "(quantized_vectors / n_levels_minus_1) * range_vals + min_vals", optimization='moderate',
+            local_dict={'quantized_vectors': quantized_vectors, 'range_vals': range_vals,
+                        'min_vals': min_vals, 'n_levels_minus_1': n_levels_minus_1}
         )
 
         if decoded.dtype != self.decode_dtype:
