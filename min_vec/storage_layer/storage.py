@@ -10,10 +10,9 @@ from min_vec.data_structures.limited_dict import LimitedDict
 
 
 class StorageWorker:
-    """A class to read and write data to a file, with optimized file handle management."""
+    """The worker class for reading and writing data to the files."""
 
     def __init__(self, database_path, dimension, chunk_size, quantizer=None):
-        self.n_threads = 1
         self.database_path = Path(database_path)
         self.database_chunk_path = self.database_path / 'chunk_data'
         self.database_chunk_indices_path = self.database_path / 'chunk_indices_data'
@@ -38,8 +37,8 @@ class StorageWorker:
         self.quantizer = quantizer
 
     def file_exists(self):
-        return not ((self.database_chunk_path / 'chunk_0.npy').exists()
-                    or (self.database_cluster_path / 'cluster_0_0.npy').exists())
+        return ((self.database_chunk_path / 'chunk_0').exists()
+                or (self.database_cluster_path / 'cluster_0_0').exists())
 
     def _return_if_in_memory(self, filename, reverse=False):
         res = self.cache.get(filename, None)
