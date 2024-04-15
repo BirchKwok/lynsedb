@@ -1,12 +1,17 @@
 """api.py - The MinVectorDB API."""
+import os
 from typing import Union, List, Tuple
 
 import numpy as np
-from spinesUtils.asserts import raise_if
+from spinesUtils.asserts import raise_if, ParameterTypeAssert
 from spinesUtils.logging import Logger
+from spinesUtils.timer import Timer
 
 from min_vec.configs.config import config
 from min_vec.configs.parameters_validator import ParametersValidator
+from min_vec.execution_layer.query import Query
+from min_vec.execution_layer.matrix_serializer import MatrixSerializer
+from min_vec.utils.utils import unavailable_if_deleted
 
 logger = Logger(
     fp=config.MVDB_LOG_PATH,
@@ -22,19 +27,27 @@ class MinVectorDB:
     A class for managing a vector database stored in .mvdb files and computing vectors similarity.
     """
 
-    from spinesUtils.asserts import ParameterValuesAssert, ParameterTypeAssert
-
-    @ParameterTypeAssert({
-        'use_cache': bool, 'reindex_if_conflict': bool
-    }, func_name='MinVectorDB')
     @ParametersValidator(
-        update_configs=['dim', 'database_path', 'n_cluster', 'chunk_size', 'index_mode', 'dtypes', 'scaler_bits'],
+        update_configs=['dim', 'database_path', 'n_clusters', 'chunk_size', 'index_mode', 'dtypes', 'scaler_bits',
+                        'distance'],
         logger=logger
     )
+    @ParameterTypeAssert({
+        'dim': int,
+        'database_path': str,
+        'n_clusters': int,
+        'chunk_size': int,
+        'distance': str,
+        'index_mode': str,
+        'dtypes': str,
+        'use_cache': bool,
+        'scaler_bits': (None, int),
+        'n_threads': (None, int)
+    }, func_name='MinVectorDB')
     def __init__(
-            self, dim: int, database_path: str, n_cluster: int = 16, chunk_size: int = 100_000,
+            self, dim: int, database_path: str, n_clusters: int = 16, chunk_size: int = 100_000,
             distance: str = 'cosine', index_mode: str = 'IVF-FLAT', dtypes: str = 'float32',
-            use_cache: bool = True, reindex_if_conflict: bool = False, scaler_bits: int = 8, n_threads: int = 10
+            use_cache: bool = True, scaler_bits: int = 8, n_threads: int = None
     ) -> None:
         """
         Initialize the vector database.
@@ -42,7 +55,7 @@ class MinVectorDB:
         Parameters:
             dim (int): Dimension of the vectors.
             database_path (str): Path to the database file.
-            n_cluster (int): The number of clusters for the IVF-FLAT index. Default is 8.
+            n_clusters (int): The number of clusters for the IVF-FLAT index. Default is 8.
             chunk_size (int): The size of each data chunk. Default is 100_000.
             distance (str): Method for calculating vector distance.
                 Options are 'cosine' or 'L2' for Euclidean distance. Default is 'cosine'.
@@ -51,29 +64,31 @@ class MinVectorDB:
             dtypes (str): The data type of the vectors. Default is 'float32'.
                 Options are 'float16', 'float32' or 'float64'.
             use_cache (bool): Whether to use cache for query. Default is True.
-            reindex_if_conflict (bool): Whether to reindex if there is a conflict. Default is False.
             scaler_bits (int): The number of bits for scalar quantization.
                 Options are 8, 16, or 32. The default is None, which means no scalar quantization.
                 The 8 for 8-bit, 16 for 16-bit, and 32 for 32-bit.
-            n_threads (int): The number of threads to use for parallel processing. Default is 10.
+            n_threads (int): The number of threads to use for parallel processing. Default is None, which means using
+                twice the number of CPU cores.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
         """
-
-        from spinesUtils.timer import Timer
-
-        from min_vec.execution_layer.query import Query
-        from min_vec.execution_layer.matrix_serializer import MatrixSerializer
-
-        raise_if(NotImplementedError, distance != 'cosine', "Only 'cosine' distance is supported for now.")
+        raise_if(ValueError, not str(database_path).endswith('mvdb'), 'database_path must end with .mvdb')
+        raise_if(ValueError, chunk_size <= 1, 'chunk_size must greater than 1')
+        raise_if(ValueError, distance not in ('cosine', 'L2'), 'distance must be "cosine" or "L2"')
+        raise_if(ValueError, index_mode not in ('FLAT', 'IVF-FLAT'), 'index_mode must be "FLAT" or "IVF-FLAT"')
+        raise_if(ValueError, dtypes not in ('float16', 'float32', 'float64'),
+                 'dtypes must be "float16", "float32" or "float64')
+        raise_if(ValueError, not isinstance(n_clusters, int) or n_clusters <= 0,
+                 'n_clusters must be int and greater than 0')
+        raise_if(ValueError, scaler_bits not in (8, 16, 32, None), 'sq_bits must be 8, 16, 32 or None')
 
         logger.info("Initializing MinVectorDB with: \n "
                     f"\r//    dim={dim}, database_path='{database_path}', \n"
-                    f"\r//    n_cluster={n_cluster}, chunk_size={chunk_size},\n"
+                    f"\r//    n_clusters={n_clusters}, chunk_size={chunk_size},\n"
                     f"\r//    distance='{distance}', index_mode='{index_mode}', \n"
                     f"\r//    dtypes='{dtypes}', use_cache={use_cache}, \n"
-                    f"\r//    reindex_if_conflict={reindex_if_conflict}, scaler_bits={scaler_bits}\n"
+                    f"\r//    scaler_bits={scaler_bits}\n"
                     )
 
         if chunk_size <= 1:
@@ -82,13 +97,12 @@ class MinVectorDB:
         self._matrix_serializer = MatrixSerializer(
             dim=dim,
             database_path=database_path,
-            n_clusters=n_cluster,
+            n_clusters=n_clusters,
             chunk_size=chunk_size,
             distance=distance,
             index_mode=index_mode,
             logger=logger,
             dtypes=dtypes,
-            reindex_if_conflict=reindex_if_conflict,
             scaler_bits=scaler_bits
         )
         self._data_loader = self._matrix_serializer.iterable_dataloader
@@ -98,18 +112,19 @@ class MinVectorDB:
         self._use_cache = use_cache
         self._distance = distance
 
-        raise_if(TypeError, not isinstance(n_threads, int), "n_threads must be an integer.")
-        raise_if(ValueError, n_threads <= 0, "n_threads must be greater than 0.")
+        raise_if(TypeError, n_threads is not None and not isinstance(n_threads, int), "n_threads must be an integer.")
+        raise_if(ValueError, n_threads is not None and n_threads <= 0, "n_threads must be greater than 0.")
 
         self._query = Query(
             matrix_serializer=self._matrix_serializer,
-            n_threads=n_threads
+            n_threads=n_threads if n_threads else 2 * os.cpu_count()
         )
 
         self._query.query.clear_cache()
 
         self._most_recent_query_report = {}
 
+    @unavailable_if_deleted
     def add_item(self, vector: np.ndarray, *, index: int = None, field: str = None) -> int:
         """
         Add a single vector to the database.
@@ -128,7 +143,10 @@ class MinVectorDB:
         """
         return self._matrix_serializer.add_item(vector, index=index, field=field)
 
-    def bulk_add_items(self, vectors: List[Tuple[np.ndarray, int, str]]):
+    @unavailable_if_deleted
+    def bulk_add_items(
+            self, vectors: Union[List[Tuple[np.ndarray, int, str]], List[Tuple[np.ndarray, int]], List[np.ndarray]]
+    ):
         """
         Bulk add vectors to the database in batches.
 
@@ -140,6 +158,7 @@ class MinVectorDB:
         """
         return self._matrix_serializer.bulk_add_items(vectors)
 
+    @unavailable_if_deleted
     def commit(self):
         """
         Save the database, ensuring that all data is written to disk.
@@ -147,6 +166,7 @@ class MinVectorDB:
         """
         self._matrix_serializer.commit()
 
+    @unavailable_if_deleted
     def query(self, vector: np.ndarray, k: Union[int, str] = 12, *, fields: List = None, subset_indices: List = None,
               return_similarity: bool = True):
         """
@@ -186,7 +206,7 @@ class MinVectorDB:
         self._most_recent_query_report['Query K'] = k
         self._most_recent_query_report[f'Top {k} results index'] = res[0]
         if return_similarity:
-            self._most_recent_query_report[f'Top {k} results similarity'] = res[1]
+            self._most_recent_query_report[f'Top {k} results similarity'] = np.array([round(i, 6) for i in res[1]])
 
         return res
 
@@ -200,6 +220,7 @@ class MinVectorDB:
         """
         return self._matrix_serializer.shape
 
+    @unavailable_if_deleted
     def insert_session(self):
         """
         Create a session to insert data, which will automatically commit the data when the session ends.
@@ -208,6 +229,7 @@ class MinVectorDB:
 
         return DatabaseSession(self)
 
+    @unavailable_if_deleted
     def delete(self):
         """
         Delete the database.
@@ -247,7 +269,6 @@ class MinVectorDB:
             'Database index_mode': self._matrix_serializer.index_mode,
             'Database distance': self._distance,
             'Database use_cache': self._use_cache,
-            'Database reindex_if_conflict': self._matrix_serializer.reindex_if_conflict,
             'Database status': 'DELETED' if self._matrix_serializer.IS_DELETED else 'ACTIVE'
         }}
 
