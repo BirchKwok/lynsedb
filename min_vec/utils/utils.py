@@ -85,3 +85,17 @@ class QueryVectorCache:
 
         wrapper.clear_cache = self.clear_cache
         return wrapper
+
+
+def unavailable_if_deleted(func):
+    """A decorator that detects if the function is called after the object is deleted."""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # self is the first parameter
+        if args[0]._matrix_serializer.IS_DELETED:
+            print("The database has been deleted, and the operation is invalid.")
+            return None
+        return func(*args, **kwargs)
+
+    return wrapper
