@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://github.com/BirchKwok/MinVectorDB"><img src="https://github.com/BirchKwok/MinVectorDB/blob/main/pic/logo.png" alt="MinVectorDB" style="max-width: 20%; height: auto;"></a>
-  <h3>A pure Python-implemented, lightweight, stateless, locally deployed vector database.</h3>
+  <h3>A pure Python-implemented, lightweight, serverless, locally deployed vector database.</h3>
   <p>
     <a href="https://badge.fury.io/py/MinVectorDB"><img src="https://badge.fury.io/py/MinVectorDB.svg" alt="PyPI version"></a>
     <a href="https://pypi.org/project/MinVectorDB/"><img src="https://img.shields.io/pypi/pyversions/MinVectorDB" alt="PyPI - Python Version"></a>
@@ -12,22 +12,26 @@
   </p>
 </div>
 
-<div align="center">
-  <a href="https://github.com/BirchKwok/MinVectorDB"><img src="https://github.com/BirchKwok/MinVectorDB/blob/main/pic/terminal-demo-show.gif" alt="Demo"></a>
-</div>
+⚡ **Serverless, simple parameters, simple API.**
+
+⚡ **Fast, memory-efficient, easily scales to millions of vectors.**
+
+⚡ **Supports cosine similarity and L2 distance, uses FLAT for exhaustive search or IVF-FLAT for inverted indexing.**
+
+⚡ **Friendly caching technology stores recently queried vectors for accelerated access.**
+
+⚡ **Based on a generic Python software stack, platform-independent, highly versatile.**
 
 > **WARNING**: MinVectorDB is actively being updated, and API backward compatibility is not guaranteed. You should use version numbers as a strong constraint during deployment to avoid unnecessary feature conflicts and errors.
 > **Although our goal is to enable brute force search or inverted indexing on billion-scale vectors, we currently still recommend using it on a scale of millions of vectors or less for the best experience.**
 
-*MinVectorDB* is a vector database implemented purely in Python, designed to be lightweight, stateless, and easy to deploy locally. It offers straightforward and clear Python APIs, aiming to lower the entry barrier for using vector databases. In response to user needs and to enhance its practicality, we are planning to introduce new features, including but not limited to:
+*MinVectorDB* is a vector database implemented purely in Python, designed to be lightweight, serverless, and easy to deploy locally. It offers straightforward and clear Python APIs, aiming to lower the entry barrier for using vector databases. In response to user needs and to enhance its practicality, we are planning to introduce new features, including but not limited to:
 
 - **Optimizing Global Search Performance**: We are focusing on algorithm and data structure enhancements to speed up searches across the database, enabling faster retrieval of vector data.
 - **Enhancing Cluster Search with Inverted Indexes**: Utilizing inverted index technology, we aim to refine the cluster search process for better search efficiency and precision.
 - **Refining Clustering Algorithms**: By improving our clustering algorithms, we intend to offer more precise and efficient data clustering to support complex queries.
 - **Facilitating Vector Modifications and Deletions**: We will introduce features to modify and delete vectors, allowing for more flexible data management.
 - **Implementing Rollback Strategies**: To increase database robustness and data security, rollback strategies will be added, helping users recover from incorrect operations or system failures easily.
-
-Additionally, we are introducing a query caching feature, with a default cache for the most recent 10,000 query results. In cases where a query does not hit the cache, the system will calculate the cosine similarity between the given vector and cached vectors. If the similarity is greater than 0.85, it will return the result of the closest cached vector directly.
 
 MinVectorDB focuses on achieving a 100% recall rate, prioritizing recall accuracy over high-speed search performance. This approach ensures that users can reliably retrieve all relevant vector data, making MinVectorDB particularly suitable for applications requiring responses within 100 milliseconds.
 
@@ -111,14 +115,15 @@ def get_test_vectors(shape):
 
 # distance can be 'L2' or 'cosine'
 # index_mode can be 'FLAT' or 'IVF-FLAT', default is 'IVF-FLAT'
-db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', index_mode='FLAT', chunk_size=100000, use_cache=False, scaler_bits=8)
+db = MinVectorDB(dim=1024, database_path='test_min_vec.mvdb', index_mode='FLAT',
+                 chunk_size=100000, use_cache=False, scaler_bits=8, n_threads=10, distance='cosine')
 
 # ========== Use automatic commit statements. Recommended. =============
 # You can perform this operation multiple times, and the data will be appended to the database.
 with db.insert_session():
     # Define the initial ID.
     id = 0
-    for t in tqdm(get_test_vectors((5000000, 1024)), total=5000000, unit="vector"):
+    for t in tqdm(get_test_vectors((1000000, 1024)), total=1000000, unit="vector"):
         if id == 0:
             query = t
             query_id = 0
@@ -144,26 +149,25 @@ db.delete()
 
     MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
-    //    n_cluster=16, chunk_size=100000,
+    //    n_clusters=16, chunk_size=100000,
     //    distance='cosine', index_mode='FLAT', 
-    //    dtypes='float32', use_cache=False, 
-    //    reindex_if_conflict=False, scaler_bits=8
+    //    dtypes='float32', use_cache=True, 
+    //    scaler_bits=8
     
     MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
-    100%|██████████| 5000000/5000000 [01:01<00:00, 81902.68vector/s] 
+    100%|██████████| 1000000/1000000 [00:12<00:00, 81258.92vector/s]
 
 
       - Query sample id:  0
       - Query sample field:  None
     
     * - MOST RECENT QUERY REPORT -
-    | - Database shape: (5000000, 1024)
-    | - Query time: 1.12399 s
+    | - Database shape: (1000000, 1024)
+    | - Query time: 0.52161 s
     | - Query K: 10
-    | - Top 10 results index: [      0  126163 2995566 1455136 3285759 3671500 2498399 4372617 2141370
-     3401650]
-    | - Top 10 results similarity: [0.9967977  0.78328276 0.78147084 0.7807232  0.7804502  0.78013766
-     0.77972347 0.77943265 0.7793954  0.779209  ]
+    | - Top 10 results index: [     0 126163 934623 376250 136782 927723  67927 454821 909201 226748]
+    | - Top 10 results similarity: [0.996918 0.783403 0.779208 0.778662 0.778039 0.777809 0.777673 0.777481
+     0.777456 0.777079]
     * - END OF REPORT -
     
 
@@ -215,10 +219,10 @@ db.delete()
 
     MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
-    //    n_cluster=16, chunk_size=10000,
+    //    n_clusters=16, chunk_size=10000,
     //    distance='cosine', index_mode='FLAT', 
     //    dtypes='float32', use_cache=True, 
-    //    reindex_if_conflict=False, scaler_bits=8
+    //    scaler_bits=8
     
     MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
 
@@ -228,11 +232,11 @@ db.delete()
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.04958 s
+    | - Query time: 0.10599 s
     | - Query K: 10
     | - Top 10 results index: [    0 67927 53447 47665 13859  5788 41949 64134 38082 18507]
-    | - Top 10 results similarity: [0.9974107  0.7780206  0.77481455 0.7742663  0.7730598  0.77304006
-     0.772899   0.772897   0.7720787  0.7714467 ]
+    | - Top 10 results similarity: [0.997411 0.778021 0.774815 0.774266 0.77306  0.77304  0.772899 0.772897
+     0.772079 0.771447]
     * - END OF REPORT -
     
 
@@ -286,10 +290,10 @@ db.delete()
 
     MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
-    //    n_cluster=16, chunk_size=10000,
+    //    n_clusters=16, chunk_size=10000,
     //    distance='cosine', index_mode='IVF-FLAT', 
     //    dtypes='float32', use_cache=True, 
-    //    reindex_if_conflict=False, scaler_bits=8
+    //    scaler_bits=8
     
     MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
 
@@ -299,11 +303,11 @@ db.delete()
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.00236 s
+    | - Query time: 0.08010 s
     | - Query K: 10
     | - Top 10 results index: [ 0 60 76 63 52 14 27 61 83 79]
-    | - Top 10 results similarity: [0.9974107  0.7515197  0.7489892  0.7483421  0.7466648  0.7452562
-     0.74377525 0.7390184  0.7307658  0.7282359 ]
+    | - Top 10 results similarity: [0.997411 0.75152  0.748989 0.748342 0.746665 0.745256 0.743775 0.739018
+     0.730766 0.728236]
     * - END OF REPORT -
     
 
@@ -356,10 +360,10 @@ db.delete()
 
     MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
-    //    n_cluster=16, chunk_size=10000,
+    //    n_clusters=16, chunk_size=10000,
     //    distance='cosine', index_mode='IVF-FLAT', 
     //    dtypes='float32', use_cache=True, 
-    //    reindex_if_conflict=False, scaler_bits=8
+    //    scaler_bits=8
     
     MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
 
@@ -369,11 +373,11 @@ db.delete()
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.00384 s
+    | - Query time: 0.05818 s
     | - Query K: 10
     | - Top 10 results index: [ 0  9 14  7  3  1 19 18  8 17]
-    | - Top 10 results similarity: [0.9974107  0.75857055 0.7452562  0.7420311  0.7413465  0.73768425
-     0.7370884  0.73495173 0.73355234 0.7306047 ]
+    | - Top 10 results similarity: [0.997411   0.75857097 0.745256   0.742031   0.741346   0.737684
+     0.737088   0.734952   0.733552   0.730605  ]
     * - END OF REPORT -
     
 
@@ -428,10 +432,10 @@ db.delete()
 
     MinVectorDB - INFO - Initializing MinVectorDB with: 
     //    dim=1024, database_path='test_min_vec.mvdb', 
-    //    n_cluster=16, chunk_size=10000,
-    //    distance='L2', index_mode='IVF-FLAT', 
+    //    n_clusters=16, chunk_size=10000,
+    //    distance='cosine', index_mode='IVF-FLAT', 
     //    dtypes='float32', use_cache=True, 
-    //    reindex_if_conflict=False, scaler_bits=8
+    //    scaler_bits=8
     
     MinVectorDB - INFO - Initializing database folder path: 'test_min_vec/'
 
@@ -441,11 +445,11 @@ db.delete()
     
     * - MOST RECENT QUERY REPORT -
     | - Database shape: (100000, 1024)
-    | - Query time: 0.05352 s
+    | - Query time: 0.00418 s
     | - Query K: 10
-    | - Top 10 results index: [ 0  9 14 13  7  3  1 19 10  8]
-    | - Top 10 results similarity: [0.00545208 0.6913169  0.71014524 0.7103149  0.71466976 0.71513784
-     0.7208866  0.7213987  0.72268754 0.7265912 ]
+    | - Top 10 results index: [ 0  9 14  7  3  1 19 18  8 17]
+    | - Top 10 results similarity: [0.997411   0.75857097 0.745256   0.742031   0.741346   0.737684
+     0.737088   0.734952   0.733552   0.730605  ]
     * - END OF REPORT -
     
 
