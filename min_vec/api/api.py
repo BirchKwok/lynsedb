@@ -42,12 +42,14 @@ class MinVectorDB:
         'dtypes': str,
         'use_cache': bool,
         'scaler_bits': (None, int),
-        'n_threads': (None, int)
+        'n_threads': (None, int),
+        'warm_up': bool
     }, func_name='MinVectorDB')
     def __init__(
             self, dim: int, database_path: str, n_clusters: int = 16, chunk_size: int = 100_000,
             distance: str = 'cosine', index_mode: str = 'IVF-FLAT', dtypes: str = 'float32',
-            use_cache: bool = True, scaler_bits: int = 8, n_threads: int = None
+            use_cache: bool = True, scaler_bits: int = 8, n_threads: int = None,
+            warm_up: bool = False
     ) -> None:
         """
         Initialize the vector database.
@@ -69,6 +71,7 @@ class MinVectorDB:
                 The 8 for 8-bit, 16 for 16-bit, and 32 for 32-bit.
             n_threads (int): The number of threads to use for parallel processing. Default is None, which means using
                 twice the number of CPU cores.
+            warm_up (bool): Whether to warm up the database. Default is False.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -103,7 +106,8 @@ class MinVectorDB:
             index_mode=index_mode,
             logger=logger,
             dtypes=dtypes,
-            scaler_bits=scaler_bits
+            scaler_bits=scaler_bits,
+            warm_up=warm_up
         )
         self._data_loader = self._matrix_serializer.iterable_dataloader
         self._id_filter = self._matrix_serializer.id_filter
@@ -117,7 +121,7 @@ class MinVectorDB:
 
         self._query = Query(
             matrix_serializer=self._matrix_serializer,
-            n_threads=n_threads if n_threads else 2 * os.cpu_count()
+            n_threads=n_threads if n_threads else min(32, os.cpu_count() + 4)
         )
 
         self._query.query.clear_cache()

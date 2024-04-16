@@ -30,7 +30,8 @@ class MatrixSerializer:
             chunk_size: int = 1_000_000,
             index_mode: str = 'IVF-FLAT',
             dtypes: str = 'float32',
-            scaler_bits=None
+            scaler_bits=None,
+            warm_up: bool = False
     ) -> None:
         """
         Initialize the vector database.
@@ -50,6 +51,7 @@ class MatrixSerializer:
             scaler_bits (int): The number of bits for scalar quantization. Default is None.
                 Options are 8, 16, 32. If None, scalar quantization will not be used.
                 The 8 bits for uint8, 16 bits for uint16, 32 bits for uint32.
+            warm_up (bool): Whether to warm up the database. Default is False.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -96,7 +98,8 @@ class MatrixSerializer:
         # initialize the storage worker
         self.storage_worker = StorageWorker(self.database_path_parent, self.dim,
                                             self.chunk_size,
-                                            quantizer=None if self.scaler_bits is None else self.scaler)
+                                            quantizer=None if self.scaler_bits is None else self.scaler,
+                                            warm_up=warm_up)
 
         self.logger.info(f"Initializing database folder path: '{'.mvdb'.join(database_path.split('.mvdb')[:-1])}/'")
 
@@ -355,6 +358,9 @@ class MatrixSerializer:
 
             # save params
             self.storage_worker.write_file_attributes({'index_mode': self.index_mode})
+
+            if self.scaler_bits is not None:
+                self.scaler.save(self.database_path_parent / 'sq_model.mvdb')
 
             self.COMMIT_FLAG = True
 

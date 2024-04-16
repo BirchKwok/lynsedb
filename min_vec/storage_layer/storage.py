@@ -12,7 +12,7 @@ from min_vec.data_structures.limited_dict import LimitedDict
 class StorageWorker:
     """The worker class for reading and writing data to the files."""
 
-    def __init__(self, database_path, dimension, chunk_size, quantizer=None):
+    def __init__(self, database_path, dimension, chunk_size, quantizer=None, warm_up=False):
         self.database_path = Path(database_path)
         self.database_chunk_path = self.database_path / 'chunk_data'
         self.database_chunk_indices_path = self.database_path / 'chunk_indices_data'
@@ -36,9 +36,20 @@ class StorageWorker:
 
         self.quantizer = quantizer
 
+        if warm_up:
+            self.warm_up()
+
     def file_exists(self):
         return ((self.database_chunk_path / 'chunk_0').exists()
                 or (self.database_cluster_path / 'cluster_0_0').exists())
+
+    def warm_up(self):
+        """Load the data from the file to the memory."""
+        if not self.file_exists():
+            return
+
+        for data, indices, fields in self.read():
+            pass
 
     def _return_if_in_memory(self, filename, reverse=False):
         res = self.cache.get(filename, None)
