@@ -24,7 +24,6 @@ class MatrixSerializer:
             self,
             dim: int,
             database_path: str,
-            distance: str,
             logger: Logger,
             n_clusters: int = 16,
             chunk_size: int = 1_000_000,
@@ -39,8 +38,6 @@ class MatrixSerializer:
         Parameters:
             dim (int): Dimension of the vectors.
             database_path (str): Path to the database file.
-            distance (str): Method for calculating vector distance.
-                Options are 'cosine' or 'L2' for Euclidean distance.
             logger (Logger): The logger object.
             n_clusters (int): The number of clusters for the IVF-FLAT index. Default is 16.
             chunk_size (int): The size of each data chunk. Default is 1_000_000.
@@ -71,8 +68,6 @@ class MatrixSerializer:
 
         self._dtypes_map = {'float16': np.float16, 'float32': np.float32, 'float64': np.float64}
 
-        # set distance
-        self.distance = distance
         # set dtypes
         self.dtypes = self._dtypes_map[dtypes]
         # set index mode
@@ -122,27 +117,11 @@ class MatrixSerializer:
             n_clusters=self.n_clusters
         )
 
-        # save initial parameters
-        self._write_params(dtypes=dtypes)
-
         if self._get_cluster_dataset_num() > 0 and self.index_mode == 'FLAT':
             # cause the index mode is FLAT, but the cluster dataset is not empty,
             # so the clustered datasets will also be traversed during querying.
             self.logger.warning('The index mode is FLAT, but the cluster dataset is not empty, '
                                 'so the clustered datasets will also be traversed during querying.')
-
-    def _write_params(self, dtypes):
-        attrs = {
-            'dim': self.dim,
-            'chunk_size': self.chunk_size,
-            'distance': self.distance,
-            'dtypes': dtypes
-        }
-
-        if self.scaler_bits is not None:
-            attrs['sq_bits'] = self.scaler_bits
-
-        self.storage_worker.write_file_attributes(attrs)
 
     def _initialize_parent_path(self, database_path):
         """make directory if not exist"""
@@ -356,9 +335,6 @@ class MatrixSerializer:
 
             self.reset_database()
 
-            # save params
-            self.storage_worker.write_file_attributes({'index_mode': self.index_mode})
-
             if self.scaler_bits is not None:
                 self.scaler.save(self.database_path_parent / 'sq_model.mvdb')
 
@@ -519,7 +495,7 @@ class MatrixSerializer:
         """
         Build the IVF index.
         """
-        self.cluster_worker.build_index(self.scaler, self.distance)
+        self.cluster_worker.build_index(self.scaler)
 
     @property
     def shape(self):
