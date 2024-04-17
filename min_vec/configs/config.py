@@ -62,11 +62,6 @@ class Config:
     def MVDB_DATALOADER_BUFFER_SIZE(self):
         return self.get_env_variable('MVDB_DATALOADER_BUFFER_SIZE', 20, int, [int, None])
 
-    @property
-    def MVDB_COSINE_SIMILARITY_THRESHOLD(self):
-        value = os.environ.get('MVDB_COSINE_SIMILARITY_THRESHOLD', 0.85)
-        return None if value == 'None' else float(value)
-
     def get_all_configs(self):
         return {
             'MVDB_LOG_LEVEL': self.MVDB_LOG_LEVEL,
@@ -75,8 +70,6 @@ class Config:
             'MVDB_LOG_WITH_TIME': self.MVDB_LOG_WITH_TIME,
             'MVDB_KMEANS_EPOCHS': self.MVDB_KMEANS_EPOCHS,
             'MVDB_QUERY_CACHE_SIZE': self.MVDB_QUERY_CACHE_SIZE,
-            'MVDB_COSINE_SIMILARITY_THRESHOLD': self.MVDB_COSINE_SIMILARITY_THRESHOLD,
-            # 'MVDB_COMPUTE_DEVICE': self.MVDB_COMPUTE_DEVICE,
             'MVDB_DATALOADER_BUFFER_SIZE': self.MVDB_DATALOADER_BUFFER_SIZE
         }
 
