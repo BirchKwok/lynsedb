@@ -5,18 +5,16 @@ import jax.numpy as jnp
 def to_normalize(vec: np.ndarray):
     if vec.ndim == 1:
         return vec / np.linalg.norm(vec)
-    elif vec.ndim == 2:
-        return vec / jnp.linalg.norm(vec, axis=1)[:, np.newaxis]
     else:
-        raise ValueError("vec must be 1d or 2d array")
+        return vec / np.linalg.norm(vec, axis=1)[:, np.newaxis]
 
 
 def cosine_distance(vec1, vec2):
-    return jnp.dot(vec2, vec1)
+    return jnp.dot(vec2, vec1).block_until_ready()
 
 
 def euclidean_distance(vec1, vec2):
-    return jnp.linalg.norm(vec1 - vec2, axis=1)
+    return jnp.linalg.norm(vec1 - vec2, axis=1).block_until_ready()
 
 
 def argsort_topk(arr, k):
@@ -38,6 +36,6 @@ def argsort_topk(arr, k):
     if k >= arr.size:
         return np.argsort(arr)
 
-    indices = jnp.argpartition(arr, k)[:k]
+    indices = np.argpartition(arr, k)[:k]
     sorted_indices = indices[np.argsort(arr[indices])]
     return sorted_indices
