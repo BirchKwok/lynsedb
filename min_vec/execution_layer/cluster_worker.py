@@ -29,7 +29,7 @@ class ClusterWorker:
 
         return self.ann_model.labels_
 
-    def build_index(self, scaler=None, distance='cosine'):
+    def build_index(self, scaler=None):
         """
         Build the IVF index more efficiently.
         """
@@ -37,14 +37,8 @@ class ClusterWorker:
         # 初始化每个聚类的存储列表
         temp_clusters = {i: ([], [], []) for i in range(self.n_clusters)}
 
-        if scaler is not None and distance == 'L2':
-            decoder = scaler.decode
-        else:
-            decoder = None
-
         for data, indices, fields in self.iterable_dataloader(read_chunk_only=True, mode='lazy'):
-            decode_data = data if decoder is None else decoder(data)
-            labels = self._kmeans_clustering(decode_data)
+            labels = self._kmeans_clustering(data)
 
             # 直接按标签将数据分配到相应的聚类
             for d, idx, f, label in zip(data, indices, fields, labels):
