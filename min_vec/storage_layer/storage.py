@@ -320,18 +320,6 @@ class StorageWorker:
             with open(self.database_path / 'info.json', 'r') as f:
                 return json.load(f)['total_shape']
 
-    def write_file_attributes(self, attributes):
-        """Write the attributes to the file."""
-        # use json to save the attributes
-        with open(self.database_path / 'attributes.json', 'w') as f:
-            json.dump(attributes, f)
-
-    def read_file_attributes(self):
-        """Read the attributes from the file."""
-        # use json to read the attributes
-        with open(self.database_path / 'attributes.json', 'r') as f:
-            return json.load(f)
-
     def delete_chunk(self):
         """Delete the chunk files."""
         for file in self.database_chunk_path.glob('*'):
