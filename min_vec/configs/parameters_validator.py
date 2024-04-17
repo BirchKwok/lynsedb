@@ -7,7 +7,10 @@ from spinesUtils.logging import Logger
 
 
 class ParametersValidator:
-    """Database configuration, define once and can not be changed."""
+    """Database configuration, define once and can not be changed.
+
+        .. versionadded:: 0.2.5
+    """
     def __init__(self, update_configs: list, logger: Logger):
         raise_if(TypeError, not isinstance(update_configs, list), "update_configs must be a list.")
 
@@ -21,7 +24,7 @@ class ParametersValidator:
                 continue
             else:
                 if update_configs_dict[key] != value:
-                    self.logger.warning(f"The database configuration {key} has been set to {value}, "
+                    self.logger.warning(f"The immutable parameter `{key}` of the database has been set to {value}, "
                                         f"the new value {update_configs_dict[key]} will be ignored.")
 
         for key, value in update_configs_dict.items():
@@ -83,6 +86,10 @@ class ParametersValidator:
             else:
                 existing_configs = self.load_configs(configs_json)
                 final_configs = self.check_configs(existing_configs, update_configs_dict)
+
+            for i in kwargs:
+                if i not in final_configs and kwargs[i] != self_instance:
+                    final_configs[i] = kwargs[i]
 
             return func(self_instance, **final_configs)
 
