@@ -100,7 +100,7 @@ from min_vec import MinVectorDB
 my_db = MinVectorDB(root_path='my_vec_db')
 ```
 
-    MinVectorDB - INFO - Successful initialization of MinVectorDB in root_path: /Users/guobingming/projects/MinVectorDB/my_vec_db
+    MinVectorDB - INFO - Successful initialization of MinVectorDB in root_path: /projects/MinVectorDB/my_vec_db
 
 
 
@@ -256,7 +256,7 @@ my_db
 
 
 
-    DELETED MinVectorDB(root_path='/Users/guobingming/projects/MinVectorDB/my_vec_db')
+    DELETED MinVectorDB(root_path='/projects/MinVectorDB/my_vec_db')
 
 
 
