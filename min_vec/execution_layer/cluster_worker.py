@@ -3,7 +3,7 @@ from typing import Callable
 from spinesUtils.logging import Logger
 
 from min_vec.storage_layer.storage import StorageWorker
-from min_vec.data_structures.kmeans import BatchKMeans
+from min_vec.structures.kmeans import BatchKMeans
 
 
 class ClusterWorker:
@@ -35,31 +35,32 @@ class ClusterWorker:
         """
         max_len = 0
         # 初始化每个聚类的存储列表
-        temp_clusters = {i: ([], [], []) for i in range(self.n_clusters)}
+        temp_clusters = {i: ([], []) for i in range(self.n_clusters)}
 
-        for data, indices, fields in self.iterable_dataloader(read_chunk_only=True, mode='lazy'):
+        filenames = self.storage_worker.get_all_files(read_type='chunk')
+        for filename in filenames:
+            data, indices = self.iterable_dataloader(filename, mode='lazy')
             labels = self._kmeans_clustering(data)
 
             # 直接按标签将数据分配到相应的聚类
-            for d, idx, f, label in zip(data, indices, fields, labels):
+            for d, idx, label in zip(data, indices, labels):
                 temp_clusters[label][0].append(d)
                 temp_clusters[label][1].append(idx)
-                temp_clusters[label][2].append(f)
                 max_len += 1
 
             if max_len >= 10000:
                 # 遍历每个聚类，保存数据
-                for cluster_id, (d, idx, f) in temp_clusters.items():
+                for cluster_id, (d, idx) in temp_clusters.items():
                     if d:  # 检查是否有数据，避免保存空聚类
-                        self.save_data(d, idx, f, write_chunk=False, cluster_id=cluster_id)
+                        self.save_data(d, idx, None, write_chunk=False, cluster_id=cluster_id)
 
                 # 初始化每个聚类的存储列表
-                temp_clusters = {i: ([], [], []) for i in range(self.n_clusters)}
+                temp_clusters = {i: ([], []) for i in range(self.n_clusters)}
                 max_len = 0
 
         if max_len > 0:
-            for cluster_id, (d, idx, f) in temp_clusters.items():
+            for cluster_id, (d, idx) in temp_clusters.items():
                 if d:
-                    self.save_data(d, idx, f, write_chunk=False, cluster_id=cluster_id)
+                    self.save_data(d, idx, None, write_chunk=False, cluster_id=cluster_id)
 
         self.storage_worker.delete_chunk()
