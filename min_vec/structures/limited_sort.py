@@ -5,31 +5,30 @@ from min_vec.computational_layer.engines import cosine_distance, argsort_topk, e
 
 
 class LimitedSorted:
-    def __init__(self, vector: np.ndarray, n: int, scaler, chunk_size, distance='cosine'):
+    def __init__(self, dim, dtype, scaler, chunk_size):
         """A class to store the top n most similar vectors to a given vector.
 
         .. versionadded:: 0.2.5
 
         Parameters:
-            vector (np.ndarray): The vector to compare against.
-            n (int): The number of most similar vectors to store.
+            dim (int): The dimension of the vectors.
+            dtype (type): The data type of the vectors.
             scaler (Scaler, optional): The scaler to decode the vectors.
             chunk_size (int): The maximum number of vectors to store.
                 .. versionadded:: 0.2.7
-            distance (str): The distance metric to use for the query.
-                .. versionadded:: 0.2.7
         """
         self.lock = threading.RLock()
-        self.vector = vector
-        self.n = n
-        self.distance = distance
-        self.distance_func = cosine_distance if distance == 'cosine' else euclidean_distance
+        self.dim = dim
+        self.n = None
         self.scaler = scaler
         self.max_length = chunk_size
         self.current_length = 0
-        self.similarities = np.empty(self.max_length, dtype=vector.dtype)
+        self.similarities = np.empty(self.max_length, dtype=dtype)
         self.indices = np.empty(self.max_length, dtype=int)
-        self.matrix_subset = np.empty((self.max_length, vector.size), dtype=vector.dtype)
+        self.matrix_subset = np.empty((self.max_length, dim), dtype=dtype)
+
+    def set_n(self, n):
+        self.n = n
 
     def add(self, sim: np.ndarray, indices: np.ndarray, matrix: np.ndarray):
         num_new_items = len(sim)
@@ -39,7 +38,7 @@ class LimitedSorted:
                 self.max_length = max(self.max_length * 2, end_pos)
                 self.similarities = np.resize(self.similarities, self.max_length)
                 self.indices = np.resize(self.indices, self.max_length)
-                self.matrix_subset = np.resize(self.matrix_subset, (self.max_length, self.vector.size))
+                self.matrix_subset = np.resize(self.matrix_subset, (self.max_length, self.dim))
 
             self.similarities[self.current_length:end_pos] = sim
             self.indices[self.current_length:end_pos] = indices
@@ -55,13 +54,24 @@ class LimitedSorted:
             self.matrix_subset[:idx_len] = self.matrix_subset[idx]
             self.current_length = idx_len
 
-    def get_top_n(self):
+    def get_top_n(self, vector: np.ndarray, distance='cosine'):
+        if distance == 'cosine':
+            distance_func = cosine_distance
+        else:
+            distance_func = euclidean_distance
+
         if self.scaler is None:
-            sim = self.distance_func(self.vector, self.matrix_subset[:self.current_length])
+            sim = distance_func(vector, self.matrix_subset[:self.current_length])
         else:
             decoded_vectors = self.scaler.decode(self.matrix_subset[:self.current_length])
-            sim = self.distance_func(self.vector, decoded_vectors)
+            sim = distance_func(vector, decoded_vectors)
 
-        sorted_idx = np.argsort(-sim) if self.distance_func == cosine_distance else np.argsort(sim)
+        sorted_idx = np.argsort(-sim) if distance == 'cosine' else np.argsort(sim)
 
         return self.indices[sorted_idx], sim[sorted_idx]
+
+    def clear(self):
+        self.current_length = 0
+        self.similarities = np.empty(self.max_length, dtype=self.similarities.dtype)
+        self.indices = np.empty(self.max_length, dtype=self.indices.dtype)
+        self.matrix_subset = np.empty((self.max_length, self.dim), dtype=self.matrix_subset.dtype)
