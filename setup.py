@@ -9,15 +9,14 @@ def read_requirements(path):
 
 reqs = read_requirements(Path('.').parent.joinpath("requirements.txt"))
 
-
 with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setup(
     name='MinVectorDB',
-    version="0.2.7",
-    description='MinVectorDB is a pure Python-implemented, lightweight, serverless vector, locally deployed database' \
-                'that offers clear and concise Python APIs, aimed at lowering the barrier to ' \
+    version="0.3.0",
+    description='MinVectorDB is a pure Python-implemented, lightweight, serverless vector, locally deployed database' 
+                'that offers clear and concise Python APIs, aimed at lowering the barrier to ' 
                 'the use of vector databases.',
     keywords='vector database',
     packages=find_packages(),
