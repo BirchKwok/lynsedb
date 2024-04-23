@@ -70,8 +70,7 @@ class ParametersValidator:
             for key in self.update_configs_list:
                 update_configs_dict[key] = kwargs.get(key)
 
-            self.database_path_parent = Path(dir_path).parent.absolute() / Path(
-                '.mvdb'.join(Path(dir_path).absolute().name.split('.mvdb')[:-1]))
+            self.database_path_parent = Path(dir_path).parent.absolute() / dir_path.absolute().name
 
             if not self.database_path_parent.exists():
                 self.database_path_parent.mkdir(parents=True)
