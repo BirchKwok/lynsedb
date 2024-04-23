@@ -1,6 +1,7 @@
 """utils.py: this file contains some useful functions and decorators."""
 
 from functools import wraps
+from pathlib import Path
 
 
 class UnKnownError(Exception):
@@ -92,10 +93,25 @@ def unavailable_if_deleted(func):
 
     @wraps(func)
     def wrapper(*args, **kwargs):
-        # self is the first parameter
-        if args[0]._matrix_serializer.IS_DELETED:
-            print("The database has been deleted, and the operation is invalid.")
-            return None
+        if hasattr(args[0], '_initialize_as_collection'):
+            # self is the first parameter
+            if args[0]._initialize_as_collection:
+                unit_name = 'collection'
+            else:
+                unit_name = 'database'
+
+            db_name = Path(args[0]._database_path).name
+
+            if args[0]._matrix_serializer.IS_DELETED:
+                raise ValueError(f"The {unit_name} `{db_name}` has been deleted, and the `{func.__name__}` function "
+                                 f"is unavailable.")
+        else:
+            db_name = Path(args[0].root_path).name
+
+            if args[0].STATUS == 'DELETED':
+                raise ValueError(f"The `{db_name}` has been deleted, and the `{func.__name__}` function "
+                                 f"is unavailable.")
+
         return func(*args, **kwargs)
 
     return wrapper
