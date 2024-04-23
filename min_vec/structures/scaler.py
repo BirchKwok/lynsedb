@@ -54,13 +54,13 @@ class ScalarQuantization:
 
         epsilon = 1e-9
         n_levels_minus_1 = self.n_levels - 1
+        range_vals = self.range_vals
         min_vals = self.min_vals
-        max_vals = self.max_vals
 
         quantized = ne.evaluate(
-            "((vectors - min_vals) / (max_vals - min_vals + epsilon)) * n_levels_minus_1", optimization='moderate',
-            local_dict={'vectors': vectors, 'min_vals': min_vals, 'max_vals': max_vals,
-                        'n_levels_minus_1': n_levels_minus_1, 'epsilon': epsilon}
+            "((vectors - min_vals) / (range_vals + epsilon)) * n_levels_minus_1", optimization='moderate',
+            local_dict={'vectors': vectors, 'min_vals': min_vals, 'n_levels_minus_1': n_levels_minus_1,
+                        'epsilon': epsilon, 'range_vals': range_vals}
         )
         quantized = np.clip(quantized, 0, n_levels_minus_1).astype(self.bits)
 
