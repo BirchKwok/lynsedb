@@ -6,7 +6,7 @@ from spinesUtils.asserts import raise_if
 
 from min_vec.computational_layer.engines import to_normalize
 from min_vec.configs.config import config
-from min_vec.data_structures.limited_dict import LimitedDict
+from min_vec.structures.limited_dict import LimitedDict
 
 
 class StorageWorker:
@@ -16,15 +16,12 @@ class StorageWorker:
         self.collection_path = Path(collection_path)
         self.collection_chunk_path = self.collection_path / 'chunk_data'
         self.collection_chunk_indices_path = self.collection_path / 'chunk_indices_data'
-        self.collection_chunk_fields_path = self.collection_path / 'chunk_fields_data'
 
         self.collection_cluster_path = self.collection_path / 'cluster_data'
         self.collection_cluster_indices_path = self.collection_path / 'cluster_indices_data'
-        self.collection_cluster_fields_path = self.collection_path / 'cluster_fields_data'
 
         for path in [self.collection_chunk_path, self.collection_chunk_indices_path,
-                     self.collection_chunk_fields_path, self.collection_cluster_path,
-                     self.collection_cluster_indices_path, self.collection_cluster_fields_path]:
+                     self.collection_cluster_path, self.collection_cluster_indices_path]:
             path.mkdir(parents=True, exist_ok=True)
 
         self.dimension = dimension
@@ -51,8 +48,8 @@ class StorageWorker:
         filenames = self.get_all_files(read_type='all')
 
         for filename in filenames:
-            data, indices, fields = self.read(filename)
-            data, indices, fields = self.read(filename)
+            data, indices = self.read(filename)
+            data, indices = self.read(filename)
 
     def _return_if_in_memory(self, filename):
         res = self.cache.get(filename, None)
@@ -62,19 +59,18 @@ class StorageWorker:
 
         return res
 
-    def _write_to_memory(self, filename, data, indices, fields):
-        self.cache[filename] = (data, indices, fields)
+    def _write_to_memory(self, filename, data, indices):
+        self.cache[filename] = (data, indices)
 
-    def _load_data(self, filename, data_path, indices_path, fields_path, update_memory=True):
+    def _load_data(self, filename, data_path, indices_path, update_memory=True):
         # 文件读取逻辑
         data = np.load(data_path / filename)
         indices = np.load(indices_path / filename)
-        fields = np.load(fields_path / filename)
 
         if update_memory:
-            self._write_to_memory(filename, data, indices, fields)
+            self._write_to_memory(filename, data, indices)
 
-        return data, indices, fields
+        return data, indices
 
     def get_all_files(self, read_type='chunk', cluster_id=None):
         if read_type == 'chunk':
@@ -101,16 +97,14 @@ class StorageWorker:
         if 'chunk' in filename:
             data_path = self.collection_chunk_path
             indices_path = self.collection_chunk_indices_path
-            fields_path = self.collection_chunk_fields_path
         else:
             data_path = self.collection_cluster_path
             indices_path = self.collection_cluster_indices_path
-            fields_path = self.collection_cluster_fields_path
 
         if filename in self.cache:
             return self._return_if_in_memory(filename)
         else:
-            return self._load_data(filename, data_path, indices_path, fields_path)
+            return self._load_data(filename, data_path, indices_path)
 
     def get_last_id(self, contains='chunk', cluster_id=None):
         if contains == 'chunk':
@@ -126,29 +120,24 @@ class StorageWorker:
         return -1
 
     @staticmethod
-    def _write_to_disk(data, indices, fields, data_path, indices_path, fields_path, filename):
+    def _write_to_disk(data, indices, data_path, indices_path, filename):
         with open(data_path / filename, 'wb') as f:
             np.save(f, data)
 
         with open(indices_path / filename, 'wb') as f:
             np.save(f, indices)
 
-        with open(fields_path / filename, 'wb') as f:
-            np.save(f, fields)
-
-    def _write(self, data, indices, fields, write_type='chunk', cluster_id=None, normalize=False):
+    def _write(self, data, indices, write_type='chunk', cluster_id=None, normalize=False):
         if normalize:
             data = to_normalize(np.vstack(data))
 
         if write_type == 'chunk':
             collection_subfile_path = self.collection_chunk_path
             collection_indices_path = self.collection_chunk_indices_path
-            collection_fields_path = self.collection_chunk_fields_path
             file_prefix = 'chunk'
         else:
             collection_subfile_path = self.collection_cluster_path
             collection_indices_path = self.collection_cluster_indices_path
-            collection_fields_path = self.collection_cluster_fields_path
 
             file_prefix = f'cluster_{cluster_id}'
 
@@ -187,18 +176,16 @@ class StorageWorker:
 
                 temp_data = np.vstack(data[:self.chunk_size])
                 temp_indices = np.array(indices[:self.chunk_size])
-                temp_fields = np.array(fields[:self.chunk_size])
 
                 data = data[self.chunk_size:]
                 indices = indices[self.chunk_size:]
-                fields = fields[self.chunk_size:]
 
                 filename = f'{file_prefix}_{last_file_id + 1}'
                 # save data
-                self._write_to_disk(temp_data, temp_indices, temp_fields, collection_subfile_path, collection_indices_path,
-                                    collection_fields_path, filename)
+                self._write_to_disk(temp_data, temp_indices, collection_subfile_path, collection_indices_path,
+                                    filename)
 
-                self._write_to_memory(filename, temp_data, temp_indices, temp_fields)
+                self._write_to_memory(filename, temp_data, temp_indices)
         # 存在未满chunk_size的新文件
         else:
             data_shape = len(data)
@@ -210,11 +197,9 @@ class StorageWorker:
                     temp_index = self.chunk_size - (total_shape[0] % self.chunk_size)
                     temp_data = np.vstack(data[:temp_index])
                     temp_indices = indices[:temp_index]
-                    temp_fields = fields[:temp_index]
 
                     data = data[temp_index:]
                     indices = indices[temp_index:]
-                    fields = fields[temp_index:]
                     already_stack = True
 
                     # save data
@@ -223,31 +208,25 @@ class StorageWorker:
                     # save indices
                     old_indices = np.load(collection_indices_path / f'{file_prefix}_{last_file_id}')
                     temp_indices = np.concatenate((old_indices, temp_indices))
-                    # save fields
-                    old_fields = np.load(collection_fields_path / f'{file_prefix}_{last_file_id}')
-                    temp_fields = np.concatenate((old_fields, temp_fields))
 
                     filename = f'{file_prefix}_{last_file_id}'
-                    self._write_to_disk(temp_data, temp_indices, temp_fields, collection_subfile_path,
-                                        collection_indices_path, collection_fields_path, filename)
+                    self._write_to_disk(temp_data, temp_indices, collection_subfile_path,
+                                        collection_indices_path, filename)
 
-                    self._write_to_memory(filename, temp_data, temp_indices, temp_fields)
+                    self._write_to_memory(filename, temp_data, temp_indices)
                 else:
                     temp_index = min(self.chunk_size, len(data))
                     temp_data = np.vstack(data[:temp_index])
                     temp_indices = np.array(indices[:temp_index])
-                    temp_fields = np.array(fields[:temp_index])
 
                     data = data[temp_index:]
                     indices = indices[temp_index:]
-                    fields = fields[temp_index:]
 
                     filename = f'{file_prefix}_{last_file_id + 1}'
-                    self._write_to_disk(temp_data, temp_indices, temp_fields, collection_subfile_path,
-                                        collection_indices_path,
-                                        collection_fields_path, filename)
+                    self._write_to_disk(temp_data, temp_indices, collection_subfile_path,
+                                        collection_indices_path, filename)
 
-                    self._write_to_memory(filename, temp_data, temp_indices, temp_fields)
+                    self._write_to_memory(filename, temp_data, temp_indices)
 
         if write_type == 'chunk':
             with open(self.collection_path / 'info.json', 'w') as f:
@@ -256,26 +235,26 @@ class StorageWorker:
         else:
             self.cluster_last_file_shape[cluster_id] = [data_shape + total_shape[0], self.dimension]
 
-    def cluster_write(self, cluster_id, data, indices, fields, normalize=False):
+    def cluster_write(self, cluster_id, data, indices, normalize=False):
         """Write the data to the file."""
-        self._write(data, indices, fields, write_type='cluster', cluster_id=cluster_id, normalize=normalize)
+        self._write(data, indices, write_type='cluster', cluster_id=cluster_id, normalize=normalize)
 
-    def chunk_write(self, data, indices, fields, normalize=False):
+    def chunk_write(self, data, indices, normalize=False):
         """Write the data to the file."""
-        self._write(data, indices, fields, write_type='chunk', normalize=normalize)
+        self._write(data, indices, write_type='chunk', normalize=normalize)
 
     def read(self, filename):
         """Read the data from the file."""
         return self._read(filename=filename)
 
-    def write(self, data, indices, fields, write_type='chunk', cluster_id=None, normalize=False):
+    def write(self, data, indices, write_type='chunk', cluster_id=None, normalize=False):
         """Write the data to the file."""
         if write_type == 'chunk':
-            self.chunk_write(data, indices, fields, normalize=normalize)
+            self.chunk_write(data, indices, normalize=normalize)
         elif write_type == 'cluster':
             raise_if(ValueError, not isinstance(cluster_id, str) and not cluster_id.isdigit(),
                      "cluster_id must be string-type integer.")
-            self.cluster_write(cluster_id, data, indices, fields, normalize=normalize)
+            self.cluster_write(cluster_id, data, indices, normalize=normalize)
         else:
             raise ValueError('write_type must be "chunk" or "cluster"')
 
@@ -289,7 +268,7 @@ class StorageWorker:
             filenames = self.get_all_files(read_type='chunk')
             if filenames:
                 for filename in filenames:
-                    data, _, _ = self.read(filename)
+                    data, _ = self.read(filename)
                     shape[0] += len(data)
 
             return shape
@@ -300,7 +279,7 @@ class StorageWorker:
             filenames = self.get_all_files(read_type='cluster')
             if filenames:
                 for filename in filenames:
-                    data, _, _ = self.read(filename)
+                    data, _ = self.read(filename)
                     shape[0] += len(data)
 
             return shape
@@ -317,8 +296,6 @@ class StorageWorker:
         for file in self.collection_chunk_path.glob('*'):
             file.unlink()
         for file in self.collection_chunk_indices_path.glob('*'):
-            file.unlink()
-        for file in self.collection_chunk_fields_path.glob('*'):
             file.unlink()
 
     def get_cluster_dataset_num(self):
@@ -356,11 +333,10 @@ class StorageWorker:
             paths = [i.name for i in self.collection_cluster_path.glob('cluster_*')]
 
         for path in paths:
-            _data, indices, fields = self._load_data(
+            _data, indices = self._load_data(
                 path,
                 self.collection_chunk_path if read_type == 'chunk' else self.collection_cluster_path,
                 self.collection_chunk_indices_path if read_type == 'chunk' else self.collection_cluster_indices_path,
-                self.collection_chunk_fields_path if read_type == 'chunk' else self.collection_cluster_fields_path,
                 update_memory=False
             )
 
