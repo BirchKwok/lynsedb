@@ -1,7 +1,7 @@
 from pyroaring import BitMap
 
 
-class IDFilter:
+class IDChecker:
     def __init__(self):
         self.ids = BitMap()
 
