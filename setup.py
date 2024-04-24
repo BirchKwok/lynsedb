@@ -14,9 +14,9 @@ with open("README.md", "r") as fh:
 
 setup(
     name='MinVectorDB',
-    version="0.3.0",
-    description='MinVectorDB is a pure Python-implemented, lightweight, serverless vector, locally deployed database' 
-                'that offers clear and concise Python APIs, aimed at lowering the barrier to ' 
+    version="0.3.1",
+    description='MinVectorDB is a pure Python-implemented, lightweight, serverless vector, locally deployed database'
+                'that offers clear and concise Python APIs, aimed at lowering the barrier to '
                 'the use of vector databases.',
     keywords='vector database',
     packages=find_packages(),
@@ -40,4 +40,9 @@ setup(
     author_email='birchkwok@gmail.com',
     install_requires=reqs,
     zip_safe=False,
+    entry_points={
+        'console_scripts': [
+            'min_vec=min_vec.api.http_api:main',
+        ],
+    },
 )
