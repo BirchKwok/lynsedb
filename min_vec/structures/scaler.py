@@ -24,7 +24,6 @@ class ScalarQuantization:
 
     def partial_fit(self, vectors, decay_factor=0.9):
         """
-        english version:
         Partially fit the model with new data, updating the minimum and maximum range values.
 
         Parameters
