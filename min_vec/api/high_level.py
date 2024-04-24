@@ -98,7 +98,7 @@ class MinVectorDB:
     @ParameterTypeAssert({
         'root_path': str
     }, func_name='MinVectorDB')
-    def __init__(self, root_path: str) -> None:
+    def __init__(self, root_path: Union[Path, str]) -> None:
         """
         Initialize the vector database.
 
