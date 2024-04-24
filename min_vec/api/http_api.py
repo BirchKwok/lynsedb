@@ -4,6 +4,7 @@ import operator
 import os
 from pathlib import Path
 
+import numpy as np
 import yaml
 
 from flask import Flask, request, jsonify, Response
@@ -44,7 +45,7 @@ def generate_config(root_path: str = default_root_path, config_path: Path = conf
     return config_path, root_path, config
 
 
-root_path, config = None, {}
+root_path, config = 'PlaceholderName', {'root_path': 'PlaceholderName'}
 
 
 @app.route('/required_collection', methods=['POST'])
@@ -139,7 +140,7 @@ def required_collection():
         return Response(json.dumps({
             'status': 'success',
             'params': {
-                'collection_name': data['collection_name'], 'database': config['root_path'],
+                'collection_name': data['collection_name'],
                 'dim': data['dim'], 'n_clusters': data['n_clusters'], 'chunk_size': data['chunk_size'],
                 'distance': data['distance'], 'index_mode': data['index_mode'], 'dtypes': data['dtypes'],
                 'use_cache': data['use_cache'], 'scaler_bits': data['scaler_bits'],
@@ -189,7 +190,11 @@ def drop_collection():
         my_vec_db.drop_collection(data['collection_name'])
 
         return Response(json.dumps(
-            {'status': 'success', 'collection_name': data['collection_name'], 'database': config['root_path']},
+            {
+                'status': 'success', 'params': {
+                'collection_name': data['collection_name']
+            }
+            },
             sort_keys=False),
             mimetype='application/json')
 
@@ -222,8 +227,41 @@ def drop_database():
         my_vec_db = MinVectorDB(root_path=config['root_path'])
         my_vec_db.drop_database()
 
-        return Response(json.dumps({'status': 'success', 'database': config['root_path']}, sort_keys=False),
-                        mimetype='application/json')
+        return Response(json.dumps({
+            'status': 'success'
+        }, sort_keys=False),
+            mimetype='application/json')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/database_exists', methods=['GET'])
+def database_exists():
+    """Check if the database exists.
+        .. versionadded:: 0.3.1
+
+    Example:
+        1) use curl
+        curl -X GET http://localhost:7637/database_exists -w "\n"
+
+        2) use python requests
+        import requests
+
+        url = 'http://localhost:7637/database_exists'
+        response = requests.get(url)
+        print(response.json())
+
+    Returns:
+        dict: The status of the operation.
+    """
+    try:
+        my_vec_db = MinVectorDB(root_path=config['root_path'])
+        return Response(json.dumps({
+            'status': 'success', 'params': {
+                    'exists': True if my_vec_db.STATUS == 'INITIALIZED' else False
+                }
+        },
+       sort_keys=False), mimetype='application/json')
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -250,7 +288,7 @@ def show_collections():
     try:
         my_vec_db = MinVectorDB(root_path=config['root_path'])
         collections = my_vec_db.show_collections()
-        return Response(json.dumps({'status': 'success', 'collections': collections, 'database': config['root_path']},
+        return Response(json.dumps({'status': 'success', 'params': {'collections': collections}},
                                    sort_keys=False), mimetype='application/json')
 
     except Exception as e:
@@ -307,11 +345,17 @@ def add_item():
         my_vec_db = MinVectorDB(root_path=config['root_path'])
         collection = my_vec_db.get_collection(data['collection_name'])
         with collection.insert_session():
-            collection.add_item(vector=data['item']['vector'], id=data['item']['id'], field=data['item']['fields'])
+            collection.add_item(vector=np.array(data['item']['vector']), id=data['item'].get('id', None),
+                                field=data['item'].get('fields', None))
 
         return Response(json.dumps(
-            {'status': 'success', 'collection_name': data['collection_name'], 'database': config['root_path'],
-             'collection shape': collection.shape}, sort_keys=False),
+            {
+                'status': 'success', 'params': {'collection_name': data['collection_name'], 'item': {
+                        'vector': data['item']['vector'], 'id': data['item'].get('id', None),
+                        'fields': data['item'].get('fields', None)
+                    }
+                }
+            }, sort_keys=False),
             mimetype='application/json')
 
     except KeyError as e:
@@ -349,7 +393,8 @@ def query():
                           "value": 18
                         }
                     ]
-                }
+                },
+                return_similarity: true
             }' -w "\n"
 
         2) use python requests
@@ -376,7 +421,8 @@ def query():
                         "value": 18
                     }
                 ]
-            }
+            },
+            return_similarity: true
         }
         response = requests.post(url, json=data)
         print(response.json())
@@ -415,19 +461,24 @@ def query():
                 ) for condition in data['query_filter']['any']
             ] if 'any' in data['query_filter'] else None
         )
-        ids, scores = collection.query(vector=data['vector'], k=data['k'], query_filter=query_filter)
+        ids, scores = collection.query(vector=data['vector'], k=data['k'],
+                                       query_filter=query_filter,
+                                       distance=data.get('distance', 'cosine'),
+                                       return_similarity=data.get('return_similarity', False))
 
-        ids = ids.tolist()
-        scores = scores.tolist()
+        if ids is not None:
+            ids = ids.tolist()
+            scores = scores.tolist()
 
         return Response(json.dumps(
             {
-                'status': 'success', 'collection_name': data['collection_name'], 'database': config['root_path'],
-                'results': {
-                    'k': data['k'], 'ids': ids, 'scores': scores,
-                    'distance': collection.most_recent_query_report['Query Distance'],
-                    'query time': collection.most_recent_query_report['Query Time']
-                }
+                'status': 'success', 'params': {
+                    'collection_name': data['collection_name'], 'items': {
+                        'k': data['k'], 'ids': ids, 'scores': scores,
+                        'distance': collection.most_recent_query_report['Query Distance'],
+                        'query time': collection.most_recent_query_report['Query Time']
+                    }
+            }
             }, sort_keys=False),
             mimetype='application/json')
     except KeyError as e:
@@ -508,15 +559,19 @@ def bulk_add_items():
         collection = my_vec_db.get_collection(data['collection_name'])
         items = []
         for item in data['items']:
-            items.append((item['vector'], item['id'], item['fields']))
+            items.append((item['vector'], item.get('id', None), item.get('fields', None)))
 
         with collection.insert_session():
             collection.bulk_add_items(items)
 
-        return Response(json.dumps({'status': 'success', 'collection_name': data['collection_name'],
-                                    'database': config['root_path'], 'added_items': len(items),
-                                    'collection shape': collection.shape}, sort_keys=False),
-                        mimetype='application/json')
+        return Response(json.dumps({
+            'status': 'success', 'params': {
+                'collection_name': data['collection_name'], 'items': [
+                    {'vector': item[0], 'id': item[1], 'fields': item[2]} for item in items
+                ]
+            }
+        }, sort_keys=False),
+            mimetype='application/json')
     except KeyError as e:
         return jsonify({'error': f'Missing required parameter {e}'}), 400
     except Exception as e:
@@ -556,9 +611,9 @@ def collection_shape():
     try:
         my_vec_db = MinVectorDB(root_path=config['root_path'])
         collection = my_vec_db.get_collection(data['collection_name'])
-        return Response(json.dumps({'status': 'success', 'collection_name': data['collection_name'],
-                                    'database': config['root_path'], 'collection shape': collection.shape}, sort_keys=False),
-                        mimetype='application/json')
+        return Response(json.dumps({'status': 'success', 'params': {
+            'collection_name': data['collection_name'], 'shape': collection.shape
+        }}, sort_keys=False), mimetype='application/json')
     except KeyError as e:
         return jsonify({'error': f'Missing required parameter {e}'}), 400
     except Exception as e:
@@ -587,4 +642,5 @@ def main():
     root_path = args.root_path
     config_path, root_path, config = generate_config(root_path=root_path, config_path=config_path)
 
-    app.run(host=args.host, port=args.port, debug=args.debug)
+    if args.run:
+        app.run(host=args.host, port=args.port, debug=args.debug)
