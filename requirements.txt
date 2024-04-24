@@ -10,3 +10,4 @@ jax>=0.4.25
 numba>=0.54.0
 jaxlib>=0.4.25
 flask>=2.0.1
+PyYAML>=5.4.1
