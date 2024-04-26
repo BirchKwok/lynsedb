@@ -37,10 +37,23 @@ class Query:
         self.n_threads = n_threads
 
         self.scaler = getattr(self.matrix_serializer, 'scaler', None)
+        if self.scaler is not None and not self.scaler.fitted:
+            self.scaler = None
 
         self.executors = ThreadPoolExecutor(max_workers=self.n_threads)
         self.limited_sorted = LimitedSorted(dim=self.matrix_serializer.dim, dtype=self.dtypes,
                                             scaler=self.scaler, chunk_size=self.chunk_size)
+
+    def update_scaler(self, scaler):
+        if scaler is not None:
+            self.scaler = scaler
+        else:
+            self.scaler = getattr(self.matrix_serializer, 'scaler', None)
+
+        if self.scaler is not None and not self.scaler.fitted:
+            self.scaler = None
+
+        self.limited_sorted.scaler = self.scaler
 
     def _query_chunk(self, vector, query_filter, dataloader, filename):
         """
@@ -135,6 +148,7 @@ class Query:
 
         vector = to_normalize(vector)
 
+        # set the number of nearest vectors to return
         self.limited_sorted.set_n(k)
 
         all_index = []
