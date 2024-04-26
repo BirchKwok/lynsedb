@@ -10,11 +10,10 @@ import portalocker
 import yaml
 
 from flask import Flask, request, jsonify, Response
-from gunicorn.app.base import BaseApplication
+from waitress import serve
 
 from min_vec.api.high_level import MinVectorDBLocalClient
 from min_vec.structures.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
-from min_vec.api import config as global_config
 
 
 os.environ['MVDB_LOG_LEVEL'] = 'ERROR'
@@ -1056,22 +1055,6 @@ def get_commit_msg():
         return jsonify({'error': str(e)}), 500
 
 
-class GunicornServer(BaseApplication):
-    def __init__(self, app, options=None):
-        self.options = options or {}
-        self.application = app
-        super(GunicornServer, self).__init__()
-
-    def load_config(self):
-        config = {key: value for key, value in self.options.items()
-                  if key in self.cfg.settings and value is not None}
-        for key, value in config.items():
-            self.cfg.set(key.lower(), value)
-
-    def load(self):
-        return self.application
-
-
 def main():
     global config_path, default_root_path, config, root_path
     import argparse
@@ -1089,15 +1072,7 @@ def main():
     config_path, root_path, config = generate_config(root_path=root_path, config_path=config_path)
 
     if args.run:
-        gunicorn_options = {
-            'bind': f"{args.host}:{args.port}",
-            'workers': 1,
-            'worker_class': 'gthread',
-            'threads': args.threads,
-            'accesslog': '-',
-            'errorlog': '-',
-        }
-        GunicornServer(app, gunicorn_options).run()
+        serve(app, host=args.host, port=args.port, threads=args.threads)
 
 
 if __name__ == '__main__':
