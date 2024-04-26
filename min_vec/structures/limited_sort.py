@@ -55,23 +55,25 @@ class LimitedSorted:
             self.current_length = idx_len
 
     def get_top_n(self, vector: np.ndarray, distance='cosine'):
-        if distance == 'cosine':
-            distance_func = cosine_distance
-        else:
-            distance_func = euclidean_distance
+        with self.lock:
+            if distance == 'cosine':
+                distance_func = cosine_distance
+            else:
+                distance_func = euclidean_distance
 
-        if self.scaler is None:
-            sim = distance_func(vector, self.matrix_subset[:self.current_length])
-        else:
-            decoded_vectors = self.scaler.decode(self.matrix_subset[:self.current_length])
-            sim = distance_func(vector, decoded_vectors)
+            if self.scaler is None:
+                sim = distance_func(vector, self.matrix_subset[:self.current_length])
+            else:
+                decoded_vectors = self.scaler.decode(self.matrix_subset[:self.current_length])
+                sim = distance_func(vector, decoded_vectors)
 
-        sorted_idx = np.argsort(-sim) if distance == 'cosine' else np.argsort(sim)
+            sorted_idx = np.argsort(-sim) if distance == 'cosine' else np.argsort(sim)
 
-        return self.indices[sorted_idx], sim[sorted_idx]
+            return self.indices[sorted_idx], sim[sorted_idx]
 
     def clear(self):
-        self.current_length = 0
-        self.similarities = np.empty(self.max_length, dtype=self.similarities.dtype)
-        self.indices = np.empty(self.max_length, dtype=self.indices.dtype)
-        self.matrix_subset = np.empty((self.max_length, self.dim), dtype=self.matrix_subset.dtype)
+        with self.lock:
+            self.current_length = 0
+            self.similarities = np.empty(self.max_length, dtype=self.similarities.dtype)
+            self.indices = np.empty(self.max_length, dtype=self.indices.dtype)
+            self.matrix_subset = np.empty((self.max_length, self.dim), dtype=self.matrix_subset.dtype)

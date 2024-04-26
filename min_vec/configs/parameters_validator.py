@@ -2,6 +2,7 @@ import json
 from functools import wraps
 from pathlib import Path
 
+import portalocker
 from spinesUtils.asserts import raise_if, generate_function_kwargs
 from spinesUtils.logging import Logger
 
@@ -49,6 +50,7 @@ class ParametersValidator:
         """Save the configurations."""
         try:
             with open(configs_json, 'w') as f:
+                portalocker.lock(f, portalocker.LOCK_EX)
                 json.dump(configs, f)
 
             return configs

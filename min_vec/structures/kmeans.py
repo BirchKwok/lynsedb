@@ -1,3 +1,4 @@
+import portalocker
 from sklearn.cluster import MiniBatchKMeans
 
 
@@ -33,7 +34,9 @@ class BatchKMeans:
     def save(self, filename):
         import cloudpickle
 
-        cloudpickle.dump(self.model, open(filename, 'wb'))
+        with open(filename, 'wb') as f:
+            portalocker.lock(f, portalocker.LOCK_EX)
+            cloudpickle.dump(self.model, f)
 
     def load(self, filename):
         import cloudpickle
