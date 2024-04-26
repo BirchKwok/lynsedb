@@ -58,6 +58,14 @@ def test_add_item(test_client):
         {"collection_name": "example_collection", "item":
             {"vector": [0.1, 0.2, 0.3, 0.4], "id": 1, "field": {"name": "example", "age": 18}}}}
 
+    url = 'http://localhost:7637/commit'
+    data = {
+        "collection_name": "example_collection"
+    }
+    response = test_client.post(url, json=data)
+    assert response.status_code == 200
+    assert response.json == {"status": "success", "params": {"collection_name": "example_collection"}}
+
 
 def test_bulk_add_items(test_client):
     url = 'http://localhost:7637/bulk_add_items'
@@ -83,6 +91,7 @@ def test_bulk_add_items(test_client):
         ]
     }
     response = test_client.post(url, json=data)
+
     assert response.status_code == 200
     assert response.json == {
         "status": "success", "params":
@@ -95,6 +104,15 @@ def test_bulk_add_items(test_client):
                 ]
             }
     }
+
+    url = 'http://localhost:7637/commit'
+    data = {
+        "collection_name": "example_collection"
+    }
+    response = test_client.post(url, json=data)
+    assert response.status_code == 200
+    assert response.json == {"status": "success", "params": {"collection_name": "example_collection"}}
+
 
 
 def test_collection_shape(test_client):
