@@ -100,14 +100,20 @@ class MinVectorDBLocalClient:
     A singleton class for the local MinVectorDB client.
     """
     _instance = None
+    _last_root_path = None
 
     def __new__(cls, root_path: Union[Path, str]):
         """
         Create a new instance or return the existing instance of the class.
         """
+        if cls._instance is not None and cls._last_root_path != root_path:
+            cls._instance = None
+            cls._last_root_path = root_path
+
         if cls._instance is None:
             cls._instance = super(MinVectorDBLocalClient, cls).__new__(cls)
             cls._instance._init(root_path)
+
         return cls._instance
 
     @ParameterTypeAssert({
