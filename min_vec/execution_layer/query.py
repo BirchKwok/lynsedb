@@ -66,7 +66,7 @@ class Query:
         Returns:
             Tuple: The indices and similarity scores of the nearest vectors in the chunk.
         """
-        database_chunk, index_chunk = dataloader(filename, mode='lazy')
+        database_chunk, index_chunk = dataloader(filename)
 
         if query_filter is not None:
             subset_indices = []
@@ -185,7 +185,17 @@ class Query:
         # otherwise, use IVF-FLAT
         cluster_id_sorted = np.argsort(
             -cosine_distance(vector, self.matrix_serializer.ann_model.cluster_centers_)
-        )
+        ).tolist()
+
+        if self.scaler is not None:
+            d_vector = self.scaler.encode(vector)
+        else:
+            d_vector = vector
+
+        predict_id = self.matrix_serializer.ann_model.predict(d_vector.reshape(1, -1))[0]
+
+        cluster_id_sorted.remove(predict_id)
+        cluster_id_sorted.insert(0, predict_id)
 
         for cluster_id in cluster_id_sorted:
             batch_query(cid=cluster_id, sort=False)
