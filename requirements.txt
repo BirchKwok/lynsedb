@@ -1,7 +1,6 @@
 numpy>=1.17.0
 spinesUtils>=0.3.13
 msgpack>=1.0.2
-h5py>=3.4.0
 scikit-learn>=1.0.0
 cloudpickle>=2.0.0
 numexpr>=2.7.3
@@ -11,3 +10,4 @@ numba>=0.54.0
 jaxlib>=0.4.25
 flask>=2.0.1
 PyYAML>=5.4.1
+portalocker>=2.3.0
