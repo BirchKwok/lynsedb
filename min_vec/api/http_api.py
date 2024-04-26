@@ -2,19 +2,25 @@
 import json
 import operator
 import os
+import shutil
 from pathlib import Path
 
 import numpy as np
+import portalocker
 import yaml
 
 from flask import Flask, request, jsonify, Response
 
-from min_vec.api.high_level import MinVectorDB
+from min_vec.api.high_level import MinVectorDBLocalClient
 from min_vec.structures.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
+from min_vec.api import config as global_config
+
 
 os.environ['MVDB_LOG_LEVEL'] = 'ERROR'
 
 app = Flask(__name__)
+
+version = '0.3.2'
 
 # 构建配置文件的路径
 config_path = Path(os.path.expanduser('~/.MinVectorDB/config.yaml'))
@@ -23,7 +29,7 @@ default_root_path = Path(os.path.expanduser('~/.MinVectorDB/data/min_vec_db')).a
 
 def generate_config(root_path: str = default_root_path, config_path: Path = config_path):
     """Generate a default configuration file.
-        .. versionadded:: 0.3.1
+        .. versionadded:: 0.3.2
     """
     if root_path is None:
         root_path = default_root_path
@@ -33,6 +39,7 @@ def generate_config(root_path: str = default_root_path, config_path: Path = conf
         config = {'root_path': root_path}
 
         with open(config_path, 'w') as file:
+            portalocker.lock(file, portalocker.LOCK_EX)
             yaml.dump(config, file)
     else:
         with open(config_path, 'r') as file:
@@ -40,6 +47,7 @@ def generate_config(root_path: str = default_root_path, config_path: Path = conf
             if 'root_path' not in config or config['root_path'] != root_path:
                 config['root_path'] = root_path
                 with open(config_path, 'w') as file:
+                    portalocker.lock(file, portalocker.LOCK_EX)
                     yaml.dump(config, file)
 
     return config_path, root_path, config
@@ -48,10 +56,15 @@ def generate_config(root_path: str = default_root_path, config_path: Path = conf
 root_path, config = 'PlaceholderName', {'root_path': 'PlaceholderName'}
 
 
+@app.route('/', methods=['GET'])
+def index():
+    return Response(json.dumps({'status': 'success', 'message': 'MinVectorDB HTTP API'}), mimetype='application/json')
+
+
 @app.route('/required_collection', methods=['POST'])
 def required_collection():
     """Create a collection in the database.
-        .. versionadded:: 0.3.1
+        .. versionadded:: 0.3.2
 
     Example:
         1) use curl
@@ -121,7 +134,7 @@ def required_collection():
         data['drop_if_exists'] = False
 
     try:
-        my_vec_db = MinVectorDB(root_path=config['root_path'])
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         collection = my_vec_db.require_collection(
             collection=data['collection_name'],
             dim=data['dim'],
@@ -158,7 +171,7 @@ def required_collection():
 @app.route('/drop_collection', methods=['POST'])
 def drop_collection():
     """Drop a collection from the database.
-        .. versionadded:: 0.3.1
+        .. versionadded:: 0.3.2
 
     Example:
         1) use curl
@@ -186,7 +199,7 @@ def drop_collection():
         return jsonify({'error': 'No data provided'}), 400
 
     try:
-        my_vec_db = MinVectorDB(root_path=config['root_path'])
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         my_vec_db.drop_collection(data['collection_name'])
 
         return Response(json.dumps(
@@ -207,7 +220,7 @@ def drop_collection():
 @app.route('/drop_database', methods=['GET'])
 def drop_database():
     """Drop the database.
-        .. versionadded:: 0.3.1
+        .. versionadded:: 0.3.2
 
     Example:
         1) use curl
@@ -224,8 +237,7 @@ def drop_database():
         dict: The status of the operation.
     """
     try:
-        my_vec_db = MinVectorDB(root_path=config['root_path'])
-        my_vec_db.drop_database()
+        shutil.rmtree(config['root_path'])
 
         return Response(json.dumps({
             'status': 'success'
@@ -238,7 +250,7 @@ def drop_database():
 @app.route('/database_exists', methods=['GET'])
 def database_exists():
     """Check if the database exists.
-        .. versionadded:: 0.3.1
+        .. versionadded:: 0.3.2
 
     Example:
         1) use curl
@@ -255,13 +267,13 @@ def database_exists():
         dict: The status of the operation.
     """
     try:
-        my_vec_db = MinVectorDB(root_path=config['root_path'])
+        exists = Path(config['root_path']).exists()
         return Response(json.dumps({
             'status': 'success', 'params': {
-                    'exists': True if my_vec_db.STATUS == 'INITIALIZED' else False
-                }
+                'exists': True if exists else False
+            }
         },
-       sort_keys=False), mimetype='application/json')
+            sort_keys=False), mimetype='application/json')
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -269,7 +281,7 @@ def database_exists():
 @app.route('/show_collections', methods=['GET'])
 def show_collections():
     """Show all collections in the database.
-        .. versionadded:: 0.3.1
+        .. versionadded:: 0.3.2
 
     Example:
         1) use curl
@@ -286,7 +298,7 @@ def show_collections():
         dict: The status of the operation.
     """
     try:
-        my_vec_db = MinVectorDB(root_path=config['root_path'])
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         collections = my_vec_db.show_collections()
         return Response(json.dumps({'status': 'success', 'params': {'collections': collections}},
                                    sort_keys=False), mimetype='application/json')
@@ -298,7 +310,7 @@ def show_collections():
 @app.route('/add_item', methods=['POST'])
 def add_item():
     """Add an item to a collection.
-        .. versionadded:: 0.3.1
+        .. versionadded:: 0.3.2
 
     Example:
         1) use curl
@@ -309,7 +321,7 @@ def add_item():
               "item": {
                   "vector": [0.1, 0.2, 0.3, 0.4],
                   "id": 1,
-                  "fields": {
+                  "field": {
                       "name": "example",
                       "age": 18
                     }
@@ -325,7 +337,7 @@ def add_item():
             "item": {
                 "vector": [0.1, 0.2, 0.3, 0.4],
                 "id": 1,
-                "fields": {
+                "field": {
                     "name": "example",
                     "age": 18
                 }
@@ -342,17 +354,18 @@ def add_item():
         return jsonify({'error': 'No data provided'}), 400
 
     try:
-        my_vec_db = MinVectorDB(root_path=config['root_path'])
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         collection = my_vec_db.get_collection(data['collection_name'])
-        with collection.insert_session():
-            collection.add_item(vector=np.array(data['item']['vector']), id=data['item'].get('id', None),
-                                field=data['item'].get('fields', None))
+        # with collection.insert_session():
+        id = collection.add_item(vector=np.array(data['item']['vector']), id=data['item'].get('id', None),
+                                 field=data['item'].get('field', None))
 
         return Response(json.dumps(
             {
-                'status': 'success', 'params': {'collection_name': data['collection_name'], 'item': {
-                        'vector': data['item']['vector'], 'id': data['item'].get('id', None),
-                        'fields': data['item'].get('fields', None)
+                'status': 'success', 'params': {
+                    'collection_name': data['collection_name'], 'item': {
+                        'vector': data['item']['vector'], 'id': id,
+                        'field': data['item'].get('field', None)
                     }
                 }
             }, sort_keys=False),
@@ -367,7 +380,7 @@ def add_item():
 @app.route('/query', methods=['POST'])
 def query():
     """Query the database for the vectors most similar to the given vector.
-        .. versionadded:: 0.3.1
+        .. versionadded:: 0.3.2
 
     Example:
         1) use curl
@@ -377,13 +390,16 @@ def query():
               "collection_name": "example_collection",
               "vector": [0.1, 0.2, 0.3, 0.4],
               "k": 10,
-              'distance': 'cosine',
+              "distance": "cosine",
               "query_filter": {
                   "must": [
                       {
                           "field": "name",
                           "operator": "eq",
                           "value": "example"
+                      },
+                      {
+                          "ids": [1, 2, 3]
                       }
                   ],
                   "any": [
@@ -394,7 +410,7 @@ def query():
                         }
                     ]
                 },
-                return_similarity: true
+                "return_similarity": true
             }' -w "\n"
 
         2) use python requests
@@ -405,13 +421,16 @@ def query():
             "collection_name": "example_collection",
             "vector": [0.1, 0.2, 0.3, 0.4],
             "k": 10,
-            'distance': 'cosine',
+            "distance": "cosine",
             "query_filter": {
                 "must": [
                     {
                         "field": "name",
                         "operator": "eq",
                         "value": "example"
+                    },
+                    {
+                        "ids": [1, 2, 3]
                     }
                 ],
                 "any": [
@@ -422,7 +441,7 @@ def query():
                     }
                 ]
             },
-            return_similarity: true
+            "return_similarity": true
         }
         response = requests.post(url, json=data)
         print(response.json())
@@ -438,33 +457,41 @@ def query():
         data['k'] = 10
 
     try:
-        my_vec_db = MinVectorDB(root_path=config['root_path'])
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         collection = my_vec_db.get_collection(data['collection_name'])
 
-        query_filter = Filter(
-            must=[
-                FieldCondition(
-                    key=condition['field'],
-                    matcher=MatchField(
-                        value=condition['value'],
-                        comparator=getattr(operator, condition['operator'])
-                    )
-                ) for condition in data['query_filter']['must']
-            ] if 'must' in data['query_filter'] else None,
-            any=[
-                FieldCondition(
-                    key=condition['field'],
-                    matcher=MatchField(
-                        value=condition['value'],
-                        comparator=getattr(operator, condition['operator'])
-                    )
-                ) for condition in data['query_filter']['any']
-            ] if 'any' in data['query_filter'] else None
-        )
+        if data['query_filter'] is None:
+            query_filter = None
+        else:
+            query_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key=condition['field'],
+                        matcher=MatchField(
+                            value=condition['value'],
+                            comparator=getattr(operator, condition['operator'])
+                        )
+                    ) if 'field' in condition and 'operator' in condition
+                    else IDCondition(matcher=MatchID(ids=condition['ids']))
+                    for condition in data['query_filter']['must']
+                ] if 'must' in data['query_filter'] else None,
+                any=[
+                    FieldCondition(
+                        key=condition['field'],
+                        matcher=MatchField(
+                            value=condition['value'],
+                            comparator=getattr(operator, condition['operator'])
+                        )
+                    ) if 'field' in condition and 'operator' in condition
+                    else IDCondition(matcher=MatchID(ids=condition['ids']))
+                    for condition in data['query_filter']['any']
+                ] if 'any' in data['query_filter'] else None
+            )
+
         ids, scores = collection.query(vector=data['vector'], k=data['k'],
                                        query_filter=query_filter,
                                        distance=data.get('distance', 'cosine'),
-                                       return_similarity=data.get('return_similarity', False))
+                                       return_similarity=data.get('return_similarity', True))
 
         if ids is not None:
             ids = ids.tolist()
@@ -473,11 +500,11 @@ def query():
         return Response(json.dumps(
             {
                 'status': 'success', 'params': {
-                    'collection_name': data['collection_name'], 'items': {
-                        'k': data['k'], 'ids': ids, 'scores': scores,
-                        'distance': collection.most_recent_query_report['Query Distance'],
-                        'query time': collection.most_recent_query_report['Query Time']
-                    }
+                'collection_name': data['collection_name'], 'items': {
+                    'k': data['k'], 'ids': ids, 'scores': scores,
+                    'distance': collection.most_recent_query_report['Query Distance'],
+                    'query time': collection.most_recent_query_report['Query Time']
+                }
             }
             }, sort_keys=False),
             mimetype='application/json')
@@ -490,7 +517,7 @@ def query():
 @app.route('/bulk_add_items', methods=['POST'])
 def bulk_add_items():
     """Bulk add items to a collection.
-        .. versionadded:: 0.3.1
+        .. versionadded:: 0.3.2
 
     Example:
         1) use curl
@@ -502,7 +529,7 @@ def bulk_add_items():
                   {
                       "vector": [0.1, 0.2, 0.3, 0.4],
                       "id": 1,
-                      "fields": {
+                      "field": {
                           "name": "example",
                           "age": 18
                         }
@@ -510,7 +537,7 @@ def bulk_add_items():
                     {
                         "vector": [0.5, 0.6, 0.7, 0.8],
                         "id": 2,
-                        "fields": {
+                        "field": {
                             "name": "example",
                             "age": 20
                         }
@@ -529,7 +556,7 @@ def bulk_add_items():
                 {
                     "vector": [0.1, 0.2, 0.3, 0.4],
                     "id": 1,
-                    "fields": {
+                    "field": {
                         "name": "example",
                         "age": 18
                     }
@@ -537,7 +564,7 @@ def bulk_add_items():
                 {
                     "vector": [0.5, 0.6, 0.7, 0.8],
                     "id": 2,
-                    "fields": {
+                    "field": {
                         "name": "example",
                         "age": 20
                     }
@@ -555,20 +582,20 @@ def bulk_add_items():
         return jsonify({'error': 'No data provided'}), 400
 
     try:
-        my_vec_db = MinVectorDB(root_path=config['root_path'])
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         collection = my_vec_db.get_collection(data['collection_name'])
         items = []
         for item in data['items']:
-            items.append((item['vector'], item.get('id', None), item.get('fields', None)))
+            items.append((item['vector'], item.get('id', None), item.get('field', None)))
 
-        with collection.insert_session():
-            collection.bulk_add_items(items)
+        # with collection.insert_session():
+        ids = collection.bulk_add_items(items)
 
         return Response(json.dumps({
             'status': 'success', 'params': {
                 'collection_name': data['collection_name'], 'items': [
-                    {'vector': item[0], 'id': item[1], 'fields': item[2]} for item in items
-                ]
+                    {'vector': item[0], 'id': item[1], 'field': item[2]} for item in items
+                ], 'ids': ids
             }
         }, sort_keys=False),
             mimetype='application/json')
@@ -578,10 +605,56 @@ def bulk_add_items():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/commit', methods=['POST'])
+def commit():
+    """Commit the database.
+        .. versionadded:: 0.3.2
+
+    Example:
+        1) use curl
+        curl -X POST http://localhost:7637/commit \
+         -H "Content-Type: application/json" \
+         -d '{
+              "collection_name": "example_collection"
+             }' -w "\n"
+
+        2) use python requests
+        import requests
+
+        url = 'http://localhost:7637/commit'
+        data = {
+            "collection_name": "example_collection"
+        }
+        response = requests.post(url, json=data)
+        print(response.json())
+
+    Returns:
+        dict: The status of the operation.
+    """
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+        collection.commit()
+
+        return Response(json.dumps({
+            'status': 'success', 'params': {
+                'collection_name': data['collection_name']
+            }
+        }, sort_keys=False), mimetype='application/json')
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/collection_shape', methods=['POST'])
 def collection_shape():
     """Get the shape of a collection.
-        .. versionadded:: 0.3.1
+        .. versionadded:: 0.3.2
 
     Example:
         1) use curl
@@ -609,10 +682,374 @@ def collection_shape():
         return jsonify({'error': 'No data provided'}), 400
 
     try:
-        my_vec_db = MinVectorDB(root_path=config['root_path'])
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         collection = my_vec_db.get_collection(data['collection_name'])
         return Response(json.dumps({'status': 'success', 'params': {
             'collection_name': data['collection_name'], 'shape': collection.shape
+        }}, sort_keys=False), mimetype='application/json')
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/set_environment', methods=['POST'])
+def set_environment():
+    """Set the environment variables.
+        .. versionadded:: 0.3.2
+
+    Example:
+        1) use curl
+        curl -X POST http://localhost:7637/set_environment \
+         -H "Content-Type: application/json" \
+         -d '{
+              "MVDB_LOG_LEVEL": "ERROR",
+              "MVDB_LOG_PATH": "/path/to/log",
+              "MVDB_TRUNCATE_LOG": "true",
+              "MVDB_LOG_WITH_TIME": "true",
+              "MVDB_KMEANS_EPOCHS": "100",
+              "MVDB_QUERY_CACHE_SIZE": "100",
+              "MVDB_DATALOADER_BUFFER_SIZE": "1000"
+             }' -w "\n"
+
+        2) use python requests
+        import requests
+
+        url = 'http://localhost:7637/set_environment'
+        data = {
+            "MVDB_LOG_LEVEL": "ERROR",
+            "MVDB_LOG_PATH": "/path/to/log",
+            "MVDB_TRUNCATE_LOG": "true",
+            "MVDB_LOG_WITH_TIME": "true",
+            "MVDB_KMEANS_EPOCHS": "100",
+            "MVDB_QUERY_CACHE_SIZE": "100",
+            "MVDB_DATALOADER_BUFFER_SIZE": "1000"
+        }
+
+        response = requests.post(url, json=data)
+        print(response.json())
+
+    Returns:
+        dict: The status of the operation.
+    """
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        for key, value in data.items():
+            os.environ[key] = value
+        return Response(json.dumps({'status': 'success', 'params': data}, sort_keys=False), mimetype='application/json')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/get_environment', methods=['GET'])
+def get_environment():
+    """Get the environment variables.
+        .. versionadded:: 0.3.2
+
+    Example:
+        1) use curl
+        curl -X GET http://localhost:7637/get_environment -w "\n"
+
+        2) use python requests
+        import requests
+
+        url = 'http://localhost:7637/get_environment'
+        response = requests.get(url)
+        print(response.json())
+
+    Returns:
+        dict: The status of the operation.
+    """
+    env_list = ['MVDB_LOG_LEVEL', 'MVDB_LOG_PATH', 'MVDB_TRUNCATE_LOG', 'MVDB_LOG_WITH_TIME',
+                'MVDB_KMEANS_EPOCHS', 'MVDB_QUERY_CACHE_SIZE', 'MVDB_DATALOADER_BUFFER_SIZE']
+
+    params = {key: eval("global_config.key") for key in env_list}
+    try:
+        return Response(json.dumps({'status': 'success', 'params': params}, sort_keys=False),
+                        mimetype='application/json')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/get_collection_query_report', methods=['POST'])
+def get_collection_query_report():
+    """Get the query report of a collection.
+        .. versionadded:: 0.3.2
+
+    Example:
+        1) use curl
+        curl -X POST http://localhost:7637/get_collection_query_report \
+         -H "Content-Type: application/json" \
+         -d '{
+              "collection_name": "example_collection"
+             }' -w "\n"
+
+        2) use python requests
+        import requests
+
+        url = 'http://localhost:7637/get_collection_query_report'
+        data = {
+            "collection_name": "example_collection"
+        }
+        response = requests.post(url, json=data)
+        print(response.json())
+
+    Returns:
+        dict: The status of the operation.
+    """
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'collection_name': data['collection_name'], 'query_report': collection.query_report_
+        }}, sort_keys=False), mimetype='application/json')
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/get_collection_status_report', methods=['POST'])
+def get_collection_status_report():
+    """Get the status report of a collection.
+        .. versionadded:: 0.3.2
+
+    Example:
+        1) use curl
+        curl -X POST http://localhost:7637/get_collection_status_report \
+         -H "Content-Type: application/json" \
+         -d '{
+              "collection_name": "example_collection"
+             }' -w "\n"
+
+        2) use python requests
+        import requests
+
+        url = 'http://localhost:7637/get_collection_status_report'
+        data = {
+            "collection_name": "example_collection"
+        }
+        response = requests.post(url, json=data)
+        print(response.json())
+
+    Returns:
+        dict: The status of the operation.
+    """
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+
+        db_report = {'DATABASE STATUS REPORT': {
+            'Database shape': (
+                0, collection._matrix_serializer.dim) if collection._matrix_serializer.IS_DELETED else collection.shape,
+            'Database last_commit_time': collection._matrix_serializer.last_commit_time,
+            'Database commit status': collection._matrix_serializer.COMMIT_FLAG,
+            'Database index_mode': collection._matrix_serializer.index_mode,
+            'Database distance': collection._distance,
+            'Database use_cache': collection._use_cache,
+            'Database status': 'DELETED' if collection._matrix_serializer.IS_DELETED else 'ACTIVE'
+        }}
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'collection_name': data['collection_name'], 'status_report': db_report
+        }}, sort_keys=False), mimetype='application/json')
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/is_collection_exists', methods=['POST'])
+def is_collection_exists():
+    """Check if a collection exists.
+        .. versionadded:: 0.3.2
+
+    Example:
+        1) use curl
+        curl -X POST http://localhost:7637/is_collection_exists \
+         -H "Content-Type: application/json" \
+         -d '{
+              "collection_name": "example_collection"
+             }' -w "\n"
+
+        2) use python requests
+        import requests
+
+        url = 'http://localhost:7637/is_collection_exists'
+        data = {
+            "collection_name": "example_collection"
+        }
+        response = requests.post(url, json=data)
+        print(response.json())
+
+    Returns:
+        dict: The status of the operation.
+    """
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
+        return Response(json.dumps({'status': 'success', 'params': {
+            'collection_name': data['collection_name'], 'exists': data['collection_name'] in my_vec_db.show_collections()
+        }}, sort_keys=False), mimetype='application/json')
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/get_collection_config', methods=['POST'])
+def get_collection_config():
+    """Get the configuration of a collection.
+        .. versionadded:: 0.3.2
+
+    Example:
+        1) use curl
+        curl -X POST http://localhost:7637/get_collection_config \
+         -H "Content-Type: application/json" \
+         -d '{
+              "collection_name": "example_collection"
+             }' -w "\n"
+
+        2) use python requests
+        import requests
+
+        url = 'http://localhost:7637/get_collection_config'
+        data = {
+            "collection_name": "example_collection"
+        }
+        response = requests.post(url, json=data)
+        print(response.json())
+
+    Returns:
+        dict: The status of the operation.
+    """
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        config_json_path = Path(config['root_path']) / 'collections.json'
+        with open(config_json_path, 'r') as file:
+            collections = json.load(file)
+            collection_config = collections[data['collection_name']]
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'collection_name': data['collection_name'], 'config': collection_config
+        }}, sort_keys=False), mimetype='application/json')
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/update_commit_msg', methods=['POST'])
+def update_commit_msg():
+    """Save the commit message of a collection.
+        .. versionadded:: 0.3.2
+
+    Example:
+        1) use curl
+        curl -X POST http://localhost:7637/save_commit_msg \
+         -H "Content-Type: application/json" \
+         -d '{
+              "collection_name": "example_collection",
+              "last_commit_time": "last_commit_time",
+             }' -w "\n"
+
+        2) use python requests
+        import requests
+
+        url = 'http://localhost:7637/save_commit_msg'
+        data = {
+            "collection_name": "example_collection",
+            "last_commit_time": "last_commit_time",
+        }
+        response = requests.post(url, json=data)
+        print(response.json())
+
+    Returns:
+        dict: The status of the operation.
+    """
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        if (Path(config['root_path']) / 'commit_msg.json').exists():
+            with open(config['root_path'] + '/commit_msg.json', 'r') as file:
+                commit_msg = json.load(file)
+                commit_msg[data['collection_name']] = data
+        else:
+            commit_msg = {data['collection_name']: data}
+
+        with open(config['root_path'] + '/commit_msg.json', 'w') as file:
+            portalocker.lock(file, portalocker.LOCK_EX)
+            json.dump(commit_msg, file)
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'collection_name': data['collection_name']
+        }}, sort_keys=False), mimetype='application/json')
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/get_commit_msg', methods=['POST'])
+def get_commit_msg():
+    """Get the commit message of a collection.
+        .. versionadded:: 0.3.2
+
+    Example:
+        1) use curl
+        curl -X POST http://localhost:7637/get_commit_msg \
+         -H "Content-Type: application/json" \
+         -d '{
+              "collection_name": "example_collection"
+             }' -w "\n"
+
+        2) use python requests
+        import requests
+
+        url = 'http://localhost:7637/get_commit_msg'
+        data = {
+            "collection_name": "example_collection"
+        }
+        response = requests.post(url, json=data)
+        print(response.json())
+
+    Returns:
+        dict: The status of the operation.
+    """
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        if (Path(config['root_path']) / 'commit_msg.json').exists():
+            with open(config['root_path'] + '/commit_msg.json', 'r') as file:
+                commit_msg = json.load(file)
+                commit_msg = commit_msg.get(data['collection_name'], None)
+        else:
+            commit_msg = None
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'collection_name': data['collection_name'], 'commit_msg': commit_msg
         }}, sort_keys=False), mimetype='application/json')
     except KeyError as e:
         return jsonify({'error': f'Missing required parameter {e}'}), 400
@@ -632,8 +1069,6 @@ def main():
     parser.add_argument('--debug', action='store_true', help='Enable debug mode.')
     parser.add_argument('run', help='Run the HTTP API server.')
 
-    version = '0.3.1'
-
     parser.add_argument('--version', action='version', version=version)
 
     args = parser.parse_args()
@@ -644,3 +1079,7 @@ def main():
 
     if args.run:
         app.run(host=args.host, port=args.port, debug=args.debug)
+
+
+if __name__ == '__main__':
+    main()
