@@ -112,10 +112,10 @@ class StorageWorker:
 
     def get_last_id(self, contains='chunk', cluster_id=None):
         if contains == 'chunk':
-            ids = [int(str(i).split('_')[-1])
+            ids = [int(i.stem.split('_')[-1])
                    for i in self.collection_chunk_path.glob('chunk_*')]
         else:
-            ids = [int(str(i).split('_')[-1])
+            ids = [int(i.stem.split('_')[-1])
                    for i in self.collection_cluster_path.glob(f'cluster_{cluster_id}_*')]
 
         if len(ids) > 0:
@@ -151,6 +151,7 @@ class StorageWorker:
         # read info file to get the shape of the data
         # file shape
         if write_type == 'chunk':
+            # save the total shape of the data
             if not (self.collection_path / 'info.json').exists():
                 total_shape = [0, self.dimension]
                 with open(self.collection_path / 'info.json', 'w') as f:
@@ -244,6 +245,7 @@ class StorageWorker:
             self.cluster_last_file_shape[cluster_id] = [data_shape + total_shape[0], self.dimension]
 
     def _overwrite(self, filename, normalize=False):
+        """only use in chunk write"""
         data, indices = self._read(filename)
 
         if normalize:
@@ -378,3 +380,21 @@ class StorageWorker:
 
     def clear_cache(self):
         self.cache.clear()
+
+    def move_all_files_to_chunk(self):
+        """Move all files to chunk."""
+        try:
+            last_id = self.get_last_id(contains='chunk')
+            for file in self.collection_cluster_path.glob('*'):
+                last_id += 1
+                new_file_path = self.collection_chunk_path / f'chunk_{last_id}'
+                file.rename(new_file_path)
+
+                indices_file = self.collection_cluster_indices_path / file.name
+                new_indices_path = self.collection_chunk_indices_path / f'chunk_{last_id}'
+                indices_file.rename(new_indices_path)
+
+                self.cache.pop(file.stem, None)
+                self.cluster_last_file_shape = {}
+        except Exception as e:
+            raise IOError(f"Error occurred: {e}")
