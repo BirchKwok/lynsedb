@@ -7,9 +7,9 @@ class IDChecker:
         self.ids = BitMap()
 
     def add(self, items):
-        if isinstance(items, int):  # 如果items是单个整数
+        if isinstance(items, int):
             self.ids.add(items)
-        else:  # 如果items是可迭代的整数集合
+        else:
             self.ids.update(items)
 
     def drop(self, item):
@@ -19,7 +19,6 @@ class IDChecker:
         return item in self.ids
 
     def to_file(self, filepath):
-        # 使用serialize方法序列化BitMap为bytes，然后写入文件
         with open(filepath, 'wb') as file:
             portalocker.lock(file, portalocker.LOCK_EX)
             file.write(self.ids.serialize())
@@ -27,7 +26,6 @@ class IDChecker:
     def from_file(self, filepath):
         try:
             with open(filepath, 'rb') as file:
-                # 从文件读取bytes，然后使用deserialize方法反序列化为BitMap对象
                 self.ids = BitMap.deserialize(file.read())
         except FileNotFoundError:
             self.ids = BitMap()

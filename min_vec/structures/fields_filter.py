@@ -150,11 +150,9 @@ class FieldIndex:
     def save(self, filepath):
         """Save all data to a file with gzip compression."""
         try:
-            # 使用 msgpack 保存基础数据
             with gzip.open(filepath, 'wb') as f:
                 portalocker.lock(f, portalocker.LOCK_EX)
                 f.write(msgpack.packb([self.data_store, self.id_map, self.last_internal_id, self.data_to_internal_id]))
-            # 使用 cloudpickle 和 gzip 保存跳表对象
             with gzip.open(Path(filepath).parent / (Path(filepath).stem + '-obj.mvdb'), 'wb') as f:
                 portalocker.lock(f, portalocker.LOCK_EX)
                 cloudpickle.dump(self.index, f)

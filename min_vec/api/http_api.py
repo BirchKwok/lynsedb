@@ -1061,7 +1061,7 @@ def main():
     global config_path, default_root_path, config, root_path
     import argparse
 
-    parser = argparse.ArgumentParser(description='Start the MinVec HTTP API server.')
+    parser = argparse.ArgumentParser(description='Start the MinVectorDB HTTP API server.')
     parser.add_argument('--host', default='127.0.0.1', help='The host to bind to.')
     parser.add_argument('--port', default=7637, type=int, help='The port to bind to.')
     parser.add_argument('--config', default=config_path, help='The path to the configuration file.')
