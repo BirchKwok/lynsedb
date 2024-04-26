@@ -9,7 +9,8 @@ class DatabaseSession:
         return self.db
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if not self.db._matrix_serializer.COMMIT_FLAG:
+        handler = getattr(self.db, '_matrix_serializer', self.db)
+        if not handler.COMMIT_FLAG:
             self.db.commit()
 
         return False
