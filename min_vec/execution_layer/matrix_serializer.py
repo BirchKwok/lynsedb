@@ -16,6 +16,7 @@ from min_vec.structures.scaler import ScalarQuantization
 from min_vec.structures.fields_filter import FieldIndex
 from min_vec.storage_layer.storage import StorageWorker
 from min_vec.execution_layer.cluster_worker import ClusterWorker
+from min_vec.structures.counter import ThreadSafeCounter
 
 
 class MatrixSerializer:
@@ -93,6 +94,7 @@ class MatrixSerializer:
         self.storage_worker = StorageWorker(self.collections_path_parent, self.dim,
                                             self.chunk_size,
                                             warm_up=warm_up)
+        self.counter = ThreadSafeCounter()
 
         # ============== Loading or create one empty collection ==============
         # first of all, initialize a collection
@@ -182,13 +184,12 @@ class MatrixSerializer:
         self.fields = []
 
     @io_checker
-    def dataloader(self, filename, mode='eager'):
+    def dataloader(self, filename):
         """
         Generator for loading the database and index.
 
         Parameters:
             filename (str): The name of the file to load.
-            mode (str): The mode of the generator. Options are 'eager' or 'lazy'. Default is 'eager'.
 
         Yields:
             tuple: A tuple of (database, index, field).
@@ -201,10 +202,7 @@ class MatrixSerializer:
         """
         data, indices = self.storage_worker.read(filename=filename)
 
-        if mode == 'lazy':
-            return data, indices
-        else:
-            return data, indices
+        return data, indices
 
     def _is_collection_reset(self):
         """
@@ -312,9 +310,20 @@ class MatrixSerializer:
             ) or (
                     cluster_partition_size > 0 and self.index_mode != 'FLAT'
             ):
-                self.logger.debug('Building index...')
-                # build index
-                self.build_index()
+                self.logger.info('Building index...')
+
+                if cluster_partition_size == 0 and (chunk_partition_size >= 100000 and self.index_mode != 'FLAT'):
+                    self.logger.info('Start to fit the index for cluster...')
+                    self.cluster_worker.build_index(refit=True)
+                else:
+                    self.counter.add(chunk_partition_size)
+                    if self.counter.get_value() >= 100000:
+                        self.logger.info('Refitting the index for cluster...')
+                        self.cluster_worker.build_index(refit=True)
+                        self.counter.reset()
+                    else:
+                        self.logger.info('Incrementally building the index for cluster...')
+                        self.cluster_worker.build_index(refit=False)
 
                 # save ivf index and k-means model
                 self.logger.debug('Saving ann model...')
@@ -485,12 +494,6 @@ class MatrixSerializer:
 
         # clear cache
         self.storage_worker.clear_cache()
-
-    def build_index(self):
-        """
-        Build the IVF index.
-        """
-        self.cluster_worker.build_index(self.scaler)
 
     @property
     def shape(self):

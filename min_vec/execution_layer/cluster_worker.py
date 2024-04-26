@@ -1,5 +1,6 @@
 from typing import Callable
 
+from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
 
 from min_vec.storage_layer.storage import StorageWorker
@@ -23,13 +24,18 @@ class ClusterWorker:
         self.save_data = save_data
         self.n_clusters = n_clusters
 
-    def _kmeans_clustering(self, data):
+    def _kmeans_clustering(self, data, refit=False):
         """kmeans clustering"""
-        self.ann_model = self.ann_model.partial_fit(data)
+        if refit:
+            self.ann_model = self.ann_model.partial_fit(data)
+            labels = self.ann_model.labels_
+        else:
+            raise_if(ValueError, not self.ann_model.fitted, "The model has not been fitted yet.")
+            labels = self.ann_model.predict(data)
 
-        return self.ann_model.labels_
+        return labels
 
-    def build_index(self, scaler=None):
+    def build_index(self, refit=False):
         """
         Build the IVF index more efficiently.
         """
@@ -37,10 +43,15 @@ class ClusterWorker:
         # 初始化每个聚类的存储列表
         temp_clusters = {i: ([], []) for i in range(self.n_clusters)}
 
+        if refit:
+            # move all files to chunk
+            self.storage_worker.move_all_files_to_chunk()
+
         filenames = self.storage_worker.get_all_files(read_type='chunk')
+
         for filename in filenames:
-            data, indices = self.iterable_dataloader(filename, mode='lazy')
-            labels = self._kmeans_clustering(data)
+            data, indices = self.iterable_dataloader(filename)
+            labels = self._kmeans_clustering(data, refit=refit)
 
             # 直接按标签将数据分配到相应的聚类
             for d, idx, label in zip(data, indices, labels):
