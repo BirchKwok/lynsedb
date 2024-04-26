@@ -5,7 +5,8 @@
     <a href="https://badge.fury.io/py/MinVectorDB"><img src="https://badge.fury.io/py/MinVectorDB.svg" alt="PyPI version"></a>
     <a href="https://pypi.org/project/MinVectorDB/"><img src="https://img.shields.io/pypi/pyversions/MinVectorDB" alt="PyPI - Python Version"></a>
     <a href="https://pypi.org/project/MinVectorDB/"><img src="https://img.shields.io/pypi/l/MinVectorDB" alt="PyPI - License"></a>
-    <a href="https://github.com/BirchKwok/MinVectorDB/actions/workflows/python-package.yml"><img src="https://github.com/BirchKwok/MinVectorDB/actions/workflows/python-package.yml/badge.svg" alt="Python package"></a>
+    <a href="https://github.com/BirchKwok/MinVectorDB/actions/workflows/python-tests.yml"><img src="https://github.com/BirchKwok/MinVectorDB/actions/workflows/python-test.yml/badge.svg" alt="Python testing"></a>
+    <a href="https://github.com/BirchKwok/MinVectorDB/actions/workflows/docker-tests.yml"><img src="https://github.com/BirchKwok/MinVectorDB/actions/workflows/docker-test.yml/badge.svg" alt="Docker build"></a>
   </p>
 </div>
 
