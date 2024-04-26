@@ -469,7 +469,7 @@ class MinVectorDBHTTPClient:
     def require_collection(
             self,
             collection: str,
-            dim: int,
+            dim: int = None,
             n_clusters: int = 16,
             chunk_size: int = 100_000,
             distance: str = 'cosine',
@@ -487,7 +487,9 @@ class MinVectorDBHTTPClient:
 
         Parameters:
             collection (str): The name of the collection.
-            dim (int): The dimension of the vectors.
+            dim (int): The dimension of the vectors. Default is None.
+                When creating a new collection, the dimension of the vectors must be specified.
+                When loading an existing collection, the dimension of the vectors is automatically loaded.
             n_clusters (int): The number of clusters. Default is 16.
             chunk_size (int): The chunk size. Default is 100,000.
             distance (str): The distance metric. Default is 'cosine'.
