@@ -22,10 +22,10 @@ jobs:
         python-version: '3.12'
 
     - name: Build Docker image
-      run: docker build -t ghcr.io/${{ github.repository }}/minvectordb:latest .
+      run: docker build -t ghcr.io/birchkwok/minvectordb/minvectordb:latest .
 
     - name: Run Docker container
-      run: docker run -d --name minvectordb -p 5403:7637 ghcr.io/${{ github.repository }}/minvectordb:latest
+      run: docker run -d --name minvectordb -p 5403:7637 ghcr.io/birchkwok/minvectordb/minvectordb:latest
 
     - name: Install Python dependencies
       run: |
@@ -35,7 +35,7 @@ jobs:
         if (Test-Path $reqFile) { pip install -r $reqFile }
 
     - name: Run tests
-      run: pytest tests/docker_tests/
+      run: pytest test/docker_tests/
 
     - name: Cleanup
       if: always()
