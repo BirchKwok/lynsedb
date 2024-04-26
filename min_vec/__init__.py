@@ -3,6 +3,18 @@ __version__ = '0.3.2'
 
 
 class MinVectorDB:
+    """
+    Create a MinVectorDB instance.
+
+    Parameters:
+        root_path (str or Path): The root path of the MinVectorDB instance.
+
+    Returns:
+        MinVectorDB: (MinVectorDBLocalClient, MinVectorDBHTTPClient):
+            The appropriate MinVectorDB client instance based on the root path.
+            If the root path is a local path, return a MinVectorDBLocalClient instance,
+            otherwise return a MinVectorDBHTTPClient instance.
+    """
     from pathlib import Path
     from typing import Union
 

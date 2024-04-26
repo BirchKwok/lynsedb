@@ -17,6 +17,26 @@ class ExecutionError(Exception):
 
 class Collection:
     def __init__(self, url, collection_name, **params):
+        """
+        Initialize the collection.
+            .. versionadded:: 0.3.2
+
+        Parameters:
+            url (str): The URL of the server.
+            collection_name (str): The name of the collection.
+            **params: The collection parameters.
+                - dim (int): The dimension of the vectors.
+                - n_clusters (int): The number of clusters.
+                - chunk_size (int): The chunk size.
+                - distance (str): The distance metric.
+                - index_mode (str): The index mode.
+                - dtypes (str): The data types.
+                - use_cache (bool): Whether to use cache.
+                - scaler_bits (int): The scaler bits.
+                - n_threads (int): The number of threads.
+                - warm_up (bool): Whether to warm up.
+                - drop_if_exists (bool): Whether to drop the collection if it exists.
+        """
         self.IS_DELETED = False
         self._url = url
         self._collection_name = collection_name
@@ -28,6 +48,15 @@ class Collection:
         self.COMMIT_FLAG = False
 
     def _get_commit_msg(self):
+        """
+        Get the commit message.
+
+        Returns:
+            str: The last commit time.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
         url = f'{self._url}/get_commit_msg'
         data = {"collection_name": self._collection_name}
 
@@ -41,6 +70,18 @@ class Collection:
             raise ExecutionError(rj)
 
     def _update_commit_msg(self, last_commit_time):
+        """
+        Update the commit message.
+
+        Parameters:
+            last_commit_time (str): The last commit time.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
         url = f'{self._url}/update_commit_msg'
         data = {
             "collection_name": self._collection_name,
@@ -57,6 +98,12 @@ class Collection:
     def _if_exists(self):
         """
         Check if the collection exists.
+
+        Returns:
+            bool: Whether the collection exists.
+
+        Raises:
+            ExecutionError: If the server returns an error.
         """
         url = f'{self._url}/is_collection_exists'
         data = {"collection_name": self._collection_name}
@@ -79,7 +126,11 @@ class Collection:
             field (dict): The fields of the item.
 
         Returns:
-            dict: The response from the server.
+            int: The ID of the item.
+
+        Raises:
+            ValueError: If the collection has been deleted or does not exist.
+            ExecutionError: If the server returns an error.
         """
         raise_if(ValueError, self.IS_DELETED or not self._if_exists(),
                  'The collection has been deleted or does not exist.')
@@ -120,6 +171,11 @@ class Collection:
 
         Returns:
             dict: The response from the server.
+
+        Raises:
+            ValueError: If the collection has been deleted or does not exist.
+            TypeError: If the vectors are not in the correct format.
+            ExecutionError: If the server returns an error.
         """
         raise_if(ValueError, self.IS_DELETED or not self._if_exists(),
                  'The collection has been deleted or does not exist.')
@@ -169,6 +225,9 @@ class Collection:
 
         Returns:
             dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
         """
         url = f'{self._url}/commit'
         data = {"collection_name": self._collection_name}
@@ -181,6 +240,10 @@ class Collection:
             raise ExecutionError(response.json())
 
     def insert_session(self):
+        """
+        Start an insert session.
+            .. versionadded:: 0.3.2
+        """
         from min_vec.execution_layer.session import DatabaseSession
 
         return DatabaseSession(self)
@@ -195,21 +258,16 @@ class Collection:
         Parameters:
             vector (list[float] or np.ndarray): The query vector.
             k (int): The number of results to return. Default is 10.
-            distance (str): The distance metric. Default is 'cosine'.
-            query_filter (dict): The query filter. Default is None.
-                The query filter is a dictionary with the following keys:
-                - "must": A list of dictionaries, each containing the keys "field", "operator", and "value".
-                    - "field": The field to filter.
-                    - "operator": The operator to use. Supported operators are: "eq", "ne", "gt", "lt", "gte", "lte".
-                    - "value": The value to compare with.
-                - "any": A list of dictionaries, each containing the keys "field", "operator", and "value".
-                    - "field": The field to filter.
-                    - "operator": The operator to use. Supported operators are: "eq", "ne", "gt", "lt", "gte", "lte".
-                    - "value": The value to compare with.
+            distance (str): The distance metric. Default is 'cosine', it can be 'cosine' or 'L2'.
+            query_filter (Filter, optional): The field filter to apply to the query, must be a Filter object.
             return_similarity (bool): Whether to return the similarity. Default is True.
 
         Returns:
-            dict: The response from the server.
+            Tuple: The indices and similarity scores of the top k nearest vectors.
+
+        Raises:
+            ValueError: If the collection has been deleted or does not exist.
+            ExecutionError: If the server returns an error.
         """
         raise_if(ValueError, self.IS_DELETED or not self._if_exists(),
                  'The collection has been deleted or does not exist.')
@@ -259,12 +317,16 @@ class Collection:
         Parameters:
             vector (list[float] or np.ndarray): The query vector.
             k (int): The number of results to return. Default is 10.
-            distance (str): The distance metric. Default is 'cosine'.
-            query_filter (Filter, optional): The field filter to apply to the query.
+            distance (str): The distance metric. Default is 'cosine'. It can be 'cosine' or 'L2'.
+            query_filter (Filter, optional): The field filter to apply to the query, must be a Filter object.
             return_similarity (bool): Whether to return the similarity. Default is True.
 
         Returns:
             Tuple: The indices and similarity scores of the top k nearest vectors.
+
+        Raises:
+            ValueError: If the collection has been deleted or does not exist.
+            ExecutionError: If the server returns an error.
         """
         tik = time.time()
         if self._init_params['use_cache']:
@@ -285,7 +347,10 @@ class Collection:
             .. versionadded:: 0.3.2
 
         Returns:
-            dict: The response from the server.
+            Tuple: The shape of the collection.
+
+        Raises:
+            ExecutionError: If the server returns an error.
         """
         url = f'{self._url}/collection_shape'
         data = {"collection_name": self._collection_name}
@@ -305,6 +370,9 @@ class Collection:
         """
         Get the query report of the collection.
             .. versionadded:: 0.3.2
+
+        Returns:
+            str: The query report.
         """
         report = '\n* - MOST RECENT QUERY REPORT -\n'
         for key, value in self.most_recent_query_report.items():
@@ -336,6 +404,12 @@ class Collection:
     def status_report_(self):
         """
         Return the database report.
+
+        Returns:
+            dict: The database report.
+
+        Raises:
+            ExecutionError: If the server returns an error.
         """
         name = "Collection"
 
@@ -368,7 +442,7 @@ class MinVectorDBHTTPClient:
             .. versionadded:: 0.3.2
 
         Parameters:
-            url (str): The URL of the server.
+            url (str): The URL of the server, must start with "http://" or "https://".
 
         Raises:
             TypeError: If the URL is not a string.
@@ -426,7 +500,10 @@ class MinVectorDBHTTPClient:
             drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
 
         Returns:
-            dict: The response from the server.
+            Collection: The collection object.
+
+        Raises:
+            ConnectionError: If the server cannot be connected to.
         """
         url = f'{self.url}/required_collection'
 
@@ -462,6 +539,9 @@ class MinVectorDBHTTPClient:
 
         Returns:
             dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
         """
         url = f'{self.url}/drop_collection'
         data = {"collection_name": collection}
@@ -479,6 +559,9 @@ class MinVectorDBHTTPClient:
 
         Returns:
             dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
         """
         if not self.database_exists()['params']['exists']:
             return {'status': 'success', 'message': 'The database does not exist.'}
@@ -498,6 +581,9 @@ class MinVectorDBHTTPClient:
 
         Returns:
             dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
         """
         url = f'{self.url}/database_exists'
         response = requests.get(url)
@@ -511,6 +597,12 @@ class MinVectorDBHTTPClient:
         """
         Show all collections in the database.
             .. versionadded:: 0.3.2
+
+        Returns:
+            List: The list of collections.
+
+        Raises:
+            ExecutionError: If the server returns an error.
         """
         url = f'{self.url}/show_collections'
         response = requests.get(url)
@@ -537,6 +629,10 @@ class MinVectorDBHTTPClient:
 
         Returns:
             dict: The response from the server.
+
+        Raises:
+            TypeError: If the value of an environment variable is not a string.
+            ExecutionError: If the server returns an error.
         """
         url = f'{self.url}/set_environment'
 
@@ -563,6 +659,9 @@ class MinVectorDBHTTPClient:
 
         Returns:
             dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
         """
         url = f'{self.url}/get_environment'
         response = requests.get(url)
@@ -582,6 +681,9 @@ class MinVectorDBHTTPClient:
 
         Returns:
             Collection: The collection object.
+
+        Raises:
+            ExecutionError: If the server returns an error.
         """
         url = f'{self.url}/is_collection_exists'
         data = {"collection_name": collection}
