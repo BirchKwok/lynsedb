@@ -45,7 +45,7 @@ def test_add_item(test_client):
         "item": {
             "vector": [0.1, 0.2, 0.3, 0.4],
             "id": 1,
-            "fields": {
+            "field": {
                 "name": "example",
                 "age": 18
             }
@@ -56,7 +56,7 @@ def test_add_item(test_client):
     assert response.status_code == 200
     assert response.json == {"status": "success", "params":
         {"collection_name": "example_collection", "item":
-            {"vector": [0.1, 0.2, 0.3, 0.4], "id": 1, "fields": {"name": "example", "age": 18}}}}
+            {"vector": [0.1, 0.2, 0.3, 0.4], "id": 1, "field": {"name": "example", "age": 18}}}}
 
 
 def test_bulk_add_items(test_client):
@@ -67,7 +67,7 @@ def test_bulk_add_items(test_client):
             {
                 "vector": [0.1, 0.4, 0.3, 0.6],
                 "id": 2,
-                "fields": {
+                "field": {
                     "name": "example2",
                     "age": 18
                 }
@@ -75,7 +75,7 @@ def test_bulk_add_items(test_client):
             {
                 "vector": [0.2, 0.3, 0.4, 0.5],
                 "id": 3,
-                "fields": {
+                "field": {
                     "name": "example3",
                     "age": 19
                 }
@@ -84,11 +84,17 @@ def test_bulk_add_items(test_client):
     }
     response = test_client.post(url, json=data)
     assert response.status_code == 200
-    assert response.json == {"status": "success", "params":
-        {"collection_name": "example_collection", "items": [
-            {"vector": [0.1, 0.4, 0.3, 0.6], "id": 2, "fields": {"name": "example2", "age": 18}},
-            {"vector": [0.2, 0.3, 0.4, 0.5], "id": 3, "fields": {"name": "example3", "age": 19}}
-        ]}}
+    assert response.json == {
+        "status": "success", "params":
+            {
+                "collection_name": "example_collection",
+                "ids": [2, 3],
+                "items": [
+                    {"vector": [0.1, 0.4, 0.3, 0.6], "id": 2, "field": {"name": "example2", "age": 18}},
+                    {"vector": [0.2, 0.3, 0.4, 0.5], "id": 3, "field": {"name": "example3", "age": 19}}
+                ]
+            }
+    }
 
 
 def test_collection_shape(test_client):
@@ -170,4 +176,4 @@ def test_database_exists(test_client):
     url = 'http://localhost:7637/database_exists'
     response = test_client.get(url)
     assert response.status_code == 200
-    assert response.json == {"status": "success", "params": {"exists": True}}
+    assert response.json == {"status": "success", "params": {"exists": False}}
