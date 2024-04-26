@@ -2,11 +2,11 @@ from pathlib import Path
 
 import numpy as np
 
-from test import MinVectorDB
+from test import MinVectorDBLocalClient
 
 
 def test_create_collection():
-    my_vec_db = MinVectorDB(root_path='my_vec_db')
+    my_vec_db = MinVectorDBLocalClient(root_path='my_vec_db')
     collection = my_vec_db.require_collection('test_collection', dim=4, drop_if_exists=True)
 
     assert Path(collection._database_path).stem == 'test_collection'
@@ -23,7 +23,7 @@ def test_create_collection():
 
 
 def test_show_collections():
-    my_vec_db = MinVectorDB(root_path='my_vec_db')
+    my_vec_db = MinVectorDBLocalClient(root_path='my_vec_db')
     collection = my_vec_db.require_collection('test_collection', dim=4, drop_if_exists=True)
 
     collections = my_vec_db.show_collections()
@@ -35,7 +35,7 @@ def test_show_collections():
 
 
 def test_get_an_exists_collection():
-    my_vec_db = MinVectorDB(root_path='my_vec_db')
+    my_vec_db = MinVectorDBLocalClient(root_path='my_vec_db')
     collection = my_vec_db.require_collection('test_collection', dim=4, drop_if_exists=True)
 
     collection = my_vec_db.get_collection('test_collection')
