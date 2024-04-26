@@ -239,6 +239,9 @@ class StandaloneMinVectorDB:
 
         self.most_recent_query_report = {}
 
+        # update scaler
+        self._query.update_scaler(self._matrix_serializer.scaler)
+
         self._timer.start()
         if self._use_cache:
             res = self._query.query(vector=vector, k=k, query_filter=query_filter, index_mode=self._matrix_serializer.index_mode,
@@ -251,7 +254,7 @@ class StandaloneMinVectorDB:
                                     return_similarity=return_similarity)
 
         time_cost = self._timer.last_timestamp_diff()
-        self.most_recent_query_report['Database Shape'] = self.shape
+        self.most_recent_query_report['Collection Shape'] = self.shape
         self.most_recent_query_report['Query Time'] = f"{time_cost :>.5f} s"
         self.most_recent_query_report['Query Distance'] = self._distance if distance is None else distance
         self.most_recent_query_report['Query K'] = k
@@ -306,6 +309,9 @@ class StandaloneMinVectorDB:
         # title use bold font
         report = '\n* - MOST RECENT QUERY REPORT -\n'
         for key, value in self.most_recent_query_report.items():
+            if key == 'Collection Shape':
+                value = self.shape
+
             report += f'| - {key}: {value}\n'
 
         report += '* - END OF REPORT -\n'
@@ -317,14 +323,18 @@ class StandaloneMinVectorDB:
         """
         Return the database report.
         """
-        db_report = {'DATABASE STATUS REPORT': {
-            'Database shape': (0, self._matrix_serializer.dim) if self._matrix_serializer.IS_DELETED else self.shape,
-            'Database last_commit_time': self._matrix_serializer.last_commit_time,
-            'Database commit status': self._matrix_serializer.COMMIT_FLAG,
-            'Database index_mode': self._matrix_serializer.index_mode,
-            'Database distance': self._distance,
-            'Database use_cache': self._use_cache,
-            'Database status': 'DELETED' if self._matrix_serializer.IS_DELETED else 'ACTIVE'
+        if self._initialize_as_collection:
+            name = "Collection"
+        else:
+            name = "Database"
+
+        db_report = {f'{name.upper()} STATUS REPORT': {
+            f'{name} shape': (0, self._matrix_serializer.dim) if self._matrix_serializer.IS_DELETED else self.shape,
+            f'{name} last_commit_time': self._matrix_serializer.last_commit_time,
+            f'{name} index_mode': self._matrix_serializer.index_mode,
+            f'{name} distance': self._distance,
+            f'{name} use_cache': self._use_cache,
+            f'{name} status': 'DELETED' if self._matrix_serializer.IS_DELETED else 'ACTIVE'
         }}
 
         return db_report
@@ -341,8 +351,13 @@ class StandaloneMinVectorDB:
             else:
                 title = "MinVectorDB object with status: \n"
 
-        report = '\n* - DATABASE STATUS REPORT -\n'
-        for key, value in self.status_report_['DATABASE STATUS REPORT'].items():
+        if self._initialize_as_collection:
+            name = "Collection"
+        else:
+            name = "Database"
+
+        report = f'\n* - {name.upper()} STATUS REPORT -\n'
+        for key, value in self.status_report_[f'{name.upper()} STATUS REPORT'].items():
             report += f'| - {key}: {value}\n'
 
         return title + report
