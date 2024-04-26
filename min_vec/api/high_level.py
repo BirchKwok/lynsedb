@@ -269,6 +269,7 @@ class MinVectorDBLocalClient:
                     file.rmdir()
             self._root_path.rmdir()
 
+        MinVectorDBLocalClient._instance = None
         self.STATUS = 'DELETED'
 
     @property
