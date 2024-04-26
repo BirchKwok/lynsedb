@@ -4,6 +4,7 @@ import shutil
 from typing import Union
 
 import numpy as np
+import portalocker
 from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
 
@@ -91,7 +92,6 @@ class MatrixSerializer:
         # initialize the storage worker
         self.storage_worker = StorageWorker(self.collections_path_parent, self.dim,
                                             self.chunk_size,
-                                            quantizer=None if self.scaler_bits is None else self.scaler,
                                             warm_up=warm_up)
 
         # ============== Loading or create one empty collection ==============
@@ -290,7 +290,28 @@ class MatrixSerializer:
             self.fields_index.save(self.collections_path_parent / 'fields_index.mvdb')
 
             chunk_partition_size = self.storage_worker.get_shape(read_type='chunk')[0]
-            if chunk_partition_size >= 100000 and self.index_mode != 'FLAT':
+            cluster_partition_size = self.storage_worker.get_shape(read_type='cluster')[0]
+
+            all_partition_size = self.storage_worker.get_shape(read_type='all')[0]
+
+            if all_partition_size >= 100000 and not (self.collections_path_parent / 'scaled_status.json').exists():
+                # only run once
+                self.storage_worker.update_quantizer(self.scaler)
+                filenames = self.storage_worker.get_all_files(read_type='chunk')
+                if filenames:
+                    for filename in filenames:
+                        self.storage_worker.write(filename=filename)
+
+                with open(self.collections_path_parent / 'scaled_status.json', 'w') as f:
+                    portalocker.lock(f, portalocker.LOCK_EX)
+                    import json
+                    json.dump({'status': True}, f)
+
+            if (
+                    cluster_partition_size == 0 and (chunk_partition_size >= 100000 and self.index_mode != 'FLAT')
+            ) or (
+                    cluster_partition_size > 0 and self.index_mode != 'FLAT'
+            ):
                 self.logger.debug('Building index...')
                 # build index
                 self.build_index()
@@ -302,7 +323,8 @@ class MatrixSerializer:
             self.reset_collection()
 
             if self.scaler_bits is not None:
-                self.scaler.save(self.collections_path_parent / 'sq_model.mvdb')
+                if self.scaler.fitted:
+                    self.scaler.save(self.collections_path_parent / 'sq_model.mvdb')
 
             self.COMMIT_FLAG = True
 
@@ -367,7 +389,8 @@ class MatrixSerializer:
                              f'vectors must be tuple of (vector, id[optional], field[optional]).')
                     vector, index, field = sample
 
-                    raise_if(TypeError, not isinstance(field, dict), f'field must be dict, got {type(field)}')
+                    raise_if(TypeError, not (isinstance(field, dict) or field is None),
+                             f'field must be dict or None, got {type(field)}')
 
                 if isinstance(vector, list):
                     vector = np.array(vector)
