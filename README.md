@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://github.com/BirchKwok/MinVectorDB"><img src="https://github.com/BirchKwok/MinVectorDB/blob/main/pic/logo.png" alt="MinVectorDB" style="max-width: 20%; height: auto;"></a>
-  <h3>A pure Python-implemented, lightweight, serverless, locally deployed vector database.</h3>
+  <h3>A pure Python-implemented, lightweight, server-optional, multi-end compatible, vector database deployable locally or remotely.</h3>
   <p>
     <a href="https://badge.fury.io/py/MinVectorDB"><img src="https://badge.fury.io/py/MinVectorDB.svg" alt="PyPI version"></a>
     <a href="https://pypi.org/project/MinVectorDB/"><img src="https://img.shields.io/pypi/pyversions/MinVectorDB" alt="PyPI - Python Version"></a>
@@ -34,103 +34,96 @@ MinVectorDB focuses on achieving 100% recall, prioritizing recall accuracy over 
 
 While the project has not yet been benchmarked against other systems, we believe these planned features will significantly enhance MinVectorDB's capabilities in managing and retrieving vector data, addressing a wide range of user needs.
 
-## Install
+## Install Client API package (Mandatory)
 
 ```shell
 pip install MinVectorDB
 ```
 
-## Qucik Start
+## If you wish to use Docker (Optional)
 
-### Environment setup (optional, Each instance can only be set once, and needs to be set before instantiation)
-
-
-```python
-import os
-
-# logger settings
-# logger level: DEBUG, INFO, WARNING, ERROR, CRITICAL
-os.environ['MVDB_LOG_LEVEL'] = 'INFO'  # default: INFO, Options are 'DEBUG'/'INFO'/'WARNING'/'ERROR'/'CRITICAL'
-
-# log path
-os.environ['MVDB_LOG_PATH'] = './min_vec_db.log'  # default: None
-
-# whether to truncate log file
-os.environ['MVDB_TRUNCATE_LOG'] = 'True'  # default: True
-
-# whether to add time to log
-os.environ['MVDB_LOG_WITH_TIME'] = 'False'  # default: False
-
-# clustering settings
-# kmeans epochs
-os.environ['MVDB_KMEANS_EPOCHS'] = '500'  # default: 100
-
-# query cache size
-os.environ['MVDB_QUERY_CACHE_SIZE'] = '10000'  # default: 10000
-
-# specify the number of chunks in the memory cache
-os.environ['MVDB_DATALOADER_BUFFER_SIZE'] = '20'  # default to '40', must be integer-like string
+```shell
+docker pull birchkwok/minvectordb:latest
 ```
+
+## Qucik Start
 
 
 ```python
 import min_vec
 print("MinVectorDB version is: ", min_vec.__version__)
-print("MinVectorDB all configs: ", '\n - ' + '\n - '.join([f'{k}: {v}' for k, v in min_vec.get_all_configs().items()]))
 ```
 
-    MinVectorDB version is:  0.3.0
-    MinVectorDB all configs:  
-     - MVDB_LOG_LEVEL: INFO
-     - MVDB_LOG_PATH: ./min_vec_db.log
-     - MVDB_TRUNCATE_LOG: True
-     - MVDB_LOG_WITH_TIME: False
-     - MVDB_KMEANS_EPOCHS: 500
-     - MVDB_QUERY_CACHE_SIZE: 10000
-     - MVDB_DATALOADER_BUFFER_SIZE: 20
+    MinVectorDB version is:  0.3.2
 
 
-### create a collection
+## Initialize Database
+
+MinVectorDB now supports HTTP API and Python local code API. 
+
+
+The HTTP API mode requires starting an HTTP server beforehand. You have two options: 
+- start directly.
+  
+  For direct startup, the default port is 7637. You can run the following command in the terminal to start the service:
+```shell
+min_vec run --host 127.0.0.1 --port 7637
+```
+
+- within Docker
+  
+  In Docker, the default port is 5403. You can run the following command in the terminal to start the service:
+```shell
+docker run -p 5403:7637 birchkwok/minvectordb:latest
+```
+
+```python
+from min_vec import MinVectorDB
+
+# This method is for the Python local code API, recommended only for CI/CD testing or single-user local use.
+# Specify database root directory
+my_db = MinVectorDB('my_vec_db')  # Judgment condition, root_path does not start with http or https
+# or
+# Use the HTTP API mode, it is suitable for use in production environments.
+# For direct startup
+my_db = MinVectorDB("http://127.0.0.1:7637")
+
+# within Docker
+my_db = MinVectorDB("http://127.0.0.1:5403")
+```
 
 
 ```python
 from min_vec import MinVectorDB
 
-# Specify database root directory
-my_db = MinVectorDB(root_path='my_vec_db')
+# For direct startup
+my_db = MinVectorDB("http://localhost:5403")
 ```
 
-    MinVectorDB - INFO - Successful initialization of MinVectorDB in root_path: /projects/MinVectorDB/my_vec_db
-
+### create a collection
 
 
 ```python
-collection = my_db.require_collection("test_collection", 4, drop_if_exists=True)
+collection = my_db.require_collection("test_collection", 4, drop_if_exists=True, scaler_bits=8)
 ```
 
-    MinVectorDB - INFO - Creating collection test_collection with: 
-    //    dim=4, collection='test_collection', 
-    //    n_clusters=16, chunk_size=100000,
-    //    distance='cosine', index_mode='IVF-FLAT', 
-    //    dtypes='float32', use_cache=True, 
-    //    scaler_bits=8, n_threads=10
-
-
 ### Add vectors
+
+When inserting vectors, collection requires manually running the `commit` function or inserting within the `insert_session` function context manager, which will run the `commit` function in the background.
 
 
 ```python
 with collection.insert_session():
-    id = collection.add_item(vector=[0.01, 0.34, 0.74, 0.31], id=1, field={'field': 'test_1', 'order': 0})
-    id = collection.add_item(vector=[0.36, 0.43, 0.56, 0.12], id=2, field={'field': 'test_1', 'order': 1})
-    id = collection.add_item(vector=[0.03, 0.04, 0.10, 0.51], id=3, field={'field': 'test_2', 'order': 2})
-    id = collection.add_item(vector=[0.11, 0.44, 0.23, 0.24], id=4, field={'field': 'test_2', 'order': 3})
-    id = collection.add_item(vector=[0.91, 0.43, 0.44, 0.67], id=5, field={'field': 'test_2', 'order': 4})
-    id = collection.add_item(vector=[0.92, 0.12, 0.56, 0.19], id=6, field={'field': 'test_3', 'order': 5})
-    id = collection.add_item(vector=[0.18, 0.34, 0.56, 0.71], id=7, field={'field': 'test_1', 'order': 6})
-    id = collection.add_item(vector=[0.01, 0.33, 0.14, 0.31], id=8, field={'field': 'test_2', 'order': 7})
-    id = collection.add_item(vector=[0.71, 0.75, 0.91, 0.82], id=9, field={'field': 'test_3', 'order': 8})
-    id = collection.add_item(vector=[0.75, 0.44, 0.38, 0.75], id=10, field={'field': 'test_1', 'order': 9})
+    id = collection.add_item(vector=[0.01, 0.34, 0.74, 0.31], id=1, field={'field': 'test_1', 'order': 0})   # id = 0
+    id = collection.add_item(vector=[0.36, 0.43, 0.56, 0.12], id=2, field={'field': 'test_1', 'order': 1})   # id = 1
+    id = collection.add_item(vector=[0.03, 0.04, 0.10, 0.51], id=3, field={'field': 'test_2', 'order': 2})   # id = 2
+    id = collection.add_item(vector=[0.11, 0.44, 0.23, 0.24], id=4, field={'field': 'test_2', 'order': 3})   # id = 3
+    id = collection.add_item(vector=[0.91, 0.43, 0.44, 0.67], id=5, field={'field': 'test_2', 'order': 4})   # id = 4
+    id = collection.add_item(vector=[0.92, 0.12, 0.56, 0.19], id=6, field={'field': 'test_3', 'order': 5})   # id = 5
+    id = collection.add_item(vector=[0.18, 0.34, 0.56, 0.71], id=7, field={'field': 'test_1', 'order': 6})   # id = 6
+    id = collection.add_item(vector=[0.01, 0.33, 0.14, 0.31], id=8, field={'field': 'test_2', 'order': 7})   # id = 7
+    id = collection.add_item(vector=[0.71, 0.75, 0.91, 0.82], id=9, field={'field': 'test_3', 'order': 8})   # id = 8
+    id = collection.add_item(vector=[0.75, 0.44, 0.38, 0.75], id=10, field={'field': 'test_1', 'order': 9})  # id = 9
 
 # If you do not use the insert_session function, you need to manually call the commit function to submit the data
 # collection.commit()
@@ -138,23 +131,34 @@ with collection.insert_session():
 
 
 ```python
-print(id)
+# or use the bulk_add_items function
+# with collection.insert_session():
+#     ids = collection.bulk_add_items([([0.01, 0.34, 0.74, 0.31], 0, {'field': 'test_1', 'order': 0}), 
+#                                      ([0.36, 0.43, 0.56, 0.12], 1, {'field': 'test_1', 'order': 1}), 
+#                                      ([0.03, 0.04, 0.10, 0.51], 2, {'field': 'test_2', 'order': 2}),
+#                                      ([0.11, 0.44, 0.23, 0.24], 3, {'field': 'test_2', 'order': 3}), 
+#                                      ([0.91, 0.43, 0.44, 0.67], 4, {'field': 'test_2', 'order': 4}), 
+#                                      ([0.92, 0.12, 0.56, 0.19], 5, {'field': 'test_3', 'order': 5}),
+#                                      ([0.18, 0.34, 0.56, 0.71], 6, {'field': 'test_1', 'order': 6}), 
+#                                      ([0.01, 0.33, 0.14, 0.31], 7, {'field': 'test_2', 'order': 7}), 
+#                                      ([0.71, 0.75, 0.91, 0.82], 8, {'field': 'test_3', 'order': 8}),
+#                                      ([0.75, 0.44, 0.38, 0.75], 9, {'field': 'test_1', 'order': 9})])
+# print(ids)  # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 ```
-
-    10
-
 
 ### Query
 
 
 ```python
-collection.query(vector=[0.36, 0.43, 0.56, 0.12], k=3)
+collection.query(vector=[0.36, 0.43, 0.56, 0.12], k=10)
 ```
 
 
 
 
-    (array([2, 9, 1]), Array([0.99822044, 0.9201999 , 0.8585187 ], dtype=float32))
+    (array([ 2,  9,  1,  4,  6,  5, 10,  7,  8,  3]),
+     array([1.        , 0.92355633, 0.86097705, 0.85727406, 0.81551266,
+            0.813797  , 0.78595245, 0.7741583 , 0.6871773 , 0.34695023]))
 
 
 
@@ -165,32 +169,15 @@ print(collection.query_report_)
 
     
     * - MOST RECENT QUERY REPORT -
-    | - Database Shape: (10, 4)
-    | - Query Time: 0.00125 s
+    | - Collection Shape: (10, 4)
+    | - Query Time: 0.20518 s
     | - Query Distance: cosine
-    | - Query K: 3
-    | - Top 3 Results ID: [2 9 1]
-    | - Top 3 Results Similarity: [0.99822  0.9202   0.858519]
+    | - Query K: 10
+    | - Top 10 Results ID: [ 2  9  1  4  6  5 10  7  8  3]
+    | - Top 10 Results Similarity: [1.         0.92355633 0.86097705 0.85727406 0.81551266 0.813797
+     0.78595245 0.7741583  0.6871773  0.34695023]
     * - END OF REPORT -
     
-
-
-
-```python
-collection.status_report_['DATABASE STATUS REPORT']
-```
-
-
-
-
-    {'Database shape': (10, 4),
-     'Database last_commit_time': datetime.datetime(2024, 4, 23, 21, 16, 38, 764711),
-     'Database commit status': True,
-     'Database index_mode': 'IVF-FLAT',
-     'Database distance': 'cosine',
-     'Database use_cache': True,
-     'Database status': 'ACTIVE'}
-
 
 
 ### Use Filter
@@ -222,12 +209,12 @@ print(collection.query_report_)
 
     
     * - MOST RECENT QUERY REPORT -
-    | - Database Shape: (10, 4)
-    | - Query Time: 0.00237 s
+    | - Collection Shape: (10, 4)
+    | - Query Time: 0.11985 s
     | - Query Distance: cosine
     | - Query K: 10
     | - Top 10 Results ID: [ 2  1  4  5 10  3]
-    | - Top 10 Results Similarity: [0.99822    0.858519   0.85362    0.812733   0.783597   0.34614798]
+    | - Top 10 Results Similarity: [1.         0.86097705 0.85727406 0.813797   0.78595245 0.34695023]
     * - END OF REPORT -
     
 
@@ -256,7 +243,19 @@ my_db
 
 
 
-    DELETED MinVectorDB(root_path='/projects/MinVectorDB/my_vec_db')
+    MinVectorDB remote server at http://localhost:5403 does not exist.
+
+
+
+
+```python
+my_db.database_exists()
+```
+
+
+
+
+    {'status': 'success', 'params': {'exists': False}}
 
 
 
