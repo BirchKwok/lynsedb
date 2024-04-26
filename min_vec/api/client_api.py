@@ -68,13 +68,13 @@ class Collection:
         else:
             raise ExecutionError(response.json())
 
-    def add_item(self, vector: list[float] | np.ndarray, id: int, field: dict):
+    def add_item(self, vector: Union[list[float], np.ndarray], id: int, field: dict):
         """
         Add an item to the collection.
             .. versionadded:: 0.3.2
 
         Parameters:
-            vector (list[float] | np.ndarray): The vector of the item.
+            vector (list[float], np.ndarray): The vector of the item.
             id (int): The ID of the item.
             field (dict): The fields of the item.
 
@@ -103,16 +103,19 @@ class Collection:
 
     def bulk_add_items(
             self,
-            vectors: (List[Tuple[Union[List, Tuple, np.ndarray], int, dict]] |
-                      List[Tuple[Union[List, Tuple, np.ndarray], int]] | List[Tuple[Union[List, Tuple, np.ndarray]]])
+            vectors: List[Union[
+                Tuple[Union[List, Tuple, np.ndarray], int, dict],
+                Tuple[Union[List, Tuple, np.ndarray], int],
+                Tuple[Union[List, Tuple, np.ndarray]]
+            ]]
     ):
         """
         Add multiple items to the collection.
             .. versionadded:: 0.3.2
 
         Parameters:
-            vectors (List[Tuple[Union[List, Tuple, np.ndarray], int, dict]] |
-            List[Tuple[Union[List, Tuple, np.ndarray], int]] | List[Tuple[Union[List, Tuple, np.ndarray]]]):
+            vectors (List[Tuple[Union[List, Tuple, np.ndarray], int, dict]],
+            List[Tuple[Union[List, Tuple, np.ndarray], int]] , List[Tuple[Union[List, Tuple, np.ndarray]]]):
                 The list of items to add. Each item is a tuple containing the vector, ID, and fields.
 
         Returns:
@@ -183,14 +186,14 @@ class Collection:
         return DatabaseSession(self)
 
     @QueryVectorCache(config.MVDB_QUERY_CACHE_SIZE)
-    def _query(self, vector: list[float] | np.ndarray, k: int = 10, distance: str = 'cosine',
+    def _query(self, vector: Union[list[float], np.ndarray], k: int = 10, distance: str = 'cosine',
                query_filter: Union[Filter, None] = None, return_similarity: bool = True, **kwargs):
         """
         Query the collection.
             .. versionadded:: 0.3.2
 
         Parameters:
-            vector (list[float] | np.ndarray): The query vector.
+            vector (list[float] or np.ndarray): The query vector.
             k (int): The number of results to return. Default is 10.
             distance (str): The distance metric. Default is 'cosine'.
             query_filter (dict): The query filter. Default is None.
@@ -246,7 +249,7 @@ class Collection:
             raise ExecutionError(response.json())
 
     def query(
-            self, vector: list[float] | np.ndarray, k: int = 10, distance: str = 'cosine',
+            self, vector: Union[list[float], np.ndarray], k: int = 10, distance: str = 'cosine',
             query_filter: Union[Filter, None] = None, return_similarity: bool = True
     ):
         """
@@ -254,7 +257,7 @@ class Collection:
             .. versionadded:: 0.3.2
 
         Parameters:
-            vector (list[float] | np.ndarray): The query vector.
+            vector (list[float] or np.ndarray): The query vector.
             k (int): The number of results to return. Default is 10.
             distance (str): The distance metric. Default is 'cosine'.
             query_filter (Filter, optional): The field filter to apply to the query.
@@ -399,8 +402,8 @@ class MinVectorDBHTTPClient:
             index_mode: str = 'IVF-FLAT',
             dtypes: str = 'float32',
             use_cache: bool = True,
-            scaler_bits: int | None = 8,
-            n_threads: int | None = 10,
+            scaler_bits: Union[int, None] = 8,
+            n_threads: Union[int, None] = 10,
             warm_up: bool = False,
             drop_if_exists: bool = False
     ):
