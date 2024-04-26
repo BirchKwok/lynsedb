@@ -66,15 +66,15 @@ class FieldCondition:
 
 
 class MatchID:
-    def __init__(self, indices: Union[list, np.ndarray]):
+    def __init__(self, ids: Union[list, np.ndarray]):
         """
         Initialize an MatchID instance.
             .. versionadded:: 0.3.0
 
         Parameters:
-            indices (list or np.ndarray): The indices to filter the numpy array.
+            ids (list or np.ndarray): The indices to filter the numpy array.
         """
-        self.indices = indices
+        self.indices = ids
 
     def match(self, array):
         """
@@ -151,6 +151,22 @@ class Filter:
             any_pass = any(condition.evaluate(data) for condition in self.any) if self.any else False
 
         return must_pass and (any_pass or not self.any)
+
+    def to_dict(self):
+        """
+        Convert the filter to a dictionary.
+
+        Returns:
+            dict: A dictionary representation of the filter.
+        """
+        return {
+            'must': [{'field': condition.key, 'operator': condition.matcher.comparator.__name__, 'value': condition.matcher.value}
+                     if isinstance(condition, FieldCondition) else {'ids': condition.matcher.indices}
+                     for condition in self.must] if self.must else None,
+            'any': [{'field': condition.key, 'operator': condition.matcher.comparator.__name__, 'value': condition.matcher.value}
+                    if isinstance(condition, FieldCondition) else {'ids': condition.matcher.indices}
+                    for condition in self.any] if self.any else None
+        }
 
     def __hash__(self):
         return hash((tuple(self.must), tuple(self.any)))
