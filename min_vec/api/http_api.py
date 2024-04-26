@@ -10,6 +10,7 @@ import portalocker
 import yaml
 
 from flask import Flask, request, jsonify, Response
+from gunicorn.app.base import BaseApplication
 
 from min_vec.api.high_level import MinVectorDBLocalClient
 from min_vec.structures.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
@@ -356,7 +357,6 @@ def add_item():
     try:
         my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         collection = my_vec_db.get_collection(data['collection_name'])
-        # with collection.insert_session():
         id = collection.add_item(vector=np.array(data['item']['vector']), id=data['item'].get('id', None),
                                  field=data['item'].get('field', None))
 
@@ -474,7 +474,7 @@ def query():
                     ) if 'field' in condition and 'operator' in condition
                     else IDCondition(matcher=MatchID(ids=condition['ids']))
                     for condition in data['query_filter']['must']
-                ] if 'must' in data['query_filter'] else None,
+                ] if data['query_filter']['must'] is not None else None,
                 any=[
                     FieldCondition(
                         key=condition['field'],
@@ -485,7 +485,7 @@ def query():
                     ) if 'field' in condition and 'operator' in condition
                     else IDCondition(matcher=MatchID(ids=condition['ids']))
                     for condition in data['query_filter']['any']
-                ] if 'any' in data['query_filter'] else None
+                ] if data['query_filter']['any'] is not None else None
             )
 
         ids, scores = collection.query(vector=data['vector'], k=data['k'],
@@ -588,7 +588,6 @@ def bulk_add_items():
         for item in data['items']:
             items.append((item['vector'], item.get('id', None), item.get('field', None)))
 
-        # with collection.insert_session():
         ids = collection.bulk_add_items(items)
 
         return Response(json.dumps({
@@ -1057,20 +1056,32 @@ def get_commit_msg():
         return jsonify({'error': str(e)}), 500
 
 
+class GunicornServer(BaseApplication):
+    def __init__(self, app, options=None):
+        self.options = options or {}
+        self.application = app
+        super(GunicornServer, self).__init__()
+
+    def load_config(self):
+        config = {key: value for key, value in self.options.items()
+                  if key in self.cfg.settings and value is not None}
+        for key, value in config.items():
+            self.cfg.set(key.lower(), value)
+
+    def load(self):
+        return self.application
+
+
 def main():
     global config_path, default_root_path, config, root_path
     import argparse
-
     parser = argparse.ArgumentParser(description='Start the MinVectorDB HTTP API server.')
     parser.add_argument('--host', default='127.0.0.1', help='The host to bind to.')
     parser.add_argument('--port', default=7637, type=int, help='The port to bind to.')
+    parser.add_argument('--threads', default=4, type=int, help='Number of threads per worker.')
     parser.add_argument('--config', default=config_path, help='The path to the configuration file.')
     parser.add_argument('--root_path', default=default_root_path, help='The path to the database root directory.')
-    parser.add_argument('--debug', action='store_true', help='Enable debug mode.')
-    parser.add_argument('run', help='Run the HTTP API server.')
-
-    parser.add_argument('--version', action='version', version=version)
-
+    parser.add_argument('run', help='Run the server.')
     args = parser.parse_args()
 
     config_path = args.config
@@ -1078,7 +1089,15 @@ def main():
     config_path, root_path, config = generate_config(root_path=root_path, config_path=config_path)
 
     if args.run:
-        app.run(host=args.host, port=args.port, debug=args.debug)
+        gunicorn_options = {
+            'bind': f"{args.host}:{args.port}",
+            'workers': 1,
+            'worker_class': 'gthread',
+            'threads': args.threads,
+            'accesslog': '-',
+            'errorlog': '-',
+        }
+        GunicornServer(app, gunicorn_options).run()
 
 
 if __name__ == '__main__':
