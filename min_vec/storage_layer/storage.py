@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 
 import numpy as np
+import portalocker
 from spinesUtils.asserts import raise_if
 
 from min_vec.computational_layer.engines import to_normalize
@@ -12,7 +13,7 @@ from min_vec.structures.limited_dict import LimitedDict
 class StorageWorker:
     """The worker class for reading and writing data to the files."""
 
-    def __init__(self, collection_path, dimension, chunk_size, quantizer=None, warm_up=False):
+    def __init__(self, collection_path, dimension, chunk_size, warm_up=False):
         self.collection_path = Path(collection_path)
         self.collection_chunk_path = self.collection_path / 'chunk_data'
         self.collection_chunk_indices_path = self.collection_path / 'chunk_indices_data'
@@ -31,10 +32,13 @@ class StorageWorker:
 
         self.cache = LimitedDict(max_size=config.MVDB_DATALOADER_BUFFER_SIZE)
 
-        self.quantizer = quantizer
+        self.quantizer = None
 
         if warm_up:
             self.warm_up()
+
+    def update_quantizer(self, quantizer):
+        self.quantizer = quantizer
 
     def file_exists(self):
         return ((self.collection_chunk_path / 'chunk_0').exists()
@@ -122,12 +126,14 @@ class StorageWorker:
     @staticmethod
     def _write_to_disk(data, indices, data_path, indices_path, filename):
         with open(data_path / filename, 'wb') as f:
+            portalocker.lock(f, portalocker.LOCK_EX)
             np.save(f, data)
 
         with open(indices_path / filename, 'wb') as f:
+            portalocker.lock(f, portalocker.LOCK_EX)
             np.save(f, indices)
 
-    def _write(self, data, indices, write_type='chunk', cluster_id=None, normalize=False):
+    def _incremental_write(self, data, indices, write_type='chunk', cluster_id=None, normalize=False):
         if normalize:
             data = to_normalize(np.vstack(data))
 
@@ -148,6 +154,7 @@ class StorageWorker:
             if not (self.collection_path / 'info.json').exists():
                 total_shape = [0, self.dimension]
                 with open(self.collection_path / 'info.json', 'w') as f:
+                    portalocker.lock(f, portalocker.LOCK_EX)
                     json.dump({"total_shape": total_shape}, f)
             else:
                 with open(self.collection_path / 'info.json', 'r') as f:
@@ -230,31 +237,36 @@ class StorageWorker:
 
         if write_type == 'chunk':
             with open(self.collection_path / 'info.json', 'w') as f:
+                portalocker.lock(f, portalocker.LOCK_EX)
                 total_shape[0] += data_shape
                 json.dump({"total_shape": total_shape}, f)
         else:
             self.cluster_last_file_shape[cluster_id] = [data_shape + total_shape[0], self.dimension]
 
-    def cluster_write(self, cluster_id, data, indices, normalize=False):
-        """Write the data to the file."""
-        self._write(data, indices, write_type='cluster', cluster_id=cluster_id, normalize=normalize)
+    def _overwrite(self, filename, normalize=False):
+        data, indices = self._read(filename)
 
-    def chunk_write(self, data, indices, normalize=False):
-        """Write the data to the file."""
-        self._write(data, indices, write_type='chunk', normalize=normalize)
+        if normalize:
+            data = to_normalize(data)
+
+        if self.quantizer is not None:
+            data = self.quantizer.fit_transform(data)
+
+        self._write_to_disk(data, indices, self.collection_chunk_path, self.collection_chunk_indices_path, filename)
+        self._write_to_memory(filename, data, indices)
 
     def read(self, filename):
         """Read the data from the file."""
         return self._read(filename=filename)
 
-    def write(self, data, indices, write_type='chunk', cluster_id=None, normalize=False):
+    def write(self, data=None, indices=None, write_type='chunk', cluster_id=None, normalize=False, filename=None):
         """Write the data to the file."""
-        if write_type == 'chunk':
-            self.chunk_write(data, indices, normalize=normalize)
-        elif write_type == 'cluster':
-            raise_if(ValueError, not isinstance(cluster_id, str) and not cluster_id.isdigit(),
-                     "cluster_id must be string-type integer.")
-            self.cluster_write(cluster_id, data, indices, normalize=normalize)
+        if write_type in ['chunk', 'cluster']:
+            if filename:
+                self._overwrite(filename, normalize=normalize)
+            else:
+                self._incremental_write(data, indices, write_type=write_type, cluster_id=cluster_id,
+                                        normalize=normalize)
         else:
             raise ValueError('write_type must be "chunk" or "cluster"')
 
@@ -348,6 +360,7 @@ class StorageWorker:
 
             with open(self.collection_chunk_path / path if read_type == 'chunk'
                       else self.collection_cluster_path / path, 'wb') as f:
+                portalocker.lock(f, portalocker.LOCK_EX)
                 np.save(f, _data)
 
             # delete cache
