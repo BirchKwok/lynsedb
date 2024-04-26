@@ -450,3 +450,33 @@ def test_result_order():
         assert index[0] == 0
 
         db.delete()
+
+
+def test_refit(capsys):
+    db = StandaloneMinVectorDB(dim=1024, database_path='test_min_vec', chunk_size=10000, index_mode='IVF-FLAT')
+    with db.insert_session():
+        for i in range(100000):
+            db.add_item(np.random.rand(1024), id=i)
+
+    out, err = capsys.readouterr()
+
+    assert 'Start to fit the index for cluster' in err
+    assert db._matrix_serializer.ann_model.fitted
+
+    with db.insert_session():
+        for i in range(100000, 110000):
+            db.add_item(np.random.rand(1024), id=i)
+
+    out, err = capsys.readouterr()
+    assert 'Incrementally building the index for cluster' in err
+    assert db._matrix_serializer.ann_model.fitted
+
+    with db.insert_session():
+        for i in range(110000, 200000):
+            db.add_item(np.random.rand(1024), id=i)
+
+    out, err = capsys.readouterr()
+    assert 'Refitting the index for cluster' in err
+    assert db._matrix_serializer.ann_model.fitted
+
+    db.delete()
