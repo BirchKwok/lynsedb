@@ -33,7 +33,6 @@ jobs:
         python -m pip install flake8 pytest numba torch
         $reqFile = "requirements.txt"
         if (Test-Path $reqFile) { pip install -r $reqFile }
-      shell: pwsh
 
     - name: Run tests
       run: pytest tests/docker_tests/
