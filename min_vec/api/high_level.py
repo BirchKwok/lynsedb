@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Union
 
 from spinesUtils.asserts import ParameterTypeAssert
+import portalocker
 
 from min_vec.api.low_level import StandaloneMinVectorDB
 from min_vec.api import logger
@@ -27,6 +28,7 @@ class _Register:
         """
         if not (self.root_path / 'collections.json').exists():
             with open(self.root_path / 'collections.json', 'w') as f:
+                portalocker.lock(f, portalocker.LOCK_EX)  # add lock
                 json.dump({collection: kwargs}, f)
         else:
             collections = self.get_collections_details()
@@ -35,6 +37,7 @@ class _Register:
                 collections[collection] = kwargs
 
                 with open(self.root_path / 'collections.json', 'w') as f:
+                    portalocker.lock(f, portalocker.LOCK_EX)  # add lock
                     json.dump(collections, f)
 
     def deregister_collection(self, collection: str):
@@ -53,6 +56,7 @@ class _Register:
             del collections[collection]
 
             with open(self.root_path / 'collections.json', 'w') as f:
+                portalocker.lock(f, portalocker.LOCK_EX)  # add lock
                 json.dump(collections, f)
 
     def get_collections_details(self) -> dict:
@@ -73,6 +77,7 @@ class _Register:
             if not (self.root_path / collection).exists():
                 del collections[collection]
                 with open(self.root_path / 'collections.json', 'w') as f:
+                    portalocker.lock(f, portalocker.LOCK_EX)  # add lock
                     json.dump(collections, f)
 
         return collections
@@ -90,21 +95,27 @@ class _Register:
         return item in self.get_collections_details()
 
 
-class MinVectorDB:
+class MinVectorDBLocalClient:
     """
-    A class for managing a vector database stored in .mvdb files and computing vectors similarity.
+    A singleton class for the local MinVectorDB client.
     """
+    _instance = None
+
+    def __new__(cls, root_path: Union[Path, str]):
+        """
+        Create a new instance or return the existing instance of the class.
+        """
+        if cls._instance is None:
+            cls._instance = super(MinVectorDBLocalClient, cls).__new__(cls)
+            cls._instance._init(root_path)
+        return cls._instance
 
     @ParameterTypeAssert({
         'root_path': str
     }, func_name='MinVectorDB')
-    def __init__(self, root_path: Union[Path, str]) -> None:
+    def _init(self, root_path: Union[Path, str]):
         """
         Initialize the vector database.
-
-        Parameters:
-            root_path (str): The root path of the database.
-                .. versionadded:: 0.3.0
         """
         self._root_path = Path(root_path).absolute()
         if not self._root_path.exists():
@@ -113,7 +124,6 @@ class MinVectorDB:
 
         self._register = _Register(root_path)
         self._collections = {}
-
         self.STATUS = 'INITIALIZED'
 
     @unavailable_if_deleted
