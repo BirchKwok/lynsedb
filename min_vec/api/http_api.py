@@ -1,10 +1,11 @@
-"""使用flask实现的http接口, 用于向外部提供服务"""
+import gzip
 import json
 import operator
 import os
 import shutil
 from pathlib import Path
 
+import msgpack
 import numpy as np
 import portalocker
 import yaml
@@ -25,6 +26,13 @@ version = '0.3.2'
 # 构建配置文件的路径
 config_path = Path(os.path.expanduser('~/.MinVectorDB/config.yaml'))
 default_root_path = Path(os.path.expanduser('~/.MinVectorDB/data/min_vec_db')).as_posix()
+
+
+@app.before_request
+def handle_msgpack_input():
+    if request.headers.get('Content-Type') == 'application/msgpack':
+        data = msgpack.unpackb(request.get_data(), raw=False)
+        request.decoded_data = data
 
 
 def generate_config(root_path: str = default_root_path, config_path: Path = config_path):
@@ -349,7 +357,13 @@ def add_item():
     Returns:
         dict: The status of the operation.
     """
-    data = request.json
+    if request.headers.get('Content-Type') == 'application/msgpack':
+        # 从自定义属性中获取解包后的数据
+        data = request.decoded_data
+    else:
+        # 对于非 msgpack 数据，正常使用 JSON 解析
+        data = request.json
+
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
@@ -370,6 +384,98 @@ def add_item():
             }, sort_keys=False),
             mimetype='application/json')
 
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/bulk_add_items', methods=['POST'])
+def bulk_add_items():
+    """Bulk add items to a collection.
+        .. versionadded:: 0.3.2
+
+    Example:
+        1) use curl
+        curl -X POST http://localhost:7637/bulk_add_items \
+         -H "Content-Type: application/json" \
+         -d '{
+              "collection_name": "example_collection",
+              "items": [
+                  {
+                      "vector": [0.1, 0.2, 0.3, 0.4],
+                      "id": 1,
+                      "field": {
+                          "name": "example",
+                          "age": 18
+                        }
+                    },
+                    {
+                        "vector": [0.5, 0.6, 0.7, 0.8],
+                        "id": 2,
+                        "field": {
+                            "name": "example",
+                            "age": 20
+                        }
+                    }
+                ]
+            }' -w "\n"
+
+        2) use python requests
+        import requests
+
+        url = 'http://localhost:7637/bulk_add_items'
+
+        data = {
+            "collection_name": "example_collection",
+            "items": [
+                {
+                    "vector": [0.1, 0.2, 0.3, 0.4],
+                    "id": 1,
+                    "field": {
+                        "name": "example",
+                        "age": 18
+                    }
+                },
+                {
+                    "vector": [0.5, 0.6, 0.7, 0.8],
+                    "id": 2,
+                    "field": {
+                        "name": "example",
+                        "age": 20
+                    }
+                }
+            ]
+        }
+        response = requests.post(url, json=data)
+        print(response.json())
+
+    Returns:
+        dict: The status of the operation.
+    """
+    if request.headers.get('Content-Type') == 'application/msgpack':
+        data = request.decoded_data
+    else:
+        data = request.json
+
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+        items = []
+        for item in data['items']:
+            items.append((item['vector'], item.get('id', None), item.get('field', None)))
+
+        ids = collection.bulk_add_items(items)
+
+        return Response(json.dumps({
+            'status': 'success', 'params': {
+                'collection_name': data['collection_name'], 'ids': ids
+            }
+        }, sort_keys=False),
+            mimetype='application/json')
     except KeyError as e:
         return jsonify({'error': f'Missing required parameter {e}'}), 400
     except Exception as e:
@@ -506,96 +612,6 @@ def query():
                 }
             }
             }, sort_keys=False),
-            mimetype='application/json')
-    except KeyError as e:
-        return jsonify({'error': f'Missing required parameter {e}'}), 400
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/bulk_add_items', methods=['POST'])
-def bulk_add_items():
-    """Bulk add items to a collection.
-        .. versionadded:: 0.3.2
-
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/bulk_add_items \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection",
-              "items": [
-                  {
-                      "vector": [0.1, 0.2, 0.3, 0.4],
-                      "id": 1,
-                      "field": {
-                          "name": "example",
-                          "age": 18
-                        }
-                    },
-                    {
-                        "vector": [0.5, 0.6, 0.7, 0.8],
-                        "id": 2,
-                        "field": {
-                            "name": "example",
-                            "age": 20
-                        }
-                    }
-                ]
-            }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/bulk_add_items'
-
-        data = {
-            "collection_name": "example_collection",
-            "items": [
-                {
-                    "vector": [0.1, 0.2, 0.3, 0.4],
-                    "id": 1,
-                    "field": {
-                        "name": "example",
-                        "age": 18
-                    }
-                },
-                {
-                    "vector": [0.5, 0.6, 0.7, 0.8],
-                    "id": 2,
-                    "field": {
-                        "name": "example",
-                        "age": 20
-                    }
-                }
-            ]
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
-
-    Returns:
-        dict: The status of the operation.
-    """
-    data = request.json
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-
-    try:
-        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
-        collection = my_vec_db.get_collection(data['collection_name'])
-        items = []
-        for item in data['items']:
-            items.append((item['vector'], item.get('id', None), item.get('field', None)))
-
-        ids = collection.bulk_add_items(items)
-
-        return Response(json.dumps({
-            'status': 'success', 'params': {
-                'collection_name': data['collection_name'], 'items': [
-                    {'vector': item[0], 'id': item[1], 'field': item[2]} for item in items
-                ], 'ids': ids
-            }
-        }, sort_keys=False),
             mimetype='application/json')
     except KeyError as e:
         return jsonify({'error': f'Missing required parameter {e}'}), 400
@@ -962,7 +978,7 @@ def update_commit_msg():
 
     Example:
         1) use curl
-        curl -X POST http://localhost:7637/save_commit_msg \
+        curl -X POST http://localhost:7637/update_commit_msg \
          -H "Content-Type: application/json" \
          -d '{
               "collection_name": "example_collection",
@@ -972,7 +988,7 @@ def update_commit_msg():
         2) use python requests
         import requests
 
-        url = 'http://localhost:7637/save_commit_msg'
+        url = 'http://localhost:7637/update_commit_msg'
         data = {
             "collection_name": "example_collection",
             "last_commit_time": "last_commit_time",

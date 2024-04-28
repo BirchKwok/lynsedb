@@ -166,13 +166,16 @@ class StandaloneMinVectorDB:
 
     @unavailable_if_deleted
     def bulk_add_items(
-            self, vectors: Union[List[Tuple[np.ndarray, int, dict]], List[Tuple[np.ndarray, int]], List[Tuple[np.ndarray]]]
+            self, vectors: Union[List[Tuple[np.ndarray, int, dict]], List[Tuple[np.ndarray, int]], List[Tuple[np.ndarray]]],
+            **kwargs
     ):
         """
         Bulk add vectors to the database in batches.
 
-        Parameters: vectors (list or tuple): A list or tuple of vectors to be saved. Each vector can be a tuple of (
+        Parameters:
+            vectors (list or tuple): A list or tuple of vectors to be saved. Each vector can be a tuple of (
             vector, id, field).
+            kwargs: Additional keyword arguments. Of no practical significance, only to maintain programming norms.
 
         Returns:
             list: A list of indices where the vectors are stored.

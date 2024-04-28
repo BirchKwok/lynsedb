@@ -1,10 +1,13 @@
+import gzip
 import time
 from datetime import datetime
 from typing import Union, List, Tuple
 
+import msgpack
 import numpy as np
 import requests
 from spinesUtils.asserts import raise_if
+from tqdm import trange
 
 from min_vec.structures.filter import Filter
 from min_vec.api import config
@@ -15,8 +18,40 @@ class ExecutionError(Exception):
     pass
 
 
+def raise_error_response(response):
+    """
+    Raise an error response.
+
+    Parameters:
+        response: The response from the server.
+
+    Raises:
+        ExecutionError: If the server returns an error.
+    """
+    try:
+        rj = response.json()
+        raise ExecutionError(rj)
+    except Exception as e:
+        print(e)
+        raise ExecutionError(response.text)
+
+
+def pack_data(data):
+    """
+    Pack the data.
+
+    Parameters:
+        data: The data to pack.
+
+    Returns:
+        bytes: The packed data.
+    """
+    packed_data = msgpack.packb(data, use_bin_type=True)
+    return packed_data
+
+
 class Collection:
-    def __init__(self, url, collection_name, **params):
+    def __init__(self, url, collection_name, session, **params):
         """
         Initialize the collection.
             .. versionadded:: 0.3.2
@@ -24,6 +59,7 @@ class Collection:
         Parameters:
             url (str): The URL of the server.
             collection_name (str): The name of the collection.
+            session: The session object.
             **params: The collection parameters.
                 - dim (int): The dimension of the vectors.
                 - n_clusters (int): The number of clusters.
@@ -40,12 +76,15 @@ class Collection:
         self.IS_DELETED = False
         self._url = url
         self._collection_name = collection_name
+        self._session = session
         self._init_params = params
 
         self.most_recent_query_report = {}
         self.query_report = {}
 
         self.COMMIT_FLAG = False
+
+        self._mesosphere_list = []
 
     def _get_commit_msg(self):
         """
@@ -60,7 +99,7 @@ class Collection:
         url = f'{self._url}/get_commit_msg'
         data = {"collection_name": self._collection_name}
 
-        response = requests.post(url, json=data)
+        response = self._session.post(url, json=data)
         rj = response.json()
         if response.status_code == 200:
             if rj['params']['commit_msg'] is None:
@@ -88,12 +127,17 @@ class Collection:
             "last_commit_time": last_commit_time,
         }
 
-        response = requests.post(url, json=data)
+        response = self._session.post(url, json=data)
 
         if response.status_code == 200:
             return response.json()
         else:
-            raise ExecutionError(response.json())
+            try:
+                rj = response.json()
+                raise ExecutionError(rj)
+            except Exception as e:
+                print(e)
+                raise ExecutionError(response.text)
 
     def _if_exists(self):
         """
@@ -108,78 +152,75 @@ class Collection:
         url = f'{self._url}/is_collection_exists'
         data = {"collection_name": self._collection_name}
 
-        response = requests.post(url, json=data)
+        response = self._session.post(url, json=data)
 
         if response.status_code == 200:
             return response.json()['params']['exists']
         else:
-            raise ExecutionError(response.json())
+            raise_error_response(response)
 
-    def add_item(self, vector: Union[list[float], np.ndarray], id: int, field: dict):
+    def add_item(self, vector: Union[list[float], np.ndarray],
+                 id: Union[int, None] = None, field: Union[dict, None] = None, delay_num: int = 0):
         """
         Add an item to the collection.
             .. versionadded:: 0.3.2
 
         Parameters:
             vector (list[float], np.ndarray): The vector of the item.
-            id (int): The ID of the item.
-            field (dict): The fields of the item.
+            id (int, optional): The ID of the item.
+            field (dict, optional): The fields of the item.
+            delay_num (int): The number of items by which to delay the commit. Defaults to 0. If delay_num is greater than 0,
+                the commit will be postponed until the specified number of items have been added. If delay_num is 0,
+                commits will occur immediately when the commit function is called or upon exiting the insert_session
+                context manager.
 
         Returns:
-            int: The ID of the item.
+            int: The ID of the item. If delay_num is greater than 0, and the number of items added is less than delay_num,
+                the function will return None. Otherwise, the function will return the IDs of the items added.
 
         Raises:
             ValueError: If the collection has been deleted or does not exist.
             ExecutionError: If the server returns an error.
         """
+        raise_if(ValueError, delay_num < 0, 'The delay_num must be greater than or equal to 0.')
         raise_if(ValueError, self.IS_DELETED or not self._if_exists(),
                  'The collection has been deleted or does not exist.')
 
-        url = f'{self._url}/add_item'
-        data = {
-            "collection_name": self._collection_name,
-            "item": {
-                "vector": vector if isinstance(vector, list) else vector.tolist(),
-                "id": id,
-                "field": field
+        if delay_num == 0:
+            url = f'{self._url}/add_item'
+
+            headers = {'Content-Type': 'application/msgpack'}
+
+            data = {
+                "collection_name": self._collection_name,
+                "item": {
+                    "vector": vector if isinstance(vector, list) else vector.tolist(),
+                    "id": id if id is not None else None,
+                    "field": field if field is not None else {}
+                }
             }
-        }
-        response = requests.post(url, json=data)
+            response = self._session.post(url, data=pack_data(data), headers=headers)
 
-        if response.status_code == 200:
-            self.COMMIT_FLAG = False
-            return response.json()['params']['item']['id']
+            if response.status_code == 200:
+                self.COMMIT_FLAG = False
+                return response.json()['params']['item']['id']
+            else:
+                raise_error_response(response)
         else:
-            raise ExecutionError(response.json())
+            self._mesosphere_list.append((vector if isinstance(vector, list) else vector.tolist(),
+                id if id is not None else None,
+                field if field is not None else {}
+            ))
 
-    def bulk_add_items(
-            self,
-            vectors: List[Union[
-                Tuple[Union[List, Tuple, np.ndarray], int, dict],
-                Tuple[Union[List, Tuple, np.ndarray], int],
-                Tuple[Union[List, Tuple, np.ndarray]]
-            ]]
-    ):
-        """
-        Add multiple items to the collection.
-            .. versionadded:: 0.3.2
+            if len(self._mesosphere_list) == delay_num:
+                ids = self.bulk_add_items(self._mesosphere_list, enable_progress_bar=False)
+                self._mesosphere_list = []
+                return ids
 
-        Parameters:
-            vectors (List[Tuple[Union[List, Tuple, np.ndarray], int, dict]],
-            List[Tuple[Union[List, Tuple, np.ndarray], int]] , List[Tuple[Union[List, Tuple, np.ndarray]]]):
-                The list of items to add. Each item is a tuple containing the vector, ID, and fields.
+            return None
 
-        Returns:
-            dict: The response from the server.
-
-        Raises:
-            ValueError: If the collection has been deleted or does not exist.
-            TypeError: If the vectors are not in the correct format.
-            ExecutionError: If the server returns an error.
-        """
-        raise_if(ValueError, self.IS_DELETED or not self._if_exists(),
-                 'The collection has been deleted or does not exist.')
-
+    @staticmethod
+    def _check_bulk_add_items(vectors):
         items = []
         for vector in vectors:
             raise_if(TypeError, not isinstance(vector, tuple), 'Each item must be a tuple of vector, '
@@ -204,19 +245,73 @@ class Collection:
                     "field": {}
                 })
 
+        return items
+
+    def bulk_add_items(
+            self,
+            vectors: List[Union[
+                Tuple[Union[List, Tuple, np.ndarray], int, dict],
+                Tuple[Union[List, Tuple, np.ndarray], int],
+                Tuple[Union[List, Tuple, np.ndarray]]
+            ]],
+            batch_size: int = 1000,
+            enable_progress_bar: bool = True
+    ):
+        """
+        Add multiple items to the collection.
+            .. versionadded:: 0.3.2
+
+        Parameters:
+            vectors (List[Tuple[Union[List, Tuple, np.ndarray], int, dict]],
+            List[Tuple[Union[List, Tuple, np.ndarray], int]] , List[Tuple[Union[List, Tuple, np.ndarray]]]):
+                The list of items to add. Each item is a tuple containing the vector, ID, and fields.
+            batch_size (int): The batch size. Default is 1000.
+            enable_progress_bar (bool): Whether to enable the progress bar. Default is True.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            ValueError: If the collection has been deleted or does not exist.
+            TypeError: If the vectors are not in the correct format.
+            ExecutionError: If the server returns an error.
+        """
+        raise_if(ValueError, self.IS_DELETED or not self._if_exists(),
+                 'The collection has been deleted or does not exist.')
+
         url = f'{self._url}/bulk_add_items'
-        data = {
-            "collection_name": self._collection_name,
-            "items": items
-        }
 
-        response = requests.post(url, json=data)
+        total_batches = (len(vectors) + batch_size - 1) // batch_size
 
-        if response.status_code == 200:
-            self.COMMIT_FLAG = False
-            return response.json()['params']['ids']
+        ids = []
+
+        if enable_progress_bar:
+            iter_obj = trange(total_batches, desc='Adding items', unit='batch')
         else:
-            raise ExecutionError(response.json())
+            iter_obj = range(total_batches)
+
+        headers = {'Content-Type': 'application/msgpack'}
+        for i in iter_obj:
+            start = i * batch_size
+            end = (i + 1) * batch_size
+            items = vectors[start:end]
+
+            items_after_checking = self._check_bulk_add_items(items)
+
+            data = {
+                "collection_name": self._collection_name,
+                "items": items_after_checking
+            }
+
+            response = self._session.post(url, data=pack_data(data), headers=headers)
+
+            if response.status_code == 200:
+                self.COMMIT_FLAG = False
+                ids.extend(response.json()['params']['ids'])
+            else:
+                raise_error_response(response)
+
+        return ids
 
     def commit(self):
         """
@@ -231,13 +326,13 @@ class Collection:
         """
         url = f'{self._url}/commit'
         data = {"collection_name": self._collection_name}
-        response = requests.post(url, json=data)
+        response = self._session.post(url, json=data)
 
         if response.status_code == 200:
             self._update_commit_msg(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
             return response.json()
         else:
-            raise ExecutionError(response.json())
+            raise_error_response(response)
 
     def insert_session(self):
         """
@@ -286,7 +381,7 @@ class Collection:
             "query_filter": query_filter,
             "return_similarity": return_similarity
         }
-        response = requests.post(url, json=data)
+        response = self._session.post(url, json=data)
 
         if response.status_code == 200:
             rjson = response.json()
@@ -304,7 +399,7 @@ class Collection:
 
             return ids, scores
         else:
-            raise ExecutionError(response.json())
+            raise_error_response(response)
 
     def query(
             self, vector: Union[list[float], np.ndarray], k: int = 10, distance: str = 'cosine',
@@ -354,7 +449,7 @@ class Collection:
         """
         url = f'{self._url}/collection_shape'
         data = {"collection_name": self._collection_name}
-        response = requests.post(url, json=data)
+        response = self._session.post(url, json=data)
 
         if response.status_code == 200:
             return tuple(response.json()['params']['shape'])
@@ -363,7 +458,7 @@ class Collection:
             if 'error' in rj and rj['error'] == f"Collection '{self._collection_name}' does not exist.":
                 return 0, self._init_params['dim']
             else:
-                raise ExecutionError(response.json())
+                raise_error_response(response)
 
     @property
     def query_report_(self):
@@ -415,10 +510,10 @@ class Collection:
 
         url = f'{self._url}/is_collection_exists'
         data = {"collection_name": self._collection_name}
-        response = requests.post(url, json=data)
+        response = self._session.post(url, json=data)
 
         if response.status_code != 200:
-            raise ExecutionError(response.json())
+            raise_error_response(response)
 
         is_exists = response.json()['params']['exists']
 
@@ -454,13 +549,15 @@ class MinVectorDBHTTPClient:
         raise_if(ValueError, not url.startswith('http://') or url.startswith('https://'),
                  'The URL must start with "http://" or "https://".')
 
+        self.session = requests.Session()
+
         if url.endswith('/'):
             self.url = url[:-1]
         else:
             self.url = url
 
         try:
-            if requests.get(url).json() != {'status': 'success', 'message': 'MinVectorDB HTTP API'}:
+            if self.session.get(url).json() != {'status': 'success', 'message': 'MinVectorDB HTTP API'}:
                 raise ConnectionError(f'Failed to connect to the server at {url}.')
 
         except requests.exceptions.ConnectionError:
@@ -525,9 +622,12 @@ class MinVectorDBHTTPClient:
         }
 
         try:
-            requests.post(url, json=data)
-            del data['collection_name']
-            return Collection(self.url, collection, **data)
+            response = self.session.post(url, json=data)
+            if response.status_code == 200:
+                del data['collection_name']
+                return Collection(self.url, collection, self.session, **data)
+            else:
+                raise_error_response(response)
         except requests.exceptions.ConnectionError:
             raise ConnectionError(f'Failed to connect to the server at {url}.')
 
@@ -547,12 +647,12 @@ class MinVectorDBHTTPClient:
         """
         url = f'{self.url}/drop_collection'
         data = {"collection_name": collection}
-        response = requests.post(url, json=data)
+        response = self.session.post(url, json=data)
 
         if response.status_code == 200:
             return response.json()
         else:
-            raise ExecutionError(response.json())
+            raise_error_response(response)
 
     def drop_database(self):
         """
@@ -569,12 +669,12 @@ class MinVectorDBHTTPClient:
             return {'status': 'success', 'message': 'The database does not exist.'}
 
         url = f'{self.url}/drop_database'
-        response = requests.get(url)
+        response = self.session.get(url)
 
         if response.status_code == 200:
             return response.json()
         else:
-            raise ExecutionError(response.text)
+            raise_error_response(response)
 
     def database_exists(self):
         """
@@ -588,12 +688,12 @@ class MinVectorDBHTTPClient:
             ExecutionError: If the server returns an error.
         """
         url = f'{self.url}/database_exists'
-        response = requests.get(url)
+        response = self.session.get(url)
 
         if response.status_code == 200:
             return response.json()
         else:
-            raise ExecutionError(response.json())
+            raise_error_response(response)
 
     def show_collections(self):
         """
@@ -607,12 +707,12 @@ class MinVectorDBHTTPClient:
             ExecutionError: If the server returns an error.
         """
         url = f'{self.url}/show_collections'
-        response = requests.get(url)
+        response = self.session.get(url)
 
         if response.status_code == 200:
             return response.json()['params']['collections']
         else:
-            raise ExecutionError(response.json())
+            raise_error_response(response)
 
     def set_environment(self, env: dict):
         """
@@ -647,12 +747,12 @@ class MinVectorDBHTTPClient:
                 raise_if(TypeError, not isinstance(env[key], str), f'The value of {key} must be a string.')
                 data[key] = env[key]
 
-        response = requests.post(url, json=data)
+        response = self.session.post(url, json=data)
 
         if response.status_code == 200:
             return response.json()
         else:
-            raise ExecutionError(response.json())
+            raise_error_response(response)
 
     def get_environment(self):
         """
@@ -666,12 +766,12 @@ class MinVectorDBHTTPClient:
             ExecutionError: If the server returns an error.
         """
         url = f'{self.url}/get_environment'
-        response = requests.get(url)
+        response = self.session.get(url)
 
         if response.status_code == 200:
             return response.json()
         else:
-            raise ExecutionError(response.json())
+            raise_error_response(response)
 
     def get_collection(self, collection: str):
         """
@@ -689,16 +789,16 @@ class MinVectorDBHTTPClient:
         """
         url = f'{self.url}/is_collection_exists'
         data = {"collection_name": collection}
-        response = requests.post(url, json=data)
+        response = self.session.post(url, json=data)
 
         if response.status_code == 200 and response.json()['params']['exists']:
             url = f'{self.url}/get_collection_config'
             data = {"collection_name": collection}
-            response = requests.post(url, json=data)
+            response = self.session.post(url, json=data)
 
-            return Collection(self.url, collection, **response.json()['params']['config'])
+            return Collection(self.url, collection, self.session, **response.json()['params']['config'])
         else:
-            raise ExecutionError(response.json())
+            raise_error_response(response)
 
     def __repr__(self):
         if self.database_exists()['params']['exists']:
