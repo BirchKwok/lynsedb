@@ -1,4 +1,3 @@
-import gzip
 import time
 from datetime import datetime
 from typing import Union, List, Tuple
@@ -51,7 +50,7 @@ def pack_data(data):
 
 
 class Collection:
-    def __init__(self, url, collection_name, session, **params):
+    def __init__(self, url, collection_name, **params):
         """
         Initialize the collection.
             .. versionadded:: 0.3.2
@@ -59,7 +58,6 @@ class Collection:
         Parameters:
             url (str): The URL of the server.
             collection_name (str): The name of the collection.
-            session: The session object.
             **params: The collection parameters.
                 - dim (int): The dimension of the vectors.
                 - n_clusters (int): The number of clusters.
@@ -76,7 +74,7 @@ class Collection:
         self.IS_DELETED = False
         self._url = url
         self._collection_name = collection_name
-        self._session = session
+        self._session = requests.Session()
         self._init_params = params
 
         self.most_recent_query_report = {}
@@ -160,7 +158,7 @@ class Collection:
             raise_error_response(response)
 
     def add_item(self, vector: Union[list[float], np.ndarray],
-                 id: Union[int, None] = None, field: Union[dict, None] = None, delay_num: int = 0):
+                 id: Union[int, None] = None, field: Union[dict, None] = None, delay_num: int = 1000):
         """
         Add an item to the collection.
             .. versionadded:: 0.3.2
@@ -169,9 +167,9 @@ class Collection:
             vector (list[float], np.ndarray): The vector of the item.
             id (int, optional): The ID of the item.
             field (dict, optional): The fields of the item.
-            delay_num (int): The number of items by which to delay the commit. Defaults to 0. If delay_num is greater than 0,
-                the commit will be postponed until the specified number of items have been added. If delay_num is 0,
-                commits will occur immediately when the commit function is called or upon exiting the insert_session
+            delay_num (int): The number of items by which to delay the commit. Defaults to 1000.
+                If delay_num is greater than 0, the commit will be postponed until the specified number of items have been added.
+                 If delay_num is 0, commits will occur immediately when the commit function is called or upon exiting the insert_session
                 context manager.
 
         Returns:
@@ -183,8 +181,6 @@ class Collection:
             ExecutionError: If the server returns an error.
         """
         raise_if(ValueError, delay_num < 0, 'The delay_num must be greater than or equal to 0.')
-        raise_if(ValueError, self.IS_DELETED or not self._if_exists(),
-                 'The collection has been deleted or does not exist.')
 
         if delay_num == 0:
             url = f'{self._url}/add_item'
@@ -207,17 +203,31 @@ class Collection:
             else:
                 raise_error_response(response)
         else:
-            self._mesosphere_list.append((vector if isinstance(vector, list) else vector.tolist(),
-                id if id is not None else None,
-                field if field is not None else {}
-            ))
+            self._mesosphere_list.append({
+                "vector": vector if isinstance(vector, list) else vector.tolist(),
+                "id": id if id is not None else None,
+                "field": field if field is not None else {}
+            })
 
             if len(self._mesosphere_list) == delay_num:
-                ids = self.bulk_add_items(self._mesosphere_list, enable_progress_bar=False)
-                self._mesosphere_list = []
-                return ids
+                url = f'{self._url}/bulk_add_items'
 
-            return None
+                headers = {'Content-Type': 'application/msgpack'}
+
+                data = {
+                    "collection_name": self._collection_name,
+                    "items": self._mesosphere_list
+                }
+
+                response = self._session.post(url, data=pack_data(data), headers=headers)
+
+                if response.status_code == 200:
+                    self.COMMIT_FLAG = False
+                    self._mesosphere_list = []
+                else:
+                    raise_error_response(response)
+
+            return id
 
     @staticmethod
     def _check_bulk_add_items(vectors):
@@ -276,11 +286,8 @@ class Collection:
             TypeError: If the vectors are not in the correct format.
             ExecutionError: If the server returns an error.
         """
-        raise_if(ValueError, self.IS_DELETED or not self._if_exists(),
-                 'The collection has been deleted or does not exist.')
 
         url = f'{self._url}/bulk_add_items'
-
         total_batches = (len(vectors) + batch_size - 1) // batch_size
 
         ids = []
@@ -291,6 +298,7 @@ class Collection:
             iter_obj = range(total_batches)
 
         headers = {'Content-Type': 'application/msgpack'}
+        responses = []
         for i in iter_obj:
             start = i * batch_size
             end = (i + 1) * batch_size
@@ -302,9 +310,12 @@ class Collection:
                 "collection_name": self._collection_name,
                 "items": items_after_checking
             }
-
+            # Send request using session to keep the connection alive
             response = self._session.post(url, data=pack_data(data), headers=headers)
+            responses.append(response)  # Store response to process later
 
+        # Process responses in the order they were sent
+        for response in responses:
             if response.status_code == 200:
                 self.COMMIT_FLAG = False
                 ids.extend(response.json()['params']['ids'])
@@ -326,7 +337,12 @@ class Collection:
         """
         url = f'{self._url}/commit'
         data = {"collection_name": self._collection_name}
-        response = self._session.post(url, json=data)
+
+        if self._mesosphere_list:
+            data["items"] = self._mesosphere_list
+            self._mesosphere_list = []
+
+        response = self._session.post(url, data=pack_data(data), headers={'Content-Type': 'application/msgpack'})
 
         if response.status_code == 200:
             self._update_commit_msg(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -345,7 +361,7 @@ class Collection:
 
     @QueryVectorCache(config.MVDB_QUERY_CACHE_SIZE)
     def _query(self, vector: Union[list[float], np.ndarray], k: int = 10, distance: str = 'cosine',
-               query_filter: Union[Filter, None] = None, return_similarity: bool = True, **kwargs):
+               query_filter: Union[Filter, None] = None, **kwargs):
         """
         Query the collection.
             .. versionadded:: 0.3.2
@@ -355,7 +371,6 @@ class Collection:
             k (int): The number of results to return. Default is 10.
             distance (str): The distance metric. Default is 'cosine', it can be 'cosine' or 'L2'.
             query_filter (Filter, optional): The field filter to apply to the query, must be a Filter object.
-            return_similarity (bool): Whether to return the similarity. Default is True.
 
         Returns:
             Tuple: The indices and similarity scores of the top k nearest vectors.
@@ -364,9 +379,6 @@ class Collection:
             ValueError: If the collection has been deleted or does not exist.
             ExecutionError: If the server returns an error.
         """
-        raise_if(ValueError, self.IS_DELETED or not self._if_exists(),
-                 'The collection has been deleted or does not exist.')
-
         url = f'{self._url}/query'
 
         if query_filter is not None:
@@ -379,25 +391,12 @@ class Collection:
             "k": k,
             'distance': distance,
             "query_filter": query_filter,
-            "return_similarity": return_similarity
+            "return_similarity": True
         }
         response = self._session.post(url, json=data)
 
         if response.status_code == 200:
-            rjson = response.json()
-            self.most_recent_query_report['Collection Shape'] = self.shape
-            self.most_recent_query_report['Query Time'] = rjson['params']['items']['query time']
-            self.most_recent_query_report['Query Distance'] = rjson['params']['items']['distance']
-            self.most_recent_query_report['Query K'] = k
-
-            ids, scores = np.array(rjson['params']['items']['ids']), np.array(rjson['params']['items']['scores'])
-
-            if ids is not None:
-                self.most_recent_query_report[f'Top {k} Results ID'] = ids
-                if return_similarity:
-                    self.most_recent_query_report[f'Top {k} Results Similarity'] = scores
-
-            return ids, scores
+            return response.json()
         else:
             raise_error_response(response)
 
@@ -425,15 +424,35 @@ class Collection:
         """
         tik = time.time()
         if self._init_params['use_cache']:
-            res = self._query(vector, k, distance, query_filter, return_similarity)
+            rjson = self._query(vector=vector, k=k, distance=distance,
+                                query_filter=query_filter, return_similarity=return_similarity)
         else:
-            res = self._query(vector, k, distance, query_filter, return_similarity=return_similarity, now=time.time())
+            rjson = self._query(vector=vector, k=k, distance=distance, query_filter=query_filter,
+                                return_similarity=return_similarity, now=time.time())
 
         tok = time.time()
 
+        self.most_recent_query_report['Collection Shape'] = self.shape
+        self.most_recent_query_report['Query Time'] = rjson['params']['items']['query time']
+        self.most_recent_query_report['Query Distance'] = rjson['params']['items']['distance']
+        self.most_recent_query_report['Query K'] = k
+
+        ids, scores = np.array(rjson['params']['items']['ids']), np.array(rjson['params']['items']['scores'])
+
+        if ids is not None:
+            self.most_recent_query_report[f'Top {k} Results ID'] = ids
+            if return_similarity:
+                self.most_recent_query_report[f'Top {k} Results Similarity'] = scores
+            else:
+                if f'Top {k} Results Similarity' in self.most_recent_query_report:
+                    del self.most_recent_query_report[f'Top {k} Results Similarity']
+
         self.most_recent_query_report['Query Time'] = f"{tok - tik :>.5f} s"
 
-        return res
+        if return_similarity:
+            return ids, scores
+
+        return ids, None
 
     @property
     def shape(self):
@@ -625,7 +644,9 @@ class MinVectorDBHTTPClient:
             response = self.session.post(url, json=data)
             if response.status_code == 200:
                 del data['collection_name']
-                return Collection(self.url, collection, self.session, **data)
+                collection = Collection(self.url, collection, **data)
+                collection._query.clear_cache()
+                return collection
             else:
                 raise_error_response(response)
         except requests.exceptions.ConnectionError:
@@ -649,7 +670,10 @@ class MinVectorDBHTTPClient:
         data = {"collection_name": collection}
         response = self.session.post(url, json=data)
 
+        collection = self.get_collection(collection)
+
         if response.status_code == 200:
+            collection._query.clear_cache()
             return response.json()
         else:
             raise_error_response(response)
@@ -796,7 +820,7 @@ class MinVectorDBHTTPClient:
             data = {"collection_name": collection}
             response = self.session.post(url, json=data)
 
-            return Collection(self.url, collection, self.session, **response.json()['params']['config'])
+            return Collection(self.url, collection, **response.json()['params']['config'])
         else:
             raise_error_response(response)
 

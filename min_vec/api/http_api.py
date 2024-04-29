@@ -605,11 +605,11 @@ def query():
         return Response(json.dumps(
             {
                 'status': 'success', 'params': {
-                'collection_name': data['collection_name'], 'items': {
-                    'k': data['k'], 'ids': ids, 'scores': scores,
-                    'distance': collection.most_recent_query_report['Query Distance'],
-                    'query time': collection.most_recent_query_report['Query Time']
-                }
+                    'collection_name': data['collection_name'], 'items': {
+                        'k': data['k'], 'ids': ids, 'scores': scores,
+                        'distance': collection.most_recent_query_report['Query Distance'],
+                        'query time': collection.most_recent_query_report['Query Time']
+                    }
             }
             }, sort_keys=False),
             mimetype='application/json')
@@ -645,13 +645,24 @@ def commit():
     Returns:
         dict: The status of the operation.
     """
-    data = request.json
+    if request.headers.get('Content-Type') == 'application/msgpack':
+        data = request.decoded_data
+    else:
+        data = request.json
+
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
     try:
         my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         collection = my_vec_db.get_collection(data['collection_name'])
+        if 'items' in data:
+            items = []
+            for item in data['items']:
+                items.append((item['vector'], item.get('id', None), item.get('field', None)))
+
+            collection.bulk_add_items(items)
+
         collection.commit()
 
         return Response(json.dumps({
