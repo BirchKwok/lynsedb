@@ -8,6 +8,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 ENV PYTHONPATH "${PYTHONPATH}:/app"
 
-EXPOSE 80
-
 CMD ["python", "/app/min_vec/api/http_api.py", "run", "--host", "0.0.0.0", "--port", "7637"]
