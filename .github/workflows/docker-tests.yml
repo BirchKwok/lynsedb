@@ -9,14 +9,12 @@ on:
       - main
 
 jobs:
-  build:
+  build-and-publish:
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest ]
         python-version: [ "3.9", "3.10", "3.11", "3.12" ]
-
-    runs-on: ${{ matrix.os }}
 
     steps:
     - name: Checkout code
@@ -27,22 +25,34 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
 
-    - name: Build Docker image
-      run: docker build -t ghcr.io/birchkwok/minvectordb/minvectordb:latest .
-
-    - name: Run Docker container
-      run: docker run -d --name minvectordb -p 5403:7637 ghcr.io/birchkwok/minvectordb/minvectordb:latest
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v1
 
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        python -m pip install flake8 pytest numba torch
-        $reqFile = "requirements.txt"
-        if (Test-Path $reqFile) { pip install -r $reqFile }
-      shell: pwsh
+        pip install flake8 pytest numba torch
+        if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
 
     - name: Run tests
       run: pytest test/docker_tests/
+
+    - name: Login to Docker Hub
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: docker/login-action@v1
+      with:
+        registry: docker.io
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Build and push Docker images
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: docker/build-push-action@v2
+      with:
+        context: .
+        push: true
+        tags: birchkwok/minvectordb:latest
+        platforms: linux/amd64, linux/arm64
 
     - name: Cleanup
       if: always()
