@@ -97,11 +97,7 @@ def test_bulk_add_items(test_client):
         "status": "success", "params":
             {
                 "collection_name": "example_collection",
-                "ids": [2, 3],
-                "items": [
-                    {"vector": [0.1, 0.4, 0.3, 0.6], "id": 2, "field": {"name": "example2", "age": 18}},
-                    {"vector": [0.2, 0.3, 0.4, 0.5], "id": 3, "field": {"name": "example3", "age": 19}}
-                ]
+                "ids": [2, 3]
             }
     }
 
