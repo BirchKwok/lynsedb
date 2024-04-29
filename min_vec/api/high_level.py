@@ -246,13 +246,17 @@ class MinVectorDBLocalClient:
         Parameters:
             collection (str): The name of the collection to delete.
         """
+
         if collection in self._collections:
             self._collections[collection].delete()
             del self._collections[collection]
             self._register.deregister_collection(collection)
         else:
-            _temp_collection = self.get_collection(collection)
-            self.drop_collection(collection)
+            try:
+                _temp_collection = self.get_collection(collection)
+                self.drop_collection(collection)
+            except ValueError:
+                pass
 
     def drop_database(self):
         """

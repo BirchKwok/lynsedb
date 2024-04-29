@@ -670,13 +670,14 @@ class MinVectorDBHTTPClient:
         data = {"collection_name": collection}
         response = self.session.post(url, json=data)
 
-        collection = self.get_collection(collection)
+        try:
+            collection = self.get_collection(collection)
 
-        if response.status_code == 200:
-            collection._query.clear_cache()
-            return response.json()
-        else:
-            raise_error_response(response)
+            if response.status_code == 200:
+                collection._query.clear_cache()
+                return response.json()
+        except ExecutionError:
+            pass
 
     def drop_database(self):
         """
