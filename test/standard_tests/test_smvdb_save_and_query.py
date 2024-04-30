@@ -28,7 +28,7 @@ def get_database_for_query(*args, with_field=True, field_prefix='test_', **kwarg
 
 def test_add_single_item_without_id_and_field():
     database = get_database()
-    id = database.add_item(np.ones(100))
+    id = database.add_item(np.ones(100), id=1)
 
     database.commit()
 
@@ -60,7 +60,7 @@ def test_bulk_add_item_without_id_and_field():
     database = get_database()
     items = []
     for i in range(101):
-        items.append((np.ones(100),))
+        items.append((np.ones(100),i))
 
     database.bulk_add_items(items)
 
@@ -347,7 +347,7 @@ def test_multiple_bulk_add_items():
     database = get_database()
     items = []
     for i in range(101):
-        items.append((np.ones(100),))
+        items.append((np.ones(100), i))
 
     database.bulk_add_items(items)
     assert len(database._matrix_serializer.fields) == 101
@@ -355,6 +355,10 @@ def test_multiple_bulk_add_items():
 
     database.commit()
     assert database.shape == (101, 100)
+
+    items = []
+    for i in range(101):
+        items.append((np.ones(100), i + 101))
 
     database.bulk_add_items(items)
     database.commit()
@@ -370,7 +374,7 @@ def test_multiple_bulk_add_items_with_insert_session():
     database = get_database()
     items = []
     for i in range(101):
-        items.append((np.ones(100),))
+        items.append((np.ones(100), i))
 
     with database.insert_session():
         database.bulk_add_items(items)
@@ -378,6 +382,10 @@ def test_multiple_bulk_add_items_with_insert_session():
         assert database._matrix_serializer.indices == list(range(101))
 
     assert database.shape == (101, 100)
+
+    items = []
+    for i in range(101, 202):
+        items.append((np.ones(100), i))
 
     with database.insert_session():
         database.bulk_add_items(items)
@@ -409,7 +417,7 @@ def test_multiple_initialization(dim=100, database_path='test_min_vec', chunk_si
 
     items = []
     for i in range(101):
-        items.append((np.ones(100), None, {"test": "test_" + str(i // 10)}))
+        items.append((np.ones(100), i + 101, {"test": "test_" + str(i // 10)}))
     # insert
     with database.insert_session():
         database.bulk_add_items(items)
