@@ -1,12 +1,12 @@
-import gzip
 import json
 import operator
 import os
+import queue
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import msgpack
-import numpy as np
 import portalocker
 import yaml
 
@@ -15,13 +15,15 @@ from waitress import serve
 
 from min_vec.api.high_level import MinVectorDBLocalClient
 from min_vec.structures.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
-
+from min_vec.structures.limited_dict import LimitedDict
 
 os.environ['MVDB_LOG_LEVEL'] = 'ERROR'
 
 app = Flask(__name__)
 
-version = '0.3.2'
+
+data_dict = LimitedDict(max_size=1000)
+
 
 # 构建配置文件的路径
 config_path = Path(os.path.expanduser('~/.MinVectorDB/config.yaml'))
@@ -52,11 +54,12 @@ def generate_config(root_path: str = default_root_path, config_path: Path = conf
     else:
         with open(config_path, 'r') as file:
             config = yaml.load(file, Loader=yaml.FullLoader)
-            if 'root_path' not in config or config['root_path'] != root_path:
-                config['root_path'] = root_path
-                with open(config_path, 'w') as file:
-                    portalocker.lock(file, portalocker.LOCK_EX)
-                    yaml.dump(config, file)
+
+        if 'root_path' not in config or config['root_path'] != root_path:
+            config['root_path'] = root_path
+            with open(config_path, 'w') as file:
+                portalocker.lock(file, portalocker.LOCK_EX)
+                yaml.dump(config, file)
 
     return config_path, root_path, config
 
@@ -74,45 +77,6 @@ def required_collection():
     """Create a collection in the database.
         .. versionadded:: 0.3.2
 
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/required_collection \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection",
-              "dim": 4,
-              "n_clusters": 10,
-              "chunk_size": 1024,
-              "distance": "cosine",
-              "index_mode": "IVF-FLAT",
-              "dtypes": "float32",
-              "use_cache": true,
-              "scaler_bits": 8,
-              "n_threads": 4,
-              "warm_up": true,
-              "drop_if_exists": false
-             }' -w "\n"
-        2) use python requests
-        import requests
-        
-        url = 'http://localhost:7637/required_collection'
-        data = {
-            "collection_name": "example_collection",
-            "dim": 4,
-            "n_clusters": 10,
-            "chunk_size": 1024,
-            "distance": "L2",
-            "index_mode": "IVF-FLAT",
-            "dtypes": "float32",
-            "use_cache": True,
-            "scaler_bits": 8,
-            "n_threads": 4,
-            "warm_up": True,
-            "drop_if_exists": False
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
-        
     Returns:
         dict: The status of the operation.
     """
@@ -143,7 +107,7 @@ def required_collection():
 
     try:
         my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
-        collection = my_vec_db.require_collection(
+        my_vec_db.require_collection(
             collection=data['collection_name'],
             dim=data['dim'],
             n_clusters=data['n_clusters'],
@@ -157,6 +121,9 @@ def required_collection():
             warm_up=data['warm_up'],
             drop_if_exists=data['drop_if_exists']
         )
+
+        if data['collection_name'] not in data_dict:
+            data_dict[data['collection_name']] = queue.Queue()
 
         return Response(json.dumps({
             'status': 'success',
@@ -181,24 +148,6 @@ def drop_collection():
     """Drop a collection from the database.
         .. versionadded:: 0.3.2
 
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/drop_collection \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection"
-             }' -w "\n"
-
-        2) use python requests
-        import requests
-        
-        url = 'http://localhost:7637/drop_collection'
-        data = {
-            "collection_name": "example_collection"
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
-        
     Returns:
         dict: The status of the operation.
     """
@@ -230,17 +179,6 @@ def drop_database():
     """Drop the database.
         .. versionadded:: 0.3.2
 
-    Example:
-        1) use curl
-        curl -X GET http://localhost:7637/drop_database -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/drop_database'
-        response = requests.get(url)
-        print(response.json())
-
     Returns:
         dict: The status of the operation.
     """
@@ -259,17 +197,6 @@ def drop_database():
 def database_exists():
     """Check if the database exists.
         .. versionadded:: 0.3.2
-
-    Example:
-        1) use curl
-        curl -X GET http://localhost:7637/database_exists -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/database_exists'
-        response = requests.get(url)
-        print(response.json())
 
     Returns:
         dict: The status of the operation.
@@ -291,17 +218,6 @@ def show_collections():
     """Show all collections in the database.
         .. versionadded:: 0.3.2
 
-    Example:
-        1) use curl
-        curl -X GET http://localhost:7637/show_collections -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/show_collections'
-        response = requests.get(url)
-        print(response.json())
-
     Returns:
         dict: The status of the operation.
     """
@@ -317,142 +233,43 @@ def show_collections():
 
 @app.route('/add_item', methods=['POST'])
 def add_item():
-    """Add an item to a collection.
-        .. versionadded:: 0.3.2
-
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/add_item \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection",
-              "item": {
-                  "vector": [0.1, 0.2, 0.3, 0.4],
-                  "id": 1,
-                  "field": {
-                      "name": "example",
-                      "age": 18
-                    }
-                }
-            }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/add_item'
-        data = {
-            "collection_name": "example_collection",
-            "item": {
-                "vector": [0.1, 0.2, 0.3, 0.4],
-                "id": 1,
-                "field": {
-                    "name": "example",
-                    "age": 18
-                }
-            }
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
-
-    Returns:
-        dict: The status of the operation.
-    """
     if request.headers.get('Content-Type') == 'application/msgpack':
-        # 从自定义属性中获取解包后的数据
         data = request.decoded_data
     else:
-        # 对于非 msgpack 数据，正常使用 JSON 解析
         data = request.json
 
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
-    try:
-        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
-        collection = my_vec_db.get_collection(data['collection_name'])
-        id = collection.add_item(vector=np.array(data['item']['vector']), id=data['item'].get('id', None),
-                                 field=data['item'].get('field', None))
+    executor = ThreadPoolExecutor(max_workers=1)
 
-        return Response(json.dumps(
+    future = executor.submit(process_add_item, data)
+    data_dict[data['collection_name']].put(future)
+
+    return Response(json.dumps(
             {
                 'status': 'success', 'params': {
                     'collection_name': data['collection_name'], 'item': {
-                        'vector': data['item']['vector'], 'id': id,
-                        'field': data['item'].get('field', None)
+                        'id': data['item']['id']
                     }
                 }
             }, sort_keys=False),
             mimetype='application/json')
 
-    except KeyError as e:
-        return jsonify({'error': f'Missing required parameter {e}'}), 400
+
+def process_add_item(data):
+    try:
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+        id = collection.add_item(vector=data['item']['vector'], id=data['item'].get('id', None),
+                                 field=data['item'].get('field', None))
+        return {'status': 'success', 'id': id}
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return {'status': 'error', 'message': str(e)}
 
 
 @app.route('/bulk_add_items', methods=['POST'])
 def bulk_add_items():
-    """Bulk add items to a collection.
-        .. versionadded:: 0.3.2
-
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/bulk_add_items \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection",
-              "items": [
-                  {
-                      "vector": [0.1, 0.2, 0.3, 0.4],
-                      "id": 1,
-                      "field": {
-                          "name": "example",
-                          "age": 18
-                        }
-                    },
-                    {
-                        "vector": [0.5, 0.6, 0.7, 0.8],
-                        "id": 2,
-                        "field": {
-                            "name": "example",
-                            "age": 20
-                        }
-                    }
-                ]
-            }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/bulk_add_items'
-
-        data = {
-            "collection_name": "example_collection",
-            "items": [
-                {
-                    "vector": [0.1, 0.2, 0.3, 0.4],
-                    "id": 1,
-                    "field": {
-                        "name": "example",
-                        "age": 18
-                    }
-                },
-                {
-                    "vector": [0.5, 0.6, 0.7, 0.8],
-                    "id": 2,
-                    "field": {
-                        "name": "example",
-                        "age": 20
-                    }
-                }
-            ]
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
-
-    Returns:
-        dict: The status of the operation.
-    """
     if request.headers.get('Content-Type') == 'application/msgpack':
         data = request.decoded_data
     else:
@@ -461,95 +278,35 @@ def bulk_add_items():
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
+    executor = ThreadPoolExecutor(max_workers=10)
+    future = executor.submit(process_bulk_add_items, data)
+    data_dict[data['collection_name']].put(future)
+
+    return Response(json.dumps({
+            'status': 'success', 'params': {
+                'collection_name': data['collection_name'], 'ids': [i['id'] for i in data['items']]
+            }
+        }, sort_keys=False),
+            mimetype='application/json')
+
+
+def process_bulk_add_items(data):
     try:
         my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         collection = my_vec_db.get_collection(data['collection_name'])
         items = []
         for item in data['items']:
-            items.append((item['vector'], item.get('id', None), item.get('field', None)))
-
+            items.append((item['vector'], item['id'], item.get('field', None)))
         ids = collection.bulk_add_items(items)
-
-        return Response(json.dumps({
-            'status': 'success', 'params': {
-                'collection_name': data['collection_name'], 'ids': ids
-            }
-        }, sort_keys=False),
-            mimetype='application/json')
-    except KeyError as e:
-        return jsonify({'error': f'Missing required parameter {e}'}), 400
+        return {'status': 'success', 'ids': ids}
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return {'status': 'error', 'message': str(e)}
 
 
 @app.route('/query', methods=['POST'])
 def query():
     """Query the database for the vectors most similar to the given vector.
         .. versionadded:: 0.3.2
-
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/query \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection",
-              "vector": [0.1, 0.2, 0.3, 0.4],
-              "k": 10,
-              "distance": "cosine",
-              "query_filter": {
-                  "must": [
-                      {
-                          "field": "name",
-                          "operator": "eq",
-                          "value": "example"
-                      },
-                      {
-                          "ids": [1, 2, 3]
-                      }
-                  ],
-                  "any": [
-                      {
-                          "field": "age",
-                          "operator": "gt",
-                          "value": 18
-                        }
-                    ]
-                },
-                "return_similarity": true
-            }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/query'
-        data = {
-            "collection_name": "example_collection",
-            "vector": [0.1, 0.2, 0.3, 0.4],
-            "k": 10,
-            "distance": "cosine",
-            "query_filter": {
-                "must": [
-                    {
-                        "field": "name",
-                        "operator": "eq",
-                        "value": "example"
-                    },
-                    {
-                        "ids": [1, 2, 3]
-                    }
-                ],
-                "any": [
-                    {
-                        "field": "age",
-                        "operator": "gt",
-                        "value": 18
-                    }
-                ]
-            },
-            "return_similarity": true
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
 
     Returns:
         dict: The status of the operation.
@@ -621,30 +378,6 @@ def query():
 
 @app.route('/commit', methods=['POST'])
 def commit():
-    """Commit the database.
-        .. versionadded:: 0.3.2
-
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/commit \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection"
-             }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/commit'
-        data = {
-            "collection_name": "example_collection"
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
-
-    Returns:
-        dict: The status of the operation.
-    """
     if request.headers.get('Content-Type') == 'application/msgpack':
         data = request.decoded_data
     else:
@@ -653,6 +386,22 @@ def commit():
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
+    tasks_queue: queue.Queue = data_dict[data['collection_name']]
+
+    if tasks_queue.empty():
+        return jsonify({'error': 'No items to commit'}), 400
+
+    tasks = []
+    while not tasks_queue.empty():
+        tasks.append(tasks_queue.get())
+
+    # 等待所有已启动的任务完成
+    for future in as_completed(tasks):
+        result = future.result()  # 获取任务结果，可以用来处理错误或记录日志
+        if result.get('status') == 'error':
+            return jsonify(result), 500
+
+    # 所有任务完成后，提交数据库更改
     try:
         my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         collection = my_vec_db.get_collection(data['collection_name'])
@@ -681,24 +430,6 @@ def collection_shape():
     """Get the shape of a collection.
         .. versionadded:: 0.3.2
 
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/collection_shape \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection"
-             }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/collection_shape'
-        data = {
-            "collection_name": "example_collection"
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
-
     Returns:
         dict: The status of the operation.
     """
@@ -723,37 +454,6 @@ def set_environment():
     """Set the environment variables.
         .. versionadded:: 0.3.2
 
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/set_environment \
-         -H "Content-Type: application/json" \
-         -d '{
-              "MVDB_LOG_LEVEL": "ERROR",
-              "MVDB_LOG_PATH": "/path/to/log",
-              "MVDB_TRUNCATE_LOG": "true",
-              "MVDB_LOG_WITH_TIME": "true",
-              "MVDB_KMEANS_EPOCHS": "100",
-              "MVDB_QUERY_CACHE_SIZE": "100",
-              "MVDB_DATALOADER_BUFFER_SIZE": "1000"
-             }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/set_environment'
-        data = {
-            "MVDB_LOG_LEVEL": "ERROR",
-            "MVDB_LOG_PATH": "/path/to/log",
-            "MVDB_TRUNCATE_LOG": "true",
-            "MVDB_LOG_WITH_TIME": "true",
-            "MVDB_KMEANS_EPOCHS": "100",
-            "MVDB_QUERY_CACHE_SIZE": "100",
-            "MVDB_DATALOADER_BUFFER_SIZE": "1000"
-        }
-
-        response = requests.post(url, json=data)
-        print(response.json())
-
     Returns:
         dict: The status of the operation.
     """
@@ -774,17 +474,6 @@ def get_environment():
     """Get the environment variables.
         .. versionadded:: 0.3.2
 
-    Example:
-        1) use curl
-        curl -X GET http://localhost:7637/get_environment -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/get_environment'
-        response = requests.get(url)
-        print(response.json())
-
     Returns:
         dict: The status of the operation.
     """
@@ -803,24 +492,6 @@ def get_environment():
 def get_collection_query_report():
     """Get the query report of a collection.
         .. versionadded:: 0.3.2
-
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/get_collection_query_report \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection"
-             }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/get_collection_query_report'
-        data = {
-            "collection_name": "example_collection"
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
 
     Returns:
         dict: The status of the operation.
@@ -846,24 +517,6 @@ def get_collection_query_report():
 def get_collection_status_report():
     """Get the status report of a collection.
         .. versionadded:: 0.3.2
-
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/get_collection_status_report \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection"
-             }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/get_collection_status_report'
-        data = {
-            "collection_name": "example_collection"
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
 
     Returns:
         dict: The status of the operation.
@@ -901,24 +554,6 @@ def is_collection_exists():
     """Check if a collection exists.
         .. versionadded:: 0.3.2
 
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/is_collection_exists \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection"
-             }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/is_collection_exists'
-        data = {
-            "collection_name": "example_collection"
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
-
     Returns:
         dict: The status of the operation.
     """
@@ -941,24 +576,6 @@ def is_collection_exists():
 def get_collection_config():
     """Get the configuration of a collection.
         .. versionadded:: 0.3.2
-
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/get_collection_config \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection"
-             }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/get_collection_config'
-        data = {
-            "collection_name": "example_collection"
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
 
     Returns:
         dict: The status of the operation.
@@ -986,26 +603,6 @@ def get_collection_config():
 def update_commit_msg():
     """Save the commit message of a collection.
         .. versionadded:: 0.3.2
-
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/update_commit_msg \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection",
-              "last_commit_time": "last_commit_time",
-             }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/update_commit_msg'
-        data = {
-            "collection_name": "example_collection",
-            "last_commit_time": "last_commit_time",
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
 
     Returns:
         dict: The status of the operation.
@@ -1039,24 +636,6 @@ def update_commit_msg():
 def get_commit_msg():
     """Get the commit message of a collection.
         .. versionadded:: 0.3.2
-
-    Example:
-        1) use curl
-        curl -X POST http://localhost:7637/get_commit_msg \
-         -H "Content-Type: application/json" \
-         -d '{
-              "collection_name": "example_collection"
-             }' -w "\n"
-
-        2) use python requests
-        import requests
-
-        url = 'http://localhost:7637/get_commit_msg'
-        data = {
-            "collection_name": "example_collection"
-        }
-        response = requests.post(url, json=data)
-        print(response.json())
 
     Returns:
         dict: The status of the operation.
@@ -1099,6 +678,7 @@ def main():
     config_path, root_path, config = generate_config(root_path=root_path, config_path=config_path)
 
     if args.run:
+        # Flask.run(app, host=args.host, port=args.port, debug=True)
         serve(app, host=args.host, port=args.port, threads=args.threads)
 
 
