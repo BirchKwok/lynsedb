@@ -4,12 +4,13 @@ from typing import Union, List, Tuple
 
 import msgpack
 import numpy as np
-import requests
+import httpx
 from spinesUtils.asserts import raise_if
 from tqdm import trange
 
 from min_vec.structures.filter import Filter
 from min_vec.api import config
+from min_vec.structures.thread_safe_list import ThreadSafeList
 from min_vec.utils.utils import QueryVectorCache
 
 
@@ -49,6 +50,33 @@ def pack_data(data):
     return packed_data
 
 
+def quantize_vector(vector):
+    """
+    Quantize the vector to 8 bits.
+
+    Parameters:
+        vector: The vector to quantize.
+
+    Returns:
+        (np.ndarray, min_vals, range_vals): The quantized vector, minimum values, and range values.
+    """
+    if isinstance(vector, list):
+        vector = np.array(vector)
+
+    epsilon = 1e-9
+    n_levels_minus_1 = 2 ** 8 - 1
+    max_val = np.max(vector, axis=0)
+    min_val = np.min(vector, axis=0)
+    range_val = max_val - min_val
+
+    quantized = ((vector - min_val) / (range_val + epsilon)) * n_levels_minus_1
+    quantized = np.clip(quantized, 0, n_levels_minus_1).astype(np.uint8)
+
+    return (quantized.tolist(),
+            min_val.tolist() if isinstance(min_val, np.ndarray) else min_val,
+            range_val.tolist() if isinstance(range_val, np.ndarray) else range_val)
+
+
 class Collection:
     def __init__(self, url, collection_name, **params):
         """
@@ -74,7 +102,7 @@ class Collection:
         self.IS_DELETED = False
         self._url = url
         self._collection_name = collection_name
-        self._session = requests.Session()
+        self._session = httpx.Client(http2=True, timeout=120)
         self._init_params = params
 
         self.most_recent_query_report = {}
@@ -82,7 +110,7 @@ class Collection:
 
         self.COMMIT_FLAG = False
 
-        self._mesosphere_list = []
+        self._mesosphere_list = ThreadSafeList()
 
     def _get_commit_msg(self):
         """
@@ -157,20 +185,15 @@ class Collection:
         else:
             raise_error_response(response)
 
-    def add_item(self, vector: Union[list[float], np.ndarray],
-                 id: Union[int, None] = None, field: Union[dict, None] = None, delay_num: int = 1000):
+    def add_item(self, vector: Union[list[float], np.ndarray], id: int, field: Union[dict, None] = None):
         """
         Add an item to the collection.
             .. versionadded:: 0.3.2
 
         Parameters:
             vector (list[float], np.ndarray): The vector of the item.
-            id (int, optional): The ID of the item.
+            id (int): The ID of the item.
             field (dict, optional): The fields of the item.
-            delay_num (int): The number of items by which to delay the commit. Defaults to 1000.
-                If delay_num is greater than 0, the commit will be postponed until the specified number of items have been added.
-                 If delay_num is 0, commits will occur immediately when the commit function is called or upon exiting the insert_session
-                context manager.
 
         Returns:
             int: The ID of the item. If delay_num is greater than 0, and the number of items added is less than delay_num,
@@ -180,7 +203,7 @@ class Collection:
             ValueError: If the collection has been deleted or does not exist.
             ExecutionError: If the server returns an error.
         """
-        raise_if(ValueError, delay_num < 0, 'The delay_num must be greater than or equal to 0.')
+        delay_num = config.MVDB_DELAY_NUM
 
         if delay_num == 0:
             url = f'{self._url}/add_item'
@@ -192,10 +215,11 @@ class Collection:
                 "item": {
                     "vector": vector if isinstance(vector, list) else vector.tolist(),
                     "id": id if id is not None else None,
-                    "field": field if field is not None else {}
+                    "field": field if field is not None else {},
                 }
             }
-            response = self._session.post(url, data=pack_data(data), headers=headers)
+
+            response = self._session.post(url, content=pack_data(data), headers=headers)
 
             if response.status_code == 200:
                 self.COMMIT_FLAG = False
@@ -206,7 +230,7 @@ class Collection:
             self._mesosphere_list.append({
                 "vector": vector if isinstance(vector, list) else vector.tolist(),
                 "id": id if id is not None else None,
-                "field": field if field is not None else {}
+                "field": field if field is not None else {},
             })
 
             if len(self._mesosphere_list) == delay_num:
@@ -219,11 +243,11 @@ class Collection:
                     "items": self._mesosphere_list
                 }
 
-                response = self._session.post(url, data=pack_data(data), headers=headers)
+                response = self._session.post(url, content=pack_data(data), headers=headers)
 
                 if response.status_code == 200:
                     self.COMMIT_FLAG = False
-                    self._mesosphere_list = []
+                    self._mesosphere_list = ThreadSafeList()
                 else:
                     raise_error_response(response)
 
@@ -234,26 +258,25 @@ class Collection:
         items = []
         for vector in vectors:
             raise_if(TypeError, not isinstance(vector, tuple), 'Each item must be a tuple of vector, '
-                                                               'ID(optional), and fields(optional).')
+                                                               'ID, and fields(optional).')
+            vec_len = len(vector)
 
-            if len(vector) == 3:
+            if vec_len == 3:
+                v1, v2, v3 = vector
                 items.append({
-                    "vector": vector[0].tolist() if isinstance(vector[0], np.ndarray) else vector[0],
-                    "id": vector[1],
-                    "field": vector[2]
+                    "vector": v1.tolist() if isinstance(v1, np.ndarray) else v1,
+                    "id": v2,
+                    "field": v3,
                 })
-            elif len(vector) == 2:
+            elif vec_len == 2:
+                v1, v2 = vector
                 items.append({
-                    "vector": vector[0].tolist() if isinstance(vector[0], np.ndarray) else vector[0],
-                    "id": vector[1],
-                    "field": {}
+                    "vector": v1.tolist() if isinstance(v1, np.ndarray) else v1,
+                    "id": v2,
+                    "field": {},
                 })
             else:
-                items.append({
-                    "vector": vector[0].tolist() if isinstance(vector[0], np.ndarray) else vector[0],
-                    "id": None,
-                    "field": {}
-                })
+                raise TypeError('Each item must be a tuple of vector, ID, and fields(optional).')
 
         return items
 
@@ -261,8 +284,7 @@ class Collection:
             self,
             vectors: List[Union[
                 Tuple[Union[List, Tuple, np.ndarray], int, dict],
-                Tuple[Union[List, Tuple, np.ndarray], int],
-                Tuple[Union[List, Tuple, np.ndarray]]
+                Tuple[Union[List, Tuple, np.ndarray], int]
             ]],
             batch_size: int = 1000,
             enable_progress_bar: bool = True
@@ -273,7 +295,7 @@ class Collection:
 
         Parameters:
             vectors (List[Tuple[Union[List, Tuple, np.ndarray], int, dict]],
-            List[Tuple[Union[List, Tuple, np.ndarray], int]] , List[Tuple[Union[List, Tuple, np.ndarray]]]):
+            List[Tuple[Union[List, Tuple, np.ndarray], int]]):
                 The list of items to add. Each item is a tuple containing the vector, ID, and fields.
             batch_size (int): The batch size. Default is 1000.
             enable_progress_bar (bool): Whether to enable the progress bar. Default is True.
@@ -298,7 +320,7 @@ class Collection:
             iter_obj = range(total_batches)
 
         headers = {'Content-Type': 'application/msgpack'}
-        responses = []
+
         for i in iter_obj:
             start = i * batch_size
             end = (i + 1) * batch_size
@@ -311,11 +333,8 @@ class Collection:
                 "items": items_after_checking
             }
             # Send request using session to keep the connection alive
-            response = self._session.post(url, data=pack_data(data), headers=headers)
-            responses.append(response)  # Store response to process later
+            response = self._session.post(url, content=pack_data(data), headers=headers)
 
-        # Process responses in the order they were sent
-        for response in responses:
             if response.status_code == 200:
                 self.COMMIT_FLAG = False
                 ids.extend(response.json()['params']['ids'])
@@ -340,9 +359,9 @@ class Collection:
 
         if self._mesosphere_list:
             data["items"] = self._mesosphere_list
-            self._mesosphere_list = []
+            self._mesosphere_list = ThreadSafeList()
 
-        response = self._session.post(url, data=pack_data(data), headers={'Content-Type': 'application/msgpack'})
+        response = self._session.post(url, content=pack_data(data), headers={'Content-Type': 'application/msgpack'})
 
         if response.status_code == 200:
             self._update_commit_msg(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -422,6 +441,8 @@ class Collection:
             ValueError: If the collection has been deleted or does not exist.
             ExecutionError: If the server returns an error.
         """
+        self.most_recent_query_report = {}
+
         tik = time.time()
         if self._init_params['use_cache']:
             rjson = self._query(vector=vector, k=k, distance=distance,
@@ -568,7 +589,7 @@ class MinVectorDBHTTPClient:
         raise_if(ValueError, not url.startswith('http://') or url.startswith('https://'),
                  'The URL must start with "http://" or "https://".')
 
-        self.session = requests.Session()
+        self._session = httpx.Client()
 
         if url.endswith('/'):
             self.url = url[:-1]
@@ -576,10 +597,19 @@ class MinVectorDBHTTPClient:
             self.url = url
 
         try:
-            if self.session.get(url).json() != {'status': 'success', 'message': 'MinVectorDB HTTP API'}:
+            response = self._session.get(url)
+            if response.status_code != 200:
                 raise ConnectionError(f'Failed to connect to the server at {url}.')
 
-        except requests.exceptions.ConnectionError:
+            try:
+                rj = response.json()
+                if rj != {'status': 'success', 'message': 'MinVectorDB HTTP API'}:
+                    raise ConnectionError(f'Failed to connect to the server at {url}.')
+            except Exception as e:
+                print(e)
+                raise ConnectionError(f'Failed to connect to the server at {url}.')
+
+        except httpx.RequestError:
             raise ConnectionError(f'Failed to connect to the server at {url}.')
 
     def require_collection(
@@ -641,7 +671,7 @@ class MinVectorDBHTTPClient:
         }
 
         try:
-            response = self.session.post(url, json=data)
+            response = self._session.post(url, json=data)
             if response.status_code == 200:
                 del data['collection_name']
                 collection = Collection(self.url, collection, **data)
@@ -649,7 +679,7 @@ class MinVectorDBHTTPClient:
                 return collection
             else:
                 raise_error_response(response)
-        except requests.exceptions.ConnectionError:
+        except httpx.RequestError:
             raise ConnectionError(f'Failed to connect to the server at {url}.')
 
     def drop_collection(self, collection: str):
@@ -668,7 +698,7 @@ class MinVectorDBHTTPClient:
         """
         url = f'{self.url}/drop_collection'
         data = {"collection_name": collection}
-        response = self.session.post(url, json=data)
+        response = self._session.post(url, json=data)
 
         try:
             collection = self.get_collection(collection)
@@ -694,7 +724,7 @@ class MinVectorDBHTTPClient:
             return {'status': 'success', 'message': 'The database does not exist.'}
 
         url = f'{self.url}/drop_database'
-        response = self.session.get(url)
+        response = self._session.get(url)
 
         if response.status_code == 200:
             return response.json()
@@ -713,7 +743,7 @@ class MinVectorDBHTTPClient:
             ExecutionError: If the server returns an error.
         """
         url = f'{self.url}/database_exists'
-        response = self.session.get(url)
+        response = self._session.get(url)
 
         if response.status_code == 200:
             return response.json()
@@ -732,7 +762,7 @@ class MinVectorDBHTTPClient:
             ExecutionError: If the server returns an error.
         """
         url = f'{self.url}/show_collections'
-        response = self.session.get(url)
+        response = self._session.get(url)
 
         if response.status_code == 200:
             return response.json()['params']['collections']
@@ -772,7 +802,7 @@ class MinVectorDBHTTPClient:
                 raise_if(TypeError, not isinstance(env[key], str), f'The value of {key} must be a string.')
                 data[key] = env[key]
 
-        response = self.session.post(url, json=data)
+        response = self._session.post(url, json=data)
 
         if response.status_code == 200:
             return response.json()
@@ -791,7 +821,7 @@ class MinVectorDBHTTPClient:
             ExecutionError: If the server returns an error.
         """
         url = f'{self.url}/get_environment'
-        response = self.session.get(url)
+        response = self._session.get(url)
 
         if response.status_code == 200:
             return response.json()
@@ -814,12 +844,12 @@ class MinVectorDBHTTPClient:
         """
         url = f'{self.url}/is_collection_exists'
         data = {"collection_name": collection}
-        response = self.session.post(url, json=data)
+        response = self._session.post(url, json=data)
 
         if response.status_code == 200 and response.json()['params']['exists']:
             url = f'{self.url}/get_collection_config'
             data = {"collection_name": collection}
-            response = self.session.post(url, json=data)
+            response = self._session.post(url, json=data)
 
             return Collection(self.url, collection, **response.json()['params']['config'])
         else:
