@@ -12,8 +12,20 @@ class IDChecker:
         else:
             self.ids.update(items)
 
-    def drop(self, item):
-        self.ids.discard(item)
+    def concat(self, another_id_checker):
+        if not isinstance(another_id_checker, IDChecker):
+            raise ValueError("Expected another_id_checker to be an instance of IDChecker")
+
+        self.ids.update(another_id_checker.ids)
+
+    def drop(self, items):
+        if isinstance(items, int):
+            if items in self.ids:
+                self.ids.discard(items)
+        else:
+            for item in items:
+                if item in self.ids:
+                    self.ids.discard(item)
 
     def __contains__(self, item):
         return item in self.ids
