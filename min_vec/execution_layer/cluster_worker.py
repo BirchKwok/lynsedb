@@ -3,7 +3,7 @@ from typing import Callable
 from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
 
-from min_vec.storage_layer.storage import StorageWorker
+from min_vec.storage_layer.storage import PersistentFileStorage
 from min_vec.structures.kmeans import BatchKMeans
 
 
@@ -13,15 +13,13 @@ class ClusterWorker:
             logger: Logger,
             iterable_dataloader: Callable,
             ann_model: BatchKMeans,
-            storage_worker: StorageWorker,
-            save_data: Callable,
+            storage_worker: PersistentFileStorage,
             n_clusters: int
     ):
         self.logger = logger
         self.iterable_dataloader = iterable_dataloader
         self.ann_model = ann_model
         self.storage_worker = storage_worker
-        self.save_data = save_data
         self.n_clusters = n_clusters
 
     def _kmeans_clustering(self, data, refit=False):
@@ -63,7 +61,7 @@ class ClusterWorker:
                 # 遍历每个聚类，保存数据
                 for cluster_id, (d, idx) in temp_clusters.items():
                     if d:  # 检查是否有数据，避免保存空聚类
-                        self.save_data(d, idx, None, write_chunk=False, cluster_id=cluster_id)
+                        self.storage_worker.write(d, idx, write_type='cluster', cluster_id=cluster_id)
 
                 # 初始化每个聚类的存储列表
                 temp_clusters = {i: ([], []) for i in range(self.n_clusters)}
@@ -72,6 +70,6 @@ class ClusterWorker:
         if max_len > 0:
             for cluster_id, (d, idx) in temp_clusters.items():
                 if d:
-                    self.save_data(d, idx, None, write_chunk=False, cluster_id=cluster_id)
+                    self.storage_worker.write(d, idx, write_type='cluster', cluster_id=cluster_id)
 
         self.storage_worker.delete_chunk()
