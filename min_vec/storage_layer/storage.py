@@ -1,3 +1,6 @@
+import os
+import shutil
+import tempfile
 from pathlib import Path
 import json
 
@@ -10,7 +13,78 @@ from min_vec.configs.config import config
 from min_vec.structures.limited_dict import LimitedDict
 
 
-class StorageWorker:
+class TemporaryFileStorage:
+    """Class for handling temporary storage of data and indices with specified chunk sizes,
+    ensuring paired data and indices with a sequential file ID."""
+
+    def __init__(self, chunk_size):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.chunk_size = chunk_size
+        self.file_id = 0  # File ID to maintain the naming order
+
+    def write_temp_data(self, data, indices, prefix='temp'):
+        if not isinstance(data, np.ndarray):
+            data = np.vstack(data)
+
+        if not isinstance(indices, np.ndarray):
+            indices = np.array(indices)
+
+        num_rows = data.shape[0]
+        start = 0
+        file_paths = []
+
+        while start < num_rows:
+            end = min(start + self.chunk_size, num_rows)
+            chunk_data = data[start:end]
+            chunk_indices = indices[start:end]
+            file_id = self.file_id
+            self.file_id += 1  # Increment file ID for each new chunk
+
+            data_file_path = Path(self.temp_dir.name) / f"{prefix}_data_{file_id}.npy"
+            indices_file_path = Path(self.temp_dir.name) / f"{prefix}_indices_{file_id}.npy"
+
+            with open(data_file_path, 'wb') as df, open(indices_file_path, 'wb') as inf:
+                portalocker.lock(df, portalocker.LOCK_EX)
+                portalocker.lock(inf, portalocker.LOCK_EX)
+                np.save(df, chunk_data)
+                np.save(inf, chunk_indices)
+
+            file_paths.append((data_file_path, indices_file_path))
+            start += self.chunk_size
+
+        return file_paths
+
+    @staticmethod
+    def read_temp_data(data_filepath, indices_filepath):
+        with open(data_filepath, 'rb') as df, open(indices_filepath, 'rb') as inf:
+            portalocker.lock(df, portalocker.LOCK_SH)
+            portalocker.lock(inf, portalocker.LOCK_SH)
+            data = np.load(df)
+            indices = np.load(inf)
+        return data, indices
+
+    def get_file_iterator(self):
+        """Generate an iterator to read data and indices files sequentially."""
+        file_ids = [int(i.stem.split('_')[-1]) for i in Path(self.temp_dir.name).glob('temp_data_*.npy')]
+        for file_id in file_ids:
+            data_path = Path(self.temp_dir.name) / f"temp_data_{file_id}.npy"
+            indices_path = Path(self.temp_dir.name) / f"temp_indices_{file_id}.npy"
+            yield self.read_temp_data(data_path, indices_path)
+
+    def cleanup(self):
+        if os.path.exists(self.temp_dir.name):
+            shutil.rmtree(self.temp_dir.name)
+
+    def reincarnate(self):
+        self.cleanup()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.file_id = 0
+
+    def __del__(self):
+        self.cleanup()
+
+
+class PersistentFileStorage:
     """The worker class for reading and writing data to the files."""
 
     def __init__(self, collection_path, dimension, chunk_size, warm_up=False):
@@ -27,6 +101,8 @@ class StorageWorker:
 
         self.dimension = dimension
         self.chunk_size = chunk_size
+
+        self.tempfile_storage = TemporaryFileStorage(chunk_size)
 
         self.cluster_last_file_shape = {}
 
