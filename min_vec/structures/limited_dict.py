@@ -25,6 +25,10 @@ class LimitedDict:
             except KeyError:
                 raise KeyError('Key not found')
 
+    @property
+    def is_reached_max_size(self):
+        return len(self.cache) == self.max_size
+
     def get(self, key, default=None):
         with self.lock:
             if key not in self.cache:
