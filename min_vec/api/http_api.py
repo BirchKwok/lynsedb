@@ -14,8 +14,8 @@ from flask import Flask, request, jsonify, Response
 from waitress import serve
 
 from min_vec.api.high_level import MinVectorDBLocalClient
-from min_vec.structures.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
-from min_vec.structures.limited_dict import LimitedDict
+from min_vec.core_components.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
+from min_vec.core_components.limited_dict import LimitedDict
 
 os.environ['MVDB_LOG_LEVEL'] = 'ERROR'
 

@@ -4,7 +4,7 @@ from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
 
 from min_vec.storage_layer.storage import PersistentFileStorage
-from min_vec.structures.kmeans import BatchKMeans
+from min_vec.core_components.kmeans import BatchKMeans
 
 
 class ClusterWorker:

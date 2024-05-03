@@ -8,16 +8,16 @@ import portalocker
 from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
 
-from min_vec.structures.id_checker import IDChecker
+from min_vec.core_components.id_checker import IDChecker
 from min_vec.utils.utils import io_checker
 from min_vec.configs.config import config
-from min_vec.structures.kmeans import BatchKMeans
-from min_vec.structures.scaler import ScalarQuantization
-from min_vec.structures.fields_filter import FieldIndex
+from min_vec.core_components.kmeans import BatchKMeans
+from min_vec.core_components.scaler import ScalarQuantization
+from min_vec.core_components.fields_filter import FieldIndex
 from min_vec.storage_layer.storage import PersistentFileStorage, TemporaryFileStorage
 from min_vec.execution_layer.cluster_worker import ClusterWorker
-from min_vec.structures.counter import ThreadSafeCounter
-from min_vec.structures.thread_safe_list import ThreadSafeList
+from min_vec.core_components.counter import ThreadSafeCounter
+from min_vec.core_components.thread_safe_list import ThreadSafeList
 
 
 class MatrixSerializer:

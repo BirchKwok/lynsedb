@@ -10,7 +10,7 @@ from spinesUtils.asserts import raise_if
 
 from min_vec.computational_layer.engines import to_normalize
 from min_vec.configs.config import config
-from min_vec.structures.limited_dict import LimitedDict
+from min_vec.core_components.limited_dict import LimitedDict
 
 
 class TemporaryFileStorage:

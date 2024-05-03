@@ -12,7 +12,7 @@ from min_vec.execution_layer.query import Query
 from min_vec.execution_layer.matrix_serializer import MatrixSerializer
 from min_vec.utils.utils import unavailable_if_deleted
 from min_vec.api import logger
-from min_vec.structures.filter import Filter
+from min_vec.core_components.filter import Filter
 
 
 class StandaloneMinVectorDB:

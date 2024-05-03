@@ -183,20 +183,18 @@ print(collection.query_report_)
 
 ### Use Filter
 
-
 ```python
 import operator
 
-from min_vec.structures.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
-
+from min_vec.core_components.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
 
 collection.query(
-    vector=[0.36, 0.43, 0.56, 0.12], 
-    k=10, 
+    vector=[0.36, 0.43, 0.56, 0.12],
+    k=10,
     query_filter=Filter(
         must=[
             FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
-        ], 
+        ],
         any=[
 
             FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),

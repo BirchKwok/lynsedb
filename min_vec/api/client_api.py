@@ -8,9 +8,9 @@ import httpx
 from spinesUtils.asserts import raise_if
 from tqdm import trange
 
-from min_vec.structures.filter import Filter
+from min_vec.core_components.filter import Filter
 from min_vec.api import config
-from min_vec.structures.thread_safe_list import ThreadSafeList
+from min_vec.core_components.thread_safe_list import ThreadSafeList
 from min_vec.utils.utils import QueryVectorCache
 
 

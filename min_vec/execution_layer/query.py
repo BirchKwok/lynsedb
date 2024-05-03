@@ -6,9 +6,9 @@ from min_vec.computational_layer.engines import to_normalize
 from min_vec.configs.config import config
 from min_vec.computational_layer.engines import cosine_distance
 from min_vec.execution_layer.matrix_serializer import MatrixSerializer
-from min_vec.structures.filter import IDCondition, Filter
+from min_vec.core_components.filter import IDCondition, Filter
 from min_vec.utils.utils import QueryVectorCache
-from min_vec.structures.limited_sort import LimitedSorted
+from min_vec.core_components.limited_sort import LimitedSorted
 
 
 class Query:

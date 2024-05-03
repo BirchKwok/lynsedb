@@ -55,7 +55,7 @@ def test_bulk_add_items():
 def test_query():
     import operator
 
-    from min_vec.structures.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
+    from min_vec.core_components.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
 
     db = MinVectorDB(root_url)
     collection = db.get_collection('test_collection')
