@@ -153,3 +153,5 @@ cython_debug/
 .idea/
 
 readme.ipynb
+speed_test.ipynb
+Benchmarks.ipynb
