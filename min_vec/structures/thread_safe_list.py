@@ -45,3 +45,7 @@ class ThreadSafeList(list):
     def __str__(self):
         with self.lock:
             return super(ThreadSafeList, self).__str__()
+
+    def clear(self):
+        with self.lock:
+            return super(ThreadSafeList, self).clear()
