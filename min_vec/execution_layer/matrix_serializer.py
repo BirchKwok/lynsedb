@@ -14,15 +14,17 @@ from min_vec.configs.config import config
 from min_vec.structures.kmeans import BatchKMeans
 from min_vec.structures.scaler import ScalarQuantization
 from min_vec.structures.fields_filter import FieldIndex
-from min_vec.storage_layer.storage import StorageWorker
+from min_vec.storage_layer.storage import PersistentFileStorage, TemporaryFileStorage
 from min_vec.execution_layer.cluster_worker import ClusterWorker
 from min_vec.structures.counter import ThreadSafeCounter
+from min_vec.structures.thread_safe_list import ThreadSafeList
 
 
 class MatrixSerializer:
     """
     The MatrixSerializer class is used to serialize and deserialize the matrix data.
     """
+
     def __init__(
             self,
             dim: int,
@@ -91,16 +93,18 @@ class MatrixSerializer:
             self._initialize_scalar_quantization()
 
         # initialize the storage worker
-        self.storage_worker = StorageWorker(self.collections_path_parent, self.dim,
-                                            self.chunk_size,
-                                            warm_up=warm_up)
+        self.storage_worker = PersistentFileStorage(self.collections_path_parent, self.dim,
+                                                    self.chunk_size,
+                                                    warm_up=warm_up)
+        self.tempfile_storage_worker = TemporaryFileStorage(self.chunk_size)
+
         self.counter = ThreadSafeCounter()
 
         # ============== Loading or create one empty collection ==============
         # first of all, initialize a collection
-        self.database = []
-        self.indices = []
-        self.fields = []
+        self.database = ThreadSafeList()
+        self.indices = ThreadSafeList()
+        self.fields = ThreadSafeList()
 
         self._initialize_fields_index()
         self._initialize_ann_model()
@@ -111,7 +115,6 @@ class MatrixSerializer:
             iterable_dataloader=self.dataloader,
             ann_model=self.ann_model,
             storage_worker=self.storage_worker,
-            save_data=self.save_data,
             n_clusters=self.n_clusters
         )
 
@@ -158,6 +161,8 @@ class MatrixSerializer:
         else:
             self.fields_index = FieldIndex()
 
+        self.temp_fields_index = FieldIndex()
+
     def _initialize_id_checker(self):
         """initialize id checker and shape"""
         self.id_filter = IDChecker()
@@ -173,15 +178,13 @@ class MatrixSerializer:
 
         self.last_id = self.id_filter.find_max_value()
 
-    def check_commit(self):
-        if not self.COMMIT_FLAG:
-            raise ValueError("Did you forget to run `commit()` function ? Try to run `commit()` first.")
+        self.temp_id_filter = IDChecker()
 
     def reset_collection(self):
         """Reset the database to its initial state with zeros."""
-        self.database = []
-        self.indices = []
-        self.fields = []
+        self.database = ThreadSafeList()
+        self.indices = ThreadSafeList()
+        self.fields = ThreadSafeList()
 
     @io_checker
     def dataloader(self, filename):
@@ -222,19 +225,17 @@ class MatrixSerializer:
             if not (len(self.database) == len(self.indices) == len(self.fields)):
                 raise ValueError('The database, index length and field length in collection are not the same.')
 
-    def save_data(self, data, indices, fields, write_chunk=True, cluster_id=None, normalize=False):
+    def save_data(self, data, indices, fields):
         """Optimized method to save data to chunk or cluster group with reusable logic."""
-        if fields is not None and cluster_id is None:
-            for id, field in zip(indices, fields):
-                self.fields_index.store(field, id)
 
-        self.storage_worker.write(data, indices,
-                                  write_type='chunk' if write_chunk else 'cluster',
-                                  cluster_id=str(cluster_id) if cluster_id is not None else cluster_id,
-                                  normalize=normalize)
+        if fields is not None:
+            for _id, _field in zip(indices, fields):
+                self.temp_fields_index.store(_field, _id)
+
+        self.tempfile_storage_worker.write_temp_data(data, indices)
 
     @io_checker
-    def save_chunk_immediately(self, normalize=True):
+    def save_chunk_immediately(self):
         """
         Save the current state of the collection to a .mvdb file.
 
@@ -244,23 +245,20 @@ class MatrixSerializer:
         self._length_checker()
 
         if self._is_collection_reset():
-            return []
+            return
 
         self.save_data(
             self.database,
             self.indices,
-            self.fields,
-            write_chunk=True,
-            cluster_id=None,
-            normalize=normalize
+            self.fields
         )
 
         self.reset_collection()  # reset collection, indices and fields
 
-    def auto_save_chunk(self, normalize=True):
+    def auto_save_chunk(self):
         self._length_checker()
         if len(self.database) >= self.chunk_size:
-            self.save_chunk_immediately(normalize=normalize)
+            self.save_chunk_immediately()
 
         return
 
@@ -270,22 +268,72 @@ class MatrixSerializer:
 
         return self.storage_worker.get_cluster_dataset_num()
 
+    def rollback(self):
+        """
+        Rollback the collection to the last commit.
+        """
+        if not self.COMMIT_FLAG:
+            self.reset_collection()
+            self.tempfile_storage_worker.reincarnate()
+            self.temp_id_filter = IDChecker()
+            self.temp_fields_index = FieldIndex()
+
+            self.COMMIT_FLAG = True
+
     def commit(self):
         """
         Save the collection, ensuring that all data is written to disk.
         This method is required to be called after saving vectors to query them.
         """
         if not self.COMMIT_FLAG:
-            self.logger.debug('Saving chunk immediately...')
-            self.save_chunk_immediately(normalize=True)
+            try:
+                self.logger.debug('Saving chunk immediately...')
+                self.save_chunk_immediately()
 
-            self.logger.debug('Saving id filter...')
-            # save filter
-            self.id_filter.to_file(self._filter_path)
+                try:
+                    self.logger.debug('Concatenating id filter...')
+                    # concat filter
+                    self.id_filter.concat(self.temp_id_filter)
+                except Exception as e:
+                    self.logger.error(f'Error occurred while concatenating the filter: {e}, rollback...')
+                    self.rollback()
+                    raise e
 
-            # save fields index
-            self.logger.debug('Saving fields index...')
-            self.fields_index.save(self.collections_path_parent / 'fields_index.mvdb')
+                self.logger.debug('Writing chunk to storage...')
+                for data, indices in self.tempfile_storage_worker.get_file_iterator():
+                    self.storage_worker.write(data, indices, write_type='chunk', normalize=True)
+
+                self.tempfile_storage_worker.reincarnate()
+
+            except Exception as e:
+                self.logger.error(f'Error occurred while saving the collection: {e}, rollback...')
+                self.rollback()
+                raise e
+
+            try:
+                self.logger.debug('Concatenating fields index...')
+                self.fields_index.concat(self.temp_fields_index)
+            except Exception as e:
+                self.logger.error(f'Error occurred while concatenating the fields index: {e}, rollback...')
+                self.rollback()
+                raise e
+
+            try:
+                self.logger.debug('Saving id filter...')
+                self.id_filter.to_file(self._filter_path)
+            except Exception as e:
+                self.logger.error(f'Error occurred while saving the filter: {e}, rollback...')
+                self.rollback()
+                raise e
+
+            try:
+                # save fields index
+                self.logger.debug('Saving fields index...')
+                self.fields_index.save(self.collections_path_parent / 'fields_index.mvdb')
+            except Exception as e:
+                self.logger.error(f'Error occurred while saving the collection: {e}, rollback...')
+                self.rollback()
+                raise e
 
             chunk_partition_size = self.storage_worker.get_shape(read_type='chunk')[0]
             cluster_partition_size = self.storage_worker.get_shape(read_type='cluster')[0]
@@ -339,20 +387,9 @@ class MatrixSerializer:
 
             self.last_commit_time = datetime.now()
 
-    def _generate_new_id(self):
-        """
-        Generate a new ID for the vector.
-        """
-        while True:
-            self.last_id += 1
-            if self.last_id not in self.id_filter:
-                break
-
-        return self.last_id
-
     def _process_vector_item(self, vector, index, field):
-        if index in self.id_filter:
-            raise ValueError(f'id {index} already exists')
+        if index in self.id_filter or index in self.temp_id_filter:
+            raise ValueError(f'id {index} already exists.')
 
         if len(vector) != self.dim:
             raise ValueError(f'vector dim error, expect {self.dim}, got {len(vector)}')
@@ -377,8 +414,6 @@ class MatrixSerializer:
         """
         raise_if(ValueError, not isinstance(vectors, (tuple, list)),
                  f'vectors must be tuple or list, got {type(vectors)}')
-        raise_if(ValueError, not all(isinstance(i, tuple) for i in vectors),
-                 f'vectors must be tuple of (vector, id[optional], field[optional]).')
 
         new_ids = []
 
@@ -386,52 +421,48 @@ class MatrixSerializer:
             batch = vectors[i:i + self.chunk_size]
 
             for sample in batch:
-                if len(sample) == 1:
-                    vector = sample[0]
-                    index = None
-                    field = {}
-                elif len(sample) == 2:
+                sample_len = len(sample)
+
+                if sample_len == 3:
+                    vector, index, field = sample
+                elif sample_len == 2:
                     vector, index = sample
                     field = {}
                 else:
-                    raise_if(ValueError, len(sample) != 3,
-                             f'vectors must be tuple of (vector, id[optional], field[optional]).')
-                    vector, index, field = sample
+                    raise ValueError('Each sample must be a tuple of (vector, id, field[optional]).')
 
-                    raise_if(TypeError, not (isinstance(field, dict) or field is None),
-                             f'field must be dict or None, got {type(field)}')
+                raise_if(TypeError, not (isinstance(field, dict) or field is None),
+                         f'field must be dict or None, got {type(field)}')
 
                 if isinstance(vector, list):
                     vector = np.array(vector)
 
-                index = self._generate_new_id() if index is None else index
-
-                raise_if(ValueError, index < 0, f'id must be greater than 0, got {index}')
+                raise_if(ValueError, (not isinstance(index, int)) or index < 0,
+                         f'id must be integer and greater than 0, got {index}')
 
                 field = {} if field is None else field
                 vector, index, field = self._process_vector_item(vector, index, field)
 
                 self.database.append(vector)
-                internal_id = index if index is not None else self._generate_new_id()
-                self.indices.append(internal_id)
-                new_ids.append(internal_id)
+                self.indices.append(index)
+                new_ids.append(index)
                 self.fields.append(field)
-                self.id_filter.add(index)
+                self.temp_id_filter.add(index)
 
-            self.auto_save_chunk(normalize=True)
+            self.auto_save_chunk()
 
         if self.COMMIT_FLAG:
             self.COMMIT_FLAG = False
 
         return new_ids
 
-    def add_item(self, vector, *, index: int = None, field: dict = None) -> int:
+    def add_item(self, vector, index: int, *, field: dict = None) -> int:
         """
         Add a single vector to the collection.
 
         Parameters:
             vector (np.ndarray): The vector to be added.
-            index (int, optional, keyword-only): The ID of the vector. If None, a new ID will be generated.
+            index (int): The ID of the vector.
             field (dict, optional, keyword-only): The field of the vector. Default is None. If None, the field will be
                 set to an empty string.
         Returns:
@@ -440,31 +471,26 @@ class MatrixSerializer:
         Raises:
             ValueError: If the vector dimensions don't match or the ID already exists.
         """
-        raise_if(ValueError, len(vector) != self.dim,
-                 f'vector dim error, expect {self.dim}, got {len(vector)}')
         if isinstance(vector, list):
             vector = np.array(vector)
 
         raise_if(ValueError, vector.ndim != 1, f'vector dim error, expect 1, got {vector.ndim}')
         raise_if(ValueError, field is not None and not isinstance(field, dict),
                  f'field must be dict, got {type(field)}')
-        raise_if(ValueError, index is not None and not isinstance(index, int), f'id must be int, got {type(index)}')
-        raise_if(ValueError, index is not None and index < 0, f'id must be greater than 0, got {index}')
 
-        index = self._generate_new_id() if index is None else index
-
-        raise_if(ValueError, index in self.id_filter, f'id {index} already exists')
+        raise_if(ValueError, (not isinstance(index, int)) or index < 0,
+                 f'id must be integer and greater than 0, got {index}')
 
         vector, index, field = self._process_vector_item(vector, index, field)
 
         # Add the id to then filter.
-        self.id_filter.add(index)
+        self.temp_id_filter.add(index)
 
         self.database.append(vector)
         self.indices.append(index)
         self.fields.append(field)
 
-        self.auto_save_chunk(normalize=True)
+        self.auto_save_chunk()
 
         if self.COMMIT_FLAG:
             self.COMMIT_FLAG = False
@@ -497,5 +523,4 @@ class MatrixSerializer:
 
     @property
     def shape(self):
-        self.check_commit()
         return tuple(self.storage_worker.get_shape(read_type='all'))
