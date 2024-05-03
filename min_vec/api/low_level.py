@@ -146,13 +146,13 @@ class StandaloneMinVectorDB:
         return self._matrix_serializer.id_filter.find_max_value()
 
     @unavailable_if_deleted
-    def add_item(self, vector: Union[np.ndarray, list], *, id: int = None, field: dict = None) -> int:
+    def add_item(self, vector: Union[np.ndarray, list], id: int, *, field: dict = None) -> int:
         """
         Add a single vector to the database.
 
         Parameters:
             vector (np.ndarray or list): The vector to be added.
-            id (int, optional, keyword-only): The ID of the vector. If None, a new ID will be generated.
+            id (int): The ID of the vector.
             field (dict, optional, keyword-only): The field of the vector. Default is None. If None, the field will be
                 set to an empty string.
 
@@ -166,7 +166,7 @@ class StandaloneMinVectorDB:
 
     @unavailable_if_deleted
     def bulk_add_items(
-            self, vectors: Union[List[Tuple[np.ndarray, int, dict]], List[Tuple[np.ndarray, int]], List[Tuple[np.ndarray]]],
+            self, vectors: Union[List[Tuple[np.ndarray, int, dict]], List[Tuple[np.ndarray, int]]],
             **kwargs
     ):
         """
