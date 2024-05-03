@@ -38,7 +38,7 @@ jobs:
       run: docker build -t mytestimage .
 
     - name: Run Docker container
-      run: docker run -d --name mytestcontainer -p 5403:7637 mytestimage
+      run: docker run -d --name mytestcontainer -p 7637:7637 mytestimage
 
     - name: Run tests
       run: pytest test/docker_tests/
