@@ -62,6 +62,10 @@ class Config:
     def MVDB_DATALOADER_BUFFER_SIZE(self):
         return self.get_env_variable('MVDB_DATALOADER_BUFFER_SIZE', 20, int, [int, None])
 
+    @property
+    def MVDB_DELAY_NUM(self):
+        return self.get_env_variable('MVDB_DELAY_NUM', 1000, int, [int])
+
     def get_all_configs(self):
         return {
             'MVDB_LOG_LEVEL': self.MVDB_LOG_LEVEL,
