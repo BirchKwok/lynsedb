@@ -1,6 +1,7 @@
 import pytest
 
 from min_vec.api.http_api import app
+from min_vec.api.client_api import pack_data
 
 
 @pytest.fixture()
@@ -40,23 +41,30 @@ def test_require_collection(test_client):
 
 def test_add_item(test_client):
     url = 'http://localhost:7637/add_item'
+
+    vector = [0.1, 0.2, 0.3, 0.4]
     data = {
         "collection_name": "example_collection",
         "item": {
-            "vector": [0.1, 0.2, 0.3, 0.4],
+            "vector": vector,
             "id": 1,
             "field": {
                 "name": "example",
                 "age": 18
-            }
+            },
         }
     }
-    response = test_client.post(url, json=data)
+
+    header = {
+        "Content-Type": "application/msgpack"
+    }
+
+    response = test_client.post(url, data=pack_data(data), headers=header)
     print(response.json)
     assert response.status_code == 200
     assert response.json == {"status": "success", "params":
         {"collection_name": "example_collection", "item":
-            {"vector": [0.1, 0.2, 0.3, 0.4], "id": 1, "field": {"name": "example", "age": 18}}}}
+            {"id": 1}}}
 
     url = 'http://localhost:7637/commit'
     data = {
@@ -69,24 +77,26 @@ def test_add_item(test_client):
 
 def test_bulk_add_items(test_client):
     url = 'http://localhost:7637/bulk_add_items'
+    v1 = [0.1, 0.2, 0.3, 0.4]
+    v2 = [0.2, 0.3, 0.4, 0.5]
     data = {
         "collection_name": "example_collection",
         "items": [
             {
-                "vector": [0.1, 0.4, 0.3, 0.6],
+                "vector": v1,
                 "id": 2,
                 "field": {
                     "name": "example2",
                     "age": 18
-                }
+                },
             },
             {
-                "vector": [0.2, 0.3, 0.4, 0.5],
+                "vector": v2,
                 "id": 3,
                 "field": {
                     "name": "example3",
                     "age": 19
-                }
+                },
             }
         ]
     }

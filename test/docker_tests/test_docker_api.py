@@ -4,7 +4,7 @@ import numpy as np
 from test import MinVectorDB
 from test import MinVectorDBHTTPClient, Collection
 
-root_url = 'http://localhost:5403'
+root_url = 'http://localhost:7637'
 
 
 def test_initialization():

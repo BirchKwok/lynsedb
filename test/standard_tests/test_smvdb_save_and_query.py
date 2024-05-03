@@ -1,6 +1,8 @@
 import shutil
 from pathlib import Path
 
+import pytest
+
 from test import StandaloneMinVectorDB, Filter, FieldCondition, MatchField, IDCondition, MatchID
 import numpy as np
 
@@ -488,3 +490,38 @@ def test_refit(capsys):
     assert db._matrix_serializer.ann_model.fitted
 
     db.delete()
+
+
+def test_transactions():
+    db = StandaloneMinVectorDB(dim=1024, database_path='test_min_vec', chunk_size=10000, index_mode='IVF-FLAT')
+
+    def get_test_vectors(shape):
+        for i in range(shape[0]):
+            yield np.random.random(shape[1])
+
+    with db.insert_session():
+        id = 0
+        vectors = []
+        for t in get_test_vectors((100000, 1024)):
+            vectors.append((t, id))
+            id += 1
+
+        db.bulk_add_items(vectors, batch_size=1000)
+
+    assert db.shape == (100000, 1024)
+
+    with pytest.raises(ValueError):
+        with db.insert_session():
+            id = 0
+            vectors = []
+            for t in get_test_vectors((100000, 1024)):
+                vectors.append((t, id))
+                id += 1
+            db.bulk_add_items(vectors, batch_size=1000)
+
+    assert db.shape == (100000, 1024)
+
+    with pytest.raises(ValueError):
+        db.bulk_add_items(vectors, batch_size=1000)
+
+    assert db.shape == (100000, 1024)
