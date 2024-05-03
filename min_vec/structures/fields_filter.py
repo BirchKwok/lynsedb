@@ -1,12 +1,9 @@
 """fields_filter.py: this file contains the FieldsMapper class. It is used to map the fields of the data."""
-import operator
-
 import gzip
 import random
 from pathlib import Path
 
 import msgpack
-import cloudpickle
 import portalocker
 
 
@@ -55,36 +52,44 @@ class SkipList:
                 new_node.forward[i] = update[i].forward[i]
                 update[i].forward[i] = new_node
 
-    def search(self, key):
-        """Search for a key in the skip list and return the node."""
+    def serialize(self):
+        """ Serialize the skip list into a list of tuples for each node. """
+        nodes = []
+        current = self.header.forward[0]
+        while current:
+            nodes.append((current.key, current.data, [f.key if f else None for f in current.forward]))
+            current = current.forward[0]
+        return nodes
+
+    def deserialize(self, nodes):
+        """ Deserialize from a list of node data to rebuild the skip list. """
+        self.header = SkipListNode(-1, self.max_level)
+        self.level = 0
+        for key, data, forwards in reversed(nodes):
+            new_node = SkipListNode(key, len(forwards) - 1, data)
+            for i in range(len(forwards)):
+                new_node.forward[i] = self.find_node(forwards[i]) if forwards[i] is not None else None
+            self.insert_node_at_level(new_node, len(forwards) - 1)
+
+    def find_node(self, key):
         current = self.header
         for i in range(self.level, -1, -1):
             while current.forward[i] and current.forward[i].key < key:
                 current = current.forward[i]
-        current = current.forward[0]
-        if current and current.key == key:
-            return current.data
-        return None
+        return current.forward[0] if current.forward[0] and current.forward[0].key == key else None
 
-    def delete(self, key):
-        """Delete a node by key from the skip list."""
-        update = [None] * (self.max_level + 1)
+    def insert_node_at_level(self, node, level):
         current = self.header
-
-        for i in range(self.level, -1, -1):
-            while current.forward[i] and current.forward[i].key < key:
+        update = [None] * (level + 1)
+        for i in range(level, -1, -1):
+            while current.forward[i] and current.forward[i].key < node.key:
                 current = current.forward[i]
             update[i] = current
-
-        current = current.forward[0]
-        if current and current.key == key:
-            for i in range(self.level + 1):
-                if update[i].forward[i] != current:
-                    break
-                update[i].forward[i] = current.forward[i]
-
-            while self.level > 0 and self.header.forward[self.level] is None:
-                self.level -= 1
+        for i in range(level + 1):
+            node.forward[i] = update[i].forward[i]
+            update[i].forward[i] = node
+        if level > self.level:
+            self.level = level
 
 
 class FieldIndex:
@@ -124,10 +129,21 @@ class FieldIndex:
             self.id_map[id] = internal_id
         return ids
 
+    def concat(self, another_field_index):
+        for internal_id, data in another_field_index.data_store.items():
+            data_hash = self._hash_data(data)
+            if data_hash not in self.data_to_internal_id:
+                self.data_store[internal_id] = data
+                self.data_to_internal_id[data_hash] = internal_id
+                self.index.insert(internal_id, data)
+            for ext_id, int_id in another_field_index.id_map.items():
+                if ext_id not in self.id_map:
+                    self.id_map[ext_id] = int_id
+
     def retrieve(self, id):
         internal_id = self.id_map.get(id)
         if internal_id is not None:
-            return (id, self.data_store[internal_id])
+            return id, self.data_store[internal_id]
         return None
 
     def query(self, filter_instance, filter_ids=None, return_ids_only=True):
@@ -153,9 +169,9 @@ class FieldIndex:
             with gzip.open(filepath, 'wb') as f:
                 portalocker.lock(f, portalocker.LOCK_EX)
                 f.write(msgpack.packb([self.data_store, self.id_map, self.last_internal_id, self.data_to_internal_id]))
-            with gzip.open(Path(filepath).parent / (Path(filepath).stem + '-obj.mvdb'), 'wb') as f:
+            with gzip.open(Path(filepath).with_suffix('.sl'), 'wb') as f:
                 portalocker.lock(f, portalocker.LOCK_EX)
-                cloudpickle.dump(self.index, f)
+                f.write(msgpack.packb(self.index.serialize()))
         except IOError as e:
             print(f"Error saving to file {filepath}: {e}")
 
@@ -165,8 +181,9 @@ class FieldIndex:
             with gzip.open(filepath, 'rb') as f:
                 self.data_store, self.id_map, self.last_internal_id, self.data_to_internal_id = msgpack.unpackb(
                     f.read(), strict_map_key=False, raw=False, use_list=False)
-            with gzip.open(Path(filepath).parent / (Path(filepath).stem + '-obj.mvdb'), 'rb') as f:
-                self.index = cloudpickle.load(f)
+            with gzip.open(Path(filepath).with_suffix('.sl'), 'rb') as f:
+                nodes = msgpack.unpackb(f.read(), raw=False)
+                self.index.deserialize(nodes)
 
             return self
 
