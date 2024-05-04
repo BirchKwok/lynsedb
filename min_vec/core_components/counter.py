@@ -1,13 +1,13 @@
-import threading
+from min_vec.core_components.cross_lock import ThreadLock
 
 
-class ThreadSafeCounter:
+class SafeCounter:
     def __init__(self):
         """
         Initialize the thread-safe counter.
         """
         self.value = 0
-        self.lock = threading.RLock()
+        self.lock = ThreadLock()
 
     def increment(self):
         with self.lock:
