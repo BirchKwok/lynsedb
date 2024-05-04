@@ -8,6 +8,7 @@ from spinesUtils.asserts import raise_if, ParameterTypeAssert
 from spinesUtils.timer import Timer
 
 from min_vec.configs.parameters_validator import ParametersValidator
+from min_vec.core_components.cross_lock import ThreadLock
 from min_vec.execution_layer.query import Query
 from min_vec.execution_layer.matrix_serializer import MatrixSerializer
 from min_vec.utils.utils import unavailable_if_deleted
@@ -134,16 +135,7 @@ class StandaloneMinVectorDB:
 
             self.most_recent_query_report = {}
 
-    def get_max_id(self):
-        """
-        Get the maximum ID in the database.
-
-        Returns:
-            int: The maximum ID in the database.
-        """
-        if self._matrix_serializer.IS_DELETED or self._matrix_serializer.id_filter is None:
-            return
-        return self._matrix_serializer.id_filter.find_max_value()
+        self.lock = ThreadLock()
 
     @unavailable_if_deleted
     def add_item(self, vector: Union[np.ndarray, list], id: int, *, field: dict = None) -> int:
