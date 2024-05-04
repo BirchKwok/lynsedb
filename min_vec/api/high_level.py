@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Union
 
 from spinesUtils.asserts import ParameterTypeAssert
-import portalocker
 
 from min_vec.api.low_level import StandaloneMinVectorDB
 from min_vec.api import logger
@@ -28,7 +27,6 @@ class _Register:
         """
         if not (self.root_path / 'collections.json').exists():
             with open(self.root_path / 'collections.json', 'w') as f:
-                portalocker.lock(f, portalocker.LOCK_EX)  # add lock
                 json.dump({collection: kwargs}, f)
         else:
             collections = self.get_collections_details()
@@ -37,7 +35,6 @@ class _Register:
                 collections[collection] = kwargs
 
                 with open(self.root_path / 'collections.json', 'w') as f:
-                    portalocker.lock(f, portalocker.LOCK_EX)  # add lock
                     json.dump(collections, f)
 
     def deregister_collection(self, collection: str):
@@ -56,7 +53,6 @@ class _Register:
             del collections[collection]
 
             with open(self.root_path / 'collections.json', 'w') as f:
-                portalocker.lock(f, portalocker.LOCK_EX)  # add lock
                 json.dump(collections, f)
 
     def get_collections_details(self) -> dict:
@@ -77,7 +73,6 @@ class _Register:
             if not (self.root_path / collection).exists():
                 del collections[collection]
                 with open(self.root_path / 'collections.json', 'w') as f:
-                    portalocker.lock(f, portalocker.LOCK_EX)  # add lock
                     json.dump(collections, f)
 
         return collections
@@ -113,6 +108,8 @@ class MinVectorDBLocalClient:
         if cls._instance is None:
             cls._instance = super(MinVectorDBLocalClient, cls).__new__(cls)
             cls._instance._init(root_path)
+
+            cls._last_root_path = root_path
 
         return cls._instance
 
@@ -201,7 +198,8 @@ class MinVectorDBLocalClient:
         self._register.register_collection(
             collection, dim=dim, database_path=collection_path.as_posix(), chunk_size=chunk_size, dtypes=dtypes,
             n_clusters=n_clusters, distance=distance, index_mode=index_mode, use_cache=use_cache,
-            scaler_bits=scaler_bits, n_threads=n_threads, warm_up=warm_up, initialize_as_collection=True)
+            scaler_bits=scaler_bits, n_threads=n_threads, warm_up=warm_up, initialize_as_collection=True
+        )
 
         return self._collections[collection]
 
