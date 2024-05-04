@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import msgpack
-import portalocker
 import yaml
 
 from flask import Flask, request, jsonify, Response
@@ -16,8 +15,6 @@ from waitress import serve
 from min_vec.api.high_level import MinVectorDBLocalClient
 from min_vec.core_components.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
 from min_vec.core_components.limited_dict import LimitedDict
-
-os.environ['MVDB_LOG_LEVEL'] = 'ERROR'
 
 app = Flask(__name__)
 
@@ -49,7 +46,6 @@ def generate_config(root_path: str = default_root_path, config_path: Path = conf
         config = {'root_path': root_path}
 
         with open(config_path, 'w') as file:
-            portalocker.lock(file, portalocker.LOCK_EX)
             yaml.dump(config, file)
     else:
         with open(config_path, 'r') as file:
@@ -58,7 +54,6 @@ def generate_config(root_path: str = default_root_path, config_path: Path = conf
         if 'root_path' not in config or config['root_path'] != root_path:
             config['root_path'] = root_path
             with open(config_path, 'w') as file:
-                portalocker.lock(file, portalocker.LOCK_EX)
                 yaml.dump(config, file)
 
     return config_path, root_path, config
@@ -261,7 +256,7 @@ def process_add_item(data):
     try:
         my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         collection = my_vec_db.get_collection(data['collection_name'])
-        id = collection.add_item(vector=data['item']['vector'], id=data['item'].get('id', None),
+        id = collection.add_item(vector=data['item']['vector'], id=data['item']['id'],
                                  field=data['item'].get('field', None))
         return {'status': 'success', 'id': id}
     except Exception as e:
@@ -388,20 +383,16 @@ def commit():
 
     tasks_queue: queue.Queue = data_dict[data['collection_name']]
 
-    if tasks_queue.empty():
-        return jsonify({'error': 'No items to commit'}), 400
+    if not tasks_queue.empty():
+        tasks = []
+        while not tasks_queue.empty():
+            tasks.append(tasks_queue.get())
 
-    tasks = []
-    while not tasks_queue.empty():
-        tasks.append(tasks_queue.get())
+        for future in as_completed(tasks):
+            result = future.result()
+            if result.get('status') == 'error':
+                return jsonify(result), 500
 
-    # 等待所有已启动的任务完成
-    for future in as_completed(tasks):
-        result = future.result()  # 获取任务结果，可以用来处理错误或记录日志
-        if result.get('status') == 'error':
-            return jsonify(result), 500
-
-    # 所有任务完成后，提交数据库更改
     try:
         my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
         collection = my_vec_db.get_collection(data['collection_name'])
@@ -620,7 +611,6 @@ def update_commit_msg():
             commit_msg = {data['collection_name']: data}
 
         with open(config['root_path'] + '/commit_msg.json', 'w') as file:
-            portalocker.lock(file, portalocker.LOCK_EX)
             json.dump(commit_msg, file)
 
         return Response(json.dumps({'status': 'success', 'params': {
@@ -650,7 +640,7 @@ def get_commit_msg():
                 commit_msg = json.load(file)
                 commit_msg = commit_msg.get(data['collection_name'], None)
         else:
-            commit_msg = None
+            commit_msg = 'No commit message found for this collection'
 
         return Response(json.dumps({'status': 'success', 'params': {
             'collection_name': data['collection_name'], 'commit_msg': commit_msg
