@@ -4,10 +4,10 @@ import shutil
 from typing import Union
 
 import numpy as np
-import portalocker
 from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
 
+from min_vec.core_components.cross_lock import ThreadLock
 from min_vec.core_components.id_checker import IDChecker
 from min_vec.utils.utils import io_checker
 from min_vec.configs.config import config
@@ -16,8 +16,8 @@ from min_vec.core_components.scaler import ScalarQuantization
 from min_vec.core_components.fields_filter import FieldIndex
 from min_vec.storage_layer.storage import PersistentFileStorage, TemporaryFileStorage
 from min_vec.execution_layer.cluster_worker import ClusterWorker
-from min_vec.core_components.counter import ThreadSafeCounter
-from min_vec.core_components.thread_safe_list import ThreadSafeList
+from min_vec.core_components.counter import SafeCounter
+from min_vec.core_components.thread_safe_list import SafeList
 
 
 class MatrixSerializer:
@@ -84,7 +84,7 @@ class MatrixSerializer:
         self._filter_path = self.collections_path_parent / 'id_filter.mvdb'
 
         # set collection path
-        self.collections_path = self.collections_path_parent  # / Path(collection_path).name
+        self.collections_path = self.collections_path_parent
 
         # set scalar quantization bits
         self.scaler_bits = scaler_bits if scaler_bits is not None else None
@@ -98,13 +98,13 @@ class MatrixSerializer:
                                                     warm_up=warm_up)
         self.tempfile_storage_worker = TemporaryFileStorage(self.chunk_size)
 
-        self.counter = ThreadSafeCounter()
+        self.counter = SafeCounter()
 
         # ============== Loading or create one empty collection ==============
         # first of all, initialize a collection
-        self.database = ThreadSafeList()
-        self.indices = ThreadSafeList()
-        self.fields = ThreadSafeList()
+        self.database = SafeList()
+        self.indices = SafeList()
+        self.fields = SafeList()
 
         self._initialize_fields_index()
         self._initialize_ann_model()
@@ -123,6 +123,8 @@ class MatrixSerializer:
             # so the clustered datasets will also be traversed during querying.
             self.logger.warning('The index mode is FLAT, but the cluster dataset is not empty, '
                                 'so the clustered datasets will also be traversed during querying.')
+
+        self.lock = ThreadLock()
 
     def _initialize_parent_path(self, collections_path):
         """make directory if not exist"""
@@ -182,9 +184,9 @@ class MatrixSerializer:
 
     def reset_collection(self):
         """Reset the database to its initial state with zeros."""
-        self.database = ThreadSafeList()
-        self.indices = ThreadSafeList()
-        self.fields = ThreadSafeList()
+        self.database = SafeList()
+        self.indices = SafeList()
+        self.fields = SafeList()
 
     @io_checker
     def dataloader(self, filename):
@@ -285,107 +287,107 @@ class MatrixSerializer:
         Save the collection, ensuring that all data is written to disk.
         This method is required to be called after saving vectors to query them.
         """
-        if not self.COMMIT_FLAG:
-            try:
-                self.logger.debug('Saving chunk immediately...')
-                self.save_chunk_immediately()
-
+        with self.lock:
+            if not self.COMMIT_FLAG:
                 try:
-                    self.logger.debug('Concatenating id filter...')
-                    # concat filter
-                    self.id_filter.concat(self.temp_id_filter)
+                    self.logger.debug('Saving chunk immediately...')
+                    self.save_chunk_immediately()
+
+                    try:
+                        self.logger.debug('Concatenating id filter...')
+                        # concat filter
+                        self.id_filter.concat(self.temp_id_filter)
+                    except Exception as e:
+                        self.logger.error(f'Error occurred while concatenating the filter: {e}, rollback...')
+                        self.rollback()
+                        raise e
+
+                    self.logger.debug('Writing chunk to storage...')
+                    for data, indices in self.tempfile_storage_worker.get_file_iterator():
+                        self.storage_worker.write(data, indices, write_type='chunk', normalize=True)
+
+                    self.tempfile_storage_worker.reincarnate()
+
                 except Exception as e:
-                    self.logger.error(f'Error occurred while concatenating the filter: {e}, rollback...')
+                    self.logger.error(f'Error occurred while saving the collection: {e}, rollback...')
                     self.rollback()
                     raise e
 
-                self.logger.debug('Writing chunk to storage...')
-                for data, indices in self.tempfile_storage_worker.get_file_iterator():
-                    self.storage_worker.write(data, indices, write_type='chunk', normalize=True)
+                try:
+                    self.logger.debug('Concatenating fields index...')
+                    self.fields_index.concat(self.temp_fields_index)
+                except Exception as e:
+                    self.logger.error(f'Error occurred while concatenating the fields index: {e}, rollback...')
+                    self.rollback()
+                    raise e
 
-                self.tempfile_storage_worker.reincarnate()
+                try:
+                    self.logger.debug('Saving id filter...')
+                    self.id_filter.to_file(self._filter_path)
+                except Exception as e:
+                    self.logger.error(f'Error occurred while saving the filter: {e}, rollback...')
+                    self.rollback()
+                    raise e
 
-            except Exception as e:
-                self.logger.error(f'Error occurred while saving the collection: {e}, rollback...')
-                self.rollback()
-                raise e
+                try:
+                    # save fields index
+                    self.logger.debug('Saving fields index...')
+                    self.fields_index.save(self.collections_path_parent / 'fields_index.mvdb')
+                except Exception as e:
+                    self.logger.error(f'Error occurred while saving the collection: {e}, rollback...')
+                    self.rollback()
+                    raise e
 
-            try:
-                self.logger.debug('Concatenating fields index...')
-                self.fields_index.concat(self.temp_fields_index)
-            except Exception as e:
-                self.logger.error(f'Error occurred while concatenating the fields index: {e}, rollback...')
-                self.rollback()
-                raise e
+                chunk_partition_size = self.storage_worker.get_shape(read_type='chunk')[0]
+                cluster_partition_size = self.storage_worker.get_shape(read_type='cluster')[0]
 
-            try:
-                self.logger.debug('Saving id filter...')
-                self.id_filter.to_file(self._filter_path)
-            except Exception as e:
-                self.logger.error(f'Error occurred while saving the filter: {e}, rollback...')
-                self.rollback()
-                raise e
+                all_partition_size = self.storage_worker.get_shape(read_type='all')[0]
 
-            try:
-                # save fields index
-                self.logger.debug('Saving fields index...')
-                self.fields_index.save(self.collections_path_parent / 'fields_index.mvdb')
-            except Exception as e:
-                self.logger.error(f'Error occurred while saving the collection: {e}, rollback...')
-                self.rollback()
-                raise e
+                if all_partition_size >= 100000 and not (self.collections_path_parent / 'scaled_status.json').exists():
+                    # only run once
+                    self.storage_worker.update_quantizer(self.scaler)
+                    filenames = self.storage_worker.get_all_files(read_type='chunk')
+                    if filenames:
+                        for filename in filenames:
+                            self.storage_worker.write(filename=filename)
 
-            chunk_partition_size = self.storage_worker.get_shape(read_type='chunk')[0]
-            cluster_partition_size = self.storage_worker.get_shape(read_type='cluster')[0]
+                    with open(self.collections_path_parent / 'scaled_status.json', 'w') as f:
+                        import json
+                        json.dump({'status': True}, f)
 
-            all_partition_size = self.storage_worker.get_shape(read_type='all')[0]
+                if (
+                        cluster_partition_size == 0 and (chunk_partition_size >= 100000 and self.index_mode != 'FLAT')
+                ) or (
+                        cluster_partition_size > 0 and self.index_mode != 'FLAT'
+                ):
+                    self.logger.info('Building index...')
 
-            if all_partition_size >= 100000 and not (self.collections_path_parent / 'scaled_status.json').exists():
-                # only run once
-                self.storage_worker.update_quantizer(self.scaler)
-                filenames = self.storage_worker.get_all_files(read_type='chunk')
-                if filenames:
-                    for filename in filenames:
-                        self.storage_worker.write(filename=filename)
-
-                with open(self.collections_path_parent / 'scaled_status.json', 'w') as f:
-                    portalocker.lock(f, portalocker.LOCK_EX)
-                    import json
-                    json.dump({'status': True}, f)
-
-            if (
-                    cluster_partition_size == 0 and (chunk_partition_size >= 100000 and self.index_mode != 'FLAT')
-            ) or (
-                    cluster_partition_size > 0 and self.index_mode != 'FLAT'
-            ):
-                self.logger.info('Building index...')
-
-                if cluster_partition_size == 0 and (chunk_partition_size >= 100000 and self.index_mode != 'FLAT'):
-                    self.logger.info('Start to fit the index for cluster...')
-                    self.cluster_worker.build_index(refit=True)
-                else:
-                    self.counter.add(chunk_partition_size)
-                    if self.counter.get_value() >= 100000:
-                        self.logger.info('Refitting the index for cluster...')
+                    if cluster_partition_size == 0 and (chunk_partition_size >= 100000 and self.index_mode != 'FLAT'):
+                        self.logger.info('Start to fit the index for cluster...')
                         self.cluster_worker.build_index(refit=True)
-                        self.counter.reset()
                     else:
-                        self.logger.info('Incrementally building the index for cluster...')
-                        self.cluster_worker.build_index(refit=False)
+                        self.counter.add(chunk_partition_size)
+                        if self.counter.get_value() >= 100000:
+                            self.logger.info('Refitting the index for cluster...')
+                            self.cluster_worker.build_index(refit=True)
+                            self.counter.reset()
+                        else:
+                            self.logger.info('Incrementally building the index for cluster...')
+                            self.cluster_worker.build_index(refit=False)
 
-                # save ivf index and k-means model
-                self.logger.debug('Saving ann model...')
-                self.ann_model.save(self.collections_path_parent / 'ann_model.mvdb')
+                    # save ivf index and k-means model
+                    self.logger.debug('Saving ann model...')
+                    self.ann_model.save(self.collections_path_parent / 'ann_model.mvdb')
 
-            self.reset_collection()
+                self.reset_collection()
 
-            if self.scaler_bits is not None:
-                if self.scaler.fitted:
-                    self.scaler.save(self.collections_path_parent / 'sq_model.mvdb')
+                if self.scaler_bits is not None:
+                    if self.scaler.fitted:
+                        self.scaler.save(self.collections_path_parent / 'sq_model.mvdb')
 
-            self.COMMIT_FLAG = True
+                self.COMMIT_FLAG = True
 
-            self.last_commit_time = datetime.now()
+                self.last_commit_time = datetime.now()
 
     def _process_vector_item(self, vector, index, field):
         if index in self.id_filter or index in self.temp_id_filter:
@@ -415,46 +417,47 @@ class MatrixSerializer:
         raise_if(ValueError, not isinstance(vectors, (tuple, list)),
                  f'vectors must be tuple or list, got {type(vectors)}')
 
-        new_ids = []
+        with self.lock:
+            new_ids = []
 
-        for i in range(0, len(vectors), self.chunk_size):
-            batch = vectors[i:i + self.chunk_size]
+            for i in range(0, len(vectors), self.chunk_size):
+                batch = vectors[i:i + self.chunk_size]
 
-            for sample in batch:
-                sample_len = len(sample)
+                for sample in batch:
+                    sample_len = len(sample)
 
-                if sample_len == 3:
-                    vector, index, field = sample
-                elif sample_len == 2:
-                    vector, index = sample
-                    field = {}
-                else:
-                    raise ValueError('Each sample must be a tuple of (vector, id, field[optional]).')
+                    if sample_len == 3:
+                        vector, index, field = sample
+                    elif sample_len == 2:
+                        vector, index = sample
+                        field = {}
+                    else:
+                        raise ValueError('Each sample must be a tuple of (vector, id, field[optional]).')
 
-                raise_if(TypeError, not (isinstance(field, dict) or field is None),
-                         f'field must be dict or None, got {type(field)}')
+                    raise_if(TypeError, not (isinstance(field, dict) or field is None),
+                             f'field must be dict or None, got {type(field)}')
 
-                if isinstance(vector, list):
-                    vector = np.array(vector)
+                    if isinstance(vector, list):
+                        vector = np.array(vector)
 
-                raise_if(ValueError, (not isinstance(index, int)) or index < 0,
-                         f'id must be integer and greater than 0, got {index}')
+                    raise_if(ValueError, (not isinstance(index, int)) or index < 0,
+                             f'id must be integer and greater than 0, got {index}')
 
-                field = {} if field is None else field
-                vector, index, field = self._process_vector_item(vector, index, field)
+                    field = {} if field is None else field
+                    vector, index, field = self._process_vector_item(vector, index, field)
 
-                self.database.append(vector)
-                self.indices.append(index)
-                new_ids.append(index)
-                self.fields.append(field)
-                self.temp_id_filter.add(index)
+                    self.database.append(vector)
+                    self.indices.append(index)
+                    new_ids.append(index)
+                    self.fields.append(field)
+                    self.temp_id_filter.add(index)
 
-            self.auto_save_chunk()
+                self.auto_save_chunk()
 
-        if self.COMMIT_FLAG:
-            self.COMMIT_FLAG = False
+            if self.COMMIT_FLAG:
+                self.COMMIT_FLAG = False
 
-        return new_ids
+            return new_ids
 
     def add_item(self, vector, index: int, *, field: dict = None) -> int:
         """
@@ -481,46 +484,49 @@ class MatrixSerializer:
         raise_if(ValueError, (not isinstance(index, int)) or index < 0,
                  f'id must be integer and greater than 0, got {index}')
 
-        vector, index, field = self._process_vector_item(vector, index, field)
+        with self.lock:
+            vector, index, field = self._process_vector_item(vector, index, field)
 
-        # Add the id to then filter.
-        self.temp_id_filter.add(index)
+            # Add the id to then filter.
+            self.temp_id_filter.add(index)
 
-        self.database.append(vector)
-        self.indices.append(index)
-        self.fields.append(field)
+            self.database.append(vector)
+            self.indices.append(index)
+            self.fields.append(field)
 
-        self.auto_save_chunk()
+            self.auto_save_chunk()
 
-        if self.COMMIT_FLAG:
-            self.COMMIT_FLAG = False
+            if self.COMMIT_FLAG:
+                self.COMMIT_FLAG = False
 
-        return index
+            return index
 
     def delete(self):
         """Delete collection."""
-        if not self.collections_path_parent.exists():
-            return None
+        with self.lock:
+            if not self.collections_path_parent.exists():
+                return None
 
-        try:
-            shutil.rmtree(self.collections_path_parent)
-        except FileNotFoundError:
-            pass
+            try:
+                shutil.rmtree(self.collections_path_parent)
+            except FileNotFoundError:
+                pass
 
-        self.IS_DELETED = True
-        self.reset_collection()
+            self.IS_DELETED = True
+            self.reset_collection()
 
-        # reinitialize
-        if self.scaler_bits is not None:
-            self._initialize_scalar_quantization()
+            # reinitialize
+            if self.scaler_bits is not None:
+                self._initialize_scalar_quantization()
 
-        self._initialize_fields_index()
-        self._initialize_ann_model()
-        self._initialize_id_checker()
+            self._initialize_fields_index()
+            self._initialize_ann_model()
+            self._initialize_id_checker()
 
-        # clear cache
-        self.storage_worker.clear_cache()
+            # clear cache
+            self.storage_worker.clear_cache()
 
     @property
     def shape(self):
-        return tuple(self.storage_worker.get_shape(read_type='all'))
+        with self.lock:
+            return tuple(self.storage_worker.get_shape(read_type='all'))
