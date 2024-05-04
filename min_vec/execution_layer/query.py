@@ -7,7 +7,7 @@ from min_vec.configs.config import config
 from min_vec.computational_layer.engines import cosine_distance
 from min_vec.execution_layer.matrix_serializer import MatrixSerializer
 from min_vec.core_components.filter import IDCondition, Filter
-from min_vec.utils.utils import QueryVectorCache
+from min_vec.utils.utils import QueryResultsCache
 from min_vec.core_components.limited_sort import LimitedSorted
 
 
@@ -119,7 +119,7 @@ class Query:
 
         return index_chunk, scores
 
-    @QueryVectorCache(config.MVDB_QUERY_CACHE_SIZE)
+    @QueryResultsCache(config.MVDB_QUERY_CACHE_SIZE)
     def query(self, vector, k=12, query_filter=None, distance=None, **kwargs):
         """
         Query the database for the vectors most similar to the given vector in batches.
