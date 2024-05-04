@@ -1,4 +1,3 @@
-import portalocker
 from pyroaring import BitMap
 
 
@@ -32,7 +31,6 @@ class IDChecker:
 
     def to_file(self, filepath):
         with open(filepath, 'wb') as file:
-            portalocker.lock(file, portalocker.LOCK_EX)
             file.write(self.ids.serialize())
 
     def from_file(self, filepath):
