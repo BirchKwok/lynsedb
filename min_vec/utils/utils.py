@@ -33,7 +33,7 @@ def io_checker(func):
     return wrapper
 
 
-class QueryVectorCache:
+class QueryResultsCache:
     """A decorator that caches the results of a function call with the same arguments.
         Only use for DatabaseQuery.query function.
     """
