@@ -10,8 +10,8 @@ from tqdm import trange
 
 from min_vec.core_components.filter import Filter
 from min_vec.api import config
-from min_vec.core_components.thread_safe_list import ThreadSafeList
-from min_vec.utils.utils import QueryVectorCache
+from min_vec.core_components.thread_safe_list import SafeList
+from min_vec.utils.utils import QueryResultsCache
 
 
 class ExecutionError(Exception):
@@ -110,7 +110,7 @@ class Collection:
 
         self.COMMIT_FLAG = False
 
-        self._mesosphere_list = ThreadSafeList()
+        self._mesosphere_list = SafeList()
 
     def _get_commit_msg(self):
         """
@@ -126,6 +126,7 @@ class Collection:
         data = {"collection_name": self._collection_name}
 
         response = self._session.post(url, json=data)
+
         rj = response.json()
         if response.status_code == 200:
             if rj['params']['commit_msg'] is None:
@@ -247,7 +248,7 @@ class Collection:
 
                 if response.status_code == 200:
                     self.COMMIT_FLAG = False
-                    self._mesosphere_list = ThreadSafeList()
+                    self._mesosphere_list = self._mesosphere_list[delay_num:]
                 else:
                     raise_error_response(response)
 
@@ -343,6 +344,9 @@ class Collection:
 
         return ids
 
+    def _rollback(self):
+        self._mesosphere_list = SafeList()
+
     def commit(self):
         """
         Commit the changes in the collection.
@@ -359,9 +363,11 @@ class Collection:
 
         if self._mesosphere_list:
             data["items"] = self._mesosphere_list
-            self._mesosphere_list = ThreadSafeList()
 
         response = self._session.post(url, content=pack_data(data), headers={'Content-Type': 'application/msgpack'})
+
+        if self._mesosphere_list:
+            self._mesosphere_list = SafeList()
 
         if response.status_code == 200:
             self._update_commit_msg(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -378,7 +384,7 @@ class Collection:
 
         return DatabaseSession(self)
 
-    @QueryVectorCache(config.MVDB_QUERY_CACHE_SIZE)
+    @QueryResultsCache(config.MVDB_QUERY_CACHE_SIZE)
     def _query(self, vector: Union[list[float], np.ndarray], k: int = 10, distance: str = 'cosine',
                query_filter: Union[Filter, None] = None, **kwargs):
         """
