@@ -2,7 +2,6 @@
 import numpy as np
 import numexpr as ne
 import cloudpickle
-import portalocker
 
 from spinesUtils.asserts import raise_if
 
@@ -91,7 +90,6 @@ class ScalarQuantization:
         raise_if(ValueError, not self.fitted, 'The model must be fitted before saving.')
         try:
             with open(filepath, 'wb') as file:
-                portalocker.lock(file, portalocker.LOCK_EX)
                 cloudpickle.dump(self, file)
         except IOError as e:
             print(f"Error saving model: {e}")
