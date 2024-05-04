@@ -48,7 +48,7 @@ class Config:
 
     @property
     def MVDB_LOG_WITH_TIME(self):
-        return self.get_env_variable('MVDB_LOG_WITH_TIME', False, bool, [bool])
+        return self.get_env_variable('MVDB_LOG_WITH_TIME', True, bool, [bool])
 
     @property
     def MVDB_KMEANS_EPOCHS(self):
