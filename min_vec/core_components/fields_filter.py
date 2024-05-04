@@ -4,7 +4,6 @@ import random
 from pathlib import Path
 
 import msgpack
-import portalocker
 
 
 class SkipListNode:
@@ -167,10 +166,8 @@ class FieldIndex:
         """Save all data to a file with gzip compression."""
         try:
             with gzip.open(filepath, 'wb') as f:
-                portalocker.lock(f, portalocker.LOCK_EX)
                 f.write(msgpack.packb([self.data_store, self.id_map, self.last_internal_id, self.data_to_internal_id]))
             with gzip.open(Path(filepath).with_suffix('.sl'), 'wb') as f:
-                portalocker.lock(f, portalocker.LOCK_EX)
                 f.write(msgpack.packb(self.index.serialize()))
         except IOError as e:
             print(f"Error saving to file {filepath}: {e}")
