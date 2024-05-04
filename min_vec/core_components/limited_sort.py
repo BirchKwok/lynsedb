@@ -1,7 +1,7 @@
-import threading
 import numpy as np
 
 from min_vec.computational_layer.engines import cosine_distance, argsort_topk, euclidean_distance
+from min_vec.core_components.cross_lock import ThreadLock
 
 
 class LimitedSorted:
@@ -17,7 +17,7 @@ class LimitedSorted:
             chunk_size (int): The maximum number of vectors to store.
                 .. versionadded:: 0.2.7
         """
-        self.lock = threading.RLock()
+        self.lock = ThreadLock()
         self.dim = dim
         self.n = None
         self.scaler = scaler

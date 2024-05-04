@@ -1,12 +1,13 @@
 from collections import OrderedDict
-import threading
+
+from min_vec.core_components.cross_lock import ThreadLock
 
 
 class LimitedDict:
     def __init__(self, max_size):
         self.max_size = max_size
         self.cache = OrderedDict()
-        self.lock = threading.RLock()
+        self.lock = ThreadLock()
 
     def __setitem__(self, key, value):
         with self.lock:
@@ -30,10 +31,9 @@ class LimitedDict:
         return len(self.cache) == self.max_size
 
     def get(self, key, default=None):
-        with self.lock:
-            if key not in self.cache:
-                return default
-            return self.__getitem__(key)
+        if key not in self.cache:
+            return default
+        return self.__getitem__(key)
 
     def clear(self):
         with self.lock:
