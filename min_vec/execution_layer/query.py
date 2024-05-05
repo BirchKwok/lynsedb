@@ -96,7 +96,7 @@ class Query:
                     filter_ids=None,
                     return_ids_only=True
                 )
-                subset_indices = list(set(subset_indices).union(set(_fids)))
+                subset_indices = list(set(subset_indices) & set(_fids))
             else:
                 subset_indices = list(set(subset_indices))
 
