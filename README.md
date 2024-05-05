@@ -10,7 +10,7 @@
   </p>
 </div>
 
-⚡ **Serverless, simple parameters, simple API.**
+⚡ **Server-optional, simple parameters, simple API.**
 
 ⚡ **Fast, memory-efficient, easily scales to millions of vectors.**
 
@@ -23,17 +23,19 @@
 > **WARNING**: MinVectorDB is actively being updated, and API backward compatibility is not guaranteed. You should use version numbers as a strong constraint during deployment to avoid unnecessary feature conflicts and errors.
 > **Although our goal is to enable brute force search or inverted indexing on billion-scale vectors, we currently still recommend using it on a scale of millions of vectors or less for the best experience.**
 
-*MinVectorDB* is a vector database implemented purely in Python, designed to be lightweight, serverless, and easy to deploy locally. It offers straightforward and clear Python APIs, aiming to lower the entry barrier for using vector databases. In response to user needs and to enhance its practicality, we are planning to introduce new features, including but not limited to:
+*MinVectorDB* is a vector database implemented purely in Python, designed to be lightweight, server-optional, and easy to deploy locally or remotely. It offers straightforward and clear Python APIs, aiming to lower the entry barrier for using vector databases. In response to user needs and to enhance its practicality, we are planning to introduce new features, including but not limited to:
 
 - **Optimizing Global Search Performance**: We are focusing on algorithm and data structure enhancements to speed up searches across the database, enabling faster retrieval of vector data.
 - **Enhancing Cluster Search with Inverted Indexes**: Utilizing inverted index technology, we aim to refine the cluster search process for better search efficiency and precision.
 - **Refining Clustering Algorithms**: By improving our clustering algorithms, we intend to offer more precise and efficient data clustering to support complex queries.
 - **Facilitating Vector Modifications and Deletions**: We will introduce features to modify and delete vectors, allowing for more flexible data management.
-- **Implementing Rollback Strategies**: To increase database robustness and data security, rollback strategies will be added, helping users recover from incorrect operations or system failures easily.
 
 MinVectorDB focuses on achieving 100% recall, prioritizing recall accuracy over high-speed search performance. This approach ensures that users can reliably retrieve all relevant vector data, making MinVectorDB particularly suitable for applications that require responses within hundreds of milliseconds.
 
-While the project has not yet been benchmarked against other systems, we believe these planned features will significantly enhance MinVectorDB's capabilities in managing and retrieving vector data, addressing a wide range of user needs.
+- [x] **Now supports HTTP API and Python local code API.**
+- [X] **Now supports Docker deployment.**
+- [X] **Now supports vector id and field filtering.**
+- [X] **Now supports transaction management; if a commit fails, it will automatically roll back.**
 
 ## Install Client API package (Mandatory)
 
@@ -55,7 +57,7 @@ import min_vec
 print("MinVectorDB version is: ", min_vec.__version__)
 ```
 
-    MinVectorDB version is:  0.3.2
+    MinVectorDB version is:  0.3.3
 
 
 ## Initialize Database
@@ -68,14 +70,14 @@ The HTTP API mode requires starting an HTTP server beforehand. You have two opti
   
   For direct startup, the default port is 7637. You can run the following command in the terminal to start the service:
 ```shell
-min_vec run --host 127.0.0.1 --port 7637
+min_vec run --host localhost --port 7637
 ```
 
 - within Docker
   
-  In Docker, the default port is 5403. You can run the following command in the terminal to start the service:
+  In Docker, You can run the following command in the terminal to start the service:
 ```shell
-docker run -p 5403:7637 birchkwok/minvectordb:latest
+docker run -p 7637:7637 birchkwok/minvectordb:latest
 ```
 
 ```python
@@ -86,11 +88,7 @@ from min_vec import MinVectorDB
 my_db = MinVectorDB('my_vec_db')  # Judgment condition, root_path does not start with http or https
 # or
 # Use the HTTP API mode, it is suitable for use in production environments.
-# For direct startup
-my_db = MinVectorDB("http://127.0.0.1:7637")
-
-# within Docker
-my_db = MinVectorDB("http://127.0.0.1:5403")
+my_db = MinVectorDB("http://localhost:7637")
 ```
 
 
@@ -98,7 +96,7 @@ my_db = MinVectorDB("http://127.0.0.1:5403")
 from min_vec import MinVectorDB
 
 # For direct startup
-my_db = MinVectorDB("http://localhost:5403")
+my_db = MinVectorDB("http://localhost:7637")
 ```
 
 ### create a collection
@@ -171,7 +169,7 @@ print(collection.query_report_)
     
     * - MOST RECENT QUERY REPORT -
     | - Collection Shape: (10, 4)
-    | - Query Time: 0.20518 s
+    | - Query Time: 0.02258 s
     | - Query Distance: cosine
     | - Query K: 10
     | - Top 10 Results ID: [ 2  9  1  4  6  5 10  7  8  3]
@@ -183,18 +181,20 @@ print(collection.query_report_)
 
 ### Use Filter
 
+
 ```python
 import operator
 
 from min_vec.core_components.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
 
+
 collection.query(
-    vector=[0.36, 0.43, 0.56, 0.12],
-    k=10,
+    vector=[0.36, 0.43, 0.56, 0.12], 
+    k=10, 
     query_filter=Filter(
         must=[
             FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
-        ],
+        ], 
         any=[
 
             FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),
@@ -209,7 +209,7 @@ print(collection.query_report_)
     
     * - MOST RECENT QUERY REPORT -
     | - Collection Shape: (10, 4)
-    | - Query Time: 0.11985 s
+    | - Query Time: 0.00630 s
     | - Query Distance: cosine
     | - Query K: 10
     | - Top 10 Results ID: [ 2  1  4  5 10  3]
@@ -223,11 +223,12 @@ print(collection.query_report_)
 
 ```python
 print("Collection list before dropping:", my_db.show_collections())
-my_db.drop_collection("test_collection")
+status = my_db.drop_collection("test_collection")
 print("Collection list after dropped:", my_db.show_collections())
 ```
 
     Collection list before dropping: ['test_collection']
+    {'status': 'success', 'params': {'collection_name': 'test_collection', 'exists': False}}
     Collection list after dropped: []
 
 
@@ -242,7 +243,7 @@ my_db
 
 
 
-    MinVectorDB remote server at http://localhost:5403 does not exist.
+    MinVectorDB remote server at http://localhost:7637 does not exist.
 
 
 
