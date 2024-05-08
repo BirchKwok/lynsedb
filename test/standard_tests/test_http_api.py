@@ -135,24 +135,68 @@ def test_collection_shape(test_client):
 def test_query(test_client):
     url = 'http://localhost:7637/query'
 
+    # 内部解析示例
+    # {
+    #     'must_fields': [{
+    #         'key': condition.key,
+    #         'matcher': {
+    #             'value': condition.matcher.value,
+    #             'comparator': condition.matcher.comparator.__name__
+    #         }
+    #     } for condition in self.must_fields] if self.must_fields else [],
+    #     'any_fields': [{
+    #         'key': condition.key,
+    #         'matcher': {
+    #             'value': condition.matcher.value,
+    #             'comparator': condition.matcher.comparator.__name__
+    #         }
+    #     } for condition in self.any_fields] if self.any_fields else [],
+    #     'must_not_fields': [{
+    #         'key': condition.key,
+    #         'matcher': {
+    #             'value': condition.matcher.value,
+    #             'comparator': condition.matcher.comparator.__name__
+    #         }
+    #     } for condition in self.must_not_fields] if self.must_not_fields else [],
+    #     'must_ids': [{
+    #         'matcher': {
+    #             'ids': condition.matcher.indices.tolist()
+    #         }
+    #     } for condition in self.must_ids] if self.must_ids else [],
+    #     'any_ids': [{
+    #         'matcher': {
+    #             'ids': condition.matcher.indices.tolist()
+    #         }
+    #     } for condition in self.any_ids] if self.any_ids else [],
+    #     'must_not_ids': [{
+    #         'matcher': {
+    #             'ids': condition.matcher.indices.tolist()
+    #         }
+    #     } for condition in self.must_not_ids] if self.must_not_ids else []
+    # }
+
     data = {
         "collection_name": "example_collection",
         "vector": [0.1, 0.2, 0.3, 0.4],
         "k": 10,
         'distance': 'cosine',
         "query_filter": {
-            "must": [
+            "must_fields": [
                 {
-                    "field": "name",
-                    "operator": "eq",
-                    "value": "example"
+                    "key": "name",
+                    "matcher": {
+                        "value": "example",
+                        "comparator": "eq"
+                    }
                 }
             ],
-            "any": [
+            "any_fields": [
                 {
-                    "field": "age",
-                    "operator": "eq",
-                    "value": 18
+                    "key": "age",
+                    "matcher": {
+                        "value": 18,
+                        "comparator": "eq"
+                    }
                 }
             ]
         }

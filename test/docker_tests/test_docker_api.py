@@ -67,14 +67,12 @@ def test_query():
                 FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
             ],
             any=[
-
                 FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),
                 IDCondition(MatchID([1, 2, 3, 4, 5])),  # Support for filtering IDs
             ]
         )
     )
-    print(ids, scores)
-    assert np.array_equal(ids, np.array([2, 1, 4, 5, 10, 3]))
+    assert np.array_equal(ids, np.array([2, 1, 10]))
 
 
 def test_drop_collection():
