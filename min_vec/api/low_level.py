@@ -254,7 +254,7 @@ class StandaloneMinVectorDB:
         self.most_recent_query_report['Query Distance'] = self._distance if distance is None else distance
         self.most_recent_query_report['Query K'] = k
 
-        if res[0] is not None:
+        if len(res[0]) > 0:
             self.most_recent_query_report[f'Top {k} Results ID'] = res[0]
             if return_similarity:
                 self.most_recent_query_report[f'Top {k} Results Similarity'] = np.array([round(i, 6) for i in res[1]])
