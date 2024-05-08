@@ -2,6 +2,7 @@ import operator
 from typing import Union
 
 import numpy as np
+from spinesUtils.asserts import raise_if
 
 
 class MatchField:
@@ -28,9 +29,6 @@ class MatchField:
             bool: True if the data attribute matches the specified value, otherwise False.
         """
         return self.comparator(data_value, self.value)
-
-    def __hash__(self):
-        return hash(self.value) + hash(self.comparator)
 
 
 class FieldCondition:
@@ -61,9 +59,6 @@ class FieldCondition:
             return self.matcher.match(attribute_value)
         return False
 
-    def __hash__(self):
-        return hash(self.key) + hash(self.matcher)
-
 
 class MatchID:
     def __init__(self, ids: Union[list, np.ndarray]):
@@ -86,13 +81,10 @@ class MatchID:
         Returns:
             np.ndarray: A numpy array filtered according to the specified indices.
         """
-        return array[np.isin(array, self.indices, assume_unique=True)]
+        if isinstance(array, list):
+            array = np.array(array)
 
-    def __hash__(self):
-        if isinstance(self.indices, list):
-            return hash(tuple(self.indices))
-        else:
-            return hash(self.indices.tobytes())
+        return np.isin(array, self.indices, assume_unique=True)
 
 
 class IDCondition:
@@ -114,14 +106,11 @@ class IDCondition:
         """
         return self.matcher.match(array)
 
-    def __hash__(self):
-        return hash(self.matcher)
-
 
 class Filter:
-    __slots__ = ['must', 'any']
+    __slots__ = ['must_fields', 'any_fields', 'must_not_fields', 'must_ids', 'any_ids', 'must_not_ids']
 
-    def __init__(self, must=None, any=None):
+    def __init__(self, must=None, any=None, must_not=None):
         """
         Initialize a Filter instance with must and any conditions.
             .. versionadded:: 0.3.0
@@ -129,28 +118,43 @@ class Filter:
         Parameters:
             must: A list of conditions that must be satisfied.
             any: A list of conditions where at least one must be satisfied.
+            must_not: A list of conditions that must not be satisfied.
+                .. versionadded:: 0.3.3
         """
-        self.must = must if must is not None else []
-        self.any = any if any is not None else []
+        self.must_fields = []
+        self.any_fields = []
+        self.must_not_fields = []
 
-    def apply(self, data):
-        """
-        Apply the filter to the given data.
+        self.must_ids = []
+        self.any_ids = []
+        self.must_not_ids = []
 
-        Parameters:
-            data: The data to apply the filter to.
+        if must:
+            for condition in must:
+                if isinstance(condition, FieldCondition):
+                    self.must_fields.append(condition)
+                elif isinstance(condition, IDCondition):
+                    self.must_ids.append(condition)
+                else:
+                    raise_if(ValueError, True, "Invalid condition type.")
 
-        Returns:
-            bool: True if the data satisfies the filter conditions, otherwise False.
-        """
-        if not self.must and not self.any:
-            must_pass = True
-            any_pass = False
-        else:
-            must_pass = all(condition.evaluate(data) for condition in self.must) if self.must else True
-            any_pass = any(condition.evaluate(data) for condition in self.any) if self.any else False
+        if any:
+            for condition in any:
+                if isinstance(condition, FieldCondition):
+                    self.any_fields.append(condition)
+                elif isinstance(condition, IDCondition):
+                    self.any_ids.append(condition)
+                else:
+                    raise_if(ValueError, True, "Invalid condition type.")
 
-        return must_pass and (any_pass or not self.any)
+        if must_not:
+            for condition in must_not:
+                if isinstance(condition, FieldCondition):
+                    self.must_not_fields.append(condition)
+                elif isinstance(condition, IDCondition):
+                    self.must_not_ids.append(condition)
+                else:
+                    raise_if(ValueError, True, "Invalid condition type.")
 
     def to_dict(self):
         """
@@ -160,13 +164,91 @@ class Filter:
             dict: A dictionary representation of the filter.
         """
         return {
-            'must': [{'field': condition.key, 'operator': condition.matcher.comparator.__name__, 'value': condition.matcher.value}
-                     if isinstance(condition, FieldCondition) else {'ids': condition.matcher.indices}
-                     for condition in self.must] if self.must else None,
-            'any': [{'field': condition.key, 'operator': condition.matcher.comparator.__name__, 'value': condition.matcher.value}
-                    if isinstance(condition, FieldCondition) else {'ids': condition.matcher.indices}
-                    for condition in self.any] if self.any else None
+            'must_fields': [{
+                'key': condition.key,
+                'matcher': {
+                    'value': condition.matcher.value,
+                    'comparator': condition.matcher.comparator.__name__
+                }
+            } for condition in self.must_fields] if self.must_fields else [],
+            'any_fields': [{
+                'key': condition.key,
+                'matcher': {
+                    'value': condition.matcher.value,
+                    'comparator': condition.matcher.comparator.__name__
+                }
+            } for condition in self.any_fields] if self.any_fields else [],
+            'must_not_fields': [{
+                'key': condition.key,
+                'matcher': {
+                    'value': condition.matcher.value,
+                    'comparator': condition.matcher.comparator.__name__
+                }
+            } for condition in self.must_not_fields] if self.must_not_fields else [],
+            'must_ids': [{
+                'matcher': {
+                    'ids': condition.matcher.indices.tolist() if isinstance(condition.matcher.indices, np.ndarray)
+                    else condition.matcher.indices
+                }
+            } for condition in self.must_ids] if self.must_ids else [],
+            'any_ids': [{
+                'matcher': {
+                    'ids': condition.matcher.indices.tolist() if isinstance(condition.matcher.indices, np.ndarray)
+                    else condition.matcher.indices
+                }
+            } for condition in self.any_ids] if self.any_ids else [],
+            'must_not_ids': [{
+                'matcher': {
+                    'ids': condition.matcher.indices.tolist() if isinstance(condition.matcher.indices, np.ndarray)
+                    else condition.matcher.indices
+                }
+            } for condition in self.must_not_ids] if self.must_not_ids else []
         }
 
-    def __hash__(self):
-        return hash((tuple(self.must), tuple(self.any)))
+    def load_dict(self, data):
+        """
+        Load the filter from a dictionary.
+
+        Parameters:
+            data: The dictionary to load the filter from.
+        """
+        self.must_fields = []
+        self.any_fields = []
+        self.must_not_fields = []
+
+        self.must_ids = []
+        self.any_ids = []
+        self.must_not_ids = []
+
+        for condition in data.get('must_fields', []):
+            self.must_fields.append(
+                FieldCondition(
+                    condition['key'],
+                    MatchField(condition['matcher']['value'], getattr(operator, condition['matcher']['comparator']))
+                )
+            )
+
+        for condition in data.get('any_fields', []):
+            self.any_fields.append(
+                FieldCondition(
+                    condition['key'],
+                    MatchField(condition['matcher']['value'], getattr(operator, condition['matcher']['comparator']))
+                )
+            )
+
+        for condition in data.get('must_not_fields', []):
+            self.must_not_fields.append(
+                FieldCondition(
+                    condition['key'],
+                    MatchField(condition['matcher']['value'], getattr(operator, condition['matcher']['comparator']))
+                )
+            )
+
+        for condition in data.get('must_ids', []):
+            self.must_ids.append(IDCondition(MatchID(np.array(condition['matcher']['ids']))))
+        for condition in data.get('any_ids', []):
+            self.any_ids.append(IDCondition(MatchID(np.array(condition['matcher']['ids']))))
+        for condition in data.get('must_not_ids', []):
+            self.must_not_ids.append(IDCondition(MatchID(np.array(condition['matcher']['ids']))))
+
+        return self
