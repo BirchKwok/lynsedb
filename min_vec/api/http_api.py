@@ -320,30 +320,7 @@ def query():
         if data['query_filter'] is None:
             query_filter = None
         else:
-            query_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key=condition['field'],
-                        matcher=MatchField(
-                            value=condition['value'],
-                            comparator=getattr(operator, condition['operator'])
-                        )
-                    ) if 'field' in condition and 'operator' in condition
-                    else IDCondition(matcher=MatchID(ids=condition['ids']))
-                    for condition in data['query_filter']['must']
-                ] if data['query_filter']['must'] is not None else None,
-                any=[
-                    FieldCondition(
-                        key=condition['field'],
-                        matcher=MatchField(
-                            value=condition['value'],
-                            comparator=getattr(operator, condition['operator'])
-                        )
-                    ) if 'field' in condition and 'operator' in condition
-                    else IDCondition(matcher=MatchID(ids=condition['ids']))
-                    for condition in data['query_filter']['any']
-                ] if data['query_filter']['any'] is not None else None
-            )
+            query_filter = Filter().load_dict(data['query_filter'])
 
         ids, scores = collection.query(vector=data['vector'], k=data['k'],
                                        query_filter=query_filter,
