@@ -169,7 +169,7 @@ print(collection.query_report_)
     
     * - MOST RECENT QUERY REPORT -
     | - Collection Shape: (10, 4)
-    | - Query Time: 0.02258 s
+    | - Query Time: 0.15716 s
     | - Query Distance: cosine
     | - Query K: 10
     | - Top 10 Results ID: [ 2  9  1  4  6  5 10  7  8  3]
@@ -196,9 +196,12 @@ collection.query(
             FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
         ], 
         any=[
-
             FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),
             IDCondition(MatchID([1, 2, 3, 4, 5])),  # Support for filtering IDs
+        ],
+        must_not=[
+            IDCondition(MatchID([8])), 
+            FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),
         ]
     )
 )
@@ -209,11 +212,11 @@ print(collection.query_report_)
     
     * - MOST RECENT QUERY REPORT -
     | - Collection Shape: (10, 4)
-    | - Query Time: 0.00630 s
+    | - Query Time: 0.09065 s
     | - Query Distance: cosine
     | - Query K: 10
-    | - Top 10 Results ID: [ 2  1  4  5 10  3]
-    | - Top 10 Results Similarity: [1.         0.86097705 0.85727406 0.813797   0.78595245 0.34695023]
+    | - Top 10 Results ID: [2 1]
+    | - Top 10 Results Similarity: [1.         0.86097705]
     * - END OF REPORT -
     
 
