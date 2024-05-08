@@ -1,9 +1,12 @@
-"""fields_filter.py: this file contains the FieldsMapper class. It is used to map the fields of the data."""
+"""metadata_kv.py: this file contains the FieldsMapper class. It is used to map the fields of the data."""
 import gzip
 import random
 from pathlib import Path
 
 import msgpack
+import numpy as np
+
+from min_vec.core_components.filter import Filter
 
 
 class SkipListNode:
@@ -71,6 +74,7 @@ class SkipList:
             self.insert_node_at_level(new_node, len(forwards) - 1)
 
     def find_node(self, key):
+        """Find a node by key in the skip list."""
         current = self.header
         for i in range(self.level, -1, -1):
             while current.forward[i] and current.forward[i].key < key:
@@ -78,6 +82,7 @@ class SkipList:
         return current.forward[0] if current.forward[0] and current.forward[0].key == key else None
 
     def insert_node_at_level(self, node, level):
+        """Insert a node at a specific level in the skip list."""
         current = self.header
         update = [None] * (level + 1)
         for i in range(level, -1, -1):
@@ -91,7 +96,10 @@ class SkipList:
             self.level = level
 
 
-class FieldIndex:
+class MetaDataKVCache:
+    """
+    A class to store metadata key-value pairs and provide fast retrieval for given keys.
+    """
     def __init__(self, max_level=4, p=0.5):
         self.data_store = {}
         self.id_map = {}
@@ -104,7 +112,7 @@ class FieldIndex:
         self.last_internal_id += 1
         return current_id
 
-    def _hash_data(self, data):
+    def _hash_data(self, data: dict):
         return msgpack.packb(data, use_bin_type=True)
 
     def store(self, data, ids=None):
@@ -145,25 +153,74 @@ class FieldIndex:
             return id, self.data_store[internal_id]
         return None
 
-    def query(self, filter_instance, filter_ids=None, return_ids_only=True):
-        """Query items that match the given Filter instance using the skip list."""
+    def query(self, filter_instance: Filter, filter_ids=None, return_ids_only=True):
         matched = []
         current = self.index.header.forward[0]
         while current:
-            if filter_instance.apply(self.data_store[current.key]):
-                external_ids = [id for id, int_id in self.id_map.items() if int_id == current.key]
-                if filter_ids is not None:
-                    external_ids = [id for id in external_ids if id in filter_ids]
-                matched.extend(external_ids)
+            data = self.data_store[current.key]
+            external_ids = [id for id, int_id in self.id_map.items() if int_id == current.key]
+
+            # Check must conditions for fields and IDs.
+            must_pass_fields = all(condition.evaluate(data) for condition in
+                                   filter_instance.must_fields) if filter_instance.must_fields else True
+            must_pass_ids = np.all([condition.matcher.match(external_ids) for condition in filter_instance.must_ids],
+                                   axis=0) if filter_instance.must_ids else np.ones(len(external_ids), dtype=bool)
+            if filter_instance.must_fields:
+                must_pass = np.where(must_pass_ids, must_pass_fields, must_pass_ids)
+            else:
+                must_pass = must_pass_ids
+
+            # Check must not conditions for fields and IDs.
+            must_not_pass_fields = any(condition.evaluate(data) for condition in
+                                       filter_instance.must_not_fields) if filter_instance.must_not_fields else False
+            must_not_pass_ids = np.any(
+                [condition.matcher.match(external_ids) for condition in filter_instance.must_not_ids],
+                axis=0) if filter_instance.must_not_ids else np.zeros(len(external_ids), dtype=bool)
+
+            if filter_instance.must_not_fields:
+                must_not_pass = np.where(must_not_pass_ids, must_not_pass_ids, must_not_pass_fields)
+            else:
+                must_not_pass = must_not_pass_ids
+
+            final_pass = must_pass & ~must_not_pass
+
+            # Only proceed with any conditions if must conditions are fully met and must_not conditions are not met.
+            if must_pass.all() and not must_not_pass.all():
+                if not filter_instance.any_fields and not filter_instance.any_ids:
+                    pass
+                else:
+                    any_pass_fields = any(condition.evaluate(data) for condition in
+                                          filter_instance.any_fields) if filter_instance.any_fields else False
+                    any_pass_ids = np.any([condition.matcher.match(external_ids) for condition in filter_instance.any_ids],
+                                          axis=0) if filter_instance.any_ids else np.zeros(len(external_ids), dtype=bool)
+
+                    if filter_instance.any_fields:
+                        if filter_instance.any_ids:
+                            any_pass = any_pass_fields | any_pass_ids
+                        else:
+                            any_pass = any_pass_fields
+                    else:
+                        any_pass = any_pass_ids
+
+                    # Combine any conditions with final pass.
+                    final_pass = np.where(final_pass, final_pass & any_pass, final_pass)
+
+            # Combine all conditions to finalize.
+            filtered_ids = np.array(external_ids)[final_pass]
+
+            if filter_ids is not None:
+                filtered_ids = [id for id in filtered_ids if id in filter_ids]
+
+            if return_ids_only:
+                matched.extend(filtered_ids)
+            else:
+                matched.extend([(id, data) for id in filtered_ids])
+
             current = current.forward[0]
 
-        if return_ids_only:
-            return matched
-        else:
-            return [(id, self.data_store[self.id_map[id]]) for id in matched]
+        return matched
 
     def save(self, filepath):
-        """Save all data to a file with gzip compression."""
         try:
             with gzip.open(filepath, 'wb') as f:
                 f.write(msgpack.packb([self.data_store, self.id_map, self.last_internal_id, self.data_to_internal_id]))
@@ -173,7 +230,6 @@ class FieldIndex:
             print(f"Error saving to file {filepath}: {e}")
 
     def load(self, filepath):
-        """Load all data from a file with gzip decompression."""
         try:
             with gzip.open(filepath, 'rb') as f:
                 self.data_store, self.id_map, self.last_internal_id, self.data_to_internal_id = msgpack.unpackb(
@@ -183,6 +239,6 @@ class FieldIndex:
                 self.index.deserialize(nodes)
 
             return self
-
         except IOError as e:
             print(f"Error loading from file {filepath}: {e}")
+
