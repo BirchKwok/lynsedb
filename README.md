@@ -37,6 +37,12 @@ MinVectorDB focuses on achieving 100% recall, prioritizing recall accuracy over 
 - [X] **Now supports vector id and field filtering.**
 - [X] **Now supports transaction management; if a commit fails, it will automatically roll back.**
 
+## Prerequisite
+
+- [x] python version >= 3.9
+- [x] Owns one of the operating systems: Windows, macOS, or Ubuntu. The recommendation is for the latest version of the system, but non-latest versions should also be installable, although they have not been tested.
+- [x] Memory >= 4GB, Free Disk >= 4GB.
+
 ## Install Client API package (Mandatory)
 
 ```shell
@@ -44,6 +50,8 @@ pip install MinVectorDB
 ```
 
 ## If you wish to use Docker (Optional)
+
+**You must first [install Docker](https://docs.docker.com/engine/install/) on the host machine.**
 
 ```shell
 docker pull birchkwok/minvectordb:latest
@@ -62,7 +70,7 @@ print("MinVectorDB version is: ", min_vec.__version__)
 
 ## Initialize Database
 
-MinVectorDB now supports HTTP API and Python local code API. 
+MinVectorDB now supports HTTP API and Python native code API. 
 
 
 The HTTP API mode requires starting an HTTP server beforehand. You have two options: 
@@ -80,30 +88,28 @@ min_vec run --host localhost --port 7637
 docker run -p 7637:7637 birchkwok/minvectordb:latest
 ```
 
+
 ```python
 from min_vec import MinVectorDB
 
-# This method is for the Python local code API, recommended only for CI/CD testing or single-user local use.
-# Specify database root directory
-my_db = MinVectorDB('my_vec_db')  # Judgment condition, root_path does not start with http or https
-# or
 # Use the HTTP API mode, it is suitable for use in production environments.
 my_db = MinVectorDB("http://localhost:7637")
-```
-
-
-```python
-from min_vec import MinVectorDB
-
-# For direct startup
-my_db = MinVectorDB("http://localhost:7637")
+# Or use the Python native code API by specifying the database root directory.
+# my_db = MinVectorDB('my_vec_db')  # Judgment condition, root_path does not start with http or https
+# The Python native code API is recommended only for CI/CD testing or single-user local use.
 ```
 
 ### create a collection
 
+**`WARNING`**
+
+When using the `require_collection` method to request a collection, if the `drop_if_exists` parameter is set to True, it will delete all content of the collection if it already exists. 
+
+A safer method is to use the `get_collection` method. It is recommended to use the `require_collection` method only when you need to reinitialize a collection or create a new one.
+
 
 ```python
-collection = my_db.require_collection("test_collection", 4, drop_if_exists=True, scaler_bits=8)
+collection = my_db.require_collection("test_collection", dim=4, drop_if_exists=True, scaler_bits=8)
 ```
 
 ### Add vectors
@@ -148,6 +154,9 @@ with collection.insert_session():
 ### Query
 
 
+The default similarity measure for query is cosine. You can specify cosine or L2 to obtain the similarity measure you need.
+
+
 ```python
 collection.query(vector=[0.36, 0.43, 0.56, 0.12], k=10)
 ```
@@ -160,6 +169,8 @@ collection.query(vector=[0.36, 0.43, 0.56, 0.12], k=10)
             0.813797  , 0.78595245, 0.7741583 , 0.6871773 , 0.34695023]))
 
 
+
+The `query_report_` attribute is the report of the most recent query. When multiple queries are conducted simultaneously, this attribute will only save the report of the last completed query result.
 
 
 ```python
@@ -180,6 +191,16 @@ print(collection.query_report_)
 
 
 ### Use Filter
+
+Using the Filter class for result filtering can maximize Recall. 
+
+The Filter class now supports `must`, `any`, and `must_not` parameters, all of which only accept list-type argument values. 
+
+The filtering conditions in `must` must be met, those in `must_not` must not be met. 
+
+After filtering with `must` and `must_not` conditions, the conditions in `any` will be considered, and at least one of the conditions in `any` must be met. 
+
+If there is a conflict between the conditions in `any` and those in `must` or `must_not`, the conditions in `any` will be ignored.
 
 
 ```python
@@ -223,6 +244,8 @@ print(collection.query_report_)
 
 ### Drop a collection
 
+`WARNING: This operation cannot be undone`
+
 
 ```python
 print("Collection list before dropping:", my_db.show_collections())
@@ -236,6 +259,8 @@ print("Collection list after dropped:", my_db.show_collections())
 
 
 ## Drop the database
+
+`WARNING: This operation cannot be undone`
 
 
 ```python
