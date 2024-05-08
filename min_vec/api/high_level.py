@@ -1,4 +1,3 @@
-"""high_level.py - The MinVectorDB API."""
 import json
 from pathlib import Path
 from typing import Union
@@ -68,7 +67,6 @@ class _Register:
         with open(self.root_path / 'collections.json', 'r') as f:
             collections = json.load(f)
 
-        # 遍历collections，如果有不存在的collection，删除
         for collection in list(collections.keys()):
             if not (self.root_path / collection).exists():
                 del collections[collection]
