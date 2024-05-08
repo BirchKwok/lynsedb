@@ -100,7 +100,7 @@ class MetaDataKVCache:
     """
     A class to store metadata key-value pairs and provide fast retrieval for given keys.
     """
-    def __init__(self, max_level=4, p=0.5):
+    def __init__(self, max_level=10, p=0.5):
         self.data_store = {}
         self.id_map = {}
         self.data_to_internal_id = {}
@@ -155,27 +155,40 @@ class MetaDataKVCache:
 
     def query(self, filter_instance: Filter, filter_ids=None, return_ids_only=True):
         matched = []
+        external_ids_dict = {}
+        for id, int_id in self.id_map.items():
+            if int_id not in external_ids_dict:
+                external_ids_dict[int_id] = [id]
+            else:
+                external_ids_dict[int_id].append(id)
+
         current = self.index.header.forward[0]
         while current:
             data = self.data_store[current.key]
-            external_ids = [id for id, int_id in self.id_map.items() if int_id == current.key]
+            external_ids = external_ids_dict[current.key]
+            external_ids_len = len(external_ids)
 
             # Check must conditions for fields and IDs.
             must_pass_fields = all(condition.evaluate(data) for condition in
                                    filter_instance.must_fields) if filter_instance.must_fields else True
             must_pass_ids = np.all([condition.matcher.match(external_ids) for condition in filter_instance.must_ids],
-                                   axis=0) if filter_instance.must_ids else np.ones(len(external_ids), dtype=bool)
+                                   axis=0) if filter_instance.must_ids else np.ones(external_ids_len, dtype=bool)
             if filter_instance.must_fields:
                 must_pass = np.where(must_pass_ids, must_pass_fields, must_pass_ids)
             else:
                 must_pass = must_pass_ids
+
+            # Skip to next node if must conditions are not met.
+            if not must_pass.any():
+                current = current.forward[0]
+                continue
 
             # Check must not conditions for fields and IDs.
             must_not_pass_fields = any(condition.evaluate(data) for condition in
                                        filter_instance.must_not_fields) if filter_instance.must_not_fields else False
             must_not_pass_ids = np.any(
                 [condition.matcher.match(external_ids) for condition in filter_instance.must_not_ids],
-                axis=0) if filter_instance.must_not_ids else np.zeros(len(external_ids), dtype=bool)
+                axis=0) if filter_instance.must_not_ids else np.zeros(external_ids_len, dtype=bool)
 
             if filter_instance.must_not_fields:
                 must_not_pass = np.where(must_not_pass_ids, must_not_pass_ids, must_not_pass_fields)
@@ -192,7 +205,7 @@ class MetaDataKVCache:
                     any_pass_fields = any(condition.evaluate(data) for condition in
                                           filter_instance.any_fields) if filter_instance.any_fields else False
                     any_pass_ids = np.any([condition.matcher.match(external_ids) for condition in filter_instance.any_ids],
-                                          axis=0) if filter_instance.any_ids else np.zeros(len(external_ids), dtype=bool)
+                                          axis=0) if filter_instance.any_ids else np.zeros(external_ids_len, dtype=bool)
 
                     if filter_instance.any_fields:
                         if filter_instance.any_ids:
