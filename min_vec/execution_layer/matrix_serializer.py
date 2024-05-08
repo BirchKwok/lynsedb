@@ -13,7 +13,7 @@ from min_vec.utils.utils import io_checker
 from min_vec.configs.config import config
 from min_vec.core_components.kmeans import BatchKMeans
 from min_vec.core_components.scaler import ScalarQuantization
-from min_vec.core_components.fields_filter import FieldIndex
+from min_vec.core_components.metadata_kv import MetaDataKVCache
 from min_vec.storage_layer.storage import PersistentFileStorage, TemporaryFileStorage
 from min_vec.execution_layer.cluster_worker import ClusterWorker
 from min_vec.core_components.counter import SafeCounter
@@ -159,11 +159,11 @@ class MatrixSerializer:
     def _initialize_fields_index(self):
         """initialize fields index"""
         if Path(self.collections_path_parent / 'fields_index.mvdb').exists():
-            self.fields_index = FieldIndex().load(self.collections_path_parent / 'fields_index.mvdb')
+            self.kv_index = MetaDataKVCache().load(self.collections_path_parent / 'fields_index.mvdb')
         else:
-            self.fields_index = FieldIndex()
+            self.kv_index = MetaDataKVCache()
 
-        self.temp_fields_index = FieldIndex()
+        self.temp_kv_index = MetaDataKVCache()
 
     def _initialize_id_checker(self):
         """initialize id checker and shape"""
@@ -230,9 +230,8 @@ class MatrixSerializer:
     def save_data(self, data, indices, fields):
         """Optimized method to save data to chunk or cluster group with reusable logic."""
 
-        if fields is not None:
-            for _id, _field in zip(indices, fields):
-                self.temp_fields_index.store(_field, _id)
+        for _id, _field in zip(indices, fields):
+            self.temp_kv_index.store(_field if _field is not None else {}, _id)
 
         self.tempfile_storage_worker.write_temp_data(data, indices)
 
@@ -278,7 +277,7 @@ class MatrixSerializer:
             self.reset_collection()
             self.tempfile_storage_worker.reincarnate()
             self.temp_id_filter = IDChecker()
-            self.temp_fields_index = FieldIndex()
+            self.temp_kv_index = MetaDataKVCache()
 
             self.COMMIT_FLAG = True
 
@@ -315,7 +314,7 @@ class MatrixSerializer:
 
                 try:
                     self.logger.debug('Concatenating fields index...')
-                    self.fields_index.concat(self.temp_fields_index)
+                    self.kv_index.concat(self.temp_kv_index)
                 except Exception as e:
                     self.logger.error(f'Error occurred while concatenating the fields index: {e}, rollback...')
                     self.rollback()
@@ -332,7 +331,7 @@ class MatrixSerializer:
                 try:
                     # save fields index
                     self.logger.debug('Saving fields index...')
-                    self.fields_index.save(self.collections_path_parent / 'fields_index.mvdb')
+                    self.kv_index.save(self.collections_path_parent / 'fields_index.mvdb')
                 except Exception as e:
                     self.logger.error(f'Error occurred while saving the collection: {e}, rollback...')
                     self.rollback()
