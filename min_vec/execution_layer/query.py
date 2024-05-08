@@ -6,7 +6,6 @@ from min_vec.computational_layer.engines import to_normalize
 from min_vec.configs.config import config
 from min_vec.computational_layer.engines import cosine_distance
 from min_vec.execution_layer.matrix_serializer import MatrixSerializer
-from min_vec.core_components.filter import IDCondition, Filter
 from min_vec.utils.utils import QueryResultsCache
 from min_vec.core_components.limited_sort import LimitedSorted
 
@@ -32,7 +31,7 @@ class Query:
         self.distance = distance
         self.chunk_size = self.matrix_serializer.chunk_size
 
-        self.fields_index = self.matrix_serializer.fields_index
+        self.fields_index = self.matrix_serializer.kv_index
 
         self.n_threads = n_threads
 
@@ -55,51 +54,20 @@ class Query:
 
         self.limited_sorted.scaler = self.scaler
 
-    def _query_chunk(self, vector, query_filter, dataloader, filename):
+    def _query_chunk(self, vector, subset_indices, dataloader, filename):
         """
         Query a single database chunk for the vectors most similar to the given vector.
 
         Parameters:
             vector (np.ndarray): The query vector.
-            query_filter (Filter, optional): The field filter to apply to the query.
+            subset_indices (np.ndarray): The indices to filter the numpy array.
 
         Returns:
             Tuple: The indices and similarity scores of the nearest vectors in the chunk.
         """
         database_chunk, index_chunk = dataloader(filename)
 
-        if query_filter is not None:
-            subset_indices = []
-            field_filters_must = []
-            field_filters_any = []
-
-            if query_filter.must:
-                for condition_filter in query_filter.must:
-                    if isinstance(condition_filter, IDCondition):
-                        subset_indices.extend(condition_filter.evaluate(index_chunk))
-                    else:
-                        field_filters_must.append(condition_filter)
-
-            if query_filter.any:
-                for condition_filter in query_filter.any:
-                    if isinstance(condition_filter, IDCondition):
-                        subset_indices.extend(condition_filter.evaluate(index_chunk))
-                    else:
-                        field_filters_any.append(condition_filter)
-
-            if field_filters_must or field_filters_any:
-                _fids = self.fields_index.query(
-                    Filter(
-                        must=field_filters_must if field_filters_must else None,
-                        any=field_filters_any if field_filters_any else None
-                    ),
-                    filter_ids=None,
-                    return_ids_only=True
-                )
-                subset_indices = list(set(subset_indices) & set(_fids))
-            else:
-                subset_indices = list(set(subset_indices))
-
+        if subset_indices is not None:
             database_chunk = database_chunk[np.isin(index_chunk, subset_indices, assume_unique=True)]
             index_chunk = index_chunk[np.isin(index_chunk, subset_indices, assume_unique=True)]
 
@@ -153,6 +121,8 @@ class Query:
 
         all_index = []
 
+        subset_indices = self.matrix_serializer.kv_index.query(query_filter) if query_filter is not None else None
+
         def batch_query(is_ivf=True, cid=None, sort=True):
             nonlocal all_index
 
@@ -160,12 +130,12 @@ class Query:
                 read_type='chunk' if not is_ivf else 'cluster', cluster_id=cid)
 
             futures = [i for i in self.executors.map(
-                lambda x: self._query_chunk(vector, query_filter, self.matrix_serializer.dataloader, x),
+                lambda x: self._query_chunk(vector, subset_indices, self.matrix_serializer.dataloader, x),
                 filenames)
                        if len(i[0]) != 0]
 
             if not futures:
-                return None, None
+                return [], []
 
             if sort:
                 return self.limited_sorted.get_top_n(vector=vector, distance=distance)
