@@ -40,7 +40,7 @@ MinVectorDB focuses on achieving 100% recall, prioritizing recall accuracy over 
 ## Prerequisite
 
 - [x] python version >= 3.9
-- [x] Owns one of the operating systems: Windows, macOS, or Ubuntu. The recommendation is for the latest version of the system, but non-latest versions should also be installable, although they have not been tested.
+- [x] Owns one of the operating systems: Windows, macOS, or Ubuntu (or other Linux distributions). The recommendation is for the latest version of the system, but non-latest versions should also be installable, although they have not been tested.
 - [x] Memory >= 4GB, Free Disk >= 4GB.
 
 ## Install Client API package (Mandatory)
@@ -139,19 +139,6 @@ my_db.show_collections_details()
 
 
 <div>
-<style scoped>
-    .dataframe tbody tr th:only-of-type {
-        vertical-align: middle;
-    }
-
-    .dataframe tbody tr th {
-        vertical-align: top;
-    }
-
-    .dataframe thead th {
-        text-align: right;
-    }
-</style>
 <table border="1" class="dataframe">
   <thead>
     <tr style="text-align: right;">
@@ -219,19 +206,6 @@ my_db.show_collections_details()
 
 
 <div>
-<style scoped>
-    .dataframe tbody tr th:only-of-type {
-        vertical-align: middle;
-    }
-
-    .dataframe tbody tr th {
-        vertical-align: top;
-    }
-
-    .dataframe thead th {
-        text-align: right;
-    }
-</style>
 <table border="1" class="dataframe">
   <thead>
     <tr style="text-align: right;">
