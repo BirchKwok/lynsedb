@@ -5,6 +5,7 @@ from typing import Union, List, Tuple
 import msgpack
 import numpy as np
 import httpx
+import pandas as pd
 from spinesUtils.asserts import raise_if
 from tqdm import trange
 
@@ -526,6 +527,33 @@ class Collection:
 
         return report
 
+    def update_description(self, description: str):
+        """
+        Update the description of the collection.
+            .. versionadded:: 0.3.4
+
+        Parameters:
+            description (str): The description of the collection.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        url = f'{self._url}/update_description'
+        data = {
+            "collection_name": self._collection_name,
+            "description": description
+        }
+
+        response = self._session.post(url, json=data)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
     def __repr__(self):
         if self.status_report_['COLLECTION STATUS REPORT']['Collection status'] == 'DELETED':
             title = "Deleted MinVectorDB collection with status: \n"
@@ -631,7 +659,8 @@ class MinVectorDBHTTPClient:
             scaler_bits: Union[int, None] = 8,
             n_threads: Union[int, None] = 10,
             warm_up: bool = False,
-            drop_if_exists: bool = False
+            drop_if_exists: bool = False,
+            description: str = None
     ):
         """
         Create a collection.
@@ -652,6 +681,9 @@ class MinVectorDBHTTPClient:
             n_threads (int): The number of threads. Default is 10.
             warm_up (bool): Whether to warm up. Default is False.
             drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
+            description (str): A description of the collection. Default is None.
+                The description is limited to 500 characters.
+                    .. versionadded:: 0.3.4
 
         Returns:
             Collection: The collection object.
@@ -673,7 +705,8 @@ class MinVectorDBHTTPClient:
             "scaler_bits": scaler_bits,
             "n_threads": n_threads,
             "warm_up": warm_up,
-            "drop_if_exists": drop_if_exists
+            "drop_if_exists": drop_if_exists,
+            "description": description
         }
 
         try:
@@ -858,6 +891,52 @@ class MinVectorDBHTTPClient:
             response = self._session.post(url, json=data)
 
             return Collection(self.url, collection, **response.json()['params']['config'])
+        else:
+            raise_error_response(response)
+
+    def update_collection_description(self, collection: str, description: str):
+        """
+        Update the description of a collection.
+            .. versionadded:: 0.3.4
+
+        Parameters:
+            collection (str): The name of the collection.
+            description (str): The description of the collection.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        url = f'{self.url}/update_collection_description'
+        data = {"collection_name": collection, "description": description}
+        response = self._session.post(url, json=data)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def show_collections_details(self):
+        """
+        Show all collections in the database with details.
+            .. versionadded:: 0.3.4
+
+        Returns:
+            pandas.DataFrame: The details of the collections.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        url = f'{self.url}/show_collections_details'
+        response = self._session.get(url)
+
+        if response.status_code == 200:
+            rj = response.json()['params']['collections']
+            rj_df = pd.DataFrame(rj)
+            rj_df.index.name = 'collections'
+            return rj_df
         else:
             raise_error_response(response)
 

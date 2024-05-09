@@ -1,5 +1,4 @@
 import json
-import operator
 import os
 import queue
 import shutil
@@ -99,6 +98,8 @@ def required_collection():
         data['warm_up'] = True
     if 'drop_if_exists' not in data:
         data['drop_if_exists'] = False
+    if 'description' not in data:
+        data['description'] = None
 
     try:
         my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
@@ -114,7 +115,8 @@ def required_collection():
             scaler_bits=data['scaler_bits'],
             n_threads=data['n_threads'],
             warm_up=data['warm_up'],
-            drop_if_exists=data['drop_if_exists']
+            drop_if_exists=data['drop_if_exists'],
+            description=data['description']
         )
 
         if data['collection_name'] not in data_dict:
@@ -624,6 +626,73 @@ def get_commit_msg():
         }}, sort_keys=False), mimetype='application/json')
     except KeyError as e:
         return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/update_collection_description', methods=['POST'])
+def update_collection_description():
+    """Update the description of a collection.
+        .. versionadded:: 0.3.4
+
+    Returns:
+        dict: The status of the operation.
+    """
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
+        my_vec_db.update_collection_description(data['collection_name'], data['description'])
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'collection_name': data['collection_name'], 'description': data['description']
+        }}, sort_keys=False), mimetype='application/json')
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/update_description', methods=['POST'])
+def update_description():
+    """Update the description of the database.
+        .. versionadded:: 0.3.4
+
+    Returns:
+        dict: The status of the operation.
+    """
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+        collection.update_description(data['description'])
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'description': data['description']
+        }}, sort_keys=False), mimetype='application/json')
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/show_collections_details', methods=['GET'])
+def show_collections_details():
+    """Show all collections in the database with details.
+        .. versionadded:: 0.3.4
+
+    Returns:
+        dict: The status of the operation.
+    """
+    try:
+        my_vec_db = MinVectorDBLocalClient(root_path=config['root_path'])
+        collections_details = my_vec_db.show_collections_details()
+        return Response(json.dumps({'status': 'success', 'params': {'collections': collections_details.to_dict()}},
+                                   sort_keys=False), mimetype='application/json')
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
