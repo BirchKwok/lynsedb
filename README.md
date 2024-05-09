@@ -65,7 +65,7 @@ import min_vec
 print("MinVectorDB version is: ", min_vec.__version__)
 ```
 
-    MinVectorDB version is:  0.3.3
+    MinVectorDB version is:  0.3.4
 
 
 ## Initialize Database
@@ -125,8 +125,167 @@ A safer method is to use the `get_collection` method. It is recommended to use t
 
 
 ```python
-collection = my_db.require_collection("test_collection", dim=4, drop_if_exists=True, scaler_bits=8)
+collection = my_db.require_collection("test_collection", dim=4, drop_if_exists=True, scaler_bits=8, description="demo collection")
 ```
+
+#### show database collections
+
+
+```python
+my_db.show_collections_details()
+```
+
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>chunk_size</th>
+      <th>description</th>
+      <th>dim</th>
+      <th>distance</th>
+      <th>dtypes</th>
+      <th>index_mode</th>
+      <th>initialize_as_collection</th>
+      <th>n_clusters</th>
+      <th>n_threads</th>
+      <th>scaler_bits</th>
+      <th>use_cache</th>
+      <th>warm_up</th>
+    </tr>
+    <tr>
+      <th>collections</th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>test_collection</th>
+      <td>100000</td>
+      <td>demo collection</td>
+      <td>4</td>
+      <td>cosine</td>
+      <td>float32</td>
+      <td>IVF-FLAT</td>
+      <td>True</td>
+      <td>16</td>
+      <td>10</td>
+      <td>8</td>
+      <td>True</td>
+      <td>False</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+
+
+#### update description
+
+
+```python
+collection.update_description("test2")
+my_db.show_collections_details()
+```
+
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>chunk_size</th>
+      <th>description</th>
+      <th>dim</th>
+      <th>distance</th>
+      <th>dtypes</th>
+      <th>index_mode</th>
+      <th>initialize_as_collection</th>
+      <th>n_clusters</th>
+      <th>n_threads</th>
+      <th>scaler_bits</th>
+      <th>use_cache</th>
+      <th>warm_up</th>
+    </tr>
+    <tr>
+      <th>collections</th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>test_collection</th>
+      <td>100000</td>
+      <td>test2</td>
+      <td>4</td>
+      <td>cosine</td>
+      <td>float32</td>
+      <td>IVF-FLAT</td>
+      <td>True</td>
+      <td>16</td>
+      <td>10</td>
+      <td>8</td>
+      <td>True</td>
+      <td>False</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+
 
 ### Add vectors
 
@@ -196,7 +355,7 @@ print(collection.query_report_)
     
     * - MOST RECENT QUERY REPORT -
     | - Collection Shape: (10, 4)
-    | - Query Time: 0.15716 s
+    | - Query Time: 0.13898 s
     | - Query Distance: cosine
     | - Query K: 10
     | - Top 10 Results ID: [ 2  9  1  4  6  5 10  7  8  3]
@@ -249,7 +408,7 @@ print(collection.query_report_)
     
     * - MOST RECENT QUERY REPORT -
     | - Collection Shape: (10, 4)
-    | - Query Time: 0.09065 s
+    | - Query Time: 0.09066 s
     | - Query Distance: cosine
     | - Query K: 10
     | - Top 10 Results ID: [2 1]
@@ -310,4 +469,3 @@ my_db.database_exists()
 - [Using different indexing methods](https://github.com/BirchKwok/MinVectorDB/blob/main/tutorials/index_mode.ipynb)
 - [Using different distance metric functions](https://github.com/BirchKwok/MinVectorDB/blob/main/tutorials/distance.ipynb)
 - [Diversified queries](https://github.com/BirchKwok/MinVectorDB/blob/main/tutorials/queries.ipynb)
-- [Benchmarks](https://github.com/BirchKwok/MinVectorDB/blob/main/tutorials/Benchmarks.ipynb)
