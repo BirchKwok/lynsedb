@@ -6,7 +6,7 @@ from typing import Union
 import pandas as pd
 from spinesUtils.asserts import ParameterTypeAssert
 
-from min_vec.api.low_level import StandaloneMinVectorDB
+from min_vec.api.native_api.low_level import StandaloneMinVectorDB
 from min_vec.api import logger
 from min_vec.utils.utils import unavailable_if_deleted
 

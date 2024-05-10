@@ -60,7 +60,10 @@ class Config:
 
     @property
     def MVDB_DATALOADER_BUFFER_SIZE(self):
-        return self.get_env_variable('MVDB_DATALOADER_BUFFER_SIZE', 20, int, [int, None])
+        size = self.get_env_variable('MVDB_DATALOADER_BUFFER_SIZE', 20, int, [int, None])
+        if size is None or size < 1:
+            return 1
+        return size
 
     @property
     def MVDB_DELAY_NUM(self):

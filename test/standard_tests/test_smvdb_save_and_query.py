@@ -621,3 +621,30 @@ def test_filter():
     assert list(d) == sorted(d, key=lambda s: -s)
     assert all(i in database._id_filter for i in n)
     assert all(0 <= i < 6 for i in n)
+
+    n, d = database.query(
+        vec, k=6, query_filter=Filter(
+        must=[
+            FieldCondition(key='test', matcher=MatchField(['test_0', 'test_00'], all_comparators=True)),
+        ],
+        any=[
+            IDCondition(MatchID([1, 2, 3, 4, 5])),
+        ]
+    ))
+
+    assert len(n) == len(d) == 0
+
+    n, d = database.query(
+        vec, k=6, query_filter=Filter(
+        must=[
+            FieldCondition(key='test', matcher=MatchField(['test_0', 'test_00'], all_comparators=False)),
+        ],
+        any=[
+            IDCondition(MatchID([1, 2, 3, 4, 5])),
+        ]
+    ))
+
+    assert len(n) == len(d) == 5
+    assert list(d) == sorted(d, key=lambda s: -s)
+    assert all(i in database._id_filter for i in n)
+    assert all(0 <= i < 6 for i in n)

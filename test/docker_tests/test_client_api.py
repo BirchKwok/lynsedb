@@ -1,9 +1,6 @@
 import concurrent.futures
 
-import pytest
-
 from test import MinVectorDB, MinVectorDBHTTPClient
-from min_vec.api.client_api import ExecutionError
 
 
 def test_initialization():

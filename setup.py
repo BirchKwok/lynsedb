@@ -14,7 +14,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name='MinVectorDB',
-    version="0.3.4",
+    version="0.3.5",
     description='A pure Python-implemented, lightweight, server-optional, '
                 'multi-end compatible, vector database deployable locally or remotely.',
     keywords='vector database',
@@ -41,7 +41,7 @@ setup(
     zip_safe=False,
     entry_points={
         'console_scripts': [
-            'min_vec=min_vec.api.http_api:main',
+            'min_vec=min_vec.api.http_api.http_api:main',
         ],
     },
 )

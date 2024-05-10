@@ -102,14 +102,9 @@ class PersistentFileStorage:
         self.dimension = dimension
         self.chunk_size = chunk_size
 
-        self.tempfile_storage = TemporaryFileStorage(chunk_size)
-
         self.cluster_last_file_shape = {}
-
         self.cache = LimitedDict(max_size=config.MVDB_DATALOADER_BUFFER_SIZE)
-
         self.quantizer = None
-
         self.lock = ThreadLock()
 
         if warm_up:
@@ -131,9 +126,9 @@ class PersistentFileStorage:
 
         filenames = self.get_all_files(read_type='all')
 
-        for filename in filenames:
-            data, indices = self.read(filename)
-            data, indices = self.read(filename)
+        for idx, filename in enumerate(filenames):
+            if idx + 1 <= config.MVDB_DATALOADER_BUFFER_SIZE:
+                data, indices = self.read(filename, filenames)
 
     def _return_if_in_memory(self, filename):
         res = self.cache.get(filename, None)
@@ -175,6 +170,7 @@ class PersistentFileStorage:
         return filenames
 
     def _read(self, filename):
+        """Read data from the specified filename if it exists."""
         if not self.file_exists():
             return
 

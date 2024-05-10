@@ -6,17 +6,22 @@ from spinesUtils.asserts import raise_if
 
 
 class MatchField:
-    def __init__(self, value, comparator=operator.eq):
+    def __init__(self, value, comparator=operator.eq, all_comparators=False):
         """
         Initialize a MatchField instance with a specific value and comparator.
             .. versionadded:: 0.3.0
 
         Parameters:
-            value: The value to compare the data attribute with.
+            value (list or tuple or any object that implements comparison functions such as __ eq__): The value to compare the data attribute with.
             comparator: The comparator function to apply to the data attribute.
+            all_comparators: Whether to apply the comparator to all values in the list or tuple.
+                If True, all values in the list or tuple must satisfy the comparison condition.
+                If False, at least one value in the list or tuple must satisfy the comparison condition.
+                    .. versionadded:: 0.3.5
         """
         self.value = value
         self.comparator = comparator
+        self.all_comparators = all_comparators
 
     def match(self, data_value):
         """
@@ -28,6 +33,12 @@ class MatchField:
         Returns:
             bool: True if the data attribute matches the specified value, otherwise False.
         """
+        if isinstance(self.value, (list, tuple)):
+            if self.all_comparators:
+                return all([self.comparator(data_value, value) for value in self.value])
+            else:
+                return any([self.comparator(data_value, value) for value in self.value])
+
         return self.comparator(data_value, self.value)
 
 

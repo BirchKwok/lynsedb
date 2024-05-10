@@ -1,7 +1,7 @@
 import pytest
 
-from min_vec.api.http_api import app
-from min_vec.api.client_api import pack_data
+from min_vec.api.http_api.http_api import app
+from min_vec.api.http_api.client_api import pack_data
 
 
 @pytest.fixture()

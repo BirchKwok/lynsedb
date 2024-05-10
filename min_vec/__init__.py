@@ -1,5 +1,5 @@
 
-__version__ = '0.3.4'
+__version__ = '0.3.5'
 
 
 class MinVectorDB:
@@ -20,8 +20,8 @@ class MinVectorDB:
 
     def __new__(cls, root_path: Union[str, Path]):
         from pathlib import Path
-        from min_vec.api.high_level import MinVectorDBLocalClient
-        from min_vec.api.client_api import MinVectorDBHTTPClient
+        from min_vec.api.native_api.high_level import MinVectorDBLocalClient
+        from min_vec.api.http_api.client_api import MinVectorDBHTTPClient
 
         if isinstance(root_path, Path):
             root_path = root_path.as_posix()
