@@ -34,6 +34,10 @@ MinVectorDB focuses on achieving 100% recall, prioritizing recall accuracy over 
 - [X] **Now supports vector id and field filtering.**
 - [X] **Now supports transaction management; if a commit fails, it will automatically roll back.**
 
+<br>
+<br>
+<br>
+
 :warning: **WARNING**
 
 **Not yet backward compatible** 
