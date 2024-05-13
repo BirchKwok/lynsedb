@@ -20,12 +20,6 @@
 
 ⚡ **Based on a generic Python software stack, platform-independent, highly versatile.**
 
-:warning: **WARNING**
-
-> MinVectorDB is actively being updated, and API backward compatibility is not guaranteed. You should use version numbers as a strong constraint during deployment to avoid unnecessary feature conflicts and errors.
-
-> **Although our goal is to enable brute force search or inverted indexing on billion-scale vectors, we currently still recommend using it on a scale of millions of vectors or less for the best experience.**
-
 *MinVectorDB* is a vector database implemented purely in Python, designed to be lightweight, server-optional, and easy to deploy locally or remotely. It offers straightforward and clear Python APIs, aiming to lower the entry barrier for using vector databases. In response to user needs and to enhance its practicality, we are planning to introduce new features, including but not limited to:
 
 - **Optimizing Global Search Performance**: We are focusing on algorithm and data structure enhancements to speed up searches across the database, enabling faster retrieval of vector data.
@@ -39,6 +33,21 @@ MinVectorDB focuses on achieving 100% recall, prioritizing recall accuracy over 
 - [X] **Now supports Docker deployment.**
 - [X] **Now supports vector id and field filtering.**
 - [X] **Now supports transaction management; if a commit fails, it will automatically roll back.**
+
+:warning: **WARNING**
+
+** Not yet backward compatible ** 
+
+MinVectorDB is actively being updated, and API backward compatibility is not guaranteed. You should use version numbers as a strong constraint during deployment to avoid unnecessary feature conflicts and errors. 
+
+** Data size constraints **
+
+Although our goal is to enable brute force search or inverted indexing on billion-scale vectors, we currently still recommend using it on a scale of millions of vectors or less for the best experience.
+
+** python's native api is not thread-safe or process-safe **
+
+The python native api is only recommended for single-process, single-threaded use; for multi-process, multi-threaded security, use the http api.
+
 
 ## Prerequisite
 
