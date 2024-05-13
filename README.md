@@ -36,15 +36,15 @@ MinVectorDB focuses on achieving 100% recall, prioritizing recall accuracy over 
 
 :warning: **WARNING**
 
-** Not yet backward compatible ** 
+**Not yet backward compatible** 
 
 MinVectorDB is actively being updated, and API backward compatibility is not guaranteed. You should use version numbers as a strong constraint during deployment to avoid unnecessary feature conflicts and errors. 
 
-** Data size constraints **
+**Data size constraints**
 
 Although our goal is to enable brute force search or inverted indexing on billion-scale vectors, we currently still recommend using it on a scale of millions of vectors or less for the best experience.
 
-** python's native api is not thread-safe or process-safe **
+**python's native api is not thread-safe or process-safe**
 
 The python native api is only recommended for single-process, single-threaded use; for multi-process, multi-threaded security, use the http api.
 
