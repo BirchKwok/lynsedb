@@ -29,13 +29,9 @@
 
 MinVectorDB focuses on achieving 100% recall, prioritizing recall accuracy over high-speed search performance. This approach ensures that users can reliably retrieve all relevant vector data, making MinVectorDB particularly suitable for applications that require responses within hundreds of milliseconds.
 
-- [x] **Now supports HTTP API and Python local code API.**
-- [X] **Now supports Docker deployment.**
-- [X] **Now supports vector id and field filtering.**
+- [x] **Now supports HTTP API and Python local code API and Docker deployment.**
 - [X] **Now supports transaction management; if a commit fails, it will automatically roll back.**
 
-<br>
-<br>
 <br>
 
 :warning: **WARNING**
