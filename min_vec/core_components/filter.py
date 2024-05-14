@@ -1,6 +1,7 @@
 import operator
 from typing import Union
 
+import msgpack
 import numpy as np
 from spinesUtils.asserts import raise_if
 
@@ -66,7 +67,7 @@ class FieldCondition:
             bool: True if the data attribute matches the specified value, otherwise False.
         """
         attribute_value = data.get(self.key)
-        if attribute_value is not None:
+        if attribute_value:
             return self.matcher.match(attribute_value)
         return False
 
@@ -263,3 +264,6 @@ class Filter:
             self.must_not_ids.append(IDCondition(MatchID(np.array(condition['matcher']['ids']))))
 
         return self
+
+    def __hash__(self):
+        return hash(msgpack.packb(self.to_dict()))
