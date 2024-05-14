@@ -8,7 +8,6 @@ from spinesUtils.asserts import raise_if, ParameterTypeAssert
 from spinesUtils.timer import Timer
 
 from min_vec.configs.parameters_validator import ParametersValidator
-from min_vec.core_components.cross_lock import ThreadLock
 from min_vec.execution_layer.query import Query
 from min_vec.execution_layer.matrix_serializer import MatrixSerializer
 from min_vec.utils.utils import unavailable_if_deleted
@@ -16,9 +15,11 @@ from min_vec.api import logger
 from min_vec.core_components.filter import Filter
 
 
-class StandaloneMinVectorDB:
+class ExclusiveMinVectorDB:
     """
     A class for managing a vector database stored in .mvdb files and computing vectors similarity.
+    The class is exclusive and cannot be shared with other threads or processes,
+    so it is not thread-safe or process-safe.
     """
 
     @ParametersValidator(
@@ -129,14 +130,6 @@ class StandaloneMinVectorDB:
 
         self._initialize_as_collection = initialize_as_collection
 
-        if warm_up and self._matrix_serializer.shape[0] > 0:
-            # Pre query once to cache the jax function
-            self.query(np.ones(dim), k=1)
-
-            self.most_recent_query_report = {}
-
-        self.lock = ThreadLock()
-
     @unavailable_if_deleted
     def add_item(self, vector: Union[np.ndarray, list], id: int, *, field: dict = None) -> int:
         """
@@ -239,7 +232,8 @@ class StandaloneMinVectorDB:
 
         self._timer.start()
         if self._use_cache:
-            res = self._query.query(vector=vector, k=k, query_filter=query_filter, index_mode=self._matrix_serializer.index_mode,
+            res = self._query.query(vector=vector, k=k, query_filter=query_filter,
+                                    index_mode=self._matrix_serializer.index_mode,
                                     distance=distance, return_similarity=return_similarity)
         else:
             res = self._query.query(vector=vector, k=k, query_filter=query_filter,
