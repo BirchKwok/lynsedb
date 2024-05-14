@@ -17,7 +17,6 @@ from min_vec.core_components.metadata_kv import MetaDataKVCache
 from min_vec.storage_layer.storage import PersistentFileStorage, TemporaryFileStorage
 from min_vec.execution_layer.cluster_worker import ClusterWorker
 from min_vec.core_components.counter import SafeCounter
-from min_vec.core_components.thread_safe_list import SafeList
 
 
 class MatrixSerializer:
@@ -102,9 +101,9 @@ class MatrixSerializer:
 
         # ============== Loading or create one empty collection ==============
         # first of all, initialize a collection
-        self.database = SafeList()
-        self.indices = SafeList()
-        self.fields = SafeList()
+        self.database = []
+        self.indices = []
+        self.fields = []
 
         self._initialize_fields_index()
         self._initialize_ann_model()
@@ -124,7 +123,7 @@ class MatrixSerializer:
             self.logger.warning('The index mode is FLAT, but the cluster dataset is not empty, '
                                 'so the clustered datasets will also be traversed during querying.')
 
-        self.lock = ThreadLock()
+        self.threadlock = ThreadLock()
 
     def _initialize_parent_path(self, collections_path):
         """make directory if not exist"""
@@ -158,12 +157,8 @@ class MatrixSerializer:
 
     def _initialize_fields_index(self):
         """initialize fields index"""
-        if Path(self.collections_path_parent / 'fields_index.mvdb').exists():
-            self.kv_index = MetaDataKVCache().load(self.collections_path_parent / 'fields_index.mvdb')
-        else:
-            self.kv_index = MetaDataKVCache()
-
-        self.temp_kv_index = MetaDataKVCache()
+        self.kv_index = MetaDataKVCache(self.collections_path_parent / 'fields_index')
+        self.temp_kv_index = MetaDataKVCache("temp_kv_index")
 
     def _initialize_id_checker(self):
         """initialize id checker and shape"""
@@ -184,9 +179,9 @@ class MatrixSerializer:
 
     def reset_collection(self):
         """Reset the database to its initial state with zeros."""
-        self.database = SafeList()
-        self.indices = SafeList()
-        self.fields = SafeList()
+        self.database = []
+        self.indices = []
+        self.fields = []
 
     @io_checker
     def dataloader(self, filename):
@@ -277,7 +272,7 @@ class MatrixSerializer:
             self.reset_collection()
             self.tempfile_storage_worker.reincarnate()
             self.temp_id_filter = IDChecker()
-            self.temp_kv_index = MetaDataKVCache()
+            self.temp_kv_index = MetaDataKVCache("temp_kv_index")
 
             self.COMMIT_FLAG = True
 
@@ -286,7 +281,7 @@ class MatrixSerializer:
         Save the collection, ensuring that all data is written to disk.
         This method is required to be called after saving vectors to query them.
         """
-        with self.lock:
+        with self.threadlock:
             if not self.COMMIT_FLAG:
                 try:
                     self.logger.debug('Saving chunk immediately...')
@@ -314,7 +309,7 @@ class MatrixSerializer:
 
                 try:
                     self.logger.debug('Concatenating fields index...')
-                    self.kv_index.concat(self.temp_kv_index)
+                    self.kv_index = self.kv_index.concat(self.temp_kv_index)
                 except Exception as e:
                     self.logger.error(f'Error occurred while concatenating the fields index: {e}, rollback...')
                     self.rollback()
@@ -331,7 +326,7 @@ class MatrixSerializer:
                 try:
                     # save fields index
                     self.logger.debug('Saving fields index...')
-                    self.kv_index.save(self.collections_path_parent / 'fields_index.mvdb')
+                    self.kv_index.save()
                 except Exception as e:
                     self.logger.error(f'Error occurred while saving the collection: {e}, rollback...')
                     self.rollback()
@@ -416,7 +411,7 @@ class MatrixSerializer:
         raise_if(ValueError, not isinstance(vectors, (tuple, list)),
                  f'vectors must be tuple or list, got {type(vectors)}')
 
-        with self.lock:
+        with self.threadlock:
             new_ids = []
 
             for i in range(0, len(vectors), self.chunk_size):
@@ -483,7 +478,7 @@ class MatrixSerializer:
         raise_if(ValueError, (not isinstance(index, int)) or index < 0,
                  f'id must be integer and greater than 0, got {index}')
 
-        with self.lock:
+        with self.threadlock:
             vector, index, field = self._process_vector_item(vector, index, field)
 
             # Add the id to then filter.
@@ -502,7 +497,7 @@ class MatrixSerializer:
 
     def delete(self):
         """Delete collection."""
-        with self.lock:
+        with self.threadlock:
             if not self.collections_path_parent.exists():
                 return None
 
@@ -527,5 +522,5 @@ class MatrixSerializer:
 
     @property
     def shape(self):
-        with self.lock:
+        with self.threadlock:
             return tuple(self.storage_worker.get_shape(read_type='all'))
