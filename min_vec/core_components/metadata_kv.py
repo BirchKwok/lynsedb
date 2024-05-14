@@ -121,7 +121,8 @@ class MetaDataKVCache:
             f.truncate(len(packed_data))
             f.write(packed_data)
             f.flush()
-            self.mm = mmap.mmap(f.fileno(), 0)
+        with open(self.filepath, 'rb+') as f:
+            self.mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_WRITE)
 
     def _load(self):
         if os.path.exists(self.filepath):
@@ -217,5 +218,6 @@ class MetaDataKVCache:
         if self.mm is not None:
             try:
                 self.mm.close()
-            except:
-                pass
+            except Exception as e:
+                print(f"Error closing mmap: {e}")
+        self.mm = None
