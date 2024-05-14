@@ -39,7 +39,7 @@ Although our goal is to enable brute force search or inverted indexing on billio
 
 **python's native api is not thread-safe or process-safe**
 
-The python native api is only recommended for single-process, single-threaded use; for multi-process, multi-threaded security, use the http api.
+The Python native API is recommended for use in single-process environments, whether single-threaded or multi-threaded; for ensuring process safety in multi-process environments, please use the HTTP API.
 
 
 ## Prerequisite
