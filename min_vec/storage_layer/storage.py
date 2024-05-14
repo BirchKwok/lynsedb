@@ -128,7 +128,7 @@ class PersistentFileStorage:
 
         for idx, filename in enumerate(filenames):
             if idx + 1 <= config.MVDB_DATALOADER_BUFFER_SIZE:
-                data, indices = self.read(filename, filenames)
+                data, indices = self.read(filename)
 
     def _return_if_in_memory(self, filename):
         res = self.cache.get(filename, None)
@@ -332,6 +332,23 @@ class PersistentFileStorage:
     def read(self, filename):
         """Read the data from the file."""
         return self._read(filename=filename)
+
+    def read_as_mmapped(self, filename, idx=None):
+        """Read the data from the file as a memory-mapped file."""
+        if 'chunk' in filename:
+            data_path = self.collection_chunk_path
+            indices_path = self.collection_chunk_indices_path
+        else:
+            data_path = self.collection_cluster_path
+            indices_path = self.collection_cluster_indices_path
+
+        indices = np.load(indices_path / filename)
+
+        if idx is None:
+            return np.load(data_path / filename), indices
+        else:
+            internal_indices = np.isin(indices, idx, assume_unique=True)
+            return np.load(data_path / filename, mmap_mode='r')[internal_indices], indices[internal_indices]
 
     def write(self, data=None, indices=None, write_type='chunk', cluster_id=None, normalize=False, filename=None):
         """Write the data to the file."""
