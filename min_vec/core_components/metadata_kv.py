@@ -1,4 +1,3 @@
-import mmap
 import os
 from functools import lru_cache
 import msgpack
@@ -7,7 +6,7 @@ from pyroaring import BitMap
 
 class MetaDataKVCache:
     """
-    A class to store metadata key-value pairs and provide fast retrieval for given keys, using memory-mapped files.
+    A class to store metadata key-value pairs and provide fast retrieval for given keys, using regular file operations.
     This version optimizes file size and memory usage by using Bitmaps for ID management.
     """
 
@@ -18,7 +17,6 @@ class MetaDataKVCache:
         self.data_to_internal_id = {}
         self.external_ids_dict = {}
         self.last_internal_id = 0
-        self.mm = None
         self._load()  # Load existing data if available
 
     def _get_next_internal_id(self):
@@ -113,22 +111,13 @@ class MetaDataKVCache:
     def save(self):
         # Serialize data with bitmaps
         packed_data = msgpack.packb([self.data_store, self.id_map, self.last_internal_id, self.data_to_internal_id])
-        # Resize file if needed
-        if self.mm is not None:
-            self.mm.close()
-            self.mm = None
-        with open(self.filepath, 'wb+') as f:
-            f.truncate(len(packed_data))
+        with open(self.filepath, 'wb') as f:
             f.write(packed_data)
-            f.flush()
-        with open(self.filepath, 'rb+') as f:
-            self.mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_WRITE)
 
     def _load(self):
         if os.path.exists(self.filepath):
             with open(self.filepath, 'rb') as f:
-                self.mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-                data = msgpack.unpackb(self.mm, raw=False, strict_map_key=False)
+                data = msgpack.unpackb(f.read(), raw=False, strict_map_key=False)
                 self.data_store, self.id_map, self.last_internal_id, self.data_to_internal_id = data
 
                 # 重新构建 external_ids_dict 使用 Bitmap
@@ -213,11 +202,3 @@ class MetaDataKVCache:
                     matched.extend(res)
 
         return matched
-
-    def __del__(self):
-        if self.mm is not None:
-            try:
-                self.mm.close()
-            except Exception as e:
-                print(f"Error closing mmap: {e}")
-        self.mm = None
