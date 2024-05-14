@@ -120,7 +120,6 @@ def test_bulk_add_items(test_client):
     assert response.json == {"status": "success", "params": {"collection_name": "example_collection"}}
 
 
-
 def test_collection_shape(test_client):
     url = 'http://localhost:7637/collection_shape'
     data = {
@@ -134,46 +133,6 @@ def test_collection_shape(test_client):
 
 def test_query(test_client):
     url = 'http://localhost:7637/query'
-
-    # 内部解析示例
-    # {
-    #     'must_fields': [{
-    #         'key': condition.key,
-    #         'matcher': {
-    #             'value': condition.matcher.value,
-    #             'comparator': condition.matcher.comparator.__name__
-    #         }
-    #     } for condition in self.must_fields] if self.must_fields else [],
-    #     'any_fields': [{
-    #         'key': condition.key,
-    #         'matcher': {
-    #             'value': condition.matcher.value,
-    #             'comparator': condition.matcher.comparator.__name__
-    #         }
-    #     } for condition in self.any_fields] if self.any_fields else [],
-    #     'must_not_fields': [{
-    #         'key': condition.key,
-    #         'matcher': {
-    #             'value': condition.matcher.value,
-    #             'comparator': condition.matcher.comparator.__name__
-    #         }
-    #     } for condition in self.must_not_fields] if self.must_not_fields else [],
-    #     'must_ids': [{
-    #         'matcher': {
-    #             'ids': condition.matcher.indices.tolist()
-    #         }
-    #     } for condition in self.must_ids] if self.must_ids else [],
-    #     'any_ids': [{
-    #         'matcher': {
-    #             'ids': condition.matcher.indices.tolist()
-    #         }
-    #     } for condition in self.any_ids] if self.any_ids else [],
-    #     'must_not_ids': [{
-    #         'matcher': {
-    #             'ids': condition.matcher.indices.tolist()
-    #         }
-    #     } for condition in self.must_not_ids] if self.must_not_ids else []
-    # }
 
     data = {
         "collection_name": "example_collection",
@@ -245,3 +204,4 @@ def test_database_exists(test_client):
     response = test_client.get(url)
     assert response.status_code == 200
     assert response.json == {"status": "success", "params": {"exists": False}}
+

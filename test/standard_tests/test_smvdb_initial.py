@@ -1,11 +1,11 @@
 import pytest
 
-from test import StandaloneMinVectorDB
+from test import ExclusiveMinVectorDB
 import numpy as np
 
 
 def test_modify_exists_database_parameter():
-    db = StandaloneMinVectorDB(dim=1024, database_path='test_mvdb', chunk_size=10000, dtypes='float32')
+    db = ExclusiveMinVectorDB(dim=1024, database_path='test_mvdb', chunk_size=10000, dtypes='float32')
 
     # insert data
     with db.insert_session():
@@ -13,7 +13,7 @@ def test_modify_exists_database_parameter():
             db.add_item(np.random.rand(1024), id=i)
 
     # modify exists database
-    db = StandaloneMinVectorDB(dim=1023, database_path='test_mvdb', chunk_size=10002, dtypes='float16')
+    db = ExclusiveMinVectorDB(dim=1023, database_path='test_mvdb', chunk_size=10002, dtypes='float16')
 
     assert db._matrix_serializer.dim == 1024  # not modified
     assert db._matrix_serializer.chunk_size == 10000  # not modified
@@ -24,7 +24,7 @@ def test_modify_exists_database_parameter():
 
 
 def test_using_api_after_database_deleted(capfd):
-    db = StandaloneMinVectorDB(dim=1024, database_path='test_mvdb', chunk_size=10000, dtypes='float32')
+    db = ExclusiveMinVectorDB(dim=1024, database_path='test_mvdb', chunk_size=10000, dtypes='float32')
 
     # insert data
     with db.insert_session():

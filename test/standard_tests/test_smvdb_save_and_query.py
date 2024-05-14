@@ -1,9 +1,10 @@
+import concurrent.futures
 import shutil
 from pathlib import Path
 
 import pytest
 
-from test import StandaloneMinVectorDB, Filter, FieldCondition, MatchField, IDCondition, MatchID
+from test import ExclusiveMinVectorDB, Filter, FieldCondition, MatchField, IDCondition, MatchID
 import numpy as np
 
 
@@ -11,7 +12,7 @@ def get_database(dim=100, database_path='test_min_vec', chunk_size=1000, dtypes=
     if Path(database_path).exists():
         shutil.rmtree(database_path)
 
-    database = StandaloneMinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
+    database = ExclusiveMinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
     return database
 
 
@@ -403,7 +404,7 @@ def test_multiple_bulk_add_items_with_insert_session():
 
 # Test if secondary initialization can properly initialize and query
 def test_multiple_initialization(dim=100, database_path='test_min_vec', chunk_size=1000, dtypes='float32'):
-    database = StandaloneMinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
+    database = ExclusiveMinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
     items = []
     for i in range(101):
         items.append((np.ones(100), i, {"test": "test_" + str(i // 10)}))
@@ -416,7 +417,7 @@ def test_multiple_initialization(dim=100, database_path='test_min_vec', chunk_si
     assert database.shape == (101, 100)
     del database
 
-    database = StandaloneMinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
+    database = ExclusiveMinVectorDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
 
     items = []
     for i in range(101):
@@ -438,8 +439,8 @@ def test_result_order():
             yield np.random.random(shape[1])
 
     for index_mode in ['FLAT', 'IVF-FLAT']:
-        db = StandaloneMinVectorDB(dim=1024, database_path='test_min_vec',
-                                   chunk_size=10000, index_mode=index_mode)
+        db = ExclusiveMinVectorDB(dim=1024, database_path='test_min_vec',
+                                  chunk_size=10000, index_mode=index_mode)
 
         # You can perform this operation multiple times, and the data will be appended to the database.
         with db.insert_session():
@@ -464,7 +465,7 @@ def test_result_order():
 
 
 def test_refit(capsys):
-    db = StandaloneMinVectorDB(dim=1024, database_path='test_min_vec', chunk_size=10000, index_mode='IVF-FLAT')
+    db = ExclusiveMinVectorDB(dim=1024, database_path='test_min_vec', chunk_size=10000, index_mode='IVF-FLAT')
     with db.insert_session():
         for i in range(100000):
             db.add_item(np.random.rand(1024), id=i)
@@ -494,7 +495,7 @@ def test_refit(capsys):
 
 
 def test_transactions():
-    db = StandaloneMinVectorDB(dim=1024, database_path='test_min_vec', chunk_size=10000, index_mode='IVF-FLAT')
+    db = ExclusiveMinVectorDB(dim=1024, database_path='test_min_vec', chunk_size=10000, index_mode='IVF-FLAT')
 
     def get_test_vectors(shape):
         for i in range(shape[0]):
