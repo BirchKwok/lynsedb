@@ -65,11 +65,13 @@ class Query:
         Returns:
             Tuple: The indices and similarity scores of the nearest vectors in the chunk.
         """
-        database_chunk, index_chunk = dataloader(filename)
-
         if subset_indices is not None:
-            database_chunk = database_chunk[np.isin(index_chunk, subset_indices, assume_unique=True)]
-            index_chunk = index_chunk[np.isin(index_chunk, subset_indices, assume_unique=True)]
+            database_chunk, index_chunk = self.matrix_serializer.storage_worker.read_as_mmapped(
+                filename,
+                idx=subset_indices
+            )
+        else:
+            database_chunk, index_chunk = dataloader(filename)
 
         if len(index_chunk) == 0:
             return [], []
