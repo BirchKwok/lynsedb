@@ -1,121 +1,37 @@
-"""metadata_kv.py: this file contains the FieldsMapper class. It is used to map the fields of the data."""
-import gzip
-import random
-from pathlib import Path
+import mmap
+import os
+from functools import lru_cache
 
 import msgpack
-import numpy as np
-
-from min_vec.core_components.filter import Filter
-
-
-class SkipListNode:
-    def __init__(self, key, level, data=None):
-        self.key = key
-        self.data = data
-        self.forward = [None] * (level + 1)
-
-
-class SkipList:
-    def __init__(self, max_level, p=0.5):
-        self.max_level = max_level
-        self.p = p
-        self.header = SkipListNode(-1, max_level)
-        self.level = 0
-
-    def random_level(self):
-        """Randomly generate a level for inserting a new node."""
-        level = 0
-        while random.random() < self.p and level < self.max_level:
-            level += 1
-        return level
-
-    def insert(self, key, data=None):
-        """Insert a key along with optional data into the skip list."""
-        update = [None] * (self.max_level + 1)
-        current = self.header
-
-        for i in range(self.level, -1, -1):
-            while current.forward[i] and current.forward[i].key < key:
-                current = current.forward[i]
-            update[i] = current
-
-        current = current.forward[0]
-
-        if current is None or current.key != key:
-            new_level = self.random_level()
-            if new_level > self.level:
-                for i in range(self.level + 1, new_level + 1):
-                    update[i] = self.header
-                self.level = new_level
-
-            new_node = SkipListNode(key, new_level, data)
-            for i in range(new_level + 1):
-                new_node.forward[i] = update[i].forward[i]
-                update[i].forward[i] = new_node
-
-    def serialize(self):
-        """ Serialize the skip list into a list of tuples for each node. """
-        nodes = []
-        current = self.header.forward[0]
-        while current:
-            nodes.append((current.key, current.data, [f.key if f else None for f in current.forward]))
-            current = current.forward[0]
-        return nodes
-
-    def deserialize(self, nodes):
-        """ Deserialize from a list of node data to rebuild the skip list. """
-        self.header = SkipListNode(-1, self.max_level)
-        self.level = 0
-        for key, data, forwards in reversed(nodes):
-            new_node = SkipListNode(key, len(forwards) - 1, data)
-            for i in range(len(forwards)):
-                new_node.forward[i] = self.find_node(forwards[i]) if forwards[i] is not None else None
-            self.insert_node_at_level(new_node, len(forwards) - 1)
-
-    def find_node(self, key):
-        """Find a node by key in the skip list."""
-        current = self.header
-        for i in range(self.level, -1, -1):
-            while current.forward[i] and current.forward[i].key < key:
-                current = current.forward[i]
-        return current.forward[0] if current.forward[0] and current.forward[0].key == key else None
-
-    def insert_node_at_level(self, node, level):
-        """Insert a node at a specific level in the skip list."""
-        current = self.header
-        update = [None] * (level + 1)
-        for i in range(level, -1, -1):
-            while current.forward[i] and current.forward[i].key < node.key:
-                current = current.forward[i]
-            update[i] = current
-        for i in range(level + 1):
-            node.forward[i] = update[i].forward[i]
-            update[i].forward[i] = node
-        if level > self.level:
-            self.level = level
+from pyroaring import BitMap
 
 
 class MetaDataKVCache:
     """
-    A class to store metadata key-value pairs and provide fast retrieval for given keys.
+    A class to store metadata key-value pairs and provide fast retrieval for given keys, using memory-mapped files.
+    This version optimizes file size and memory usage by using Bitmaps for ID management.
     """
-    def __init__(self, max_level=10, p=0.5):
+
+    def __init__(self, filepath):
+        self.filepath = filepath
         self.data_store = {}
         self.id_map = {}
         self.data_to_internal_id = {}
+        self.external_ids_dict = {}
         self.last_internal_id = 0
-        self.index = SkipList(max_level, p)
+        self.mm = None
+        self._load()  # Load existing data if available
 
     def _get_next_internal_id(self):
         current_id = self.last_internal_id
         self.last_internal_id += 1
         return current_id
 
-    def _hash_data(self, data: dict):
+    @staticmethod
+    def _hash_data(data: dict):
         return msgpack.packb(data, use_bin_type=True)
 
-    def store(self, data, ids=None):
+    def store(self, data, external_id):
         if not isinstance(data, dict):
             raise ValueError("Only dictionary data types are supported for storage.")
 
@@ -126,26 +42,14 @@ class MetaDataKVCache:
             internal_id = self._get_next_internal_id()
             self.data_store[internal_id] = data
             self.data_to_internal_id[data_hash] = internal_id
-            self.index.insert(internal_id, data)
-        if ids is None:
-            ids = [self._get_next_internal_id()]
-        if isinstance(ids, int):
-            ids = [ids]
 
-        for id in ids:
-            self.id_map[id] = internal_id
-        return ids
+        self.id_map[external_id] = internal_id  # 使用具体的外部 ID 作为键
+        if internal_id in self.external_ids_dict:
+            self.external_ids_dict[internal_id].add(external_id)
+        else:
+            self.external_ids_dict[internal_id] = BitMap([external_id])
 
-    def concat(self, another_field_index):
-        for internal_id, data in another_field_index.data_store.items():
-            data_hash = self._hash_data(data)
-            if data_hash not in self.data_to_internal_id:
-                self.data_store[internal_id] = data
-                self.data_to_internal_id[data_hash] = internal_id
-                self.index.insert(internal_id, data)
-            for ext_id, int_id in another_field_index.id_map.items():
-                if ext_id not in self.id_map:
-                    self.id_map[ext_id] = int_id
+        return external_id
 
     def retrieve(self, id):
         internal_id = self.id_map.get(id)
@@ -153,105 +57,162 @@ class MetaDataKVCache:
             return id, self.data_store[internal_id]
         return None
 
-    def query(self, filter_instance: Filter, filter_ids=None, return_ids_only=True):
-        matched = []
-        external_ids_dict = {}
-        for id, int_id in self.id_map.items():
-            if int_id not in external_ids_dict:
-                external_ids_dict[int_id] = [id]
-            else:
-                external_ids_dict[int_id].append(id)
+    def concat(self, other):
+        """
+        Concatenates another MetaDataKVCache instance into this one.
+        Assumes external IDs are unique across both instances or handles conflicts.
+        """
+        if not isinstance(other, MetaDataKVCache):
+            raise ValueError("The 'other' must be an instance of MetaDataKVCache.")
 
-        current = self.index.header.forward[0]
-        while current:
-            data = self.data_store[current.key]
-            external_ids = external_ids_dict[current.key]
-            external_ids_len = len(external_ids)
+        # Iterate over items in the other instance
+        for external_id, other_internal_id in other.id_map.items():
+            other_data = other.data_store[other_internal_id]
 
-            # Check must conditions for fields and IDs.
-            must_pass_fields = all(condition.evaluate(data) for condition in
-                                   filter_instance.must_fields) if filter_instance.must_fields else True
-            must_pass_ids = np.all([condition.matcher.match(external_ids) for condition in filter_instance.must_ids],
-                                   axis=0) if filter_instance.must_ids else np.ones(external_ids_len, dtype=bool)
-            if filter_instance.must_fields:
-                must_pass = np.where(must_pass_ids, must_pass_fields, must_pass_ids)
-            else:
-                must_pass = must_pass_ids
+            # Check if the data already exists in the current cache
+            data_hash = self._hash_data(other_data)
+            if data_hash in self.data_to_internal_id:
+                # Data already exists, just link the external ID to the existing internal ID
+                internal_id = self.data_to_internal_id[data_hash]
+                self.id_map[external_id] = internal_id
 
-            # Skip to next node if must conditions are not met.
-            if not must_pass.any():
-                current = current.forward[0]
-                continue
-
-            # Check must not conditions for fields and IDs.
-            must_not_pass_fields = any(condition.evaluate(data) for condition in
-                                       filter_instance.must_not_fields) if filter_instance.must_not_fields else False
-            must_not_pass_ids = np.any(
-                [condition.matcher.match(external_ids) for condition in filter_instance.must_not_ids],
-                axis=0) if filter_instance.must_not_ids else np.zeros(external_ids_len, dtype=bool)
-
-            if filter_instance.must_not_fields:
-                must_not_pass = np.where(must_not_pass_ids, must_not_pass_ids, must_not_pass_fields)
-            else:
-                must_not_pass = must_not_pass_ids
-
-            final_pass = must_pass & ~must_not_pass
-
-            # Only proceed with any conditions if must conditions are fully met and must_not conditions are not met.
-            if must_pass.all() and not must_not_pass.all():
-                if not filter_instance.any_fields and not filter_instance.any_ids:
-                    pass
+                # Ensure the internal ID exists in external_ids_dict before adding external ID
+                if internal_id in self.external_ids_dict:
+                    self.external_ids_dict[internal_id].add(external_id)
                 else:
-                    any_pass_fields = any(condition.evaluate(data) for condition in
-                                          filter_instance.any_fields) if filter_instance.any_fields else False
-                    any_pass_ids = np.any([condition.matcher.match(external_ids) for condition in filter_instance.any_ids],
-                                          axis=0) if filter_instance.any_ids else np.zeros(external_ids_len, dtype=bool)
-
-                    if filter_instance.any_fields:
-                        if filter_instance.any_ids:
-                            any_pass = any_pass_fields | any_pass_ids
-                        else:
-                            any_pass = any_pass_fields
-                    else:
-                        any_pass = any_pass_ids
-
-                    # Combine any conditions with final pass.
-                    final_pass = np.where(final_pass, final_pass & any_pass, final_pass)
-
-            # Combine all conditions to finalize.
-            filtered_ids = np.array(external_ids)[final_pass]
-
-            if filter_ids is not None:
-                filtered_ids = [id for id in filtered_ids if id in filter_ids]
-
-            if return_ids_only:
-                matched.extend(filtered_ids)
+                    # If the internal ID is not found, initialize a new BitMap for it
+                    self.external_ids_dict[internal_id] = BitMap([external_id])
             else:
-                matched.extend([(id, data) for id in filtered_ids])
+                # New data, store it in the current instance
+                new_internal_id = self._get_next_internal_id()
+                self.data_store[new_internal_id] = other_data
+                self.data_to_internal_id[data_hash] = new_internal_id
+                self.id_map[external_id] = new_internal_id
+                self.external_ids_dict[new_internal_id] = BitMap([external_id])
 
-            current = current.forward[0]
+        # Optionally, update any internal structures if necessary
+        self._update_internal_structures()
+
+        return self
+
+    def _update_internal_structures(self):
+        """
+        Update or rebuild internal structures to ensure data integrity and performance.
+        This example focuses on ensuring the external_ids_dict is correct.
+        """
+        # Rebuild the external_ids_dict based on current id_map
+        new_external_ids_dict = {}
+        for external_id, internal_id in self.id_map.items():
+            if internal_id in new_external_ids_dict:
+                new_external_ids_dict[internal_id].add(external_id)
+            else:
+                new_external_ids_dict[internal_id] = BitMap([external_id])
+
+        # Replace the old external_ids_dict with the newly constructed one
+        self.external_ids_dict = new_external_ids_dict
+
+    def save(self):
+        # Serialize data with bitmaps
+        packed_data = msgpack.packb([self.data_store, self.id_map, self.last_internal_id, self.data_to_internal_id])
+        # Resize file if needed
+        if self.mm is not None:
+            self.mm.close()
+        with open(self.filepath, 'wb+') as f:
+            f.truncate(len(packed_data))
+            f.write(packed_data)
+            f.flush()
+            self.mm = mmap.mmap(f.fileno(), 0)
+
+    def _load(self):
+        if os.path.exists(self.filepath):
+            with open(self.filepath, 'rb') as f:
+                self.mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+                data = msgpack.unpackb(self.mm, raw=False, strict_map_key=False)
+                self.data_store, self.id_map, self.last_internal_id, self.data_to_internal_id = data
+
+                # 重新构建 external_ids_dict 使用 Bitmap
+                self.external_ids_dict = {}  # 初始化一个空字典
+                for ext_id, int_id in self.id_map.items():
+                    if int_id in self.external_ids_dict:
+                        self.external_ids_dict[int_id].add(ext_id)
+                    else:
+                        self.external_ids_dict[int_id] = BitMap([ext_id])
+
+    def __del__(self):
+        if self.mm:
+            self.mm.close()
+
+    def _single_query(self, int_id, data, filter_instance, filter_ids, return_ids_only):
+        external_ids = self.external_ids_dict[int_id]
+
+        # 检查必须满足的条件
+        must_pass_fields = all(condition.evaluate(data) for condition in
+                               filter_instance.must_fields) if filter_instance.must_fields else True
+
+        if filter_instance.must_ids:
+            must_pass_ids = BitMap()
+            for condition in filter_instance.must_ids:
+                matched_ids = BitMap([id for id in external_ids if condition.matcher.match(id)])
+                if must_pass_ids:
+                    must_pass_ids &= matched_ids
+                else:
+                    must_pass_ids = matched_ids
+        else:
+            must_pass_ids = external_ids
+
+        if not must_pass_fields or len(must_pass_ids) == 0:
+            return None
+
+        # 检查不必须满足的条件
+        must_not_pass_fields = any(condition.evaluate(data) for condition in
+                                   filter_instance.must_not_fields) if filter_instance.must_not_fields else False
+
+        if filter_instance.must_not_ids:
+            must_not_pass_ids = BitMap()
+            for condition in filter_instance.must_not_ids:
+                matched_ids = BitMap([id for id in external_ids if condition.matcher.match(id)])
+                must_not_pass_ids |= matched_ids
+        else:
+            must_not_pass_ids = BitMap()
+
+        if must_not_pass_fields:
+            return None
+
+        final_pass = must_pass_ids - must_not_pass_ids
+
+        # 处理 "any" 条件
+        if filter_instance.any_fields or filter_instance.any_ids:
+            any_pass_ids = BitMap()
+            if filter_instance.any_fields:
+                any_pass_fields = any(condition.evaluate(data) for condition in filter_instance.any_fields)
+                if any_pass_fields:
+                    any_pass_ids = external_ids
+
+            if filter_instance.any_ids:
+                for condition in filter_instance.any_ids:
+                    matched_ids = BitMap([id for id in external_ids if condition.matcher.match(id)])
+                    any_pass_ids |= matched_ids
+
+            final_pass &= any_pass_ids
+
+        filtered_ids = final_pass.to_array()
+
+        if filter_ids is not None:
+            filtered_ids = [id for id in filtered_ids if id in filter_ids]
+
+        if return_ids_only:
+            return filtered_ids
+        else:
+            return [(id, data) for id in filtered_ids]
+
+    @lru_cache(maxsize=1000)
+    def query(self, filter_instance, filter_ids=None, return_ids_only=True):
+        matched = []
+
+        for int_id, data in self.data_store.items():
+            if int_id in self.external_ids_dict:
+                res = self._single_query(int_id, data, filter_instance, filter_ids, return_ids_only)
+                if res:
+                    matched.extend(res)
 
         return matched
-
-    def save(self, filepath):
-        try:
-            with gzip.open(filepath, 'wb') as f:
-                f.write(msgpack.packb([self.data_store, self.id_map, self.last_internal_id, self.data_to_internal_id]))
-            with gzip.open(Path(filepath).with_suffix('.sl'), 'wb') as f:
-                f.write(msgpack.packb(self.index.serialize()))
-        except IOError as e:
-            print(f"Error saving to file {filepath}: {e}")
-
-    def load(self, filepath):
-        try:
-            with gzip.open(filepath, 'rb') as f:
-                self.data_store, self.id_map, self.last_internal_id, self.data_to_internal_id = msgpack.unpackb(
-                    f.read(), strict_map_key=False, raw=False, use_list=False)
-            with gzip.open(Path(filepath).with_suffix('.sl'), 'rb') as f:
-                nodes = msgpack.unpackb(f.read(), raw=False)
-                self.index.deserialize(nodes)
-
-            return self
-        except IOError as e:
-            print(f"Error loading from file {filepath}: {e}")
-
