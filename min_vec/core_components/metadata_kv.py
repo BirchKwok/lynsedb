@@ -1,7 +1,6 @@
 import mmap
 import os
 from functools import lru_cache
-
 import msgpack
 from pyroaring import BitMap
 
@@ -117,6 +116,7 @@ class MetaDataKVCache:
         # Resize file if needed
         if self.mm is not None:
             self.mm.close()
+            self.mm = None
         with open(self.filepath, 'wb+') as f:
             f.truncate(len(packed_data))
             f.write(packed_data)
