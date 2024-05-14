@@ -138,10 +138,6 @@ class MetaDataKVCache:
                     else:
                         self.external_ids_dict[int_id] = BitMap([ext_id])
 
-    def __del__(self):
-        if self.mm:
-            self.mm.close()
-
     def _single_query(self, int_id, data, filter_instance, filter_ids, return_ids_only):
         external_ids = self.external_ids_dict[int_id]
 
@@ -216,3 +212,10 @@ class MetaDataKVCache:
                     matched.extend(res)
 
         return matched
+
+    def __del__(self):
+        if self.mm is not None:
+            try:
+                self.mm.close()
+            except:
+                pass

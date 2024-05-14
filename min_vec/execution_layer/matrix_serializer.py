@@ -502,6 +502,11 @@ class MatrixSerializer:
                 return None
 
             try:
+                if hasattr(self, 'kv_index'):
+                    self.kv_index.__del__()
+                if hasattr(self, 'temp_kv_index'):
+                    self.temp_kv_index.__del__()
+
                 shutil.rmtree(self.collections_path_parent)
             except FileNotFoundError:
                 pass
