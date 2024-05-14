@@ -6,7 +6,7 @@ from typing import Union
 import pandas as pd
 from spinesUtils.asserts import ParameterTypeAssert
 
-from min_vec.api.native_api.low_level import StandaloneMinVectorDB
+from min_vec.api.native_api.low_level import ExclusiveMinVectorDB
 from min_vec.api import logger
 from min_vec.utils.utils import unavailable_if_deleted
 
@@ -127,6 +127,7 @@ class _Register:
 class MinVectorDBLocalClient:
     """
     A singleton class for the local MinVectorDB client.
+    This class is thread-safe only. Using it in multiple processes will result in a race condition.
     """
     _instance = None
     _last_root_path = None
@@ -235,7 +236,7 @@ class MinVectorDBLocalClient:
         if chunk_size <= 1:
             raise ValueError('chunk_size must be greater than 1')
 
-        self._collections[collection] = StandaloneMinVectorDB(
+        self._collections[collection] = ExclusiveMinVectorDB(
             dim=dim, database_path=collection_path.as_posix(), chunk_size=chunk_size, dtypes=dtypes,
             n_clusters=n_clusters, distance=distance, index_mode=index_mode, use_cache=use_cache,
             scaler_bits=scaler_bits, n_threads=n_threads, warm_up=warm_up, initialize_as_collection=True
@@ -261,7 +262,7 @@ class MinVectorDBLocalClient:
             collection (str): The name of the collection to get.
 
         Returns:
-            StandaloneMinVectorDB: The collection.
+            ExclusiveMinVectorDB: The collection.
         """
         if collection not in self._collections:
             if collection not in self._register:
@@ -270,7 +271,7 @@ class MinVectorDBLocalClient:
             params = self._register.get_collections_details()[collection]
             if 'description' in params:
                 del params['description']
-            self._collections[collection] = StandaloneMinVectorDB(**params)
+            self._collections[collection] = ExclusiveMinVectorDB(**params)
 
         return self._collections[collection]
 
