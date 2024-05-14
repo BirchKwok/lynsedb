@@ -37,7 +37,7 @@ MinVectorDB is actively being updated, and API backward compatibility is not gua
 
 Although our goal is to enable brute force search or inverted indexing on billion-scale vectors, we currently still recommend using it on a scale of millions of vectors or less for the best experience.
 
-**python's native api is not thread-safe or process-safe**
+**python's native api is not process-safe**
 
 The Python native API is recommended for use in single-process environments, whether single-threaded or multi-threaded; for ensuring process safety in multi-process environments, please use the HTTP API.
 
