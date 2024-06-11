@@ -1,12 +1,12 @@
 <div align="center">
-  <a href="https://github.com/BirchKwok/MinVectorDB"><img src="https://github.com/BirchKwok/MinVectorDB/blob/main/pic/logo.png" alt="MinVectorDB" style="max-width: 20%; height: auto;"></a>
+  <a href="https://github.com/BirchKwok/Convergence"><img src="https://github.com/BirchKwok/Convergence/blob/main/pic/logo.png" alt="Convergence" style="max-width: 20%; height: auto;"></a>
   <h3>A pure Python-implemented, lightweight, server-optional, multi-end compatible, vector database deployable locally or remotely.</h3>
   <p>
-    <a href="https://badge.fury.io/py/MinVectorDB"><img src="https://badge.fury.io/py/MinVectorDB.svg" alt="PyPI version"></a>
-    <a href="https://pypi.org/project/MinVectorDB/"><img src="https://img.shields.io/pypi/pyversions/MinVectorDB" alt="PyPI - Python Version"></a>
-    <a href="https://pypi.org/project/MinVectorDB/"><img src="https://img.shields.io/pypi/l/MinVectorDB" alt="PyPI - License"></a>
-    <a href="https://github.com/BirchKwok/MinVectorDB/actions/workflows/python-tests.yml"><img src="https://github.com/BirchKwok/MinVectorDB/actions/workflows/python-tests.yml/badge.svg" alt="Python testing"></a>
-    <a href="https://github.com/BirchKwok/MinVectorDB/actions/workflows/docker-tests.yml"><img src="https://github.com/BirchKwok/MinVectorDB/actions/workflows/docker-tests.yml/badge.svg" alt="Docker build"></a>
+    <a href="https://badge.fury.io/py/Convergence"><img src="https://badge.fury.io/py/Convergence.svg" alt="PyPI version"></a>
+    <a href="https://pypi.org/project/Convergence/"><img src="https://img.shields.io/pypi/pyversions/Convergence" alt="PyPI - Python Version"></a>
+    <a href="https://pypi.org/project/Convergence/"><img src="https://img.shields.io/pypi/l/Convergence" alt="PyPI - License"></a>
+    <a href="https://github.com/BirchKwok/Convergence/actions/workflows/python-tests.yml"><img src="https://github.com/BirchKwok/Convergence/actions/workflows/python-tests.yml/badge.svg" alt="Python testing"></a>
+    <a href="https://github.com/BirchKwok/Convergence/actions/workflows/docker-tests.yml"><img src="https://github.com/BirchKwok/Convergence/actions/workflows/docker-tests.yml/badge.svg" alt="Docker build"></a>
   </p>
 </div>
 
@@ -18,9 +18,9 @@
 
 ⚡ **Based on a generic Python software stack, platform-independent, highly versatile.**
 
-*MinVectorDB* is a vector database implemented purely in Python, designed to be lightweight, server-optional, and easy to deploy locally or remotely. It offers straightforward and clear Python APIs, aiming to lower the entry barrier for using vector databases. 
+*Convergence* is a vector database implemented purely in Python, designed to be lightweight, server-optional, and easy to deploy locally or remotely. It offers straightforward and clear Python APIs, aiming to lower the entry barrier for using vector databases. 
 
-MinVectorDB focuses on achieving 100% recall, prioritizing recall accuracy over high-speed search performance. This approach ensures that users can reliably retrieve all relevant vector data, making MinVectorDB particularly suitable for applications that require responses within hundreds of milliseconds.
+Convergence focuses on achieving 100% recall, prioritizing recall accuracy over high-speed search performance. This approach ensures that users can reliably retrieve all relevant vector data, making Convergence particularly suitable for applications that require responses within hundreds of milliseconds.
 
 - [x] **Now supports HTTP API and Python local code API and Docker deployment.**
 - [X] **Now supports transaction management; if a commit fails, it will automatically roll back.**
@@ -31,7 +31,7 @@ MinVectorDB focuses on achieving 100% recall, prioritizing recall accuracy over 
 
 **Not yet backward compatible** 
 
-MinVectorDB is actively being updated, and API backward compatibility is not guaranteed. You should use version numbers as a strong constraint during deployment to avoid unnecessary feature conflicts and errors. 
+Convergence is actively being updated, and API backward compatibility is not guaranteed. You should use version numbers as a strong constraint during deployment to avoid unnecessary feature conflicts and errors. 
 
 **Data size constraints**
 
@@ -59,7 +59,7 @@ pip install Convergence
 **You must first [install Docker](https://docs.docker.com/engine/install/) on the host machine.**
 
 ```shell
-docker pull birchkwok/minvectordb:latest
+docker pull birchkwok/Convergence:latest
 ```
 
 ## Qucik Start
@@ -67,15 +67,15 @@ docker pull birchkwok/minvectordb:latest
 ```python
 import cvg
 
-print("MinVectorDB version is: ", cvg.__version__)
+print("Convergence version is: ", cvg.__version__)
 ```
 
-    MinVectorDB version is:  0.3.4
+    Convergence version is:  0.0.1
 
 
 ## Initialize Database
 
-MinVectorDB now supports HTTP API and Python native code API. 
+Convergence now supports HTTP API and Python native code API. 
 
 
 The HTTP API mode requires starting an HTTP server beforehand. You have two options: 
@@ -90,14 +90,14 @@ cvg run --host localhost --port 7637
   
   In Docker, You can run the following command in the terminal to start the service:
 ```shell
-docker run -p 7637:7637 birchkwok/minvectordb:latest
+docker run -p 7637:7637 birchkwok/Convergence:latest
 ```
 - Remote deploy
 
   If you want to deploy remotely, you can bind the image to port 80 of the remote host, or allow the host to open access to port 7637.
   such as:
 ```shell
-docker run -p 80:7637 birchkwok/minvectordb:latest
+docker run -p 80:7637 birchkwok/Convergence:latest
 ```
 
 - test if api available
@@ -109,12 +109,12 @@ docker run -p 80:7637 birchkwok/minvectordb:latest
   If the image is bound to port 80 of the host in remote deployment, you can directly access it http://your_host_ip
 
 ```python
-from cvg import MinVectorDB
+from cvg import Convergence
 
 # Use the HTTP API mode, it is suitable for use in production environments.
-my_db = MinVectorDB("http://localhost:7637")
+my_db = Convergence("http://localhost:7637")
 # Or use the Python native code API by specifying the database root directory.
-# my_db = MinVectorDB('my_vec_db')  # Judgment condition, root_path does not start with http or https
+# my_db = Convergence('my_vec_db')  # Judgment condition, root_path does not start with http or https
 # The Python native code API is recommended only for CI/CD testing or single-user local use.
 ```
 
@@ -419,7 +419,7 @@ my_db
 
 
 
-    MinVectorDB remote server at http://localhost:7637 does not exist.
+    Convergence remote server at http://localhost:7637 does not exist.
 
 
 
@@ -437,8 +437,8 @@ my_db.database_exists()
 
 ## What's Next
 
-- [Collection's operations](https://github.com/BirchKwok/MinVectorDB/blob/main/tutorials/collections.ipynb)
-- [Add vectors to collection](https://github.com/BirchKwok/MinVectorDB/blob/main/tutorials/add_vectors.ipynb)
-- [Using different indexing methods](https://github.com/BirchKwok/MinVectorDB/blob/main/tutorials/index_mode.ipynb)
-- [Using different distance metric functions](https://github.com/BirchKwok/MinVectorDB/blob/main/tutorials/distance.ipynb)
-- [Diversified queries](https://github.com/BirchKwok/MinVectorDB/blob/main/tutorials/queries.ipynb)
+- [Collection's operations](https://github.com/BirchKwok/Convergence/blob/main/tutorials/collections.ipynb)
+- [Add vectors to collection](https://github.com/BirchKwok/Convergence/blob/main/tutorials/add_vectors.ipynb)
+- [Using different indexing methods](https://github.com/BirchKwok/Convergence/blob/main/tutorials/index_mode.ipynb)
+- [Using different distance metric functions](https://github.com/BirchKwok/Convergence/blob/main/tutorials/distance.ipynb)
+- [Diversified queries](https://github.com/BirchKwok/Convergence/blob/main/tutorials/queries.ipynb)
