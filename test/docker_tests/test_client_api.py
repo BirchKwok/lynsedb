@@ -1,22 +1,25 @@
 import concurrent.futures
 
-from test import MinVectorDB, MinVectorDBHTTPClient
+from test import VectorDBClient, HTTPClient
 
 
 def test_initialization():
-    db = MinVectorDB('http://localhost:7637')
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
 
-    assert isinstance(db, MinVectorDBHTTPClient)
+    assert isinstance(db, HTTPClient)
 
 
 def test_create_collection():
-    db = MinVectorDB('http://localhost:7637')
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
     assert collection._collection_name == 'test_collection'
 
 
 def test_add_item():
-    db = MinVectorDB('http://localhost:7637')
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
     with collection.insert_session():
         id = collection.add_item([0.01, 0.34, 0.74, 0.31], id=1, field={'name': 'John Doe'})
@@ -32,14 +35,16 @@ def test_add_item():
 
 
 def add_item(id, vector, field):
-    db = MinVectorDB('http://localhost:7637')
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     collection = db.get_collection('test_collection')
     collection.add_item(vector, id=id, field=field)
     collection.commit()
 
 
 def test_multi_users_add_item():
-    db = MinVectorDB('http://localhost:7637')
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -54,14 +59,16 @@ def test_multi_users_add_item():
 
 
 def bulk_add_items(items):
-    db = MinVectorDB('http://localhost:7637')
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     collection = db.get_collection('test_collection')
     collection.bulk_add_items(items)
     collection.commit()
 
 
 def test_multi_users_bulk_add_items():
-    db = MinVectorDB('http://localhost:7637')
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
 
     items = [
@@ -83,7 +90,8 @@ def test_multi_users_bulk_add_items():
 
 
 def test_multi_thread_bulk_add_items():
-    db = MinVectorDB('http://localhost:7637')
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
 
     items = [
@@ -105,7 +113,8 @@ def test_multi_thread_bulk_add_items():
 
 
 def test_multi_thread_add_item():
-    db = MinVectorDB('http://localhost:7637')
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
 
     with concurrent.futures.ThreadPoolExecutor() as executor:

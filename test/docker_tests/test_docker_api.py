@@ -1,27 +1,28 @@
 # The address of the docker container running the service is http://localhost:5403
 import numpy as np
 
-from test import MinVectorDB
-from test import MinVectorDBHTTPClient, Collection
-
-root_url = 'http://localhost:7637'
+from test import VectorDBClient
+from test import HTTPClient, Collection
 
 
 def test_initialization():
-    db = MinVectorDB(root_url)
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
 
-    assert isinstance(db, MinVectorDBHTTPClient)
+    assert isinstance(db, HTTPClient)
 
 
 def test_create_collection():
-    db = MinVectorDB(root_url)
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
     assert isinstance(collection, Collection)
     assert collection._collection_name == 'test_collection'
 
 
 def test_add_item():
-    db = MinVectorDB(root_url)
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     collection = db.get_collection('test_collection')
     item = {
         "vector": [0.01, 0.34, 0.74, 0.31],
@@ -37,7 +38,8 @@ def test_add_item():
 
 
 def test_bulk_add_items():
-    db = MinVectorDB(root_url)
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     collection = db.get_collection('test_collection')
     with collection.insert_session():
         ids = collection.bulk_add_items([([0.36, 0.43, 0.56, 0.12], 2, {'field': 'test_1', 'order': 1}),
@@ -55,20 +57,21 @@ def test_bulk_add_items():
 def test_query():
     import operator
 
-    from min_vec.core_components.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
+    from cvg.core_components.kv_cache.filter import Filter, FieldCondition, MatchField, MatchID
 
-    db = MinVectorDB(root_url)
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     collection = db.get_collection('test_collection')
-    ids, scores = collection.query(
+    ids, scores = collection.search(
         vector=[0.36, 0.43, 0.56, 0.12],
         k=10,
-        query_filter=Filter(
+        search_filter=Filter(
             must=[
                 FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
             ],
             any=[
                 FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),
-                IDCondition(MatchID([1, 2, 3, 4, 5])),  # Support for filtering IDs
+                FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3, 4, 5])),  # Support for filtering IDs
             ]
         )
     )
@@ -76,6 +79,7 @@ def test_query():
 
 
 def test_drop_collection():
-    db = MinVectorDB(root_url)
+    client = VectorDBClient('http://localhost:7637')
+    db = client.create_database('test_db', drop_if_exists=True)
     db.drop_collection('test_collection')
     assert 'test_collection' not in db.show_collections()

@@ -1,23 +1,25 @@
-from test import MinVectorDB, ExclusiveMinVectorDB
+import cvg
 import concurrent.futures
+
+client = cvg.VectorDBClient()
 
 
 def add_item(id, vector, field):
-    db = MinVectorDB('test_min_vec')
+    db = client.create_database("test_min_vec", drop_if_exists=False)
     collection = db.get_collection('test_collection')
     collection.add_item(vector, id=id, field=field)
     collection.commit()
 
 
 def bulk_add_items(items):
-    db = MinVectorDB('test_min_vec')
+    db = client.create_database("test_min_vec", drop_if_exists=False)
     collection = db.get_collection('test_collection')
     collection.bulk_add_items(items)
     collection.commit()
 
 
 def test_multi_thread_bulk_add_items():
-    db = MinVectorDB('test_min_vec')
+    db = client.create_database("test_min_vec", drop_if_exists=False)
     collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
 
     items = [
@@ -40,7 +42,7 @@ def test_multi_thread_bulk_add_items():
 
 
 def test_multi_thread_add_item():
-    db = MinVectorDB('test_min_vec')
+    db = client.create_database("test_min_vec", drop_if_exists=False)
     collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
 
     with concurrent.futures.ThreadPoolExecutor() as executor:

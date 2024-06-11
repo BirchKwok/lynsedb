@@ -51,7 +51,7 @@ The Python native API is recommended for use in single-process environments, whe
 ## Install Client API package (Mandatory)
 
 ```shell
-pip install MinVectorDB
+pip install Convergence
 ```
 
 ## If you wish to use Docker (Optional)
@@ -64,10 +64,10 @@ docker pull birchkwok/minvectordb:latest
 
 ## Qucik Start
 
-
 ```python
-import min_vec
-print("MinVectorDB version is: ", min_vec.__version__)
+import cvg
+
+print("MinVectorDB version is: ", cvg.__version__)
 ```
 
     MinVectorDB version is:  0.3.4
@@ -83,7 +83,7 @@ The HTTP API mode requires starting an HTTP server beforehand. You have two opti
   
   For direct startup, the default port is 7637. You can run the following command in the terminal to start the service:
 ```shell
-min_vec run --host localhost --port 7637
+cvg run --host localhost --port 7637
 ```
 
 - within Docker
@@ -107,11 +107,9 @@ docker run -p 80:7637 birchkwok/minvectordb:latest
   For port 80, you can use this url: http://localhost
   
   If the image is bound to port 80 of the host in remote deployment, you can directly access it http://your_host_ip
-    
-
 
 ```python
-from min_vec import MinVectorDB
+from cvg import MinVectorDB
 
 # Use the HTTP API mode, it is suitable for use in production environments.
 my_db = MinVectorDB("http://localhost:7637")
@@ -310,9 +308,8 @@ with collection.insert_session():
 
 The default similarity measure for query is cosine. You can specify cosine or L2 to obtain the similarity measure you need.
 
-
 ```python
-collection.query(vector=[0.36, 0.43, 0.56, 0.12], k=10)
+collection.search(vector=[0.36, 0.43, 0.56, 0.12], k=10)
 ```
 
 
@@ -326,9 +323,8 @@ collection.query(vector=[0.36, 0.43, 0.56, 0.12], k=10)
 
 The `query_report_` attribute is the report of the most recent query. When multiple queries are conducted simultaneously, this attribute will only save the report of the last completed query result.
 
-
 ```python
-print(collection.query_report_)
+print(collection.search_report_)
 ```
 
     
@@ -356,32 +352,30 @@ After filtering with `must` and `must_not` conditions, the conditions in `any` w
 
 If there is a conflict between the conditions in `any` and those in `must` or `must_not`, the conditions in `any` will be ignored.
 
-
 ```python
 import operator
 
-from min_vec.core_components.filter import Filter, FieldCondition, MatchField, IDCondition, MatchID
+from cvg.core_components.kv_cache.filter import Filter, FieldCondition, MatchField, MatchID
 
-
-collection.query(
-    vector=[0.36, 0.43, 0.56, 0.12], 
-    k=10, 
-    query_filter=Filter(
+collection.search(
+    vector=[0.36, 0.43, 0.56, 0.12],
+    k=10,
+    search_filter=Filter(
         must=[
             FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
-        ], 
+        ],
         any=[
             FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),
-            IDCondition(MatchID([1, 2, 3, 4, 5])),  # Support for filtering IDs
+            FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3, 4, 5])),  # Support for filtering IDs
         ],
         must_not=[
-            IDCondition(MatchID([8])), 
+            FieldCondition(key=":match_id:", matcher=MatchID([8])),
             FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),
         ]
     )
 )
 
-print(collection.query_report_)
+print(collection.search_report_)
 ```
 
     

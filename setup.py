@@ -13,8 +13,8 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setup(
-    name='MinVectorDB',
-    version="0.3.6",
+    name='Convergence',
+    version="0.0.1",
     description='A pure Python-implemented, lightweight, server-optional, '
                 'multi-end compatible, vector database deployable locally or remotely.',
     keywords='vector database',
@@ -41,7 +41,7 @@ setup(
     zip_safe=False,
     entry_points={
         'console_scripts': [
-            'min_vec=min_vec.api.http_api.http_api:main',
+            'cvg=cvg.api.http_api.http_api:main',
         ],
     },
 )

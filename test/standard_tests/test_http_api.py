@@ -1,7 +1,7 @@
 import pytest
 
-from min_vec.api.http_api.http_api import app
-from min_vec.api.http_api.client_api import pack_data
+from cvg.api.http_api.http_api import app
+from cvg.api.http_api.client_api import pack_data
 
 
 @pytest.fixture()
@@ -16,12 +16,11 @@ def test_client():
 def test_require_collection(test_client):
     url = 'http://localhost:7637/required_collection'
     data = {
+        "database_name": "example_database",
         "collection_name": "example_collection",
         "dim": 4,
-        "n_clusters": 10,
         "chunk_size": 1024,
         "distance": "L2",
-        "index_mode": "IVF-FLAT",
         "dtypes": "float32",
         "use_cache": True,
         "scaler_bits": 8,
@@ -32,11 +31,16 @@ def test_require_collection(test_client):
     response = test_client.post(url, json=data)
     print(response.json)
     assert response.status_code == 200
-    assert response.json == {"status": "success", "params":
-        {"collection_name": "example_collection",
-         "dim": 4, "n_clusters": 10, "chunk_size": 1024, "distance": "L2",
-         "index_mode": "IVF-FLAT", "dtypes": "float32", "use_cache": True, "scaler_bits": 8,
-         "n_threads": 4, "warm_up": True, "drop_if_exists": True}}
+    assert response.json == {
+        "status": "success", "params":
+            {
+                "database_name": "example_database",
+                "collection_name": "example_collection",
+                "dim": 4, "chunk_size": 1024, "distance": "L2",
+                "dtypes": "float32", "use_cache": True, "scaler_bits": 8,
+                "n_threads": 4, "warm_up": True, "drop_if_exists": True, "buffer_size": 20
+            }
+    }
 
 
 def test_add_item(test_client):
@@ -44,6 +48,7 @@ def test_add_item(test_client):
 
     vector = [0.1, 0.2, 0.3, 0.4]
     data = {
+        "database_name": "example_database",
         "collection_name": "example_collection",
         "item": {
             "vector": vector,
@@ -63,16 +68,18 @@ def test_add_item(test_client):
     print(response.json)
     assert response.status_code == 200
     assert response.json == {"status": "success", "params":
-        {"collection_name": "example_collection", "item":
-            {"id": 1}}}
+        {
+            "database_name": "example_database",
+            "collection_name": "example_collection", "item":
+            {"id": 1}
+        }}
 
     url = 'http://localhost:7637/commit'
     data = {
         "collection_name": "example_collection"
     }
     response = test_client.post(url, json=data)
-    assert response.status_code == 200
-    assert response.json == {"status": "success", "params": {"collection_name": "example_collection"}}
+    assert response.status_code == 202
 
 
 def test_bulk_add_items(test_client):
@@ -80,6 +87,7 @@ def test_bulk_add_items(test_client):
     v1 = [0.1, 0.2, 0.3, 0.4]
     v2 = [0.2, 0.3, 0.4, 0.5]
     data = {
+        "database_name": "example_database",
         "collection_name": "example_collection",
         "items": [
             {
@@ -106,6 +114,7 @@ def test_bulk_add_items(test_client):
     assert response.json == {
         "status": "success", "params":
             {
+                "database_name": "example_database",
                 "collection_name": "example_collection",
                 "ids": [2, 3]
             }
@@ -113,28 +122,30 @@ def test_bulk_add_items(test_client):
 
     url = 'http://localhost:7637/commit'
     data = {
+        "database_name": "example_database",
         "collection_name": "example_collection"
     }
     response = test_client.post(url, json=data)
-    assert response.status_code == 200
-    assert response.json == {"status": "success", "params": {"collection_name": "example_collection"}}
+    assert response.status_code == 202
 
 
 def test_collection_shape(test_client):
     url = 'http://localhost:7637/collection_shape'
     data = {
+        "database_name": "example_database",
         "collection_name": "example_collection"
     }
     response = test_client.post(url, json=data)
     assert response.status_code == 200
     assert response.json == {"status": "success",
-                             "params": {"collection_name": "example_collection", "shape": [3, 4]}}
+                             "params": {"database_name": "example_database", "collection_name": "example_collection", "shape": [3, 4]}}
 
 
 def test_query(test_client):
     url = 'http://localhost:7637/query'
 
     data = {
+        "database_name": "example_database",
         "collection_name": "example_collection",
         "vector": [0.1, 0.2, 0.3, 0.4],
         "k": 10,
@@ -169,7 +180,7 @@ def test_query(test_client):
     rjson['params']['items']['scores'] = [1]
 
     assert rjson == {"status": "success", "params":
-        {"collection_name": "example_collection", "items": {
+        {"database_name": "example_database", "collection_name": "example_collection", "items": {
             "k": 10, "ids": [1], "scores": [1],
             "distance": 'cosine', "query time": 0.0
         }}}
@@ -178,30 +189,39 @@ def test_query(test_client):
 def test_drop_collection(test_client):
     url = 'http://localhost:7637/drop_collection'
     data = {
+        "database_name": "example_database",
         "collection_name": "example_collection"
     }
     response = test_client.post(url, json=data)
     assert response.status_code == 200
-    assert response.json == {"status": "success", "params": {"collection_name": "example_collection"}}
+    assert response.json == {"status": "success", "params": {"database_name": "example_database", "collection_name": "example_collection"}}
 
 
 def test_show_collections(test_client):
     url = 'http://localhost:7637/show_collections'
-    response = test_client.get(url)
+    data = {
+        "database_name": "example_database"
+    }
+    response = test_client.post(url, json=data)
     assert response.status_code == 200
     assert response.json == {"status": "success", "params": {"collections": []}}
 
 
 def test_drop_database(test_client):
     url = 'http://localhost:7637/drop_database'
-    response = test_client.get(url)
+    data = {
+        "database_name": "example_database"
+    }
+    response = test_client.post(url, json=data)
     assert response.status_code == 200
-    assert response.json == {"status": "success"}
+    assert response.json == {"status": "success", "params": {"database_name": "example_database"}}
 
 
 def test_database_exists(test_client):
     url = 'http://localhost:7637/database_exists'
-    response = test_client.get(url)
+    data = {
+        "database_name": "example_database"
+    }
+    response = test_client.post(url, json=data)
     assert response.status_code == 200
     assert response.json == {"status": "success", "params": {"exists": False}}
-
