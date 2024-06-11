@@ -2,9 +2,9 @@
   <a href="https://github.com/BirchKwok/Convergence"><img src="https://github.com/BirchKwok/Convergence/blob/main/pic/logo.png" alt="Convergence" style="max-width: 20%; height: auto;"></a>
   <h3>A pure Python-implemented, lightweight, server-optional, multi-end compatible, vector database deployable locally or remotely.</h3>
   <p>
-    <a href="https://badge.fury.io/py/Convergence"><img src="https://badge.fury.io/py/Convergence.svg" alt="PyPI version"></a>
-    <a href="https://pypi.org/project/Convergence/"><img src="https://img.shields.io/pypi/pyversions/Convergence" alt="PyPI - Python Version"></a>
-    <a href="https://pypi.org/project/Convergence/"><img src="https://img.shields.io/pypi/l/Convergence" alt="PyPI - License"></a>
+    <a href="https://badge.fury.io/py/ConvergenceDB"><img src="https://badge.fury.io/py/ConvergenceDB.svg" alt="PyPI version"></a>
+    <a href="https://pypi.org/project/ConvergenceDB/"><img src="https://img.shields.io/pypi/pyversions/ConvergenceDB" alt="PyPI - Python Version"></a>
+    <a href="https://pypi.org/project/ConvergenceDB/"><img src="https://img.shields.io/pypi/l/ConvergenceDB" alt="PyPI - License"></a>
     <a href="https://github.com/BirchKwok/Convergence/actions/workflows/python-tests.yml"><img src="https://github.com/BirchKwok/Convergence/actions/workflows/python-tests.yml/badge.svg" alt="Python testing"></a>
     <a href="https://github.com/BirchKwok/Convergence/actions/workflows/docker-tests.yml"><img src="https://github.com/BirchKwok/Convergence/actions/workflows/docker-tests.yml/badge.svg" alt="Docker build"></a>
   </p>
