@@ -1,6 +1,8 @@
 <div align="center">
   <picture>
-  <source srcset="pic/logo.png">
+    <a href="https://github.com/BirchKwok/LynseDB">
+      <img src="https://github.com/BirchKwok/LynseDB/blob/main/pic/logo.png" alt="LynseDB" style="width: 100px; height: auto;">
+    </a>
   </picture>
   <h3>A pure Python-implemented, lightweight, server-optional, multi-end compatible, vector database deployable locally or remotely.</h3>
   <p>
