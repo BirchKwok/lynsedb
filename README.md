@@ -8,6 +8,7 @@
 <br>
 
 <p align="center">
+  <a href="https://discord.com/invite/rcYK5nYF"><img src="https://img.shields.io/badge/Discord-Online-brightgreen" alt="Discord"></a>
   <a href="https://badge.fury.io/py/LynseDB"><img src="https://badge.fury.io/py/LynseDB.svg" alt="PyPI version"></a>
   <a href="https://pypi.org/project/LynseDB/"><img src="https://img.shields.io/pypi/pyversions/LynseDB" alt="PyPI - Python Version"></a>
   <a href="https://pypi.org/project/LynseDB/"><img src="https://img.shields.io/pypi/l/LynseDB" alt="PyPI - License"></a>
