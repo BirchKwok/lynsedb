@@ -1,5 +1,5 @@
 <div align="center">
-  <a href="https://github.com/BirchKwok/LynseDB"><img src="https://github.com/BirchKwok/LynseDB/blob/main/pic/logo.png" alt="LynseDB" style="max-width: 20%; height: auto;"></a>
+  <a href="https://github.com/BirchKwok/LynseDB"><img src="https://github.com/BirchKwok/LynseDB/blob/main/pic/logo.png" alt="LynseDB" style="max-width: 10%; height: auto;"></a>
   <h3>A pure Python-implemented, lightweight, server-optional, multi-end compatible, vector database deployable locally or remotely.</h3>
   <p>
     <a href="https://badge.fury.io/py/LynseDB"><img src="https://badge.fury.io/py/LynseDB.svg" alt="PyPI version"></a>
