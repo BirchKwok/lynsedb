@@ -1,18 +1,20 @@
 <div align="center">
   <picture>
-    <a href="https://github.com/BirchKwok/LynseDB">
-      <img src="https://github.com/BirchKwok/LynseDB/blob/main/pic/logo.png" alt="LynseDB" style="width: 100px; height: auto;">
-    </a>
+    <source media="(prefers-color-scheme: light)" srcset="https://github.com/BirchKwok/LynseDB/blob/main/pic/logo.png">
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/BirchKwok/LynseDB/blob/main/pic/logo.png">
+    <img alt="LynseDB logo" src="https://github.com/BirchKwok/LynseDB/blob/main/pic/logo.png" height="100">
   </picture>
-  <h3>A pure Python-implemented, lightweight, server-optional, multi-end compatible, vector database deployable locally or remotely.</h3>
-  <p>
-    <a href="https://badge.fury.io/py/LynseDB"><img src="https://badge.fury.io/py/LynseDB.svg" alt="PyPI version"></a>
-    <a href="https://pypi.org/project/LynseDB/"><img src="https://img.shields.io/pypi/pyversions/LynseDB" alt="PyPI - Python Version"></a>
-    <a href="https://pypi.org/project/LynseDB/"><img src="https://img.shields.io/pypi/l/LynseDB" alt="PyPI - License"></a>
-    <a href="https://github.com/BirchKwok/LynseDB/actions/workflows/python-tests.yml"><img src="https://github.com/BirchKwok/LynseDB/actions/workflows/python-tests.yml/badge.svg" alt="Python testing"></a>
-    <a href="https://github.com/BirchKwok/LynseDB/actions/workflows/docker-tests.yml"><img src="https://github.com/BirchKwok/LynseDB/actions/workflows/docker-tests.yml/badge.svg" alt="Docker build"></a>
-  </p>
 </div>
+<br>
+
+<p align="center">
+  <a href="https://badge.fury.io/py/LynseDB"><img src="https://badge.fury.io/py/LynseDB.svg" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/LynseDB/"><img src="https://img.shields.io/pypi/pyversions/LynseDB" alt="PyPI - Python Version"></a>
+  <a href="https://pypi.org/project/LynseDB/"><img src="https://img.shields.io/pypi/l/LynseDB" alt="PyPI - License"></a>
+  <a href="https://github.com/BirchKwok/LynseDB/actions/workflows/python-tests.yml"><img src="https://github.com/BirchKwok/LynseDB/actions/workflows/python-tests.yml/badge.svg" alt="Python testing"></a>
+  <a href="https://github.com/BirchKwok/LynseDB/actions/workflows/docker-tests.yml"><img src="https://github.com/BirchKwok/LynseDB/actions/workflows/docker-tests.yml/badge.svg" alt="Docker build"></a>
+</p>
+
 
 ⚡ **Server-optional, simple parameters, simple API.**
 
