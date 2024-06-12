@@ -3,12 +3,12 @@ from functools import partial
 
 import numpy as np
 
-from cvg.computational_layer.engines import to_normalize, inner_product_distance
-from cvg.configs.config import config
-from cvg.execution_layer.cluster_worker import ClusterWorker
-from cvg.execution_layer.matrix_serializer import MatrixSerializer
-from cvg.utils.utils import SearchResultsCache
-from cvg.core_components.limited_sort import LimitedSorted
+from lynse.computational_layer.engines import to_normalize, inner_product_distance
+from lynse.configs.config import config
+from lynse.execution_layer.cluster_worker import ClusterWorker
+from lynse.execution_layer.matrix_serializer import MatrixSerializer
+from lynse.utils.utils import SearchResultsCache
+from lynse.core_components.limited_sort import LimitedSorted
 
 
 class Search:
@@ -90,7 +90,7 @@ class Search:
 
         limited_sorted.add(scores, index_chunk, database_chunk)
 
-    @SearchResultsCache(config.CVG_SEARCH_CACHE_SIZE)
+    @SearchResultsCache(config.LYNSE_SEARCH_CACHE_SIZE)
     def search(self, vector, k=12, search_filter=None, distance=None, normalize=True, **kwargs):
         """
         Search the database for the vectors most similar to the given vector in batches.

@@ -3,10 +3,10 @@ from pathlib import Path
 
 import numpy as np
 
-import cvg
+import lynse
 
 
-client = cvg.VectorDBClient()
+client = lynse.VectorDBClient()
 
 
 def test_create_collection():

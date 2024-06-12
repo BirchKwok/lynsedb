@@ -5,8 +5,8 @@ import mmap
 from typing import Dict
 from pathlib import Path
 
-from cvg.core_components.kv_cache.index import Index
-from cvg.core_components.id_checker import IDChecker
+from lynse.core_components.kv_cache.index import Index
+from lynse.core_components.id_checker import IDChecker
 
 
 class KVCacheStorage:

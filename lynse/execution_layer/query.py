@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
-from cvg.execution_layer.matrix_serializer import MatrixSerializer
+from lynse.execution_layer.matrix_serializer import MatrixSerializer
 
 
 class Query:

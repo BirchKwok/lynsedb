@@ -1,7 +1,7 @@
 import pytest
 
-from cvg.api.http_api.http_api import app
-from cvg.api.http_api.client_api import pack_data
+from lynse.api.http_api.http_api import app
+from lynse.api.http_api.client_api import pack_data
 
 
 @pytest.fixture()

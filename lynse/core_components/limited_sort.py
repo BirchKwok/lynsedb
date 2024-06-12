@@ -3,7 +3,7 @@ from functools import partial
 
 import numpy as np
 
-from cvg.computational_layer.engines import inner_product_distance, euclidean_distance, cosine_distance
+from lynse.computational_layer.engines import inner_product_distance, euclidean_distance, cosine_distance
 
 
 class LimitedSorted:

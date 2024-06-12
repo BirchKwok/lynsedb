@@ -1,8 +1,8 @@
 
 __version__ = '0.0.1'
 
-from cvg.api.http_api.http_api import launch_in_jupyter
-from cvg.core_components import kv_cache as field_models
+from lynse.api.http_api.http_api import launch_in_jupyter
+from lynse.core_components import kv_cache as field_models
 
 
 class _InstanceDistributor:
@@ -11,9 +11,9 @@ class _InstanceDistributor:
 
     def __new__(cls, root_path: Union[str, Path, None], database_name: str):
         from pathlib import Path
-        from cvg.api.native_api.high_level import LocalClient
-        from cvg.api.http_api.client_api import HTTPClient
-        from cvg.configs.config import config
+        from lynse.api.native_api.high_level import LocalClient
+        from lynse.api.http_api.client_api import HTTPClient
+        from lynse.configs.config import config
 
         if isinstance(root_path, Path):
             root_path = root_path.as_posix()
@@ -22,13 +22,13 @@ class _InstanceDistributor:
             instance = HTTPClient(url=root_path, database_name=database_name)
         else:
             import multiprocessing
-            from cvg.api.http_api.http_api import serve_queue
+            from lynse.api.http_api.http_api import serve_queue
             # start the message message_queue process
             queue_process = multiprocessing.Process(target=serve_queue)
             queue_process.daemon = True
             queue_process.start()
 
-            native_api_root_path = config.CVG_DEFAULT_ROOT_PATH
+            native_api_root_path = config.LYNSE_DEFAULT_ROOT_PATH
 
             instance = LocalClient((native_api_root_path / database_name).as_posix())
 
@@ -83,14 +83,14 @@ class VectorDBClient:
         Returns:
             None
         """
-        from cvg.api.http_api.client_api import raise_error_response
-        from cvg.configs.config import config
+        from lynse.api.http_api.client_api import raise_error_response
+        from lynse.configs.config import config
         import httpx
 
         if self._url is None:
-            from cvg.api.native_api.database_manager import DatabaseManager
+            from lynse.api.native_api.database_manager import DatabaseManager
 
-            db_manager = DatabaseManager(root_path=config.CVG_DEFAULT_ROOT_PATH)
+            db_manager = DatabaseManager(root_path=config.LYNSE_DEFAULT_ROOT_PATH)
             db_manager.register(db_name=database_name)
 
             if drop_if_exists:
@@ -119,15 +119,15 @@ class VectorDBClient:
                 If the root path is a local path, return a LocalClient instance,
                 otherwise return a HTTPClient instance.
         """
-        from cvg.api.http_api.client_api import raise_error_response
+        from lynse.api.http_api.client_api import raise_error_response
         from spinesUtils.asserts import raise_if
-        from cvg.configs.config import config
+        from lynse.configs.config import config
         import httpx
 
         if self._url is None:
-            from cvg.api.native_api.database_manager import DatabaseManager
+            from lynse.api.native_api.database_manager import DatabaseManager
 
-            db_manager = DatabaseManager(root_path=config.CVG_DEFAULT_ROOT_PATH)
+            db_manager = DatabaseManager(root_path=config.LYNSE_DEFAULT_ROOT_PATH)
             databases = db_manager.list_database()
             raise_if(ValueError, database_name not in databases, f'{database_name} does not exist.')
         else:
@@ -150,14 +150,14 @@ class VectorDBClient:
         Returns:
             List: A list of all databases.
         """
-        from cvg.api.http_api.client_api import raise_error_response
+        from lynse.api.http_api.client_api import raise_error_response
         import httpx
 
         if self._url is None:
-            from cvg.api.native_api.database_manager import DatabaseManager
-            from cvg.configs.config import config
+            from lynse.api.native_api.database_manager import DatabaseManager
+            from lynse.configs.config import config
 
-            db_manager = DatabaseManager(root_path=config.CVG_DEFAULT_ROOT_PATH)
+            db_manager = DatabaseManager(root_path=config.LYNSE_DEFAULT_ROOT_PATH)
             return db_manager.list_database()
         else:
             try:
@@ -179,14 +179,14 @@ class VectorDBClient:
         Returns:
             None
         """
-        from cvg.api.http_api.client_api import raise_error_response
+        from lynse.api.http_api.client_api import raise_error_response
         import httpx
 
         if self._url is None:
-            from cvg.api.native_api.database_manager import DatabaseManager
-            from cvg.configs.config import config
+            from lynse.api.native_api.database_manager import DatabaseManager
+            from lynse.configs.config import config
 
-            db_manager = DatabaseManager(root_path=config.CVG_DEFAULT_ROOT_PATH)
+            db_manager = DatabaseManager(root_path=config.LYNSE_DEFAULT_ROOT_PATH)
             databases = db_manager.list_database()
             if database_name not in databases:
                 return

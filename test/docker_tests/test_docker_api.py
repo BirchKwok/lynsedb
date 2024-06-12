@@ -57,7 +57,7 @@ def test_bulk_add_items():
 def test_query():
     import operator
 
-    from cvg.core_components.kv_cache.filter import Filter, FieldCondition, MatchField, MatchID
+    from lynse.core_components.kv_cache.filter import Filter, FieldCondition, MatchField, MatchID
 
     client = VectorDBClient('http://localhost:7637')
     db = client.create_database('test_db', drop_if_exists=True)

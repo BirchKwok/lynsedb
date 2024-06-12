@@ -7,13 +7,13 @@ import numpy as np
 from spinesUtils.asserts import raise_if, ParameterTypeAssert
 from spinesUtils.timer import Timer
 
-from cvg.configs.parameters_validator import ParametersValidator
-from cvg.execution_layer.cluster_worker import ClusterWorker
-from cvg.execution_layer.search import Search
-from cvg.execution_layer.matrix_serializer import MatrixSerializer
-from cvg.utils.utils import unavailable_if_deleted
-from cvg.api import logger
-from cvg.core_components.kv_cache.filter import Filter
+from lynse.configs.parameters_validator import ParametersValidator
+from lynse.execution_layer.cluster_worker import ClusterWorker
+from lynse.execution_layer.search import Search
+from lynse.execution_layer.matrix_serializer import MatrixSerializer
+from lynse.utils.utils import unavailable_if_deleted
+from lynse.api import logger
+from lynse.core_components.kv_cache.filter import Filter
 
 
 class ExclusiveDB:
@@ -291,7 +291,7 @@ class ExclusiveDB:
         """
         Create a session to insert data, which will automatically commit the data when the session ends.
         """
-        from cvg.execution_layer.session import DataOpsSession
+        from lynse.execution_layer.session import DataOpsSession
 
         return DataOpsSession(self)
 

@@ -9,10 +9,10 @@ import pandas as pd
 from spinesUtils.asserts import raise_if
 from tqdm import trange
 
-from cvg.core_components.kv_cache.filter import Filter
-from cvg.api import config, logger
-from cvg.core_components.thread_safe_list import SafeList
-from cvg.utils.utils import SearchResultsCache
+from lynse.core_components.kv_cache.filter import Filter
+from lynse.api import config, logger
+from lynse.core_components.thread_safe_list import SafeList
+from lynse.utils.utils import SearchResultsCache
 
 
 class ExecutionError(Exception):
@@ -437,11 +437,11 @@ class Collection:
         Start an insert session.
             .. versionadded:: 0.3.2
         """
-        from cvg.execution_layer.session import DataOpsSession
+        from lynse.execution_layer.session import DataOpsSession
 
         return DataOpsSession(self)
 
-    @SearchResultsCache(config.CVG_SEARCH_CACHE_SIZE)
+    @SearchResultsCache(config.LYNSE_SEARCH_CACHE_SIZE)
     def _search(self, vector: Union[list[float], np.ndarray], k: int = 10, distance: str = 'IP',
                 search_filter: Union[Filter, None] = None, normalize=False, **kwargs):
         """
@@ -963,13 +963,13 @@ class HTTPClient:
 
         Parameters:
             env (dict): The environment variables. It can be specified on the same time or separately.
-                - CVG_LOG_LEVEL: The log level.
-                - CVG_LOG_PATH: The log path.
-                - CVG_TRUNCATE_LOG: Whether to truncate the log.
-                - CVG_LOG_WITH_TIME: Whether to log with time.
-                - CVG_KMEANS_EPOCHS: The number of epochs for KMeans.
-                - CVG_SEARCH_CACHE_SIZE: The search cache size.
-                - CVG_DATALOADER_BUFFER_SIZE: The dataloader buffer size.
+                - LYNSE_LOG_LEVEL: The log level.
+                - LYNSE_LOG_PATH: The log path.
+                - LYNSE_TRUNCATE_LOG: Whether to truncate the log.
+                - LYNSE_LOG_WITH_TIME: Whether to log with time.
+                - LYNSE_KMEANS_EPOCHS: The number of epochs for KMeans.
+                - LYNSE_SEARCH_CACHE_SIZE: The search cache size.
+                - LYNSE_DATALOADER_BUFFER_SIZE: The dataloader buffer size.
 
         Returns:
             dict: The response from the server.
@@ -980,8 +980,8 @@ class HTTPClient:
         """
         url = f'{self.url}/set_environment'
 
-        env_list = ['CVG_LOG_LEVEL', 'CVG_LOG_PATH', 'CVG_TRUNCATE_LOG', 'CVG_LOG_WITH_TIME',
-                    'CVG_KMEANS_EPOCHS', 'CVG_SEARCH_CACHE_SIZE', 'CVG_DATALOADER_BUFFER_SIZE']
+        env_list = ['LYNSE_LOG_LEVEL', 'LYNSE_LOG_PATH', 'LYNSE_TRUNCATE_LOG', 'LYNSE_LOG_WITH_TIME',
+                    'LYNSE_KMEANS_EPOCHS', 'LYNSE_SEARCH_CACHE_SIZE', 'LYNSE_DATALOADER_BUFFER_SIZE']
 
         data = {"database_name": self.database_name}
         for key in env:

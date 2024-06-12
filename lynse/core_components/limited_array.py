@@ -1,6 +1,6 @@
 import numpy as np
 
-from cvg.core_components.locks import ThreadLock
+from lynse.core_components.locks import ThreadLock
 
 
 class LimitedArray:

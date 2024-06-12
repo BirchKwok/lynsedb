@@ -6,15 +6,15 @@ import shutil
 from typing import Union
 
 import numpy as np
-from cvg.computational_layer.engines import to_normalize
+from lynse.computational_layer.engines import to_normalize
 from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
 
-from cvg.core_components.locks import ThreadLock
-from cvg.core_components.id_checker import IDChecker
-from cvg.core_components.scaler import ScalarQuantization
-from cvg.core_components.kv_cache import VeloKV
-from cvg.storage_layer.storage import PersistentFileStorage, TemporaryFileStorage
+from lynse.core_components.locks import ThreadLock
+from lynse.core_components.id_checker import IDChecker
+from lynse.core_components.scaler import ScalarQuantization
+from lynse.core_components.kv_cache import VeloKV
+from lynse.storage_layer.storage import PersistentFileStorage, TemporaryFileStorage
 
 
 class MatrixSerializer:

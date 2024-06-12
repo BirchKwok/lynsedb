@@ -7,10 +7,10 @@ import json
 import numpy as np
 from spinesUtils.asserts import raise_if
 
-from cvg.core_components.limited_array import LimitedArray
-from cvg.core_components.locks import ThreadLock
-from cvg.core_components.limited_dict import LimitedDict
-from cvg.utils.utils import load_chunk_file
+from lynse.core_components.limited_array import LimitedArray
+from lynse.core_components.locks import ThreadLock
+from lynse.core_components.limited_dict import LimitedDict
+from lynse.utils.utils import load_chunk_file
 
 
 class TemporaryFileStorage:

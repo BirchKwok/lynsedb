@@ -5,11 +5,11 @@ import numpy as np
 from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
 
-from cvg.configs.config import config
-from cvg.storage_layer.storage import PersistentFileStorage
-from cvg.core_components.kmeans import BatchKMeans
-from cvg.core_components.ivf_index import IVFIndex
-from cvg.core_components.locks import ThreadLock
+from lynse.configs.config import config
+from lynse.storage_layer.storage import PersistentFileStorage
+from lynse.core_components.kmeans import BatchKMeans
+from lynse.core_components.ivf_index import IVFIndex
+from lynse.core_components.locks import ThreadLock
 
 
 class ClusterWorker:
@@ -74,19 +74,19 @@ class ClusterWorker:
                 self.ivf_index.add_entry(label, filename, idx)
 
     def _check_if_refit(self, n_clusters):
-        CVG_KMEANS_EPOCHS = config.CVG_KMEANS_EPOCHS
+        LYNSE_KMEANS_EPOCHS = config.LYNSE_KMEANS_EPOCHS
 
         if self.ann_model is None:
             self.ann_model = BatchKMeans(n_clusters=n_clusters, random_state=0,
-                                         batch_size=10240, epochs=CVG_KMEANS_EPOCHS)
+                                         batch_size=10240, epochs=LYNSE_KMEANS_EPOCHS)
 
         REFIT = False
 
         if (self.ann_model.n_clusters != n_clusters or
-                self.ann_model.epochs != CVG_KMEANS_EPOCHS or
+                self.ann_model.epochs != LYNSE_KMEANS_EPOCHS or
                 self.ann_model.batch_size != 10240):
             self.ann_model = BatchKMeans(n_clusters=n_clusters, random_state=0,
-                                         batch_size=10240, epochs=CVG_KMEANS_EPOCHS)
+                                         batch_size=10240, epochs=LYNSE_KMEANS_EPOCHS)
             REFIT = True
 
         return REFIT

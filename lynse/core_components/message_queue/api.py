@@ -1,7 +1,7 @@
 import flask
 from flask import jsonify
 
-from cvg.core_components.message_queue import MessageQueue
+from lynse.core_components.message_queue import MessageQueue
 
 queue_app = flask.Flask(__name__)
 

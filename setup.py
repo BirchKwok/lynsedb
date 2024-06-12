@@ -41,7 +41,7 @@ setup(
     zip_safe=False,
     entry_points={
         'console_scripts': [
-            'cvg=cvg.api.http_api.http_api:main',
+            'lynse=lynse.api.http_api.http_api:main',
         ],
     },
 )

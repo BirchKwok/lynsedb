@@ -1,12 +1,12 @@
 <div align="center">
-  <a href="https://github.com/BirchKwok/Convergence"><img src="https://github.com/BirchKwok/Convergence/blob/main/pic/logo.png" alt="Convergence" style="max-width: 20%; height: auto;"></a>
+  <a href="https://github.com/BirchKwok/LynseDB"><img src="https://github.com/BirchKwok/LynseDB/blob/main/pic/logo.png" alt="LynseDB" style="max-width: 20%; height: auto;"></a>
   <h3>A pure Python-implemented, lightweight, server-optional, multi-end compatible, vector database deployable locally or remotely.</h3>
   <p>
-    <a href="https://badge.fury.io/py/ConvergenceDB"><img src="https://badge.fury.io/py/ConvergenceDB.svg" alt="PyPI version"></a>
-    <a href="https://pypi.org/project/ConvergenceDB/"><img src="https://img.shields.io/pypi/pyversions/ConvergenceDB" alt="PyPI - Python Version"></a>
-    <a href="https://pypi.org/project/ConvergenceDB/"><img src="https://img.shields.io/pypi/l/ConvergenceDB" alt="PyPI - License"></a>
-    <a href="https://github.com/BirchKwok/Convergence/actions/workflows/python-tests.yml"><img src="https://github.com/BirchKwok/Convergence/actions/workflows/python-tests.yml/badge.svg" alt="Python testing"></a>
-    <a href="https://github.com/BirchKwok/Convergence/actions/workflows/docker-tests.yml"><img src="https://github.com/BirchKwok/Convergence/actions/workflows/docker-tests.yml/badge.svg" alt="Docker build"></a>
+    <a href="https://badge.fury.io/py/LynseDB"><img src="https://badge.fury.io/py/LynseDB.svg" alt="PyPI version"></a>
+    <a href="https://pypi.org/project/LynseDB/"><img src="https://img.shields.io/pypi/pyversions/LynseDB" alt="PyPI - Python Version"></a>
+    <a href="https://pypi.org/project/LynseDB/"><img src="https://img.shields.io/pypi/l/LynseDB" alt="PyPI - License"></a>
+    <a href="https://github.com/BirchKwok/LynseDB/actions/workflows/python-tests.yml"><img src="https://github.com/BirchKwok/LynseDB/actions/workflows/python-tests.yml/badge.svg" alt="Python testing"></a>
+    <a href="https://github.com/BirchKwok/LynseDB/actions/workflows/docker-tests.yml"><img src="https://github.com/BirchKwok/LynseDB/actions/workflows/docker-tests.yml/badge.svg" alt="Docker build"></a>
   </p>
 </div>
 
@@ -18,9 +18,9 @@
 
 ⚡ **Based on a generic Python software stack, platform-independent, highly versatile.**
 
-*Convergence* is a vector database implemented purely in Python, designed to be lightweight, server-optional, and easy to deploy locally or remotely. It offers straightforward and clear Python APIs, aiming to lower the entry barrier for using vector databases. 
+*LynseDB* is a vector database implemented purely in Python, designed to be lightweight, server-optional, and easy to deploy locally or remotely. It offers straightforward and clear Python APIs, aiming to lower the entry barrier for using vector databases. 
 
-Convergence focuses on achieving 100% recall, prioritizing recall accuracy over high-speed search performance. This approach ensures that users can reliably retrieve all relevant vector data, making Convergence particularly suitable for applications that require responses within hundreds of milliseconds.
+LynseDB focuses on achieving 100% recall, prioritizing recall accuracy over high-speed search performance. This approach ensures that users can reliably retrieve all relevant vector data, making LynseDB particularly suitable for applications that require responses within hundreds of milliseconds.
 
 - [x] **Now supports HTTP API and Python local code API and Docker deployment.**
 - [X] **Now supports transaction management; if a commit fails, it will automatically roll back.**
@@ -31,7 +31,7 @@ Convergence focuses on achieving 100% recall, prioritizing recall accuracy over 
 
 **Not yet backward compatible** 
 
-Convergence is actively being updated, and API backward compatibility is not guaranteed. You should use version numbers as a strong constraint during deployment to avoid unnecessary feature conflicts and errors. 
+LynseDB is actively being updated, and API backward compatibility is not guaranteed. You should use version numbers as a strong constraint during deployment to avoid unnecessary feature conflicts and errors. 
 
 **Data size constraints**
 
@@ -51,7 +51,7 @@ The Python native API is recommended for use in single-process environments, whe
 ## Install Client API package (Mandatory)
 
 ```shell
-pip install Convergence
+pip install LynseDB
 ```
 
 ## If you wish to use Docker (Optional)
@@ -59,23 +59,23 @@ pip install Convergence
 **You must first [install Docker](https://docs.docker.com/engine/install/) on the host machine.**
 
 ```shell
-docker pull birchkwok/Convergence:latest
+docker pull birchkwok/LynseDB:latest
 ```
 
 ## Qucik Start
 
 ```python
-import cvg
+import lynse
 
-print("Convergence version is: ", cvg.__version__)
+print("LynseDB version is: ", lynse.__version__)
 ```
 
-    Convergence version is:  0.0.1
+    LynseDB version is:  0.0.1
 
 
 ## Initialize Database
 
-Convergence now supports HTTP API and Python native code API. 
+LynseDB now supports HTTP API and Python native code API. 
 
 
 The HTTP API mode requires starting an HTTP server beforehand. You have two options: 
@@ -83,21 +83,21 @@ The HTTP API mode requires starting an HTTP server beforehand. You have two opti
   
   For direct startup, the default port is 7637. You can run the following command in the terminal to start the service:
 ```shell
-cvg run --host localhost --port 7637
+lynse run --host localhost --port 7637
 ```
 
 - within Docker
   
   In Docker, You can run the following command in the terminal to start the service:
 ```shell
-docker run -p 7637:7637 birchkwok/Convergence:latest
+docker run -p 7637:7637 birchkwok/LynseDB:latest
 ```
 - Remote deploy
 
   If you want to deploy remotely, you can bind the image to port 80 of the remote host, or allow the host to open access to port 7637.
   such as:
 ```shell
-docker run -p 80:7637 birchkwok/Convergence:latest
+docker run -p 80:7637 birchkwok/LynseDB:latest
 ```
 
 - test if api available
@@ -109,12 +109,12 @@ docker run -p 80:7637 birchkwok/Convergence:latest
   If the image is bound to port 80 of the host in remote deployment, you can directly access it http://your_host_ip
 
 ```python
-from cvg import Convergence
+from lynse import LynseDB
 
 # Use the HTTP API mode, it is suitable for use in production environments.
-my_db = Convergence("http://localhost:7637")
+my_db = LynseDB("http://localhost:7637")
 # Or use the Python native code API by specifying the database root directory.
-# my_db = Convergence('my_vec_db')  # Judgment condition, root_path does not start with http or https
+# my_db = LynseDB('my_vec_db')  # Judgment condition, root_path does not start with http or https
 # The Python native code API is recommended only for CI/CD testing or single-user local use.
 ```
 
@@ -355,7 +355,7 @@ If there is a conflict between the conditions in `any` and those in `must` or `m
 ```python
 import operator
 
-from cvg.core_components.kv_cache.filter import Filter, FieldCondition, MatchField, MatchID
+from lynse.core_components.kv_cache.filter import Filter, FieldCondition, MatchField, MatchID
 
 collection.search(
     vector=[0.36, 0.43, 0.56, 0.12],
@@ -419,7 +419,7 @@ my_db
 
 
 
-    Convergence remote server at http://localhost:7637 does not exist.
+    LynseDB remote server at http://localhost:7637 does not exist.
 
 
 
@@ -437,8 +437,8 @@ my_db.database_exists()
 
 ## What's Next
 
-- [Collection's operations](https://github.com/BirchKwok/Convergence/blob/main/tutorials/collections.ipynb)
-- [Add vectors to collection](https://github.com/BirchKwok/Convergence/blob/main/tutorials/add_vectors.ipynb)
-- [Using different indexing methods](https://github.com/BirchKwok/Convergence/blob/main/tutorials/index_mode.ipynb)
-- [Using different distance metric functions](https://github.com/BirchKwok/Convergence/blob/main/tutorials/distance.ipynb)
-- [Diversified queries](https://github.com/BirchKwok/Convergence/blob/main/tutorials/queries.ipynb)
+- [Collection's operations](https://github.com/BirchKwok/LynseDB/blob/main/tutorials/collections.ipynb)
+- [Add vectors to collection](https://github.com/BirchKwok/LynseDB/blob/main/tutorials/add_vectors.ipynb)
+- [Using different indexing methods](https://github.com/BirchKwok/LynseDB/blob/main/tutorials/index_mode.ipynb)
+- [Using different distance metric functions](https://github.com/BirchKwok/LynseDB/blob/main/tutorials/distance.ipynb)
+- [Diversified queries](https://github.com/BirchKwok/LynseDB/blob/main/tutorials/queries.ipynb)

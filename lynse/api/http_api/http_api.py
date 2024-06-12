@@ -13,15 +13,15 @@ from flask import Flask, request, jsonify, Response
 from waitress import serve
 import socket
 
-from cvg.configs.config import config
-from cvg.core_components.limited_dict import LimitedDict
-from cvg.core_components.safe_dict import SafeDict
+from lynse.configs.config import config
+from lynse.core_components.limited_dict import LimitedDict
+from lynse.core_components.safe_dict import SafeDict
 
 app = Flask(__name__)
 
 data_dict = LimitedDict(max_size=1000)
 
-root_path = config.CVG_DEFAULT_ROOT_PATH
+root_path = config.LYNSE_DEFAULT_ROOT_PATH
 root_path_parent = root_path.parent
 
 
@@ -45,7 +45,7 @@ def required_collection():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -120,7 +120,7 @@ def drop_collection():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -195,7 +195,7 @@ def show_collections():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     try:
@@ -241,7 +241,7 @@ def add_item():
 
 
 def process_add_item(data):
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     try:
         my_vec_db = LocalClient(root_path=root_path / data['database_name'])
@@ -277,7 +277,7 @@ def bulk_add_items():
 
 
 def process_bulk_add_items(data):
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     try:
         my_vec_db = LocalClient(root_path=root_path / data['database_name'])
@@ -299,8 +299,8 @@ def search():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
-    from cvg.core_components.kv_cache.filter import Filter
+    from lynse.api.native_api.high_level import LocalClient
+    from lynse.core_components.kv_cache.filter import Filter
 
     data = request.json
     if not data:
@@ -350,7 +350,7 @@ tasks = SafeDict()
 
 
 def long_task(task_id, data):
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     tasks_queue: queue.Queue = data_dict[data['collection_name']]
 
@@ -425,7 +425,7 @@ def collection_shape():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -472,8 +472,8 @@ def get_environment():
     Returns:
         dict: The status of the operation.
     """
-    env_list = ['CVG_LOG_LEVEL', 'CVG_LOG_PATH', 'CVG_TRUNCATE_LOG', 'CVG_LOG_WITH_TIME',
-                'CVG_KMEANS_EPOCHS', 'CVG_SEARCH_CACHE_SIZE', 'CVG_DATALOADER_BUFFER_SIZE']
+    env_list = ['LYNSE_LOG_LEVEL', 'LYNSE_LOG_PATH', 'LYNSE_TRUNCATE_LOG', 'LYNSE_LOG_WITH_TIME',
+                'LYNSE_KMEANS_EPOCHS', 'LYNSE_SEARCH_CACHE_SIZE', 'LYNSE_DATALOADER_BUFFER_SIZE']
 
     params = {key: eval("global_config.key") for key in env_list}
     try:
@@ -491,7 +491,7 @@ def get_collection_search_report():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -519,7 +519,7 @@ def get_collection_status_report():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -557,7 +557,7 @@ def is_collection_exists():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -675,7 +675,7 @@ def update_collection_description():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -703,7 +703,7 @@ def update_description():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -733,7 +733,7 @@ def show_collections_details():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     try:
@@ -758,7 +758,7 @@ def build_index():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -787,7 +787,7 @@ def remove_index():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -816,7 +816,7 @@ def list_databases():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.database_manager import DatabaseManager
+    from lynse.api.native_api.database_manager import DatabaseManager
 
     try:
         data_manager = DatabaseManager(root_path_parent)
@@ -835,7 +835,7 @@ def delete_database():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.database_manager import DatabaseManager
+    from lynse.api.native_api.database_manager import DatabaseManager
 
     data = request.json
     try:
@@ -855,8 +855,8 @@ def create_database():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.database_manager import DatabaseManager
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.database_manager import DatabaseManager
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     try:
@@ -881,7 +881,7 @@ def head():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -914,7 +914,7 @@ def tail():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -947,7 +947,7 @@ def get_collection_path():
     Returns:
         dict: The status of the operation.
     """
-    from cvg.api.native_api.high_level import LocalClient
+    from lynse.api.native_api.high_level import LocalClient
 
     data = request.json
     try:
@@ -973,7 +973,7 @@ def get_local_ip():
 
 def serve_queue():
     from waitress import serve
-    from cvg.core_components.message_queue.api import queue_app
+    from lynse.core_components.message_queue.api import queue_app
 
     def find_free_port(start_port):
         port = start_port

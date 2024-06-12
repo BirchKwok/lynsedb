@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List
 
 
-from cvg.core_components.kv_cache.filter import MatchField, MatchID, FieldCondition, Filter, MatchRange
+from lynse.core_components.kv_cache.filter import MatchField, MatchID, FieldCondition, Filter, MatchRange
 
 
 @dataclass
@@ -30,8 +30,8 @@ class VeloKV:
             as_temp_file: bool
                 If True, the cache will be stored in a temporary file.
         """
-        from cvg.core_components.kv_cache.kv_query import KVCacheQuery
-        from cvg.core_components.kv_cache.kv_storage import KVCacheStorage
+        from lynse.core_components.kv_cache.kv_query import KVCacheQuery
+        from lynse.core_components.kv_cache.kv_storage import KVCacheStorage
 
         self.storage = KVCacheStorage(filepath, as_temp_file=as_temp_file)
         self.query_handler = KVCacheQuery(self.storage)

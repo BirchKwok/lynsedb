@@ -1,7 +1,7 @@
-import cvg
+import lynse
 import concurrent.futures
 
-client = cvg.VectorDBClient()
+client = lynse.VectorDBClient()
 
 
 def add_item(id, vector, field):

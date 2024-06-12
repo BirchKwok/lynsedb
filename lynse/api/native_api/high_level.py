@@ -6,8 +6,8 @@ from typing import Union
 
 import pandas as pd
 
-from cvg.api import logger
-from cvg.utils.utils import unavailable_if_deleted
+from lynse.api import logger
+from lynse.utils.utils import unavailable_if_deleted
 
 
 class _Register:
@@ -202,7 +202,7 @@ class LocalClient:
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
         """
-        from cvg.api.native_api.low_level import ExclusiveDB
+        from lynse.api.native_api.low_level import ExclusiveDB
 
         collection_path = self._root_path / collection
 
@@ -265,7 +265,7 @@ class LocalClient:
         Returns:
             ExclusiveDB: The collection.
         """
-        from cvg.api.native_api.low_level import ExclusiveDB
+        from lynse.api.native_api.low_level import ExclusiveDB
 
         if collection not in self._collections:
             if collection not in self._register:
