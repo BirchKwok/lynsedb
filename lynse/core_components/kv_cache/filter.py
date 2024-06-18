@@ -47,7 +47,6 @@ class MatchField:
     def __init__(self, value, comparator=operator.eq, all_comparators=False):
         """
         Initialize a MatchField instance with a specific value and comparator.
-            .. versionadded:: 0.3.0
 
         Parameters:
             value (list or tuple or any object that implements comparison functions such as __ eq__): The value to compare the data attribute with.
@@ -55,7 +54,6 @@ class MatchField:
             all_comparators: Whether to apply the comparator to all values in the list or tuple.
                 If True, all values in the list or tuple must satisfy the comparison condition.
                 If False, at least one value in the list or tuple must satisfy the comparison condition.
-                    .. versionadded:: 0.3.5
         """
         self.value = value
         self.comparator = comparator
@@ -86,7 +84,6 @@ class MatchID:
     def __init__(self, ids: list):
         """
         Initialize an MatchID instance.
-            .. versionadded:: 0.3.0
 
         Parameters:
             ids (list): The indices to filter the numpy array.
@@ -112,7 +109,6 @@ class FieldCondition:
     def __init__(self, key=None, matcher=None):
         """
         Initialize a FieldCondition instance with a specific key and matcher.
-            .. versionadded:: 0.3.0
 
         Parameters:
             key: The key of the data attribute to compare.
@@ -154,13 +150,11 @@ class Filter:
     def __init__(self, must=None, any=None, must_not=None):
         """
         Initialize a Filter instance with must and any conditions.
-            .. versionadded:: 0.3.0
 
         Parameters:
             must: A list of conditions that must be satisfied.
             any: A list of conditions where at least one must be satisfied.
             must_not: A list of conditions that must not be satisfied.
-                .. versionadded:: 0.3.3
         """
         self.must_fields = []
         self.any_fields = []
@@ -200,31 +194,52 @@ class Filter:
             'must_fields': [
                 {
                     'ids': condition.matcher.indices
-                } if not isinstance(condition.matcher, MatchField) else {
+                } if isinstance(condition.matcher, MatchID) else {
                     'key': condition.key,
                     'matcher': {
                         'value': condition.matcher.value,
                         'comparator': condition.matcher.comparator.__name__
+                    }
+                } if isinstance(condition.matcher, MatchField) else {
+                    'key': condition.key,
+                    'matcher': {
+                        'start': condition.matcher.start,
+                        'end': condition.matcher.end,
+                        'inclusive': condition.matcher.inclusive
                     }
                 } for condition in self.must_fields] if self.must_fields else [],
             'any_fields': [
                 {
                     'ids': condition.matcher.indices
-                } if not isinstance(condition.matcher, MatchField) else {
+                } if isinstance(condition.matcher, MatchID) else {
                     'key': condition.key,
                     'matcher': {
                         'value': condition.matcher.value,
                         'comparator': condition.matcher.comparator.__name__
                     }
+                } if isinstance(condition.matcher, MatchField) else {
+                    'key': condition.key,
+                    'matcher': {
+                        'start': condition.matcher.start,
+                        'end': condition.matcher.end,
+                        'inclusive': condition.matcher.inclusive
+                    }
                 } for condition in self.any_fields] if self.any_fields else [],
             'must_not_fields': [
                 {
                     'ids': condition.matcher.indices
-                } if not isinstance(condition.matcher, MatchField) else {
+                } if isinstance(condition.matcher, MatchID) else {
                     'key': condition.key,
                     'matcher': {
                         'value': condition.matcher.value,
                         'comparator': condition.matcher.comparator.__name__
+                    }
+                } if isinstance(condition.matcher, MatchField) else {
+                    'key': condition.key,
+                    'matcher': {
+                        'start': condition.matcher.start,
+                        'end': condition.matcher.end,
+                        'inclusive': condition.matcher.inclusive
                     }
                 } for condition in self.must_not_fields] if self.must_not_fields else []
         }
@@ -243,29 +258,47 @@ class Filter:
         for condition in data.get('must_fields', []):
             if 'ids' in condition:
                 self.must_fields.append(FieldCondition(':match_id:', MatchID(condition['ids'])))
-            else:
+            elif 'value' in condition['matcher']:
                 self.must_fields.append(FieldCondition(condition['key'],
                                                        MatchField(
                                                            condition['matcher']['value'],
                                                            getattr(operator, condition['matcher']['comparator']))))
+            else:
+                self.must_fields.append(FieldCondition(condition['key'],
+                                                       MatchRange(
+                                                           condition['matcher']['start'],
+                                                           condition['matcher']['end'],
+                                                           condition['matcher']['inclusive'])))
 
         for condition in data.get('any_fields', []):
             if 'ids' in condition:
                 self.any_fields.append(FieldCondition(':match_id:', MatchID(condition['ids'])))
-            else:
+            elif 'value' in condition['matcher']:
                 self.any_fields.append(FieldCondition(condition['key'],
                                                       MatchField(
                                                           condition['matcher']['value'],
                                                           getattr(operator, condition['matcher']['comparator']))))
+            else:
+                self.any_fields.append(FieldCondition(condition['key'],
+                                                      MatchRange(
+                                                          condition['matcher']['start'],
+                                                          condition['matcher']['end'],
+                                                          condition['matcher']['inclusive'])))
 
         for condition in data.get('must_not_fields', []):
             if 'ids' in condition:
                 self.must_not_fields.append(FieldCondition(':match_id:', MatchID(condition['ids'])))
-            else:
+            elif 'value' in condition['matcher']:
                 self.must_not_fields.append(FieldCondition(
                     condition['key'], MatchField(
                         condition['matcher']['value'],
                         getattr(operator, condition['matcher']['comparator']))))
+            else:
+                self.must_not_fields.append(FieldCondition(
+                    condition['key'], MatchRange(
+                        condition['matcher']['start'],
+                        condition['matcher']['end'],
+                        condition['matcher']['inclusive'])))
         return self
 
     def __hash__(self):
