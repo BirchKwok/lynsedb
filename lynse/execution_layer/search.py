@@ -23,7 +23,6 @@ class Search:
             matrix_serializer (MatrixSerializer): The database to be queried.
             n_threads (int): The number of threads to use for searching the database.
             distance (str): The distance metric to use for the search.
-                .. versionadded:: 0.2.7
         """
         self.matrix_serializer = matrix_serializer
         self.cluster_worker = cluster_worker
@@ -71,8 +70,8 @@ class Search:
                 subset_indices = np.intersect1d(subset_indices, ivf_subset_indices)
 
         if subset_indices is not None:
-            database_chunk, index_chunk = self.matrix_serializer.storage_worker.read_by_idx(filename,
-                                                                                            idx=subset_indices)
+            database_chunk, index_chunk = self.matrix_serializer.storage_worker.read_by_id(filename,
+                                                                                           id=subset_indices)
         else:
             database_chunk, index_chunk = self.matrix_serializer.dataloader(filename)
 
@@ -91,7 +90,7 @@ class Search:
         limited_sorted.add(scores, index_chunk, database_chunk)
 
     @SearchResultsCache(config.LYNSE_SEARCH_CACHE_SIZE)
-    def search(self, vector, k=12, search_filter=None, distance=None, normalize=True, **kwargs):
+    def search(self, vector, k=12, search_filter=None, distance=None, normalize=True, return_fields=False, **kwargs):
         """
         Search the database for the vectors most similar to the given vector in batches.
 
@@ -100,12 +99,13 @@ class Search:
             k (int): The number of nearest vectors to return.
             search_filter (Filter, optional): The field filter to apply to the search.
             distance (str): The distance metric to use for the search.
-                .. versionadded:: 0.2.7
             normalize (bool): Whether to normalize the search vector.
-                .. versionadded:: 0.3.6
+            return_fields (bool): Whether to return the fields of the search results.
 
         Returns:
-            Tuple: The indices and similarity scores of the top k nearest vectors.
+            Tuple: If return_fields is True, the indices, similarity scores,
+                    and fields of the nearest vectors in the database.
+                Otherwise, the indices and similarity scores of the nearest vectors in the database.
 
         Raises:
             ValueError: If the database is empty.
@@ -123,17 +123,27 @@ class Search:
 
         subset_indices = None if search_filter is None else self.matrix_serializer.kv_index.query(search_filter)
 
-        filenames = self.matrix_serializer.storage_worker.get_all_files()
+        filenames = self.matrix_serializer.storage_worker.get_all_files(separate=True, return_cache=True)
+        cache_filename, filenames = filenames if isinstance(filenames, tuple) else (None, filenames)
 
         def batch_search(is_ivf=True, cid=None, sort=True, use_jax=False):
-            nonlocal subset_indices, limited_sorted, filenames
+            nonlocal subset_indices, limited_sorted, filenames, cache_filename
 
             ivf_subset_indices = None if not is_ivf else self.cluster_worker.ivf_index.get_entries(cid)
 
             if ivf_subset_indices is not None:
                 filenames = [filename for filename in filenames if filename in ivf_subset_indices]
 
-            map_fuc = self.executors.map if not is_ivf else map
+                if cache_filename in ivf_subset_indices:
+                    _ = [ivf_subset_indices[cache_filename]]
+                    for filename in ivf_subset_indices:
+                        if filename not in filenames:
+                            _.append(ivf_subset_indices[filename])
+                            del ivf_subset_indices[filename]
+                    if _:
+                        ivf_subset_indices[cache_filename] = np.concatenate(_)
+
+            map_fuc = self.executors.map if (not is_ivf) and len(filenames) > 1 else map
             distance_func = partial(inner_product_distance, use='jax' if use_jax else 'np')
 
             _ = [
@@ -148,7 +158,9 @@ class Search:
             ]
 
             if sort:
-                return limited_sorted.get_top_n(vector=vector, distance=distance)
+                res_indices, res_scores = limited_sorted.get_top_n(vector=vector, distance=distance)
+                res_fields = self.fields_index.retrieve_ids(res_indices, include_external_id=True)
+                return res_indices, res_scores, res_fields if return_fields else None
 
         # if the index mode is FLAT, use FLAT
         if not (self.cluster_worker.ann_model is not None and self.cluster_worker.ann_model.fitted):
@@ -178,7 +190,9 @@ class Search:
             if len(limited_sorted) >= k:
                 break
 
-        return limited_sorted.get_top_n(vector=vector, distance=distance)
+        res_indices, res_scores = limited_sorted.get_top_n(vector=vector, distance=distance)
+        res_fields = self.fields_index.retrieve_ids(res_indices, include_external_id=True)
+        return res_indices, res_scores, res_fields if return_fields else None
 
     def __del__(self):
         self.executors.shutdown(wait=True)

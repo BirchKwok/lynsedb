@@ -1,94 +1,19 @@
-import os
-import shutil
-import tempfile
 from pathlib import Path
 import json
+from typing import Union
 
 import numpy as np
 from spinesUtils.asserts import raise_if
 
 from lynse.core_components.limited_array import LimitedArray
 from lynse.core_components.locks import ThreadLock
-from lynse.core_components.limited_dict import LimitedDict
 from lynse.utils.utils import load_chunk_file
-
-
-class TemporaryFileStorage:
-    """Class for handling temporary storage of data and indices with specified chunk sizes,
-    ensuring paired data and indices with a sequential file ID."""
-
-    def __init__(self, chunk_size):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.chunk_size = chunk_size
-        self.file_id = 0  # File ID to maintain the naming order
-        self.lock = ThreadLock()
-
-    def write_temp_data(self, data, indices, prefix='temp'):
-        with self.lock:
-            if not isinstance(data, np.ndarray):
-                data = np.vstack(data)
-
-            if not isinstance(indices, np.ndarray):
-                indices = np.array(indices)
-
-            num_rows = data.shape[0]
-            start = 0
-            file_paths = []
-
-            while start < num_rows:
-                end = min(start + self.chunk_size, num_rows)
-                chunk_data = data[start:end]
-                chunk_indices = indices[start:end]
-                file_id = self.file_id
-                self.file_id += 1  # Increment file ID for each new chunk
-
-                data_file_path = Path(self.temp_dir.name) / f"{prefix}_data_{file_id}.npy"
-                indices_file_path = Path(self.temp_dir.name) / f"{prefix}_indices_{file_id}.npy"
-
-                with open(data_file_path, 'wb') as df, open(indices_file_path, 'wb') as inf:
-                    np.save(df, chunk_data)
-                    np.save(inf, chunk_indices)
-
-                file_paths.append((data_file_path, indices_file_path))
-                start += self.chunk_size
-
-            return file_paths
-
-    @staticmethod
-    def read_temp_data(data_filepath, indices_filepath):
-        return np.load(data_filepath), np.load(indices_filepath)
-
-    def get_file_iterator(self):
-        """Generate an iterator to read data and indices files sequentially."""
-        with self.lock:
-            file_ids = sorted([int(i.stem.split('_')[-1]) for i in Path(self.temp_dir.name).glob('temp_data_*.npy')])
-            for file_id in file_ids:
-                data_path = Path(self.temp_dir.name) / f"temp_data_{file_id}.npy"
-                indices_path = Path(self.temp_dir.name) / f"temp_indices_{file_id}.npy"
-                yield self.read_temp_data(data_path, indices_path), data_path, indices_path
-
-    def cleanup(self):
-        with self.lock:
-            try:
-                if os.path.exists(self.temp_dir.name):
-                    shutil.rmtree(self.temp_dir.name)
-            except Exception as e:
-                print(f"Error during cleanup: {e}")
-
-    def reincarnate(self):
-        with self.lock:
-            self.cleanup()
-            self.temp_dir = tempfile.TemporaryDirectory()
-            self.file_id = 0
-
-    def __del__(self):
-        self.cleanup()
 
 
 class PersistentFileStorage:
     """The worker class for reading and writing data to the files."""
 
-    def __init__(self, collection_path, dimension, chunk_size, warm_up=False, buffer_size=20):
+    def __init__(self, collection_path, dimension, chunk_size, warm_up=False, cache_chunks=20):
         self.collection_path = Path(collection_path)
         self.collection_chunk_path = self.collection_path / 'chunk_data'
         self.collection_chunk_indices_path = self.collection_path / 'chunk_indices_data'
@@ -102,7 +27,7 @@ class PersistentFileStorage:
         self.quantizer = None
         self.lock = ThreadLock()
 
-        self.dataloader = DataLoader(dimension, collection_path, buffer_size=buffer_size)
+        self.dataloader = DataLoader(dimension, collection_path, cache_chunks=cache_chunks, warm_up=warm_up)
 
         if warm_up:
             self.dataloader.warm_up()
@@ -113,7 +38,7 @@ class PersistentFileStorage:
 
     def file_exists(self):
         """Check if the file exists."""
-        return (self.collection_chunk_path / 'chunk_0').exists()
+        return self.dataloader.file_exists()
 
     def _return_if_in_memory(self, filename):
         return self.dataloader.return_if_in_memory(filename)
@@ -125,12 +50,12 @@ class PersistentFileStorage:
         return self.dataloader.load_data(filename, data_path, indices_path,
                                          update_memory=update_memory, is_mmap=is_mmap)
 
-    def get_all_files(self, separate=True):
-        return self.dataloader.get_all_files(separate=separate)
+    def get_all_files(self, separate=True, return_cache=False):
+        return self.dataloader.get_all_files(separate=separate, return_cache=return_cache)
 
-    def read(self, filename, is_mmap=True):
+    def read(self, filename, is_mmap=True, return_memory=True):
         """Read data from the specified filename if it exists."""
-        return self.dataloader.read(filename, is_mmap=is_mmap)
+        return self.dataloader.read(filename, is_mmap=is_mmap, return_memory=return_memory)
 
     def get_last_id(self):
         ids = [int(i.stem.split('_')[-1])
@@ -248,7 +173,7 @@ class PersistentFileStorage:
             all_indices = {}
             limit_shape = 0
             for filename in filenames:
-                _data, _idx = self.read(filename, is_mmap=False)
+                _data, _idx = self.read(filename, is_mmap=False, return_memory=False)
                 limit_shape += len(_data)
                 all_indices[filename] = ([limit_shape - len(_data), limit_shape], _idx)
                 datas.append(_data)
@@ -265,16 +190,28 @@ class PersistentFileStorage:
                     data, indices = (fitted_data[all_indices[filename][0][0]: all_indices[filename][0][1]],
                                      all_indices[filename][1])
                 else:
-                    data, indices = self.read(filename, is_mmap=False)
+                    data, indices = self.read(filename, is_mmap=False, return_memory=False)
                     data = self.quantizer.encode(data)
 
                 self._write_to_disk(data, indices,
                                     self.collection_chunk_path, self.collection_chunk_indices_path, filename)
                 self._write_to_memory(filename, data, indices)
 
-    def read_by_idx(self, filename, idx=None):
+    def read_by_id(self, filename, id=None):
         """Read the data from the file as a memory-mapped file."""
-        return self.dataloader.read_by_idx(filename, idx=idx)
+        return self.dataloader.read_by_id(filename, id=id)
+
+    def read_by_only_id(self, id: Union[int, list]):
+        """
+        Read the data from the file by only the id.
+
+        Parameters:
+            id (Union[int, list]): The id or list of ids to read.
+
+        Returns:
+            Tuple: The data and the indices.
+        """
+        return self.dataloader.read_by_only_id(id=id)
 
     def write(self, data=None, indices=None, filenames=None):
         """Write the data to the file."""
@@ -296,13 +233,13 @@ class PersistentFileStorage:
 
 
 class DataLoader:
-    def __init__(self, dimension, collection_path, buffer_size=20, warm_up=False):
+    def __init__(self, dimension, collection_path, cache_chunks=20, warm_up=False):
         self.dimension = dimension
         self.collection_path = Path(collection_path)
         self.collection_chunk_path = self.collection_path / 'chunk_data'
         self.collection_chunk_indices_path = self.collection_path / 'chunk_indices_data'
         self.cache_filenames = []
-        self.cache = LimitedArray(dimension, buffer_size) if buffer_size > 0 or buffer_size == -1 else None
+        self.cache = LimitedArray(dimension, cache_chunks) if (cache_chunks > 0 or cache_chunks == -1) else None
         self.lock = ThreadLock()
         if warm_up:
             self.warm_up()
@@ -317,11 +254,11 @@ class DataLoader:
             return
 
         if self.cache is not None:
-            filenames = self.get_all_files()
+            filenames = self.get_all_files(separate=False)
 
             for idx, filename in enumerate(filenames):
                 if not self.cache.is_reached_max_size:
-                    self.read(filename)
+                    self.read(filename, return_memory=False)
 
     def write_to_memory(self, filename, data, indices):
         if self.cache is not None:
@@ -334,7 +271,7 @@ class DataLoader:
 
         res = self.cache.get(filename)
 
-        if res is None:
+        if res is None or (len(res) == 2 and res[0] is None):
             return None
 
         return res  # data, indices
@@ -351,7 +288,7 @@ class DataLoader:
 
         return data, indices
 
-    def get_all_files(self, separate=False):
+    def get_all_files(self, separate=False, return_cache=False):
         filenames = sorted([x.stem for x in self.collection_chunk_path.glob('chunk_*')],
                            key=lambda x: int(x.split('_')[-1]))
         if separate:
@@ -362,21 +299,31 @@ class DataLoader:
                     cache_filenames.append(filename)
                 else:
                     local_filenames.append(filename)
-            return [cache_filenames[0]] + local_filenames  # cache_filenames only need the first one
+            if cache_filenames:
+                # cache_filenames only need the first one
+                return ([cache_filenames[0]] + local_filenames) if not return_cache else (
+                    cache_filenames[0], [cache_filenames[0]] + local_filenames
+                )
+            return local_filenames
+
         return filenames
 
-    def read(self, filename, is_mmap=True):
+    def read(self, filename, is_mmap=True, return_memory=True):
         """Read data from the specified filename if it exists."""
         if not self.file_exists():
             return
+
+        if not return_memory:
+            return self.load_data(filename, self.collection_chunk_path, self.collection_chunk_indices_path,
+                                  is_mmap=is_mmap)
 
         return self.return_if_in_memory(filename) or self.load_data(filename, self.collection_chunk_path,
                                                                     self.collection_chunk_indices_path,
                                                                     is_mmap=is_mmap)
 
-    def read_by_idx(self, filename, idx=None):
+    def read_by_id(self, filename, id=None):
         """Read the data from the file as a memory-mapped file."""
-        idx_filter = lambda x: np.isin(indices, idx, assume_unique=True) if idx is not None else None
+        idx_filter = lambda x: np.isin(indices, id, assume_unique=True) if id is not None else None
 
         data, indices = self.read(filename, is_mmap=True)
         if not isinstance(indices, np.ndarray):
@@ -391,6 +338,21 @@ class DataLoader:
         indices = indices[inter_idx]
 
         return data, indices
+
+    def read_by_only_id(self, id: Union[int, list]):
+        if isinstance(id, int):
+            id = [id]
+
+        filenames = self.get_all_files()
+        data = []
+        indices = []
+        for filename in filenames:
+            _data, _indices = self.read_by_id(filename, id)
+            if len(_data) > 0:
+                data.append(_data)
+                indices.append(_indices)
+
+        return np.vstack(data), np.concatenate(indices)
 
     def get_shape(self, read_type='all'):
         """Get the shape of the data.
