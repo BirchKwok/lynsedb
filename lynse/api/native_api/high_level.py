@@ -124,7 +124,7 @@ class _Register:
 
 class LocalClient:
     """
-    A singleton class for the local Convergence client.
+    A singleton class for the local LynseDB client.
     This class is thread-safe only. Using it in multiple processes will result in a race condition.
     """
     _instance = None
@@ -169,10 +169,9 @@ class LocalClient:
             warm_up: bool = False,
             drop_if_exists: bool = False,
             description: str = None,
-            buffer_size: int = 20
+            cache_chunks: int = 20
     ):
         """Create or load a collection in the database.
-            .. versionadded:: 0.3.0
 
         Initialize the vector database.
 
@@ -195,9 +194,7 @@ class LocalClient:
             drop_if_exists (bool): Whether to drop the collection if it already exists. Default is False.
             description (str): A description of the collection. Default is None.
                 The description is limited to 500 characters.
-                    .. versionadded:: 0.3.4
-            buffer_size (int): The buffer size for the search. Default is 20.
-                .. versionadded:: 0.3.6
+            cache_chunks (int): The number of chunks to cache. Default is 20.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -236,13 +233,13 @@ class LocalClient:
         self._collections[collection] = ExclusiveDB(
             dim=dim, database_path=collection_path.as_posix(), chunk_size=chunk_size, dtypes=dtypes,
             distance=distance, use_cache=use_cache, scaler_bits=scaler_bits, n_threads=n_threads,
-            warm_up=warm_up, initialize_as_collection=True, buffer_size=buffer_size
+            warm_up=warm_up, initialize_as_collection=True, cache_chunks=cache_chunks
         )
 
         self._register.register_collection(
             collection, dim=dim, database_path=collection_path.as_posix(), chunk_size=chunk_size, dtypes=dtypes,
             distance=distance, use_cache=use_cache, scaler_bits=scaler_bits, n_threads=n_threads,
-            warm_up=warm_up, initialize_as_collection=True, description=description, buffer_size=buffer_size
+            warm_up=warm_up, initialize_as_collection=True, description=description, cache_chunks=cache_chunks
         )
 
         self._collections[collection].update_description = partial(self.update_collection_description, collection)
@@ -250,17 +247,14 @@ class LocalClient:
         return self._collections[collection]
 
     @unavailable_if_deleted
-    def get_collection(self, collection: str, buffer_size: int = 10, warm_up: bool = True):
+    def get_collection(self, collection: str, cache_chunks: int = 20, warm_up: bool = True):
         """
         Get a collection from the database.
-            .. versionadded:: 0.3.0
 
         Parameters:
             collection (str): The name of the collection to get.
-            buffer_size (int): The buffer size for the search. Default is 10.
-                .. versionadded:: 0.3.6
+            cache_chunks (int): The number of chunks to cache. Default is 20.
             warm_up (bool): Whether to warm up the database. Default is True.
-                .. versionadded:: 0.3.6
 
         Returns:
             ExclusiveDB: The collection.
@@ -272,7 +266,7 @@ class LocalClient:
                 raise ValueError(f"Collection '{collection}' does not exist.")
 
             params = self._register.get_collections_details()[collection]
-            params.update({'buffer_size': buffer_size, 'warm_up': warm_up})
+            params.update({'cache_chunks': cache_chunks, 'warm_up': warm_up})
             if 'description' in params:
                 del params['description']
             self._collections[collection] = ExclusiveDB(**params)
@@ -283,7 +277,6 @@ class LocalClient:
     def show_collections(self):
         """
         Show the collections in the database.
-            .. versionadded:: 0.3.0
 
         Returns:
             list: The list of collections in the database.
@@ -294,7 +287,6 @@ class LocalClient:
     def drop_collection(self, collection: str):
         """
         Delete a collection from the database.
-            .. versionadded:: 0.3.0
 
         Parameters:
             collection (str): The name of the collection to delete.
@@ -323,7 +315,6 @@ class LocalClient:
     def drop_database(self):
         """
         Delete the database.
-            .. versionadded:: 0.3.0
         """
         if self.STATUS == 'DELETED':
             return
@@ -337,7 +328,6 @@ class LocalClient:
     def update_collection_description(self, collection: str, description: str):
         """
         Update the description of the collection.
-            .. versionadded:: 0.3.4
 
         Parameters:
             collection (str): The name of the collection.
@@ -348,7 +338,6 @@ class LocalClient:
     def show_collections_details(self) -> pd.DataFrame:
         """
         Show the collections in the database.
-            .. versionadded:: 0.3.4
 
         Returns:
             list: The list of collections in the database.
@@ -366,7 +355,7 @@ class LocalClient:
         return self._root_path.as_posix()
 
     def __repr__(self):
-        return f"{self.STATUS} Convergence(root_path='{self._root_path.as_posix()}')"
+        return f"{self.STATUS} LynseDB(root_path='{self._root_path.as_posix()}')"
 
     def __str__(self):
-        return f"{self.STATUS} Convergence(root_path='{self._root_path.as_posix()}')"
+        return f"{self.STATUS} LynseDB(root_path='{self._root_path.as_posix()}')"
