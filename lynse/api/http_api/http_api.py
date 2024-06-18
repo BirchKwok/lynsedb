@@ -1,10 +1,7 @@
 import json
-import multiprocessing
 import os
-import queue
 import shutil
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Thread
 
 import msgpack
@@ -14,8 +11,10 @@ from waitress import serve
 import socket
 
 from lynse.configs.config import config
+from lynse.core_components.kv_cache import IndexSchema
 from lynse.core_components.limited_dict import LimitedDict
 from lynse.core_components.safe_dict import SafeDict
+
 
 app = Flask(__name__)
 
@@ -34,13 +33,12 @@ def handle_msgpack_input():
 
 @app.route('/', methods=['GET'])
 def index():
-    return Response(json.dumps({'status': 'success', 'message': 'Convergence HTTP API'}), mimetype='application/json')
+    return Response(json.dumps({'status': 'success', 'message': 'LynseDB HTTP API'}), mimetype='application/json')
 
 
 @app.route('/required_collection', methods=['POST'])
 def required_collection():
     """Create a collection in the database.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -69,8 +67,8 @@ def required_collection():
         data['drop_if_exists'] = False
     if 'description' not in data:
         data['description'] = None
-    if 'buffer_size' not in data:
-        data['buffer_size'] = 20
+    if 'cache_chunks' not in data:
+        data['cache_chunks'] = 20
 
     try:
         my_vec_db = LocalClient(root_path=root_path / data['database_name'])
@@ -86,11 +84,8 @@ def required_collection():
             warm_up=data['warm_up'],
             drop_if_exists=data['drop_if_exists'],
             description=data['description'],
-            buffer_size=data['buffer_size']
+            cache_chunks=data['cache_chunks']
         )
-
-        if data['collection_name'] not in data_dict:
-            data_dict[data['collection_name']] = queue.Queue()
 
         return Response(json.dumps({
             'status': 'success',
@@ -102,7 +97,7 @@ def required_collection():
                 'use_cache': data['use_cache'], 'scaler_bits': data['scaler_bits'],
                 'n_threads': data['n_threads'],
                 'warm_up': data['warm_up'], 'drop_if_exists': data['drop_if_exists'],
-                'buffer_size': data['buffer_size']
+                'cache_chunks': data['cache_chunks']
             }
         }, sort_keys=False), mimetype='application/json')
 
@@ -115,7 +110,6 @@ def required_collection():
 @app.route('/drop_collection', methods=['POST'])
 def drop_collection():
     """Drop a collection from the database.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -149,7 +143,6 @@ def drop_collection():
 @app.route('/drop_database', methods=['POST'])
 def drop_database():
     """Drop the database.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -169,7 +162,6 @@ def drop_database():
 @app.route('/database_exists', methods=['POST'])
 def database_exists():
     """Check if the database exists.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -190,7 +182,6 @@ def database_exists():
 @app.route('/show_collections', methods=['POST'])
 def show_collections():
     """Show all collections in the database.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -215,6 +206,8 @@ def show_collections():
 
 @app.route('/add_item', methods=['POST'])
 def add_item():
+    from lynse.api.native_api.high_level import LocalClient
+
     if request.headers.get('Content-Type') == 'application/msgpack':
         data = request.decoded_data
     else:
@@ -222,39 +215,31 @@ def add_item():
 
     if not data:
         return jsonify({'error': 'No data provided'}), 400
-
-    executor = ThreadPoolExecutor(max_workers=1)
-
-    future = executor.submit(process_add_item, data)
-    data_dict[data['collection_name']].put(future)
-
-    return Response(json.dumps(
-        {
-            'status': 'success', 'params': {
-            'database_name': data['database_name'],
-            'collection_name': data['collection_name'], 'item': {
-                'id': data['item']['id']
-            }
-        }
-        }, sort_keys=False),
-        mimetype='application/json')
-
-
-def process_add_item(data):
-    from lynse.api.native_api.high_level import LocalClient
 
     try:
         my_vec_db = LocalClient(root_path=root_path / data['database_name'])
         collection = my_vec_db.get_collection(data['collection_name'])
         id = collection.add_item(vector=data['item']['vector'], id=data['item']['id'],
-                                 field=data['item'].get('field', None), normalize=data['normalize'])
-        return {'status': 'success', 'id': id}
+                                 field=data['item'].get('field', {}), normalize=data['normalize'])
+
+        return Response(json.dumps(
+            {
+                'status': 'success', 'params': {
+                'database_name': data['database_name'],
+                'collection_name': data['collection_name'], 'item': {
+                    'id': data['item']['id']
+                }
+            }
+            }, sort_keys=False),
+            mimetype='application/json')
     except Exception as e:
-        return {'status': 'error', 'message': str(e)}
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/bulk_add_items', methods=['POST'])
 def bulk_add_items():
+    from lynse.api.native_api.high_level import LocalClient
+
     if request.headers.get('Content-Type') == 'application/msgpack':
         data = request.decoded_data
     else:
@@ -262,22 +247,6 @@ def bulk_add_items():
 
     if not data:
         return jsonify({'error': 'No data provided'}), 400
-
-    executor = ThreadPoolExecutor(max_workers=10)
-    future = executor.submit(process_bulk_add_items, data)
-    data_dict[data['collection_name']].put(future)
-
-    return Response(json.dumps({
-        'status': 'success', 'params': {
-            'database_name': data['database_name'],
-            'collection_name': data['collection_name'], 'ids': [i['id'] for i in data['items']]
-        }
-    }, sort_keys=False),
-        mimetype='application/json')
-
-
-def process_bulk_add_items(data):
-    from lynse.api.native_api.high_level import LocalClient
 
     try:
         my_vec_db = LocalClient(root_path=root_path / data['database_name'])
@@ -286,15 +255,21 @@ def process_bulk_add_items(data):
         for item in data['items']:
             items.append((item['vector'], item['id'], item.get('field', None)))
         ids = collection.bulk_add_items(items, normalize=data['normalize'])
-        return {'status': 'success', 'ids': ids}
+
+        return Response(json.dumps({
+            'status': 'success', 'params': {
+                'database_name': data['database_name'],
+                'collection_name': data['collection_name'], 'ids': [i['id'] for i in data['items']]
+            }
+        }, sort_keys=False),
+            mimetype='application/json')
     except Exception as e:
-        return {'status': 'error', 'message': str(e)}
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/search', methods=['POST'])
 def search():
     """Search the database for the vectors most similar to the given vector.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -318,11 +293,13 @@ def search():
         else:
             search_filter = Filter().load_dict(data['search_filter'])
 
-        ids, scores = collection.search(vector=data['vector'], k=data['k'],
-                                        search_filter=search_filter,
-                                        distance=data.get('distance', 'IP'),
-                                        return_similarity=data.get('return_similarity', True),
-                                        normalize=data.get('normalize', False))
+        ids, scores, field = collection.search(
+            vector=data['vector'], k=data['k'],
+            search_filter=search_filter,
+            distance=data.get('distance', 'IP'),
+            normalize=data.get('normalize', False),
+            return_fields=data.get('return_fields', False)
+        )
 
         if ids is not None:
             ids = ids.tolist()
@@ -334,6 +311,7 @@ def search():
                     'database_name': data['database_name'],
                     'collection_name': data['collection_name'], 'items': {
                         'k': data['k'], 'ids': ids, 'scores': scores,
+                        'fields': field,
                         'distance': collection.most_recent_search_report['Search Distance'],
                         'search time': collection.most_recent_search_report['Search Time']
                     }
@@ -349,45 +327,29 @@ def search():
 tasks = SafeDict()
 
 
-def long_task(task_id, data):
+def commit_task(data):
     from lynse.api.native_api.high_level import LocalClient
 
-    tasks_queue: queue.Queue = data_dict[data['collection_name']]
-
-    if not tasks_queue.empty():
-        queue_tasks = []
-        while not tasks_queue.empty():
-            queue_tasks.append(tasks_queue.get())
-
-        for future in as_completed(queue_tasks):
-            result = future.result()
-            if result.get('status') == 'error':
-                return jsonify(result), 500
-
     try:
-        # 更新任务状态为处理中
-        tasks[task_id] = {'status': 'Processing'}
-
-        # 执行你的任务逻辑
         my_vec_db = LocalClient(root_path=root_path / data['database_name'])
         collection = my_vec_db.get_collection(data['collection_name'])
         if 'items' in data:
             items = []
             for item in data['items']:
-                items.append((item['vector'], item.get('id', None), item.get('field', None)))
+                items.append((item['vector'], item['id'], item.get('field', {})))
+
             collection.bulk_add_items(items)
 
         collection.commit()
 
-        # 更新任务状态为成功
-        tasks[task_id] = {'status': 'Success', 'result': {
+        return {'status': 'Success', 'result': {
             'database_name': data['database_name'],
             'collection_name': data['collection_name']
         }}
     except KeyError as e:
-        tasks[task_id] = {'status': 'Error', 'message': f'Missing required parameter {e}'}
+        return {'status': 'Error', 'message': f' missing required parameter {e}'}
     except Exception as e:
-        tasks[task_id] = {'status': 'Error', 'message': str(e)}
+        return {'status': 'Error', 'message': str(e)}
 
 
 @app.route('/commit', methods=['POST'])
@@ -398,11 +360,16 @@ def commit():
         data = request.json
 
     if not data:
-        return jsonify({'error': 'No data provided'}), 400
+        return jsonify({'error': '未提供数据'}), 400
 
     task_id = str(uuid.uuid4())
-    tasks[task_id] = {'status': 'Pending'}
-    thread = Thread(target=long_task, args=(task_id, data))
+    tasks[task_id] = {'status': 'Processing'}
+
+    def execute_task():
+        result = commit_task(data)
+        tasks[task_id] = result
+
+    thread = Thread(target=execute_task)
     thread.start()
 
     return jsonify({'task_id': task_id}), 202
@@ -412,7 +379,7 @@ def commit():
 def get_status(task_id):
     task = tasks.get(task_id)
     if not task:
-        return jsonify({'error': 'Task not found'}), 404
+        return jsonify({'error': '任务未找到'}), 404
 
     return jsonify(task)
 
@@ -420,7 +387,6 @@ def get_status(task_id):
 @app.route('/collection_shape', methods=['POST'])
 def collection_shape():
     """Get the shape of a collection.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -447,7 +413,6 @@ def collection_shape():
 @app.route('/set_environment', methods=['POST'])
 def set_environment():
     """Set the environment variables.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -467,13 +432,12 @@ def set_environment():
 @app.route('/get_environment', methods=['GET'])
 def get_environment():
     """Get the environment variables.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
     """
     env_list = ['LYNSE_LOG_LEVEL', 'LYNSE_LOG_PATH', 'LYNSE_TRUNCATE_LOG', 'LYNSE_LOG_WITH_TIME',
-                'LYNSE_KMEANS_EPOCHS', 'LYNSE_SEARCH_CACHE_SIZE', 'LYNSE_DATALOADER_BUFFER_SIZE']
+                'LYNSE_KMEANS_EPOCHS', 'LYNSE_SEARCH_CACHE_SIZE']
 
     params = {key: eval("global_config.key") for key in env_list}
     try:
@@ -486,7 +450,6 @@ def get_environment():
 @app.route('/get_collection_search_report', methods=['POST'])
 def get_collection_search_report():
     """Get the search report of a collection.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -514,7 +477,6 @@ def get_collection_search_report():
 @app.route('/get_collection_status_report', methods=['POST'])
 def get_collection_status_report():
     """Get the status report of a collection.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -552,7 +514,6 @@ def get_collection_status_report():
 @app.route('/is_collection_exists', methods=['POST'])
 def is_collection_exists():
     """Check if a collection exists.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -579,7 +540,6 @@ def is_collection_exists():
 @app.route('/get_collection_config', methods=['POST'])
 def get_collection_config():
     """Get the configuration of a collection.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -607,7 +567,6 @@ def get_collection_config():
 @app.route('/update_commit_msg', methods=['POST'])
 def update_commit_msg():
     """Save the commit message of a collection.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -640,7 +599,6 @@ def update_commit_msg():
 @app.route('/get_commit_msg', methods=['POST'])
 def get_commit_msg():
     """Get the commit message of a collection.
-        .. versionadded:: 0.3.2
 
     Returns:
         dict: The status of the operation.
@@ -670,7 +628,6 @@ def get_commit_msg():
 @app.route('/update_collection_description', methods=['POST'])
 def update_collection_description():
     """Update the description of a collection.
-        .. versionadded:: 0.3.4
 
     Returns:
         dict: The status of the operation.
@@ -698,7 +655,6 @@ def update_collection_description():
 @app.route('/update_description', methods=['POST'])
 def update_description():
     """Update the description of the database.
-        .. versionadded:: 0.3.4
 
     Returns:
         dict: The status of the operation.
@@ -728,7 +684,6 @@ def update_description():
 @app.route('/show_collections_details', methods=['POST'])
 def show_collections_details():
     """Show all collections in the database with details.
-        .. versionadded:: 0.3.4
 
     Returns:
         dict: The status of the operation.
@@ -753,7 +708,6 @@ def show_collections_details():
 @app.route('/build_index', methods=['POST'])
 def build_index():
     """Build the index of a collection.
-        .. versionadded:: 0.3.6
 
     Returns:
         dict: The status of the operation.
@@ -782,7 +736,6 @@ def build_index():
 @app.route('/remove_index', methods=['POST'])
 def remove_index():
     """Remove the index of a collection.
-        .. versionadded:: 0.3.6
 
     Returns:
         dict: The status of the operation.
@@ -811,7 +764,6 @@ def remove_index():
 @app.route('/list_databases', methods=['GET'])
 def list_databases():
     """List all databases.
-        .. versionadded:: 0.3.6
 
     Returns:
         dict: The status of the operation.
@@ -830,7 +782,6 @@ def list_databases():
 @app.route('/delete_database', methods=['POST'])
 def delete_database():
     """Delete a database.
-        .. versionadded:: 0.3.6
 
     Returns:
         dict: The status of the operation.
@@ -850,7 +801,6 @@ def delete_database():
 @app.route('/create_database', methods=['POST'])
 def create_database():
     """Create a database.
-        .. versionadded:: 0.3.6
 
     Returns:
         dict: The status of the operation.
@@ -876,7 +826,6 @@ def create_database():
 @app.route('/head', methods=['POST'])
 def head():
     """Get the first n items of a collection.
-        .. versionadded:: 0.3.6
 
     Returns:
         dict: The status of the operation.
@@ -894,7 +843,7 @@ def head():
         my_vec_db = LocalClient(root_path=root_path / data['database_name'])
         collection = my_vec_db.get_collection(data['collection_name'])
         head = collection.head(n=data['n'])
-        head = (head[0].tolist(), head[1].tolist())
+        head = (head[0].tolist(), head[1].tolist(), head[2])
 
         return Response(json.dumps({'status': 'success', 'params': {
             'database_name': data['database_name'],
@@ -909,7 +858,6 @@ def head():
 @app.route('/tail', methods=['POST'])
 def tail():
     """Get the last n items of a collection.
-        .. versionadded:: 0.3.6
 
     Returns:
         dict: The status of the operation.
@@ -927,7 +875,7 @@ def tail():
         my_vec_db = LocalClient(root_path=root_path / data['database_name'])
         collection = my_vec_db.get_collection(data['collection_name'])
         tail = collection.tail(n=data['n'])
-        tail = (tail[0].tolist(), tail[1].tolist())
+        tail = (tail[0].tolist(), tail[1].tolist(), tail[2])
 
         return Response(json.dumps({'status': 'success', 'params': {
             'database_name': data['database_name'],
@@ -939,10 +887,40 @@ def tail():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/read_by_only_id', methods=['POST'])
+def read_by_only_id():
+    """Read the item by only id.
+
+    Returns:
+        dict: The status of the operation.
+    """
+    from lynse.api.native_api.high_level import LocalClient
+
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+        vector, id, field = collection.read_by_only_id(data['id'])
+        vector = vector.tolist()
+        id = id.tolist()
+
+        item = (vector, id, field)
+        return Response(json.dumps({'status': 'success', 'params': {
+            'database_name': data['database_name'],
+            'collection_name': data['collection_name'], 'item': item
+        }}, sort_keys=False), mimetype='application/json')
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/get_collection_path', methods=['POST'])
 def get_collection_path():
     """Get the path of a database.
-        .. versionadded:: 0.3.6
 
     Returns:
         dict: The status of the operation.
@@ -962,6 +940,149 @@ def get_collection_path():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/query', methods=['POST'])
+def query():
+    """Query the database.
+
+    Returns:
+        dict: The status of the operation.
+    """
+    from lynse.api.native_api.high_level import LocalClient
+
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+
+        result = collection.query(data['filter_instance'], data['filter_ids'], data['return_ids_only'])
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'database_name': data['database_name'],
+            'collection_name': data['collection_name'],
+            'result': result}}, sort_keys=False), mimetype='application/json')
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/build_field_index', methods=['POST'])
+def build_field_index():
+    """Build the index of a field.
+
+    Returns:
+        dict: The status of the operation.
+    """
+    from lynse.api.native_api.high_level import LocalClient
+
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+
+        schema = IndexSchema().load_from_json(data['schema'])
+
+        collection.build_field_index(schema=schema,
+                                     rebuild_if_exists=data['rebuild_if_exists'])
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'database_name': data['database_name'],
+            'collection_name': data['collection_name']
+        }}, sort_keys=False), mimetype='application/json')
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/list_field_index', methods=['POST'])
+def list_field_index():
+    """List all field indexes of a collection.
+
+    Returns:
+        dict: The status of the operation.
+    """
+    from lynse.api.native_api.high_level import LocalClient
+
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+
+        field_indices = collection.list_field_index()
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'database_name': data['database_name'],
+            'collection_name': data['collection_name'],
+            'field_indices': field_indices}}, sort_keys=False), mimetype='application/json')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/remove_field_index', methods=['POST'])
+def remove_field_index():
+    """Remove the index of a field.
+
+    Returns:
+        dict: The status of the operation.
+    """
+    from lynse.api.native_api.high_level import LocalClient
+
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+
+        collection.remove_field_index(data['field_name'])
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'database_name': data['database_name'],
+            'collection_name': data['collection_name'],
+            'field_name': data['field_name']
+        }}, sort_keys=False), mimetype='application/json')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/remove_all_field_indices', methods=['POST'])
+def remove_all_field_indices():
+    """Remove all field indices of a collection.
+
+    Returns:
+        dict: The status of the operation.
+    """
+    from lynse.api.native_api.high_level import LocalClient
+
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+
+        collection.remove_all_field_indices()
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'database_name': data['database_name'],
+            'collection_name': data['collection_name']
+        }}, sort_keys=False), mimetype='application/json')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 def get_local_ip():
     try:
         hostname = socket.gethostname()
@@ -971,24 +1092,9 @@ def get_local_ip():
         return "127.0.0.1"
 
 
-def serve_queue():
-    from waitress import serve
-    from lynse.core_components.message_queue.api import queue_app
-
-    def find_free_port(start_port):
-        port = start_port
-        while True:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                if s.connect_ex(('localhost', port)) != 0:
-                    return port
-                port += 1
-
-    serve(queue_app, host='localhost', port=find_free_port(7785), threads=4)
-
-
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='Start the Convergence HTTP API server.')
+    parser = argparse.ArgumentParser(description='Start the LynseDB HTTP API server.')
     parser.add_argument('--host', default='127.0.0.1', help='The host to bind to.')
     parser.add_argument('--port', default=7637, type=int, help='The port to bind to.')
     parser.add_argument('--threads', default=10, type=int, help='Number of threads per worker.')
@@ -1004,21 +1110,16 @@ def main():
         else:
             print(f"Server running at http://{args.host}:{args.port}", end="\n\n")
 
-        queue_process = multiprocessing.Process(target=serve_queue)
-        queue_process.daemon = True
-        queue_process.start()
-
         serve(app, host=args.host, port=args.port, threads=args.threads)
 
 
-def launch_in_jupyter(host: str = '127.0.0.1', port: int = 7638, threads: int = 10):
+def launch_in_jupyter(host: str = '127.0.0.1', port: int = 7637, threads: int = 10):
     """
     Launch the HTTP API server in Jupyter notebook.
-        .. versionadded:: 0.3.6
 
     Parameters:
         host (str): The host to bind to. Default is '127.0.0.1'
-        port (int): The port to bind to. Default is 7638.
+        port (int): The port to bind to. Default is 7637.
         threads (int): Number of threads per worker. Default is 10.
 
     Returns:
@@ -1033,10 +1134,6 @@ def launch_in_jupyter(host: str = '127.0.0.1', port: int = 7638, threads: int = 
         print(f"  - Local IP: http://{local_ip}:{port}", end="\n\n")
     else:
         print(f"Server running at http://{host}:{port}", end="\n\n")
-
-    queue_process = multiprocessing.Process(target=serve_queue)
-    queue_process.daemon = True
-    queue_process.start()
 
     # set the thread as daemon thread
     server_thread = threading.Thread(target=serve, args=(app,), kwargs={'host': host, 'port': port, 'threads': threads})
