@@ -22,8 +22,8 @@ def test_create_collection():
 
 def test_add_item():
     client = VectorDBClient('http://localhost:7637')
-    db = client.create_database('test_db', drop_if_exists=True)
-    collection = db.get_collection('test_collection')
+    db = client.create_database('test_db', drop_if_exists=False)
+    collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
     item = {
         "vector": [0.01, 0.34, 0.74, 0.31],
         "id": 1,
@@ -39,10 +39,11 @@ def test_add_item():
 
 def test_bulk_add_items():
     client = VectorDBClient('http://localhost:7637')
-    db = client.create_database('test_db', drop_if_exists=True)
-    collection = db.get_collection('test_collection')
+    db = client.create_database('test_db', drop_if_exists=False)
+    collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
     with collection.insert_session():
-        ids = collection.bulk_add_items([([0.36, 0.43, 0.56, 0.12], 2, {'field': 'test_1', 'order': 1}),
+        ids = collection.bulk_add_items([([0.01, 0.34, 0.74, 0.31], 1, {'field': 'test_1', 'order': 0}),
+                                         ([0.36, 0.43, 0.56, 0.12], 2, {'field': 'test_1', 'order': 1}),
                                          ([0.03, 0.04, 0.10, 0.51], 3, {'field': 'test_2', 'order': 2}),
                                          ([0.11, 0.44, 0.23, 0.24], 4, {'field': 'test_2', 'order': 3}),
                                          ([0.91, 0.43, 0.44, 0.67], 5, {'field': 'test_2', 'order': 4}),
@@ -51,7 +52,7 @@ def test_bulk_add_items():
                                          ([0.01, 0.33, 0.14, 0.31], 8, {'field': 'test_2', 'order': 7}),
                                          ([0.71, 0.75, 0.91, 0.82], 9, {'field': 'test_3', 'order': 8}),
                                          ([0.75, 0.44, 0.38, 0.75], 10, {'field': 'test_1', 'order': 9})])
-    assert ids == [2, 3, 4, 5, 6, 7, 8, 9, 10]
+    assert ids == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 
 def test_query():
@@ -60,9 +61,9 @@ def test_query():
     from lynse.core_components.kv_cache.filter import Filter, FieldCondition, MatchField, MatchID
 
     client = VectorDBClient('http://localhost:7637')
-    db = client.create_database('test_db', drop_if_exists=True)
+    db = client.create_database('test_db', drop_if_exists=False)
     collection = db.get_collection('test_collection')
-    ids, scores = collection.search(
+    ids, scores, fields = collection.search(
         vector=[0.36, 0.43, 0.56, 0.12],
         k=10,
         search_filter=Filter(
@@ -75,11 +76,12 @@ def test_query():
             ]
         )
     )
+    print(ids)
     assert np.array_equal(ids, np.array([2, 1, 10]))
 
 
 def test_drop_collection():
     client = VectorDBClient('http://localhost:7637')
-    db = client.create_database('test_db', drop_if_exists=True)
+    db = client.create_database('test_db', drop_if_exists=False)
     db.drop_collection('test_collection')
     assert 'test_collection' not in db.show_collections()

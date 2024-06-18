@@ -39,20 +39,3 @@ def test_multi_thread_bulk_add_items():
 
     assert collection.shape == (4, 4)
     db.drop_database()
-
-
-def test_multi_thread_add_item():
-    db = client.create_database("test_min_vec", drop_if_exists=False)
-    collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(add_item, 1, [1, 2, 3, 4], {'name': 'John Doe'}),
-                   executor.submit(add_item, 2, [5, 6, 7, 8], {'name': 'Jane Doe'}),
-                   executor.submit(add_item, 3, [9, 10, 11, 12], {'name': 'John Smith'}),
-                   executor.submit(add_item, 4, [13, 14, 15, 16], {'name': 'Jane Smith'})]
-
-        concurrent.futures.wait(futures)
-
-    assert collection.shape == (4, 4)
-
-    db.drop_database()

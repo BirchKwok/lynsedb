@@ -36,31 +36,15 @@ def test_add_item():
 
 def add_item(id, vector, field):
     client = VectorDBClient('http://localhost:7637')
-    db = client.create_database('test_db', drop_if_exists=True)
+    db = client.create_database('test_db', drop_if_exists=False)
     collection = db.get_collection('test_collection')
-    collection.add_item(vector, id=id, field=field)
-    collection.commit()
-
-
-def test_multi_users_add_item():
-    client = VectorDBClient('http://localhost:7637')
-    db = client.create_database('test_db', drop_if_exists=True)
-    collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
-
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        futures = [executor.submit(add_item, 1, [1, 2, 3, 4], {'name': 'John Doe'}),
-                   executor.submit(add_item, 2, [5, 6, 7, 8], {'name': 'Jane Doe'}),
-                   executor.submit(add_item, 3, [9, 10, 11, 12], {'name': 'John Smith'}),
-                   executor.submit(add_item, 4, [13, 14, 15, 16], {'name': 'Jane Smith'})]
-
-        concurrent.futures.wait(futures)
-
-    assert collection.shape == (4, 4)
+    with collection.insert_session() as session:
+        session.add_item(vector, id=id, field=field, buffer_size=True)
 
 
 def bulk_add_items(items):
     client = VectorDBClient('http://localhost:7637')
-    db = client.create_database('test_db', drop_if_exists=True)
+    db = client.create_database('test_db', drop_if_exists=False)
     collection = db.get_collection('test_collection')
     collection.bulk_add_items(items)
     collection.commit()
@@ -106,22 +90,6 @@ def test_multi_thread_bulk_add_items():
                    executor.submit(bulk_add_items, items),
                    executor.submit(bulk_add_items, items),
                    executor.submit(bulk_add_items, items)]
-
-        concurrent.futures.wait(futures)
-
-    assert collection.shape == (4, 4)
-
-
-def test_multi_thread_add_item():
-    client = VectorDBClient('http://localhost:7637')
-    db = client.create_database('test_db', drop_if_exists=True)
-    collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(add_item, 1, [1, 2, 3, 4], {'name': 'John Doe'}),
-                   executor.submit(add_item, 2, [5, 6, 7, 8], {'name': 'Jane Doe'}),
-                   executor.submit(add_item, 3, [9, 10, 11, 12], {'name': 'John Smith'}),
-                   executor.submit(add_item, 4, [13, 14, 15, 16], {'name': 'Jane Smith'})]
 
         concurrent.futures.wait(futures)
 

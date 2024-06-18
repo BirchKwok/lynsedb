@@ -28,6 +28,8 @@ def test_modify_exists_database_parameter():
     # delete database
     db.delete()
 
+    del db
+
 
 def test_using_api_after_database_deleted(capfd):
     if os.path.exists('test_mvdb'):
@@ -57,3 +59,5 @@ def test_using_api_after_database_deleted(capfd):
 
     # delete database
     db.delete()
+
+    del db

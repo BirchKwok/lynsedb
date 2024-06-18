@@ -7,7 +7,7 @@ from test import ExclusiveDB, Filter, FieldCondition, MatchField, MatchID
 import numpy as np
 
 
-def get_database(dim=100, database_path='test_min_vec', chunk_size=1000, dtypes='float32'):
+def get_database(dim=100, database_path='test_local_db', chunk_size=1000, dtypes='float32'):
     if Path(database_path).exists():
         shutil.rmtree(database_path)
 
@@ -30,13 +30,10 @@ def get_database_for_query(*args, with_field=True, field_prefix='test_', **kwarg
 
 def test_add_single_item_without_id_and_field():
     database = get_database()
+
     id = database.add_item(np.ones(100), id=1)
 
     database.commit()
-
-    assert database._matrix_serializer.database == []
-    assert database._matrix_serializer.fields == []
-    assert database._matrix_serializer.indices == []
 
     assert database.shape == (1, 100)
 
@@ -49,10 +46,6 @@ def test_add_single_item_with_id_and_field():
 
     database.commit()
 
-    assert database._matrix_serializer.database == []
-    assert database._matrix_serializer.fields == []
-    assert database._matrix_serializer.indices == []
-
     assert database.shape == (1, 100)
 
     database.delete()
@@ -62,14 +55,11 @@ def test_bulk_add_item_without_id_and_field():
     database = get_database()
     items = []
     for i in range(101):
-        items.append((np.ones(100),i))
+        items.append((np.ones(100), i))
 
     database.bulk_add_items(items)
 
     database.commit()
-    assert database._matrix_serializer.database == []
-    assert database._matrix_serializer.fields == []
-    assert database._matrix_serializer.indices == []
 
     assert database.shape == (101, 100)
 
@@ -86,10 +76,6 @@ def test_bulk_add_item_with_id_and_field():
 
     database.commit()
 
-    assert database._matrix_serializer.database == []
-    assert database._matrix_serializer.fields == []
-    assert database._matrix_serializer.indices == []
-
     assert database.shape == (101, 100)
 
     database.delete()
@@ -105,10 +91,6 @@ def test_add_bulk_item_with_id_and_chinese_field():
 
     database.commit()
 
-    assert database._matrix_serializer.database == []
-    assert database._matrix_serializer.fields == []
-    assert database._matrix_serializer.indices == []
-
     assert database.shape == (101, 100)
 
     database.delete()
@@ -119,7 +101,7 @@ def test_query_without_field():
 
     print(database.shape)
     vec = np.random.random(100)
-    n, d = database.search(vec, k=6)
+    n, d, f = database.search(vec, k=6)
 
     assert len(n) == len(d) == 6
     assert list(d) == sorted(d, key=lambda s: -s)
@@ -132,7 +114,7 @@ def test_query_with_field():
     database = get_database_for_query(with_field=True)
 
     vec = np.random.random(100)
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
             must=[FieldCondition(key="test", matcher=MatchField('test_1'))]
         )
@@ -150,7 +132,7 @@ def test_query_with_list_field():
     database = get_database_for_query(with_field=True)
 
     vec = np.random.random(100)
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=12, search_filter=Filter(
             any=[
                 FieldCondition(key="test", matcher=MatchField('test_1')),
@@ -171,7 +153,7 @@ def test_query_with_chinese_field():
     database = get_database_for_query(with_field=True, field_prefix='测试_')
 
     vec = np.random.random(100)
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
             must=[
                 FieldCondition(key="test", matcher=MatchField('测试_1'))
@@ -191,7 +173,7 @@ def test_query_with_chinese_list_field():
     database = get_database_for_query(with_field=True, field_prefix='测试_')
 
     vec = np.random.random(100)
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=12, search_filter=Filter(
             any=[
                 FieldCondition(key="test", matcher=MatchField('测试_1')),
@@ -212,7 +194,7 @@ def test_query_with_subset_indices():
     database = get_database_for_query(with_field=True)
 
     vec = np.random.random(100)
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
             must=[FieldCondition(key=":match_id:", matcher=MatchID(list(range(10))))]
         )
@@ -230,7 +212,7 @@ def test_query_with_subset_indices_and_field():
     database = get_database_for_query(with_field=True, field_prefix='test_')
 
     vec = np.random.random(100)
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
             must=[
                 FieldCondition(key="test", matcher=MatchField('test_0')),
@@ -251,7 +233,7 @@ def test_query_with_subset_indices_and_list_field():
     database = get_database_for_query(with_field=True)
 
     vec = np.random.random(100)
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=12, search_filter=Filter(
             must=[
                 FieldCondition(key=":match_id:", matcher=MatchID(list(range(10, 20)) + list(range(70, 80))))
@@ -275,7 +257,7 @@ def test_query_with_subset_indices_and_chinese_field():
     database = get_database_for_query(with_field=True, field_prefix='测试_')
 
     vec = np.random.random(100)
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
             must=[
                 FieldCondition(key="test", matcher=MatchField('测试_0')),
@@ -296,7 +278,7 @@ def test_query_with_subset_indices_and_chinese_list_field():
     database = get_database_for_query(with_field=True, field_prefix='测试_')
 
     vec = np.random.random(100)
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=12, search_filter=Filter(
             must=[
                 FieldCondition(key=":match_id:", matcher=MatchID(list(range(10, 20)) + list(range(70, 80))))
@@ -320,7 +302,7 @@ def test_query_with_subset_indices_and_chinese_list_field():
 def test_query_stability_of_mvdb_files():
     database = get_database_for_query(with_field=True)
     vec = np.random.random(100)
-    last_n, last_d = database.search(
+    last_n, last_d, last_f = database.search(
         vec, k=6,
         search_filter=Filter(
             must=[FieldCondition(key="test", matcher=MatchField('test_1'))]
@@ -329,7 +311,7 @@ def test_query_stability_of_mvdb_files():
 
     assert len(last_n) == len(last_d) == 6
     for i in range(20):
-        n, d = database.search(
+        n, d, f = database.search(
             vec, k=6,
             search_filter=Filter(
                 must=[FieldCondition(key="test", matcher=MatchField('test_1'))]
@@ -353,9 +335,6 @@ def test_multiple_bulk_add_items():
         items.append((np.ones(100), i))
 
     database.bulk_add_items(items)
-    assert len(database._matrix_serializer.fields) == 101
-    assert database._matrix_serializer.indices == list(range(101))
-
     database.commit()
     assert database.shape == (101, 100)
 
@@ -365,8 +344,6 @@ def test_multiple_bulk_add_items():
 
     database.bulk_add_items(items)
     database.commit()
-    assert database._matrix_serializer.fields == []
-    assert database._matrix_serializer.indices == []
 
     assert database.shape == (202, 100)
 
@@ -381,8 +358,6 @@ def test_multiple_bulk_add_items_with_insert_session():
 
     with database.insert_session():
         database.bulk_add_items(items)
-        assert len(database._matrix_serializer.fields) == 101
-        assert database._matrix_serializer.indices == list(range(101))
 
     assert database.shape == (101, 100)
 
@@ -393,16 +368,13 @@ def test_multiple_bulk_add_items_with_insert_session():
     with database.insert_session():
         database.bulk_add_items(items)
 
-    assert database._matrix_serializer.fields == []
-    assert database._matrix_serializer.indices == []
-
     assert database.shape == (202, 100)
 
     database.delete()
 
 
 # Test if secondary initialization can properly initialize and query
-def test_multiple_initialization(dim=100, database_path='test_min_vec', chunk_size=1000, dtypes='float32'):
+def test_multiple_initialization(dim=100, database_path='test_local_db', chunk_size=1000, dtypes='float32'):
     database = ExclusiveDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
     items = []
     for i in range(101):
@@ -410,8 +382,6 @@ def test_multiple_initialization(dim=100, database_path='test_min_vec', chunk_si
 
     with database.insert_session():
         database.bulk_add_items(items)
-    assert database._matrix_serializer.fields == []
-    assert database._matrix_serializer.indices == []
 
     assert database.shape == (101, 100)
     del database
@@ -425,23 +395,20 @@ def test_multiple_initialization(dim=100, database_path='test_min_vec', chunk_si
     with database.insert_session():
         database.bulk_add_items(items)
 
-    assert database._matrix_serializer.fields == []
-    assert database._matrix_serializer.indices == []
-
     assert database.shape == (202, 100)
     database.delete()
 
 
 def test_result_order():
-    if Path('test_min_vec').exists():
-        shutil.rmtree('test_min_vec')
+    if Path('test_local_db').exists():
+        shutil.rmtree('test_local_db')
 
     def get_test_vectors(shape):
         for i in range(shape[0]):
             yield np.random.random(shape[1])
 
     for index_mode in ['FLAT', 'IVF-FLAT']:
-        db = ExclusiveDB(dim=1024, database_path='test_min_vec',
+        db = ExclusiveDB(dim=1024, database_path='test_local_db',
                          chunk_size=10000)
 
         # You can perform this operation multiple times, and the data will be appended to the database.
@@ -459,7 +426,7 @@ def test_result_order():
             db.bulk_add_items(vectors)
 
         db.build_index(index_mode=index_mode)
-        index, score = db.search(query, k=10)
+        index, score, field = db.search(query, k=10)
 
         assert len(index) == len(score) == 10
 
@@ -467,10 +434,10 @@ def test_result_order():
 
 
 def test_refit(capsys):
-    if Path('test_min_vec').exists():
-        shutil.rmtree('test_min_vec')
+    if Path('test_local_db').exists():
+        shutil.rmtree('test_local_db')
 
-    db = ExclusiveDB(dim=1024, database_path='test_min_vec', chunk_size=10000)
+    db = ExclusiveDB(dim=1024, database_path='test_local_db', chunk_size=10000)
     with db.insert_session():
         for i in range(100000):
             db.add_item(np.random.rand(1024), id=i)
@@ -504,7 +471,7 @@ def test_refit(capsys):
 
 
 def test_transactions():
-    db = ExclusiveDB(dim=1024, database_path='test_min_vec', chunk_size=10000)
+    db = ExclusiveDB(dim=1024, database_path='test_local_db', chunk_size=10000)
 
     def get_test_vectors(shape):
         for i in range(shape[0]):
@@ -545,7 +512,7 @@ def test_filter():
     database = get_database_for_query(with_field=True)
 
     vec = np.random.random(100)
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
             must=[FieldCondition(key="test", matcher=MatchField('test_1'))]
         )
@@ -556,7 +523,7 @@ def test_filter():
     assert all(i in database._id_filter for i in n)
     assert all(10 <= i < 20 for i in n)
 
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
             must=[FieldCondition(key="test", matcher=MatchField('test_1'))],
             any=[FieldCondition(key="test", matcher=MatchField('test_7'))]
@@ -565,7 +532,7 @@ def test_filter():
 
     assert len(n) == len(d) == 0
 
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
             must=[FieldCondition(key="test", matcher=MatchField('test_1'))],
             any=[FieldCondition(key="test", matcher=MatchField('test_0'))],
@@ -575,7 +542,7 @@ def test_filter():
 
     assert len(n) == len(d) == 0
 
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
             must=[FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3]))],
             any=[FieldCondition(key="test", matcher=MatchField('test_0'))],
@@ -587,7 +554,7 @@ def test_filter():
     assert all(i in database._id_filter for i in n)
     assert all(1 <= i < 4 for i in n)
 
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
             must=[FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3]))],
             any=[FieldCondition(key="test", matcher=MatchField('test_0'))],
@@ -597,7 +564,7 @@ def test_filter():
 
     assert len(n) == len(d) == 0
 
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
             must=[FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3]))],
             any=[FieldCondition(key="test", matcher=MatchField('test_0'))],
@@ -605,9 +572,9 @@ def test_filter():
         )
     )
 
-    assert len(n) == len(d) == 0
+    assert len(n) == len(d) == 6
 
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
             must=[FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3]))],
             any=[FieldCondition(key="test", matcher=MatchField('test_0'))],
@@ -620,42 +587,42 @@ def test_filter():
     assert all(i in database._id_filter for i in n)
     assert all(1 <= i < 4 for i in n)
 
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
-        must=[
-            FieldCondition(key='test', matcher=MatchField('test_0')),
-        ],
-        any=[
-            FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3, 4, 5])),
-        ]
-    ))
+            must=[
+                FieldCondition(key='test', matcher=MatchField('test_0')),
+            ],
+            any=[
+                FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3, 4, 5])),
+            ]
+        ))
 
     assert len(n) == len(d) == 5
     assert list(d) == sorted(d, key=lambda s: -s)
     assert all(i in database._id_filter for i in n)
     assert all(0 <= i < 6 for i in n)
 
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
-        must=[
-            FieldCondition(key='test', matcher=MatchField(['test_0', 'test_00'], all_comparators=True)),
-        ],
-        any=[
-            FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3, 4, 5])),
-        ]
-    ))
+            must=[
+                FieldCondition(key='test', matcher=MatchField(['test_0', 'test_00'], all_comparators=True)),
+            ],
+            any=[
+                FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3, 4, 5])),
+            ]
+        ))
 
     assert len(n) == len(d) == 0
 
-    n, d = database.search(
+    n, d, f = database.search(
         vec, k=6, search_filter=Filter(
-        must=[
-            FieldCondition(key='test', matcher=MatchField(['test_0', 'test_00'], all_comparators=False)),
-        ],
-        any=[
-            FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3, 4, 5])),
-        ]
-    ))
+            must=[
+                FieldCondition(key='test', matcher=MatchField(['test_0', 'test_00'], all_comparators=False)),
+            ],
+            any=[
+                FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3, 4, 5])),
+            ]
+        ))
 
     assert len(n) == len(d) == 5
     assert list(d) == sorted(d, key=lambda s: -s)

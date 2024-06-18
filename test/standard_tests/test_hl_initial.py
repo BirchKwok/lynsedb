@@ -17,13 +17,13 @@ def test_create_collection():
     assert collection._matrix_serializer.dim == 4
     assert collection._matrix_serializer.chunk_size == 100000
     assert collection._matrix_serializer.dtypes == np.float32
-    assert Path(os.path.expanduser("~/.MinVectorDB/data/my_vec_db/test_collection")).exists()
+    assert Path(os.path.expanduser("~/.LynseDB/databases/my_vec_db/test_collection")).exists()
 
     my_vec_db.drop_collection('test_collection')
-    assert not Path(os.path.expanduser("~/.MinVectorDB/data/my_vec_db/test_collection")).exists()
+    assert not Path(os.path.expanduser("~/.LynseDB/databases/my_vec_db/test_collection")).exists()
 
     my_vec_db.drop_database()
-    assert not Path(os.path.expanduser("~/.MinVectorDB/data/my_vec_db/test_collection/my_vec_db")).exists()
+    assert not Path(os.path.expanduser("~/.LynseDB/databases/my_vec_db/test_collection/my_vec_db")).exists()
 
 
 def test_show_collections():
@@ -35,7 +35,7 @@ def test_show_collections():
 
     my_vec_db.drop_collection('test_collection')
     my_vec_db.drop_database()
-    assert not Path(os.path.expanduser("~/.MinVectorDB/data/my_vec_db/test_collection/my_vec_db")).exists()
+    assert not Path(os.path.expanduser("~/.LynseDB/databases/my_vec_db/test_collection/my_vec_db")).exists()
 
 
 def test_get_an_exists_collection():
@@ -47,4 +47,4 @@ def test_get_an_exists_collection():
 
     my_vec_db.drop_collection('test_collection')
     my_vec_db.drop_database()
-    assert not Path(os.path.expanduser("~/.MinVectorDB/data/my_vec_db/test_collection/my_vec_db")).exists()
+    assert not Path(os.path.expanduser("~/.LynseDB/databases/my_vec_db/test_collection/my_vec_db")).exists()
