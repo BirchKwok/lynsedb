@@ -1,8 +1,8 @@
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://github.com/BirchKwok/LynseDB/blob/main/pic/logo.png">
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/BirchKwok/LynseDB/blob/main/pic/logo.png">
-    <img alt="LynseDB logo" src="https://github.com/BirchKwok/LynseDB/blob/main/pic/logo.png" height="100">
+    <source media="(prefers-color-scheme: light)" srcset="https://github.com/BirchKwok/LynseDB/blob/main/logo/logo.png">
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/BirchKwok/LynseDB/blob/main/logo/logo.png">
+    <img alt="LynseDB logo" src="https://github.com/BirchKwok/LynseDB/blob/main/logo/logo.png" height="100">
   </picture>
 </div>
 <br>
@@ -49,6 +49,7 @@ Although our goal is to enable brute force search or inverted indexing on billio
 The Python native API is recommended for use in single-process environments, whether single-threaded or multi-threaded; for ensuring process safety in multi-process environments, please use the HTTP API.
 
 
+
 ## Prerequisite
 
 - [x] python version >= 3.9
@@ -71,6 +72,7 @@ docker pull birchkwok/LynseDB:latest
 
 ## Qucik Start
 
+
 ```python
 import lynse
 
@@ -80,7 +82,7 @@ print("LynseDB version is: ", lynse.__version__)
     LynseDB version is:  0.0.1
 
 
-## Initialize Database
+### Initialize Database
 
 LynseDB now supports HTTP API and Python native code API. 
 
@@ -115,14 +117,24 @@ docker run -p 80:7637 birchkwok/LynseDB:latest
   
   If the image is bound to port 80 of the host in remote deployment, you can directly access it http://your_host_ip
 
-```python
-from lynse import LynseDB
 
+
+```python
+# If you are in a Jupyter environment, you can use this method to start the backend server
+# Ignore this code if you are using docker
+lynse.launch_in_jupyter()
+```
+
+    Server running at http://127.0.0.1:7637
+    
+
+
+
+```python
 # Use the HTTP API mode, it is suitable for use in production environments.
-my_db = LynseDB("http://localhost:7637")
-# Or use the Python native code API by specifying the database root directory.
-# my_db = LynseDB('my_vec_db')  # Judgment condition, root_path does not start with http or https
-# The Python native code API is recommended only for CI/CD testing or single-user local use.
+client = lynse.VectorDBClient("http://127.0.0.1:7637")  # If no url is passed, the native api is used.
+# Create a database named "test_db", if it already exists, delete it and rebuild it.
+my_db = client.create_database("test_db", drop_if_exists=True)
 ```
 
 ### create a collection
@@ -135,8 +147,18 @@ A safer method is to use the `get_collection` method. It is recommended to use t
 
 
 ```python
-collection = my_db.require_collection("test_collection", dim=4, drop_if_exists=True, scaler_bits=8, description="demo collection")
+collection = my_db.require_collection("test_collection", dim=4, drop_if_exists=True, scaler_bits=None, description="demo collection")
 ```
+
+    2024-06-16 19:49:44 - LynseDB - INFO - Creating collection test_collection with: 
+    //    dim=4, collection='test_collection', 
+    //    chunk_size=100000, distance='cosine', 
+    //    dtypes='float32', use_cache=True, 
+    //    scaler_bits=None, n_threads=10, 
+    //    warm_up=False, drop_if_exists=True, 
+    //    description=demo collection, 
+    
+
 
 #### show database collections
 
@@ -149,54 +171,50 @@ my_db.show_collections_details()
 
 
 <div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
 <table border="1" class="dataframe">
   <thead>
     <tr style="text-align: right;">
       <th></th>
-      <th>chunk_size</th>
-      <th>description</th>
       <th>dim</th>
-      <th>distance</th>
+      <th>chunk_size</th>
       <th>dtypes</th>
-      <th>index_mode</th>
-      <th>initialize_as_collection</th>
-      <th>n_clusters</th>
-      <th>n_threads</th>
-      <th>scaler_bits</th>
+      <th>distance</th>
       <th>use_cache</th>
+      <th>scaler_bits</th>
+      <th>n_threads</th>
       <th>warm_up</th>
-    </tr>
-    <tr>
-      <th>collections</th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
+      <th>initialize_as_collection</th>
+      <th>description</th>
+      <th>buffer_size</th>
     </tr>
   </thead>
   <tbody>
     <tr>
       <th>test_collection</th>
-      <td>100000</td>
-      <td>demo collection</td>
       <td>4</td>
-      <td>cosine</td>
+      <td>100000</td>
       <td>float32</td>
-      <td>IVF-FLAT</td>
+      <td>cosine</td>
       <td>True</td>
-      <td>16</td>
+      <td>None</td>
       <td>10</td>
-      <td>8</td>
-      <td>True</td>
       <td>False</td>
+      <td>True</td>
+      <td>demo collection</td>
+      <td>20</td>
     </tr>
   </tbody>
 </table>
@@ -208,7 +226,7 @@ my_db.show_collections_details()
 
 
 ```python
-collection.update_description("test2")
+collection.update_description("Hello World")
 my_db.show_collections_details()
 ```
 
@@ -216,54 +234,50 @@ my_db.show_collections_details()
 
 
 <div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
 <table border="1" class="dataframe">
   <thead>
     <tr style="text-align: right;">
       <th></th>
-      <th>chunk_size</th>
-      <th>description</th>
       <th>dim</th>
-      <th>distance</th>
+      <th>chunk_size</th>
       <th>dtypes</th>
-      <th>index_mode</th>
-      <th>initialize_as_collection</th>
-      <th>n_clusters</th>
-      <th>n_threads</th>
-      <th>scaler_bits</th>
+      <th>distance</th>
       <th>use_cache</th>
+      <th>scaler_bits</th>
+      <th>n_threads</th>
       <th>warm_up</th>
-    </tr>
-    <tr>
-      <th>collections</th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
-      <th></th>
+      <th>initialize_as_collection</th>
+      <th>description</th>
+      <th>buffer_size</th>
     </tr>
   </thead>
   <tbody>
     <tr>
       <th>test_collection</th>
-      <td>100000</td>
-      <td>test2</td>
       <td>4</td>
-      <td>cosine</td>
+      <td>100000</td>
       <td>float32</td>
-      <td>IVF-FLAT</td>
+      <td>cosine</td>
       <td>True</td>
-      <td>16</td>
+      <td>None</td>
       <td>10</td>
-      <td>8</td>
-      <td>True</td>
       <td>False</td>
+      <td>True</td>
+      <td>Hello World</td>
+      <td>20</td>
     </tr>
   </tbody>
 </table>
@@ -273,28 +287,27 @@ my_db.show_collections_details()
 
 ### Add vectors
 
-When inserting vectors, collection requires manually running the `commit` function or inserting within the `insert_session` function context manager, which will run the `commit` function in the background.
+When inserting vectors, the collection requires manually running the `commit` function or inserting within the `insert_session` function context manager, which will run the `commit` function in the background.
+
+It is strongly recommended to use the `insert_session` context manager for insertion, as this provides more comprehensive data security features during the insertion process.
 
 
 ```python
-with collection.insert_session():
-    id = collection.add_item(vector=[0.01, 0.34, 0.74, 0.31], id=1, field={'field': 'test_1', 'order': 0})   # id = 0
-    id = collection.add_item(vector=[0.36, 0.43, 0.56, 0.12], id=2, field={'field': 'test_1', 'order': 1})   # id = 1
-    id = collection.add_item(vector=[0.03, 0.04, 0.10, 0.51], id=3, field={'field': 'test_2', 'order': 2})   # id = 2
-    id = collection.add_item(vector=[0.11, 0.44, 0.23, 0.24], id=4, field={'field': 'test_2', 'order': 3})   # id = 3
-    id = collection.add_item(vector=[0.91, 0.43, 0.44, 0.67], id=5, field={'field': 'test_2', 'order': 4})   # id = 4
-    id = collection.add_item(vector=[0.92, 0.12, 0.56, 0.19], id=6, field={'field': 'test_3', 'order': 5})   # id = 5
-    id = collection.add_item(vector=[0.18, 0.34, 0.56, 0.71], id=7, field={'field': 'test_1', 'order': 6})   # id = 6
-    id = collection.add_item(vector=[0.01, 0.33, 0.14, 0.31], id=8, field={'field': 'test_2', 'order': 7})   # id = 7
-    id = collection.add_item(vector=[0.71, 0.75, 0.91, 0.82], id=9, field={'field': 'test_3', 'order': 8})   # id = 8
-    id = collection.add_item(vector=[0.75, 0.44, 0.38, 0.75], id=10, field={'field': 'test_1', 'order': 9})  # id = 9
+with collection.insert_session() as session:
+    id = session.add_item(vector=[0.01, 0.34, 0.74, 0.31], id=1, field={'field': 'test_1', 'order': 0})   # id = 0
+    id = session.add_item(vector=[0.36, 0.43, 0.56, 0.12], id=2, field={'field': 'test_1', 'order': 1})   # id = 1
+    id = session.add_item(vector=[0.03, 0.04, 0.10, 0.51], id=3, field={'field': 'test_2', 'order': 2})   # id = 2
+    id = session.add_item(vector=[0.11, 0.44, 0.23, 0.24], id=4, field={'field': 'test_2', 'order': 3})   # id = 3
+    id = session.add_item(vector=[0.91, 0.43, 0.44, 0.67], id=5, field={'field': 'test_2', 'order': 4})   # id = 4
+    id = session.add_item(vector=[0.92, 0.12, 0.56, 0.19], id=6, field={'field': 'test_3', 'order': 5})   # id = 5
+    id = session.add_item(vector=[0.18, 0.34, 0.56, 0.71], id=7, field={'field': 'test_1', 'order': 6})   # id = 6
+    id = session.add_item(vector=[0.01, 0.33, 0.14, 0.31], id=8, field={'field': 'test_2', 'order': 7})   # id = 7
+    id = session.add_item(vector=[0.71, 0.75, 0.91, 0.82], id=9, field={'field': 'test_3', 'order': 8})   # id = 8
+    id = session.add_item(vector=[0.75, 0.44, 0.38, 0.75], id=10, field={'field': 'test_1', 'order': 9})  # id = 9
 
 # If you do not use the insert_session function, you need to manually call the commit function to submit the data
 # collection.commit()
-```
 
-
-```python
 # or use the bulk_add_items function
 # with collection.insert_session():
 #     ids = collection.bulk_add_items([([0.01, 0.34, 0.74, 0.31], 0, {'field': 'test_1', 'order': 0}), 
@@ -310,41 +323,102 @@ with collection.insert_session():
 # print(ids)  # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 ```
 
-### Query
+    2024-06-16 19:49:44 - LynseDB - INFO - Saving data...
+    2024-06-16 19:49:44 - LynseDB - INFO - Writing chunk to storage...
+    2024-06-16 19:49:44 - LynseDB - INFO - Task status: {'status': 'Processing'}
+    2024-06-16 19:49:44 - LynseDB - INFO - Writing chunk to storage done.
+    2024-06-16 19:49:46 - LynseDB - INFO - Task status: {'result': {'collection_name': 'test_collection', 'database_name': 'test_db'}, 'status': 'Success'}
 
 
-The default similarity measure for query is cosine. You can specify cosine or L2 to obtain the similarity measure you need.
+### Find the nearest neighbors of a given vector
+
+The default similarity measure for query is Inner Product (IP). You can specify cosine or L2 to obtain the similarity measure you need.
+
 
 ```python
-collection.search(vector=[0.36, 0.43, 0.56, 0.12], k=10)
+ids, scores, fields = collection.search(vector=[0.36, 0.43, 0.56, 0.12], k=3, distance="cosine", return_fields=True)
+print("ids: ", ids)
+print("scores: ", scores)
+print("fields: ", fields)
 ```
 
-
-
-
-    (array([ 2,  9,  1,  4,  6,  5, 10,  7,  8,  3]),
-     array([1.        , 0.92355633, 0.86097705, 0.85727406, 0.81551266,
-            0.813797  , 0.78595245, 0.7741583 , 0.6871773 , 0.34695023]))
-
+    ids:  [2 9 1]
+    scores:  [1.         0.92355633 0.86097705]
+    fields:  [{':id:': 2, 'field': 'test_1', 'order': 1}, {':id:': 9, 'field': 'test_3', 'order': 8}, {':id:': 1, 'field': 'test_1', 'order': 0}]
 
 
 The `query_report_` attribute is the report of the most recent query. When multiple queries are conducted simultaneously, this attribute will only save the report of the last completed query result.
+
 
 ```python
 print(collection.search_report_)
 ```
 
     
-    * - MOST RECENT QUERY REPORT -
+    * - MOST RECENT SEARCH REPORT -
     | - Collection Shape: (10, 4)
-    | - Query Time: 0.13898 s
-    | - Query Distance: cosine
-    | - Query K: 10
-    | - Top 10 Results ID: [ 2  9  1  4  6  5 10  7  8  3]
-    | - Top 10 Results Similarity: [1.         0.92355633 0.86097705 0.85727406 0.81551266 0.813797
-     0.78595245 0.7741583  0.6871773  0.34695023]
-    * - END OF REPORT -
+    | - Search Time: 0.01578 s
+    | - Search Distance: cosine
+    | - Search K: 3
+    | - Top 3 Results ID: [2 9 1]
+    | - Top 3 Results Similarity: [1.         0.92355633 0.86097705]
     
+
+
+### List data
+
+
+```python
+collection.head(10)
+```
+
+
+
+
+    (array([[0.01      , 0.34      , 0.74000001, 0.31      ],
+            [0.36000001, 0.43000001, 0.56      , 0.12      ],
+            [0.03      , 0.04      , 0.1       , 0.50999999],
+            [0.11      , 0.44      , 0.23      , 0.23999999],
+            [0.91000003, 0.43000001, 0.44      , 0.67000002],
+            [0.92000002, 0.12      , 0.56      , 0.19      ],
+            [0.18000001, 0.34      , 0.56      , 0.70999998],
+            [0.01      , 0.33000001, 0.14      , 0.31      ],
+            [0.70999998, 0.75      , 0.91000003, 0.81999999],
+            [0.75      , 0.44      , 0.38      , 0.75      ]]),
+     array([ 1,  2,  3,  4,  5,  6,  7,  8,  9, 10]),
+     [{':id:': 1, 'field': 'test_1', 'order': 0},
+      {':id:': 2, 'field': 'test_1', 'order': 1},
+      {':id:': 3, 'field': 'test_2', 'order': 2},
+      {':id:': 4, 'field': 'test_2', 'order': 3},
+      {':id:': 5, 'field': 'test_2', 'order': 4},
+      {':id:': 6, 'field': 'test_3', 'order': 5},
+      {':id:': 7, 'field': 'test_1', 'order': 6},
+      {':id:': 8, 'field': 'test_2', 'order': 7},
+      {':id:': 9, 'field': 'test_3', 'order': 8},
+      {':id:': 10, 'field': 'test_1', 'order': 9}])
+
+
+
+
+```python
+collection.tail(5)
+```
+
+
+
+
+    (array([[0.92000002, 0.12      , 0.56      , 0.19      ],
+            [0.18000001, 0.34      , 0.56      , 0.70999998],
+            [0.01      , 0.33000001, 0.14      , 0.31      ],
+            [0.70999998, 0.75      , 0.91000003, 0.81999999],
+            [0.75      , 0.44      , 0.38      , 0.75      ]]),
+     array([ 6,  7,  8,  9, 10]),
+     [{':id:': 6, 'field': 'test_3', 'order': 5},
+      {':id:': 7, 'field': 'test_1', 'order': 6},
+      {':id:': 8, 'field': 'test_2', 'order': 7},
+      {':id:': 9, 'field': 'test_3', 'order': 8},
+      {':id:': 10, 'field': 'test_1', 'order': 9}])
+
 
 
 ### Use Filter
@@ -359,10 +433,11 @@ After filtering with `must` and `must_not` conditions, the conditions in `any` w
 
 If there is a conflict between the conditions in `any` and those in `must` or `must_not`, the conditions in `any` will be ignored.
 
+
 ```python
 import operator
 
-from lynse.core_components.kv_cache.filter import Filter, FieldCondition, MatchField, MatchID
+from lynse.core_components.kv_cache.filter import Filter, FieldCondition, MatchField, MatchID, MatchRange
 
 collection.search(
     vector=[0.36, 0.43, 0.56, 0.12],
@@ -372,7 +447,7 @@ collection.search(
             FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
         ],
         any=[
-            FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),
+            FieldCondition(key='order', matcher=MatchRange(start=0, end=8, inclusive=True)),
             FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3, 4, 5])),  # Support for filtering IDs
         ],
         must_not=[
@@ -386,15 +461,77 @@ print(collection.search_report_)
 ```
 
     
-    * - MOST RECENT QUERY REPORT -
+    * - MOST RECENT SEARCH REPORT -
     | - Collection Shape: (10, 4)
-    | - Query Time: 0.09066 s
-    | - Query Distance: cosine
-    | - Query K: 10
-    | - Top 10 Results ID: [2 1]
-    | - Top 10 Results Similarity: [1.         0.86097705]
-    * - END OF REPORT -
+    | - Search Time: 0.00729 s
+    | - Search Distance: cosine
+    | - Search K: 10
+    | - Top 10 Results ID: [2 1 7]
+    | - Top 10 Results Similarity: [1.         0.86097705 0.7741583 ]
     
+
+
+### Query existing text in fields
+
+#### Query via Filter
+
+
+```python
+query_filter=Filter(
+    must=[
+        FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
+    ],
+    any=[
+        FieldCondition(key='order', matcher=MatchRange(start=0, end=8, inclusive=True)),
+        FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3, 4, 5])),  # Support for filtering IDs
+    ],
+    must_not=[
+        FieldCondition(key=":match_id:", matcher=MatchID([8])),
+        FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),
+    ]
+)
+
+collection.query(query_filter)
+```
+
+
+
+
+    [{':id:': 1, 'field': 'test_1', 'order': 0},
+     {':id:': 2, 'field': 'test_1', 'order': 1},
+     {':id:': 7, 'field': 'test_1', 'order': 6}]
+
+
+
+#### Precision Query
+
+
+```python
+collection.query({':id:': 1, 'field': 'test_1', 'order': 0})
+```
+
+
+
+
+    [{':id:': 1, 'field': 'test_1', 'order': 0}]
+
+
+
+#### Fuzzy Query
+
+
+```python
+collection.query({'field': 'test_1'})
+```
+
+
+
+
+    [{':id:': 1, 'field': 'test_1', 'order': 0},
+     {':id:': 2, 'field': 'test_1', 'order': 1},
+     {':id:': 7, 'field': 'test_1', 'order': 6},
+     {':id:': 10, 'field': 'test_1', 'order': 9}]
+
 
 
 ### Drop a collection
@@ -409,7 +546,6 @@ print("Collection list after dropped:", my_db.show_collections())
 ```
 
     Collection list before dropping: ['test_collection']
-    {'status': 'success', 'params': {'collection_name': 'test_collection', 'exists': False}}
     Collection list after dropped: []
 
 
@@ -426,19 +562,7 @@ my_db
 
 
 
-    LynseDB remote server at http://localhost:7637 does not exist.
-
-
-
-
-```python
-my_db.database_exists()
-```
-
-
-
-
-    {'status': 'success', 'params': {'exists': False}}
+    Database `test_db` does not exist on the LynseDB remote server.
 
 
 
