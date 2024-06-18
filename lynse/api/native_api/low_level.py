@@ -1,4 +1,3 @@
-"""low_level.py - The Convergence API."""
 import os
 from pathlib import Path
 from typing import Union, List, Tuple
@@ -8,9 +7,11 @@ from spinesUtils.asserts import raise_if, ParameterTypeAssert
 from spinesUtils.timer import Timer
 
 from lynse.configs.parameters_validator import ParametersValidator
+from lynse.core_components.kv_cache import VeloKV, IndexSchema
 from lynse.execution_layer.cluster_worker import ClusterWorker
 from lynse.execution_layer.search import Search
 from lynse.execution_layer.matrix_serializer import MatrixSerializer
+from lynse.utils import copy_doc
 from lynse.utils.utils import unavailable_if_deleted
 from lynse.api import logger
 from lynse.core_components.kv_cache.filter import Filter
@@ -39,7 +40,7 @@ class ExclusiveDB:
         'n_threads': (None, int),
         'warm_up': bool,
         'initialize_as_collection': bool,
-        'buffer_size': int
+        'cache_chunks': int
     }, func_name='ExclusiveDB')
     def __init__(
             self,
@@ -53,7 +54,7 @@ class ExclusiveDB:
             n_threads: Union[int, None] = 10,
             warm_up: bool = False,
             initialize_as_collection: bool = False,
-            buffer_size: int = 20
+            cache_chunks: int = 20
     ) -> None:
         """
         Initialize the vector database.
@@ -72,11 +73,8 @@ class ExclusiveDB:
                 The 8 for 8-bit, 16 for 16-bit, and 32 for 32-bit.
             n_threads (int): The number of threads to use for parallel processing. Default is 10.
             warm_up (bool): Whether to warm up the database. Default is False.
-                .. versionadded:: 0.2.6
             initialize_as_collection (bool): Whether to initialize the database as a collection.
-                .. versionadded:: 0.3.0
-            buffer_size (int): The buffer size for reading and writing data. Default is 20.
-                .. versionadded:: 0.3.6
+            cache_chunks (int): The buffer size for reading and writing data. Default is 20.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -88,7 +86,7 @@ class ExclusiveDB:
         raise_if(ValueError, scaler_bits not in (8, 16, 32, None), 'sq_bits must be 8, 16, 32 or None')
 
         if not initialize_as_collection:
-            logger.info("Initializing Convergence with: \n "
+            logger.info("Initializing LynseDB with: \n "
                         f"\r//    dim={dim}, database_path='{database_path}', \n"
                         f"\r//    chunk_size={chunk_size}, distance='{distance}', \n"
                         f"\r//    dtypes='{dtypes}', use_cache={use_cache}, \n"
@@ -109,7 +107,7 @@ class ExclusiveDB:
             dtypes=dtypes,
             scaler_bits=scaler_bits,
             warm_up=warm_up,
-            buffer_size=buffer_size
+            cache_chunks=cache_chunks
         )
         self._data_loader = self._matrix_serializer.dataloader
         self._id_filter = self._matrix_serializer.id_filter
@@ -141,25 +139,19 @@ class ExclusiveDB:
 
         self._initialize_as_collection = initialize_as_collection
 
+        # Set the docstrings
+        copy_doc(self.add_item, MatrixSerializer.add_item)
+        copy_doc(self.bulk_add_items, MatrixSerializer.bulk_add_items)
+        copy_doc(self.build_index, ClusterWorker.build_index)
+        copy_doc(self.remove_index, ClusterWorker.remove_index)
+        copy_doc(self.search, Search.search)
+        copy_doc(self.query, VeloKV.query)
+
     @unavailable_if_deleted
-    def add_item(self, vector: Union[np.ndarray, list], id: int, *, field: dict = None, normalize=False) -> int:
-        """
-        Add a single vector to the database.
-
-        Parameters:
-            vector (np.ndarray or list): The vector to be added.
-            id (int): The ID of the vector.
-            field (dict, optional, keyword-only): The field of the vector. Default is None. If None, the field will be
-                set to an empty string.
-            normalize (bool): Whether to normalize the vector. Default is False.
-
-        Returns:
-            int: The ID of the added vector.
-
-        Raises:
-            ValueError: If the vector dimensions don't match or the ID already exists.
-        """
-        return self._matrix_serializer.add_item(vector, index=id, field=field, normalize=normalize)
+    def add_item(self, vector: Union[np.ndarray, list], id: int, *, field: dict = None,
+                 normalize: bool = False, buffer_size: Union[int, None, bool] = None):
+        return self._matrix_serializer.add_item(vector, id=id, field=field,
+                                                normalize=normalize, buffer_size=buffer_size)
 
     @unavailable_if_deleted
     def bulk_add_items(
@@ -167,18 +159,6 @@ class ExclusiveDB:
             *, normalize=False,
             **kwargs
     ):
-        """
-        Bulk add vectors to the database in batches.
-
-        Parameters:
-            vectors (list or tuple): A list or tuple of vectors to be saved. Each vector can be a tuple of (
-            vector, id, field).
-            normalize (bool): Whether to normalize the vectors. Default is False.
-            kwargs: Additional keyword arguments. Of no practical significance, only to maintain programming norms.
-
-        Returns:
-            list: A list of indices where the vectors are stored.
-        """
         return self._matrix_serializer.bulk_add_items(vectors, normalize=normalize)
 
     @unavailable_if_deleted
@@ -199,28 +179,7 @@ class ExclusiveDB:
     @unavailable_if_deleted
     def search(self, vector: Union[np.ndarray, list], k: int = 12, *,
                search_filter: Filter = None,
-               distance: Union[str, None] = None,
-               return_similarity: bool = True, normalize=False):
-        """
-        Search the database for the vectors most similar to the given vector in batches.
-
-        Parameters:
-            vector (np.ndarray or list): The search vector.
-            k (int): The number of nearest vectors to return.
-            search_filter (Filter, optional): The field filter to apply to the search.
-            distance (str): The distance metric to use for the search.
-                .. versionadded:: 0.2.7
-            return_similarity (bool): Whether to return the similarity scores.Default is True.
-                .. versionadded:: 0.2.5
-            normalize (bool): Whether to normalize the search vector.
-                .. versionadded:: 0.3.6
-
-        Returns:
-            Tuple: The indices and similarity scores of the top k nearest vectors.
-
-        Raises:
-            ValueError: If the database is empty.
-        """
+               distance: Union[str, None] = None, normalize=False, return_fields=False):
         raise_if(ValueError, not isinstance(vector, (np.ndarray, list)), 'vector must be np.ndarray or list.')
 
         import datetime
@@ -228,17 +187,16 @@ class ExclusiveDB:
         logger.debug(f'Search vector: {vector.tolist() if isinstance(vector, np.ndarray) else vector}')
         logger.debug(f'Search k: {k}')
         logger.debug(f'Search distance: {self._distance if distance is None else distance}')
-        logger.debug(f'Search return_similarity: {return_similarity}')
 
         raise_if(TypeError, not isinstance(k, int) and not (isinstance(k, str) and k != 'all'),
                  'k must be int or "all".')
         raise_if(ValueError, k <= 0, 'k must be greater than 0.')
-        raise_if(ValueError, not isinstance(search_filter, (Filter, type(None))), 'search_filter must be Filter or None.')
+        raise_if(ValueError, not isinstance(search_filter, (Filter, type(None))),
+                 'search_filter must be Filter or None.')
 
         raise_if(ValueError, len(vector) != self._matrix_serializer.shape[1],
                  'vector must be same dim with database.')
 
-        raise_if(ValueError, not isinstance(return_similarity, bool), 'return_similarity must be bool.')
         raise_if(ValueError, distance is not None and distance not in ['cosine', 'L2', 'IP'],
                  'distance must be "cosine" or "L2" or "IP" or None.')
 
@@ -256,12 +214,12 @@ class ExclusiveDB:
         self._timer.start()
         if self._use_cache:
             res = self._search.search(vector=vector, k=k, search_filter=search_filter,
-                                      distance=distance, return_similarity=return_similarity, normalize=normalize)
+                                      distance=distance, normalize=normalize, return_fields=return_fields)
         else:
             res = self._search.search(vector=vector, k=k, search_filter=search_filter,
                                       now_time=datetime.datetime.now().strftime('%Y%m%d%H%M%S%f'),
                                       distance=distance,
-                                      return_similarity=return_similarity, normalize=normalize)
+                                      normalize=normalize, return_fields=return_fields)
 
         time_cost = self._timer.last_timestamp_diff()
         self.most_recent_search_report['Collection Shape'] = self.shape
@@ -269,12 +227,16 @@ class ExclusiveDB:
         self.most_recent_search_report['Search Distance'] = self._distance if distance is None else distance
         self.most_recent_search_report['Search K'] = k
 
-        if len(res[0]) > 0:
+        if res is not None:
             self.most_recent_search_report[f'Top {k} Results ID'] = res[0]
-            if return_similarity:
-                self.most_recent_search_report[f'Top {k} Results Similarity'] = np.array([round(i, 6) for i in res[1]])
+            self.most_recent_search_report[f'Top {k} Results Similarity'] = \
+                np.array([round(i, 6) for i in res[1]]) if len(res[1]) > 0 else res[1]
 
-        return res if return_similarity else res[0]
+        return res
+
+    @unavailable_if_deleted
+    def query(self, filter_instance, filter_ids=None, return_ids_only=False):
+        return self._matrix_serializer.kv_index.query(filter_instance, filter_ids, return_ids_only)
 
     @property
     def shape(self):
@@ -320,8 +282,9 @@ class ExclusiveDB:
                 break
 
         if data:
-            return np.vstack(data)[:n], np.array(indices)[:n]
-        return np.array(data), np.array(indices)
+            return (np.vstack(data)[:n], np.array(indices)[:n],
+                    self._matrix_serializer.kv_index.retrieve_ids(indices[:n], include_external_id=True))
+        return np.array(data), np.array(indices), []
 
     def tail(self, n=5):
         """
@@ -341,15 +304,68 @@ class ExclusiveDB:
         count = 0
         for filename in filenames[::-1]:
             data_chunk, index_chunk = self._matrix_serializer.dataloader(filename)
-            data.extend(data_chunk)
-            indices.extend(index_chunk)
+            data.insert(0, data_chunk)
+            indices = index_chunk.tolist() + indices
             count += len(index_chunk)
             if count >= n:
                 break
 
         if data:
-            return np.vstack(data)[-n:], np.array(indices)[-n:]
-        return np.array(data), np.array(indices)
+            return (np.vstack(data)[-n:], np.array(indices)[-n:],
+                    self._matrix_serializer.kv_index.retrieve_ids(indices[-n:], include_external_id=True))
+        return np.array(data), np.array(indices), []
+
+    def read_by_only_id(self, id: Union[int, list]):
+        """
+        Read the vector data by the external ID.
+
+        Parameters:
+            id (int or list): The external ID or list of external IDs.
+
+        Returns:
+            tuple: The vector data and the ID and field of the vector.
+        """
+        data, ids = self._matrix_serializer.storage_worker.read_by_only_id(id)
+        if data.shape[0] > 0:
+            return np.array(data), np.array(ids), \
+                self._matrix_serializer.kv_index.retrieve_ids(ids, include_external_id=True)
+        return np.array(data), np.array(ids), []
+
+    def build_field_index(self, schema, rebuild_if_exists=False):
+        """
+        Build an index for the field.
+
+        Parameters:
+            schema (IndexSchema): The schema of the field.
+            rebuild_if_exists (bool): Whether to rebuild the index if it already exists.
+        """
+        if not isinstance(schema, IndexSchema):
+            raise TypeError("schema must be an instance of IndexSchema.")
+        self._matrix_serializer.kv_index.build_index(schema, rebuild_if_exists=rebuild_if_exists)
+
+    def remove_field_index(self, field_name):
+        """
+        Remove the index for the field.
+
+        Parameters:
+            field_name (str): The name of the field.
+        """
+        self._matrix_serializer.kv_index.remove_index(field_name)
+
+    def remove_all_field_indices(self):
+        """
+        Remove all the field indices.
+        """
+        self._matrix_serializer.kv_index.remove_all_field_indices()
+
+    def list_field_index(self):
+        """
+        List the field index.
+
+        Returns:
+            list: The list of field indices.
+        """
+        return self._matrix_serializer.kv_index.list_indices()
 
     def delete(self):
         """
@@ -403,14 +419,14 @@ class ExclusiveDB:
     def __repr__(self):
         if self._matrix_serializer.IS_DELETED:
             if self._initialize_as_collection:
-                title = "Deleted Convergence collection with status: \n"
+                title = "Deleted LynseDB collection with status: \n"
             else:
-                title = "Deleted Convergence object with status: \n"
+                title = "Deleted LynseDB object with status: \n"
         else:
             if self._initialize_as_collection:
-                title = "Convergence collection with status: \n"
+                title = "LynseDB collection with status: \n"
             else:
-                title = "Convergence object with status: \n"
+                title = "LynseDB object with status: \n"
 
         if self._initialize_as_collection:
             name = "Collection"
