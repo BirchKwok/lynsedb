@@ -1,22 +1,35 @@
 import os
-from dataclasses import dataclass
-from pathlib import Path
 from typing import List
-
 
 from lynse.core_components.kv_cache.filter import MatchField, MatchID, FieldCondition, Filter, MatchRange
 
 
-@dataclass
 class IndexSchema:
-    indices: dict = None
+    def __init__(self):
+        self.indices = {}
 
-    def __post_init__(self):
-        if self.indices is None:
-            self.indices = {}
+    @staticmethod
+    def _check_field_name(field_name: str):
+        if ':id:' == field_name.strip():
+            raise ValueError("The field name ':id:' is reserved.")
 
-    def add_index(self, index_name: str, index_type: type):
-        self.indices[index_name] = index_type
+    def _add_index(self, field_name: str, field_type):
+        self._check_field_name(field_name)
+        self.indices[field_name] = field_type
+
+    def add_string_index(self, field_name: str):
+        self._add_index(field_name, str)
+
+    def add_int_index(self, field_name: str):
+        self._add_index(field_name, int)
+
+    def to_json(self):
+        indices = {k: v.__name__ for k, v in self.indices.items()}
+        return indices
+
+    def load_from_json(self, schema_dict):
+        self.indices = {k: eval(v) for k, v in schema_dict.items()}
+        return self
 
 
 class VeloKV:
@@ -57,43 +70,48 @@ class VeloKV:
         Query the cache.
 
         Parameters:
-            filter_instance: Filter
-                The filter object.
+            filter_instance: Filter or dict
+                The filter object or the specify data to filter.
             filter_ids: List[int]
                 The list of external IDs to filter.
             return_ids_only: bool
                 If True, only the external IDs will be returned.
 
         Returns:
-            dict: The records that match the filter.
+            List[dict]: The records. If not return_ids_only, the records will be returned.
+            List[int]: The external IDs. If return_ids_only, the external IDs will be returned.
         """
         return self.query_handler.query(filter_instance, filter_ids, return_ids_only)
 
-    def retrieve(self, external_id):
+    def retrieve(self, external_id, include_external_id=False):
         """
         Retrieve a record from the cache.
 
         Parameters:
             external_id: int
                 The external ID of the record.
+            include_external_id: bool
+                If True, the external ID will be included in the record.
 
         Returns:
             dict: The record.
         """
-        return self.query_handler.retrieve(external_id)
+        return self.query_handler.retrieve(external_id, include_external_id=include_external_id)
 
-    def retrieve_ids(self, external_ids: List[int]):
+    def retrieve_ids(self, external_ids: List[int], include_external_id: bool = False):
         """
         Retrieve records from the cache.
 
         Parameters:
             external_ids: List[int]
                 The external IDs of the records.
+            include_external_id: bool
+                If True, the external IDs will be included in the records.
 
         Returns:
             List[dict]: The records.
         """
-        return self.query_handler.retrieve_ids(external_ids)
+        return self.query_handler.retrieve_ids(external_ids, include_external_id=include_external_id)
 
     def concat(self, other: 'VeloKV') -> 'VeloKV':
         """
@@ -142,6 +160,8 @@ class VeloKV:
         Returns:
             None
         """
+        if not schema.indices:
+            raise ValueError("The index schema is empty.")
         self.storage.build_index(schema.indices, rebuild_if_exists)
         self.storage.index.save(self.storage.index_path)
 
@@ -163,46 +183,22 @@ class VeloKV:
         else:
             self.storage.index.save(self.storage.index_path)
 
-
-class IndexBuilder:
-    def __init__(self, collection, schema):
+    def remove_all_field_indices(self):
         """
-        Build an index schema for a collection.
-
-        Parameters:
-            collection: ExclusiveDB
-            schema: IndexSchema
-
-        """
-        if collection.name == "Local":
-            self.velo_kv = VeloKV(filepath=Path(collection._database_path) / 'fields_index')
-        else:
-            raise NotImplementedError("Only local collections are supported.")
-            # self.velo_kv = VeloKV(filepath=collection.get_collection_path())
-        self.schema = schema
-
-    def build(self, rebuild_if_exists=False):
-        """
-        Build the index.
-
-        Parameters:
-            rebuild_if_exists: bool
-                If True, the index will be rebuilt if it already exists.
+        Remove all the field indices from the cache.
 
         Returns:
             None
         """
-        return self.velo_kv.build_index(self.schema, rebuild_if_exists=rebuild_if_exists)
+        indices = self.list_indices()
+        for index in indices:
+            self.remove_index(index)
 
-    def remove(self, field_name: str):
+    def list_indices(self):
         """
-        Remove an index from the collection.
-
-        Parameters:
-            field_name: str
-                The name of the field.
+        List the indices in the cache.
 
         Returns:
-            None
+            List[str]: The list of indices.
         """
-        return self.velo_kv.remove_index(field_name)
+        return list(self.storage.index.indices.keys())
