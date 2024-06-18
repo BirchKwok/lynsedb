@@ -62,7 +62,7 @@ class Config:
     @property
     def LYNSE_DEFAULT_ROOT_PATH(self):
         return self.get_env_variable('LYNSE_DEFAULT_ROOT_PATH',
-                                     Path(os.path.expanduser('~/.Convergence/data/')), Path, [str, None, Path])
+                                     Path(os.path.expanduser('~/.LynseDB/databases/')), Path, [str, None, Path])
 
     def get_all_configs(self):
         return {
