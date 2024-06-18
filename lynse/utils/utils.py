@@ -1,4 +1,3 @@
-"""utils.py: this file contains some useful functions and decorators."""
 import time
 from functools import wraps
 from pathlib import Path
