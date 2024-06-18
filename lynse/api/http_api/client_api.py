@@ -1,3 +1,4 @@
+import queue
 import time
 from datetime import datetime
 from typing import Union, List, Tuple
@@ -9,10 +10,12 @@ import pandas as pd
 from spinesUtils.asserts import raise_if
 from tqdm import trange
 
+from lynse.core_components.kv_cache import IndexSchema
 from lynse.core_components.kv_cache.filter import Filter
 from lynse.api import config, logger
-from lynse.core_components.thread_safe_list import SafeList
+from lynse.core_components.locks import ThreadLock
 from lynse.utils.utils import SearchResultsCache
+from lynse.utils.poster import Poster
 
 
 class ExecutionError(Exception):
@@ -57,7 +60,6 @@ class Collection:
     def __init__(self, url, database_name, collection_name, **params):
         """
         Initialize the collection.
-            .. versionadded:: 0.3.2
 
         Parameters:
             url (str): The URL of the server.
@@ -73,14 +75,14 @@ class Collection:
                 - n_threads (int): The number of threads.
                 - warm_up (bool): Whether to warm up.
                 - drop_if_exists (bool): Whether to drop the collection if it exists.
-                - buffer_size (int): The buffer size.
+                - cache_chunks (int): The number of chunks to cache.
 
         """
         self.IS_DELETED = False
         self._url = url
         self._database_name = database_name
         self._collection_name = collection_name
-        self._session = httpx.Client(http2=True, timeout=120)
+        self._session = Poster()
         self._init_params = params
 
         self.most_recent_search_report = {}
@@ -88,7 +90,8 @@ class Collection:
 
         self.COMMIT_FLAG = False
 
-        self._mesosphere_list = SafeList()
+        self._mesosphere_list = queue.Queue()
+        self._lock = ThreadLock()
 
     def _get_commit_msg(self):
         """
@@ -146,7 +149,7 @@ class Collection:
                 print(e)
                 raise ExecutionError(response.text)
 
-    def _if_exists(self):
+    def exists(self):
         """
         Check if the collection exists.
 
@@ -167,30 +170,41 @@ class Collection:
             raise_error_response(response)
 
     def add_item(self, vector: Union[list[float], np.ndarray], id: int, *, field: Union[dict, None] = None,
-                 normalize: bool = False, delay_num: int = 1000):
+                 normalize: bool = False, buffer_size: int = True):
         """
         Add an item to the collection.
-            .. versionadded:: 0.3.2
 
         Parameters:
             vector (list[float], np.ndarray): The vector of the item.
             id (int): The ID of the item.
             field (dict, optional): The fields of the item.
             normalize (bool): Whether to normalize the vector. Default is False.
-            delay_num (int): Number of items to delay push. Default is 1000.
+            buffer_size (int or bool): The buffer size.
+                Default is True, which means the default buffer size (1000) will be used.
+                If buffer_size is 0, the function will add the item directly.
+                If buffer_size is greater than 0, the function will add the item to the buffer.
+                If buffer_size is False, the function will add the item directly and not use the buffer.
+                If buffer_size is True, the function will add the item to the buffer and use the default buffer size.
 
         Returns:
-            int: The ID of the item. If delay_num is greater than 0, and the number of items added is less than delay_num,
+            int: The ID of the item.
+                If delay_num is greater than 0, and the number of items added is less than delay_num,
                 the function will return None. Otherwise, the function will return the IDs of the items added.
 
         Raises:
             ValueError: If the collection has been deleted or does not exist.
             ExecutionError: If the server returns an error.
         """
-        raise_if(ValueError, (not isinstance(delay_num, int)) or delay_num < 0,
-                 'The delay_num must be an integer and >= 0.')
+        if buffer_size is True:
+            buffer_size = 1000
+        else:
+            if buffer_size is False:
+                buffer_size = 0
+            else:
+                raise_if(ValueError, (not isinstance(buffer_size, int)) or buffer_size < 0,
+                         'If buffer_size is not bool, it must be a positive integer.')
 
-        if delay_num == 0:
+        if buffer_size == 0:
             url = f'{self._url}/add_item'
 
             headers = {'Content-Type': 'application/msgpack'}
@@ -206,7 +220,7 @@ class Collection:
                 "normalize": normalize
             }
 
-            response = self._session.post(url, content=pack_data(data), headers=headers)
+            response = self._session.post(url, data=None, content=pack_data(data), headers=headers)
 
             if response.status_code == 200:
                 self.COMMIT_FLAG = False
@@ -214,31 +228,34 @@ class Collection:
             else:
                 raise_error_response(response)
         else:
-            self._mesosphere_list.append({
-                "vector": vector if isinstance(vector, list) else vector.tolist(),
-                "id": id if id is not None else None,
-                "field": field if field is not None else {},
-            })
+            with self._lock:
+                self._mesosphere_list.put({
+                    "vector": vector if isinstance(vector, list) else vector.tolist(),
+                    "id": id if id is not None else None,
+                    "field": field if field is not None else {},
+                })
 
-            if len(self._mesosphere_list) == delay_num:
-                url = f'{self._url}/bulk_add_items'
+                if self._mesosphere_list.qsize() >= buffer_size:
+                    mesosphere_list = list(self._mesosphere_list.queue)
 
-                headers = {'Content-Type': 'application/msgpack'}
+                    url = f'{self._url}/bulk_add_items'
 
-                data = {
-                    "database_name": self._database_name,
-                    "collection_name": self._collection_name,
-                    "items": self._mesosphere_list,
-                    "normalize": normalize
-                }
+                    headers = {'Content-Type': 'application/msgpack'}
 
-                response = self._session.post(url, content=pack_data(data), headers=headers)
+                    data = {
+                        "database_name": self._database_name,
+                        "collection_name": self._collection_name,
+                        "items": mesosphere_list,
+                        "normalize": normalize
+                    }
 
-                if response.status_code == 200:
-                    self.COMMIT_FLAG = False
-                    self._mesosphere_list = self._mesosphere_list[delay_num:]
-                else:
-                    raise_error_response(response)
+                    response = self._session.post(url, data=None, content=pack_data(data), headers=headers)
+
+                    if response.status_code == 200:
+                        self.COMMIT_FLAG = False
+                        self._mesosphere_list = queue.Queue()
+                    else:
+                        raise_error_response(response)
 
             return id
 
@@ -281,7 +298,6 @@ class Collection:
     ):
         """
         Add multiple items to the collection.
-            .. versionadded:: 0.3.2
 
         Parameters:
             vectors (List[Tuple[Union[List, Tuple, np.ndarray], int, dict]],
@@ -336,13 +352,9 @@ class Collection:
 
         return ids
 
-    def _rollback(self):
-        self._mesosphere_list = SafeList()
-
     def commit(self):
         """
         Commit the changes in the collection.
-            .. versionadded:: 0.3.2
 
         Returns:
             dict: The response from the server.
@@ -353,13 +365,13 @@ class Collection:
         url = f'{self._url}/commit'
         data = {"database_name": self._database_name, "collection_name": self._collection_name}
 
-        if self._mesosphere_list:
-            data["items"] = self._mesosphere_list
+        if not self._mesosphere_list.empty():
+            data["items"] = list(self._mesosphere_list.queue)
+
+        self._mesosphere_list = queue.Queue()
 
         response = self._session.post(url, content=pack_data(data), headers={'Content-Type': 'application/msgpack'})
 
-        if self._mesosphere_list:
-            self._mesosphere_list = SafeList()
 
         if response.status_code == 202:
             task_id = response.json().get('task_id')
@@ -370,10 +382,12 @@ class Collection:
                 status_data = status_response.json()
 
                 if status_response.status_code == 200:
-                    logger.info(f'Task status: {status_data}')
+                    logger.info(f'Task status: {status_data}', rewrite_print=True)
                     if status_data['status'] in ['Success', 'Error']:
                         if status_data['status'] == 'Success':
                             self._update_commit_msg(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                        else:
+                            raise_error_response(status_response)
                         return status_data
                 else:
                     raise_error_response(status_response)
@@ -385,7 +399,6 @@ class Collection:
     def build_index(self, index_mode: str = 'IVF-FLAT', n_clusters: int = 16):
         """
         Build the index of the collection.
-            .. versionadded:: 0.3.6
 
         Parameters:
             index_mode (str): The index mode. Default is 'IVF-FLAT'.
@@ -415,7 +428,6 @@ class Collection:
     def remove_index(self):
         """
         Remove the index of the collection.
-            .. versionadded:: 0.3.6
 
         Returns:
             dict: The response from the server.
@@ -435,32 +447,15 @@ class Collection:
     def insert_session(self):
         """
         Start an insert session.
-            .. versionadded:: 0.3.2
         """
         from lynse.execution_layer.session import DataOpsSession
 
         return DataOpsSession(self)
 
     @SearchResultsCache(config.LYNSE_SEARCH_CACHE_SIZE)
-    def _search(self, vector: Union[list[float], np.ndarray], k: int = 10, distance: str = 'IP',
-                search_filter: Union[Filter, None] = None, normalize=False, **kwargs):
+    def _search(self, vector, k, distance, search_filter, normalize, return_fields=False, **kwargs):
         """
         Search the collection.
-            .. versionadded:: 0.3.2
-
-        Parameters:
-            vector (list[float] or np.ndarray): The search vector.
-            k (int): The number of results to return. Default is 10.
-            distance (str): The distance metric. Default is 'IP', it can be 'cosine' or 'L2' or 'IP'.
-            search_filter (Filter, optional): The field filter to apply to the search, must be a Filter object.
-            normalize (bool): Whether to normalize the vector. Default is False.
-
-        Returns:
-            Tuple: The indices and similarity scores of the top k nearest vectors.
-
-        Raises:
-            ValueError: If the collection has been deleted or does not exist.
-            ExecutionError: If the server returns an error.
         """
         url = f'{self._url}/search'
 
@@ -476,7 +471,8 @@ class Collection:
             'distance': distance,
             "search_filter": search_filter,
             "return_similarity": True,
-            "normalize": normalize
+            "normalize": normalize,
+            "return_fields": return_fields
         }
         response = self._session.post(url, json=data)
 
@@ -486,24 +482,26 @@ class Collection:
             raise_error_response(response)
 
     def search(
-            self, vector: Union[list[float], np.ndarray], k: int = 10, distance: str = 'IP',
-            search_filter: Union[Filter, None] = None, return_similarity: bool = True,
-            normalize: bool = False
+            self, vector: Union[list[float], np.ndarray], k: int = 10, distance: str = 'cosine',
+            search_filter: Union[Filter, None] = None,
+            normalize: bool = False,
+            return_fields: bool = False
     ):
         """
         Search the collection.
-            .. versionadded:: 0.3.2
 
         Parameters:
             vector (list[float] or np.ndarray): The search vector.
             k (int): The number of results to return. Default is 10.
-            distance (str): The distance metric. Default is 'IP'. It can be 'cosine' or 'L2' or 'IP'.
+            distance (str): The distance metric. Default is 'cosine'. It can be 'cosine' or 'L2' or 'IP'.
             search_filter (Filter, optional): The field filter to apply to the search, must be a Filter object.
-            return_similarity (bool): Whether to return the similarity. Default is True.
             normalize (bool): Whether to normalize the vector. Default is False.
+            return_fields (bool): Whether to return the fields of the search results. Default is False.
 
         Returns:
-            Tuple: The indices and similarity scores of the top k nearest vectors.
+            Tuple: If return_fields is True, the indices, similarity scores,
+                    and fields of the nearest vectors in the database.
+                Otherwise, the indices and similarity scores of the nearest vectors in the database.
 
         Raises:
             ValueError: If the collection has been deleted or does not exist.
@@ -514,10 +512,10 @@ class Collection:
         tik = time.time()
         if self._init_params['use_cache']:
             rjson = self._search(vector=vector, k=k, distance=distance,
-                                 search_filter=search_filter, return_similarity=return_similarity, normalize=normalize)
+                                 search_filter=search_filter, normalize=normalize, return_fields=return_fields)
         else:
             rjson = self._search(vector=vector, k=k, distance=distance, search_filter=search_filter,
-                                 return_similarity=return_similarity, now=time.time(), normalize=normalize)
+                                 now=time.time(), normalize=normalize, return_fields=return_fields)
 
         tok = time.time()
 
@@ -527,27 +525,20 @@ class Collection:
         self.most_recent_search_report['Search K'] = k
 
         ids, scores = np.array(rjson['params']['items']['ids']), np.array(rjson['params']['items']['scores'])
+        fields = rjson['params']['items']['fields']
 
         if ids is not None:
             self.most_recent_search_report[f'Top {k} Results ID'] = ids
-            if return_similarity:
-                self.most_recent_search_report[f'Top {k} Results Similarity'] = scores
-            else:
-                if f'Top {k} Results Similarity' in self.most_recent_search_report:
-                    del self.most_recent_search_report[f'Top {k} Results Similarity']
+            self.most_recent_search_report[f'Top {k} Results Similarity'] = scores
 
         self.most_recent_search_report['Search Time'] = f"{tok - tik :>.5f} s"
 
-        if return_similarity:
-            return ids, scores
-
-        return ids, None
+        return ids, scores, fields
 
     @property
     def shape(self):
         """
         Get the shape of the collection.
-            .. versionadded:: 0.3.2
 
         Returns:
             Tuple: The shape of the collection.
@@ -571,7 +562,6 @@ class Collection:
     def head(self, n: int = 5):
         """
         Get the first n items in the collection.
-            .. versionadded:: 0.3.6
 
         Parameters:
             n (int): The number of items to return. Default is 5.
@@ -588,14 +578,13 @@ class Collection:
 
         if response.status_code == 200:
             head = response.json()['params']['head']
-            return np.asarray(head[0]), np.asarray(head[1])
+            return np.asarray(head[0]), np.asarray(head[1]), head[2]
         else:
             raise_error_response(response)
 
     def tail(self, n: int = 5):
         """
         Get the last n items in the collection.
-            .. versionadded:: 0.3.6
 
         Parameters:
             n (int): The number of items to return. Default is 5.
@@ -612,7 +601,160 @@ class Collection:
 
         if response.status_code == 200:
             tail = response.json()['params']['tail']
-            return np.asarray(tail[0]), np.asarray(tail[1])
+            return np.asarray(tail[0]), np.asarray(tail[1]), tail[2]
+        else:
+            raise_error_response(response)
+
+    def read_by_only_id(self, id: Union[int, list]):
+        """
+        Read the item by ID.
+
+        Parameters:
+            id (int, list): The ID of the item or a list of IDs.
+
+        Returns:
+            pd.DataFrame: The item or items with the specified ID.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        url = f'{self._url}/read_by_only_id'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name, "id": id}
+        response = self._session.post(url, json=data)
+
+        item = response.json()['params']['item']
+
+        if response.status_code == 200:
+            return item[0], item[1], item[2]
+        else:
+            raise_error_response(response)
+
+    def query(self, filter_instance, filter_ids=None, return_ids_only=False):
+        """
+        Query the collection.
+
+        Parameters:
+            filter_instance (Filter or dict): The filter object.
+            filter_ids (list[int]): The list of IDs to filter.
+            return_ids_only (bool): Whether to return the IDs only.
+
+        Returns:
+            List[dict]: The records. If not return_ids_only, the records will be returned.
+            List[int]: The external IDs. If return_ids_only, the external IDs will be returned.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        url = f'{self._url}/query'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "filter_instance": filter_instance.to_dict() if isinstance(filter_instance, Filter) else filter_instance,
+            "filter_ids": filter_ids,
+            "return_ids_only": return_ids_only
+        }
+
+        response = self._session.post(url, json=data)
+
+        if response.status_code == 200:
+            return response.json()['params']['result']
+        else:
+            raise_error_response(response)
+
+    def build_field_index(self, schema, rebuild_if_exists=False):
+        """
+        Build the field index of the collection.
+
+        Parameters:
+            schema (IndexSchema): The schema of the field index.
+            rebuild_if_exists (bool): Whether to rebuild the field index if it exists.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        if not isinstance(schema, IndexSchema):
+            raise TypeError("schema must be an instance of IndexSchema.")
+
+        url = f'{self._url}/build_field_index'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "schema": schema.to_json(),
+            "rebuild_if_exists": rebuild_if_exists
+        }
+
+        response = self._session.post(url, json=data)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def list_field_index(self):
+        """
+        List the field index of the collection.
+
+        Returns:
+            dict: The field index of the collection.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        url = f'{self._url}/list_field_index'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name}
+        response = self._session.post(url, json=data)
+
+        if response.status_code == 200:
+            return response.json()['params']['field_indices']
+        else:
+            raise_error_response(response)
+
+    def remove_field_index(self, field_name):
+        """
+        Remove the field index of the collection.
+
+        Parameters:
+            field_name (str): The name of the field.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        url = f'{self._url}/remove_field_index'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "field_name": field_name
+        }
+
+        response = self._session.post(url, json=data)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def remove_all_field_indices(self):
+        """
+        Remove all the field indices of the collection.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        url = f'{self._url}/remove_all_field_indices'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name}
+        response = self._session.post(url, json=data)
+
+        if response.status_code == 200:
+            return response.json()
         else:
             raise_error_response(response)
 
@@ -620,7 +762,6 @@ class Collection:
     def search_report_(self):
         """
         Get the search report of the collection.
-            .. versionadded:: 0.3.2
 
         Returns:
             str: The search report.
@@ -637,7 +778,6 @@ class Collection:
     def update_description(self, description: str):
         """
         Update the description of the collection.
-            .. versionadded:: 0.3.4
 
         Parameters:
             description (str): The description of the collection.
@@ -665,7 +805,6 @@ class Collection:
     def get_collection_path(self):
         """
         Get the path of the database.
-            .. versionadded:: 0.3.6
 
         Returns:
             str: The path of the database.
@@ -682,9 +821,9 @@ class Collection:
 
     def __repr__(self):
         if self.status_report_['COLLECTION STATUS REPORT']['Collection status'] == 'DELETED':
-            title = "Deleted Convergence collection with status: \n"
+            title = "Deleted LynseDB collection with status: \n"
         else:
-            title = "Convergence collection with status: \n"
+            title = "LynseDB collection with status: \n"
 
         report = '\n* - COLLECTION STATUS REPORT -\n'
         for key, value in self.status_report_['COLLECTION STATUS REPORT'].items():
@@ -733,7 +872,6 @@ class HTTPClient:
     def __init__(self, url, database_name):
         """
         Initialize the client.
-            .. versionadded:: 0.3.2
 
         Parameters:
             url (str): The URL of the server, must start with "http://" or "https://".
@@ -771,11 +909,10 @@ class HTTPClient:
             warm_up: bool = False,
             drop_if_exists: bool = False,
             description: str = None,
-            buffer_size: int = 20
+            cache_chunks: int = 20
     ):
         """
         Create a collection.
-            .. versionadded:: 0.3.2
 
         Parameters:
             collection (str): The name of the collection.
@@ -792,9 +929,7 @@ class HTTPClient:
             drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
             description (str): A description of the collection. Default is None.
                 The description is limited to 500 characters.
-                    .. versionadded:: 0.3.4
-            buffer_size (int): The buffer size. Default is 20.
-                .. versionadded:: 0.3.6
+            cache_chunks (int): The number of chunks to cache. Default is 20.
 
         Returns:
             Collection: The collection object.
@@ -817,7 +952,7 @@ class HTTPClient:
             "warm_up": warm_up,
             "drop_if_exists": drop_if_exists,
             "description": description,
-            "buffer_size": buffer_size
+            "cache_chunks": cache_chunks
         }
 
         try:
@@ -834,17 +969,14 @@ class HTTPClient:
         except httpx.RequestError:
             raise ConnectionError(f'Failed to connect to the server at {url}.')
 
-    def get_collection(self, collection: str, buffer_size=10, warm_up=True):
+    def get_collection(self, collection: str, cache_chunks=20, warm_up=True):
         """
         Get a collection.
-            .. versionadded:: 0.3.2
 
         Parameters:
             collection (str): The name of the collection.
-            buffer_size (int): The buffer size. Default is 10.
-                .. versionadded:: 0.3.6
+            cache_chunks (int): The number of chunks to cache. Default is 20.
             warm_up (bool): Whether to warm up. Default is True.
-                .. versionadded:: 0.3.6
 
         Returns:
             Collection: The collection object.
@@ -862,7 +994,7 @@ class HTTPClient:
             response = self._session.post(url, json=data)
 
             params = response.json()['params']['config']
-            params.update({'buffer_size': buffer_size, 'warm_up': warm_up})
+            params.update({'cache_chunks': cache_chunks, 'warm_up': warm_up})
 
             return Collection(url=self.url, database_name=self.database_name, collection_name=collection,
                               **params)
@@ -872,7 +1004,6 @@ class HTTPClient:
     def drop_collection(self, collection: str):
         """
         Drop a collection.
-            .. versionadded:: 0.3.2
 
         Parameters:
             collection (str): The name of the collection.
@@ -896,7 +1027,6 @@ class HTTPClient:
     def drop_database(self):
         """
         Drop the database.
-            .. versionadded:: 0.3.2
 
         Returns:
             dict: The response from the server.
@@ -919,7 +1049,6 @@ class HTTPClient:
     def database_exists(self):
         """
         Check if the database exists.
-            .. versionadded:: 0.3.2
 
         Returns:
             dict: The response from the server.
@@ -939,7 +1068,6 @@ class HTTPClient:
     def show_collections(self):
         """
         Show all collections in the database.
-            .. versionadded:: 0.3.2
 
         Returns:
             List: The list of collections.
@@ -959,7 +1087,6 @@ class HTTPClient:
     def set_environment(self, env: dict):
         """
         Set the environment variables.
-            .. versionadded:: 0.3.2
 
         Parameters:
             env (dict): The environment variables. It can be specified on the same time or separately.
@@ -999,7 +1126,6 @@ class HTTPClient:
     def get_environment(self):
         """
         Get the environment variables.
-            .. versionadded:: 0.3.2
 
         Returns:
             dict: The response from the server.
@@ -1019,7 +1145,6 @@ class HTTPClient:
     def update_collection_description(self, collection: str, description: str):
         """
         Update the description of a collection.
-            .. versionadded:: 0.3.4
 
         Parameters:
             collection (str): The name of the collection.
@@ -1043,7 +1168,6 @@ class HTTPClient:
     def show_collections_details(self):
         """
         Show all collections in the database with details.
-            .. versionadded:: 0.3.4
 
         Returns:
             pandas.DataFrame: The details of the collections.
@@ -1058,16 +1182,15 @@ class HTTPClient:
         if response.status_code == 200:
             rj = response.json()['params']['collections']
             rj_df = pd.DataFrame(rj)
-            rj_df.index.name = 'collections'
             return rj_df
         else:
             raise_error_response(response)
 
     def __repr__(self):
         if self.database_exists()['params']['exists']:
-            return f'Convergence HTTP Client connected to {self.url}, use database: `{self.database_name}`.'
+            return f'LynseDB HTTP Client connected to {self.url}, use database: `{self.database_name}`.'
         else:
-            return f"Database `{self.database_name}` does not exist on the Convergence remote server."
+            return f"Database `{self.database_name}` does not exist on the LynseDB remote server."
 
     def __str__(self):
         return self.__repr__()
