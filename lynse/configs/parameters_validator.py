@@ -9,7 +9,6 @@ from spinesUtils.logging import Logger
 class ParametersValidator:
     """Database configuration, define once and can not be changed.
 
-        .. versionadded:: 0.2.5
     """
     def __init__(self, update_configs: list, logger: Logger):
         raise_if(TypeError, not isinstance(update_configs, list), "update_configs must be a list.")
@@ -42,7 +41,7 @@ class ParametersValidator:
                 configs = json.load(f)
             return configs
         except (FileNotFoundError, json.JSONDecodeError, PermissionError, OSError) as e:
-            self.logger.error(f"Failed to load the Convergence configurations.")
+            self.logger.error(f"Failed to load the LynseDB configurations.")
             raise e
 
     def save_configs(self, configs_json: Path, configs: dict):
@@ -53,7 +52,7 @@ class ParametersValidator:
 
             return configs
         except (PermissionError, OSError) as e:
-            self.logger.error(f"Failed to save the Convergence configurations.")
+            self.logger.error(f"Failed to save the LynseDB configurations.")
             raise e
 
     def __call__(self, func):
