@@ -13,7 +13,7 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setup(
-    name='Convergence',
+    name='LynseDB',
     version="0.0.1",
     description='A pure Python-implemented, lightweight, server-optional, '
                 'multi-end compatible, vector database deployable locally or remotely.',
