@@ -10,7 +10,7 @@ from lynse.core_components.id_checker import IDChecker
 
 
 class KVCacheStorage:
-    RECORD_HEADER_SIZE = 4  # 使用4个字节来存储每个记录的大小
+    RECORD_HEADER_SIZE = 4
 
     def __init__(self, filepath=None, as_temp_file=False):
         if filepath is None and not as_temp_file:
@@ -22,13 +22,14 @@ class KVCacheStorage:
 
         self.memory_store = {}
         self.id_mapping = {}
+        self.external_to_internal = {}
         self.current_internal_id = 0
 
         self.filter_path = self.filepath.with_suffix('.filter')
         self.index_path = self.filepath.with_suffix('.index')
         self._initialize_id_checker()
 
-        self._load_id_mapping()
+        self._load_mappings()
 
         self.index = Index()
         self._load_index()
@@ -47,15 +48,19 @@ class KVCacheStorage:
                     self.id_filter.add(external_id)
                 self.id_filter.to_file(self.filter_path)
 
-    def _load_id_mapping(self):
+    def _load_mappings(self):
         id_mapping_path = self.filepath.with_suffix('.idmap')
+        external_to_internal_path = self.filepath.with_suffix('.ext2int')
         if id_mapping_path.exists():
             with open(id_mapping_path, 'rb') as f:
-                unpacker = msgpack.Unpacker(f, raw=False, strict_map_key=False)
-                for unpacked in unpacker:
-                    self.id_mapping.update(unpacked)
+                unpacked = msgpack.unpackb(f.read(), raw=False, strict_map_key=False)
+                self.id_mapping.update(unpacked)
             if self.id_mapping:
                 self.current_internal_id = max(self.id_mapping.keys()) + 1
+        if external_to_internal_path.exists():
+            with open(external_to_internal_path, 'rb') as f:
+                unpacked = msgpack.unpackb(f.read(), raw=False, strict_map_key=False)
+                self.external_to_internal.update(unpacked)
 
     def _load_index(self):
         if self.index_path.exists():
@@ -68,14 +73,16 @@ class KVCacheStorage:
 
     def store(self, data: dict, external_id: int):
         if not isinstance(data, dict):
-            raise ValueError("只支持存储字典类型的数据。")
+            raise ValueError("Only dictionaries are allowed as data.")
 
         if external_id in self.id_filter:
-            raise ValueError(f"外部ID {external_id} 已经存在于缓存存储中。")
+            raise ValueError(f"external_id {external_id} already exists.")
         self.id_filter.add(external_id)
 
+        data = {":id:": external_id, **data}
         internal_id = self.current_internal_id
         self.memory_store[internal_id] = data
+        self.external_to_internal[external_id] = internal_id
         self.current_internal_id += 1
 
         if self.use_index:
@@ -105,49 +112,57 @@ class KVCacheStorage:
             packed_mapping = msgpack.packb(self.id_mapping)
             f.write(packed_mapping)
 
+        external_to_internal_path = self.filepath.with_suffix('.ext2int')
+        with open(external_to_internal_path, 'wb') as f:
+            packed_mapping = msgpack.packb(self.external_to_internal)
+            f.write(packed_mapping)
+
         self.id_filter.to_file(self.filter_path)
 
         if self.use_index:
             self.index.save(self.index_path)
 
-    def retrieve_all(self):
+    def retrieve_all(self, include_external_id=True):
         self.auto_commit()
 
-        if os.path.exists(self.filepath):
-            with open(self.filepath, 'rb') as f:
-                while True:
-                    record_size_bytes = f.read(self.RECORD_HEADER_SIZE)
-                    if not record_size_bytes:
-                        break
-                    record_size = int.from_bytes(record_size_bytes, 'big')
-                    chunk = f.read(record_size)
-                    unpacker = msgpack.Unpacker(raw=False, strict_map_key=False)
-                    unpacker.feed(chunk)
-                    for unpacked in unpacker:
-                        for internal_id, data in unpacked.items():
-                            yield internal_id, data
+        if not os.path.exists(self.filepath):
+            return
 
-    def retrieve_by_external_id(self, external_ids):
+        with open(self.filepath, 'rb') as f:
+            while True:
+                record_size_bytes = f.read(self.RECORD_HEADER_SIZE)
+                if not record_size_bytes:
+                    break
+                record_size = int.from_bytes(record_size_bytes, 'big')
+                chunk = f.read(record_size)
+                unpacked = msgpack.unpackb(chunk, raw=False, strict_map_key=False)
+                for internal_id, data in unpacked.items():
+                    external_id = data.get(':id:')
+                    if not include_external_id:
+                        del data[':id:']
+                    yield external_id, data
+
+    def retrieve_by_external_id(self, external_ids, include_external_id=True):
         self.auto_commit()
 
         if isinstance(external_ids, int):
             external_ids = [external_ids]
 
-        results = {}
+        results = []
         with open(self.filepath, 'rb') as f:
             with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
                 for external_id in external_ids:
-                    if external_id in self.id_mapping:
-                        offset = self.id_mapping[external_id]
+                    if external_id in self.external_to_internal:
+                        internal_id = self.external_to_internal[external_id]
+                        offset = self.id_mapping[internal_id]
                         mm.seek(offset)
                         record_size = int.from_bytes(mm.read(self.RECORD_HEADER_SIZE), 'big')
                         chunk = mm.read(record_size)
-                        unpacker = msgpack.Unpacker(raw=False, strict_map_key=False)
-                        unpacker.feed(chunk)
-                        for unpacked in unpacker:
-                            if external_id in unpacked:
-                                results[external_id] = unpacked[external_id]
-                                break
+                        unpacked = msgpack.unpackb(chunk, raw=False, strict_map_key=False)
+                        if internal_id in unpacked:
+                            if not include_external_id:
+                                del unpacked[internal_id][':id:']
+                            results.append(unpacked[internal_id])
         return results
 
     def delete(self):
@@ -156,6 +171,9 @@ class KVCacheStorage:
         id_mapping_path = self.filepath.with_suffix('.idmap')
         if id_mapping_path.exists():
             id_mapping_path.unlink()
+        external_to_internal_path = self.filepath.with_suffix('.ext2int')
+        if external_to_internal_path.exists():
+            external_to_internal_path.unlink()
         if self.filter_path.exists():
             self.filter_path.unlink()
         if self.index_path.exists():
@@ -163,30 +181,33 @@ class KVCacheStorage:
 
         self.memory_store.clear()
         self.id_mapping.clear()
+        self.external_to_internal.clear()
         self.filepath = None
         self.memory_store = None
         self.id_mapping = None
         self.current_internal_id = None
         self.max_entries = None
-        if self.use_index:
-            self.index = None
+        self.use_index = False
+        self.index = None
 
     def build_index(self, schema: Dict[str, type], rebuild_if_exists=False):
         self.auto_commit()
 
         for index_name, index_type in schema.items():
             self.index.add_index(index_name, index_type, rebuild_if_exists)
-        for internal_id, data in self.retrieve_all():
-            self.index.insert(data, internal_id)
+        for external_id, data in self.retrieve_all():
+            self.index.insert(data, external_id)
         self.use_index = True
         self.index.save(self.index_path)
 
     def remove_index(self, field_name: str):
         self.index.remove_index(field_name)
         if not self.index.indices:
-            self.use_index = False
             if os.path.exists(self.index_path):
                 os.remove(self.index_path)
+
+            self.index = Index()
+            self.use_index = False
         else:
             self.index.save(self.index_path)
 
