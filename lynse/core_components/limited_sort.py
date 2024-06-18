@@ -10,7 +10,6 @@ class LimitedSorted:
     def __init__(self, scaler=None, n=10):
         """A class to store the top n most similar vectors to a given vector.
 
-        .. versionadded:: 0.2.5
 
         Parameters:
             scaler (Scaler, optional): The scaler to decode the vectors.
@@ -45,6 +44,9 @@ class LimitedSorted:
             distance_func = partial(cosine_distance, use=use)
         else:
             distance_func = partial(euclidean_distance, use=use)
+
+        if len(self.similarities) == 0:
+            return np.array([]), np.array([])
 
         matrix_subset = np.vstack(self.matrix_subset)
         indices = np.concatenate(self.indices)
