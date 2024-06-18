@@ -8,7 +8,6 @@ import zlib
 class IVFIndex:
     """
     Inverted File Index for storing the mapping between external IDs and file names.
-        .. versionadded:: 0.3.6
     """
 
     def __init__(self):
