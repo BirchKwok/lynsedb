@@ -1,6 +1,8 @@
 import operator
 from typing import List
 
+from lynse.core_components.kv_cache import Filter, MatchField, FieldCondition
+
 
 class KVCacheQuery:
     def __init__(self, storage):
@@ -79,7 +81,8 @@ class KVCacheQuery:
                     all_fields_indexed = False
 
             if not all_fields_indexed:
-                any_match_ids |= {external_id for external_id, data in zip(match_ids, self.retrieve_ids(list(match_ids)))
+                any_match_ids |= {external_id for external_id, data in
+                                  zip(match_ids, self.retrieve_ids(list(match_ids)))
                                   if self._index_filter(external_id, data, filter_ids, non_indexed_must_conditions=None,
                                                         non_indexed_must_not_conditions=None,
                                                         non_indexed_any_conditions=non_indexed_any_conditions)}
@@ -99,7 +102,7 @@ class KVCacheQuery:
                 if return_ids_only:
                     matched.append(external_id)
                 else:
-                    matched.append((external_id, data))
+                    matched.append(data)
             return matched
 
         return self._normal_query(filter_instance, filter_ids, return_ids_only)
@@ -170,7 +173,8 @@ class KVCacheQuery:
 
         for external_id, data in self.storage.retrieve_all():
             if self._index_filter(external_id, data, filter_ids,
-                                  non_indexed_must_conditions, non_indexed_must_not_conditions, non_indexed_any_conditions):
+                                  non_indexed_must_conditions, non_indexed_must_not_conditions,
+                                  non_indexed_any_conditions):
                 if return_ids_only:
                     matched.append(external_id)
                 else:
@@ -203,41 +207,77 @@ class KVCacheQuery:
                     if return_ids_only:
                         matched.append(external_id)
                     else:
-                        matched.append((external_id, data))
+                        matched.append(data)
         else:
             for external_id, data in self.storage.retrieve_all():
                 if self._matches_filter(external_id, data, filter_instance, filter_ids):
                     if return_ids_only:
                         matched.append(external_id)
                     else:
-                        matched.append((external_id, data))
+                        matched.append(data)
 
         return matched
 
     def query(self, filter_instance, filter_ids=None, return_ids_only=True):
+        """
+        Query the cache.
+
+        Parameters:
+            filter_instance: Filter or dict
+                The filter object or the specify data to filter.
+            filter_ids: List[int]
+                The list of external IDs to filter.
+            return_ids_only: bool
+                If True, only the external IDs will be returned.
+
+        Returns:
+            List[dict]: The records that match the filter.
+        """
+        if isinstance(filter_instance, dict):
+            if ('must_fields' not in filter_instance or
+                                                  'must_not_fields' not in filter_instance or
+                                                  'any_fields' not in filter_instance):
+                final_filter = []
+                for key, value in filter_instance.items():
+                    final_filter.append(FieldCondition(key=key, matcher=MatchField(value, comparator=operator.eq)))
+                    filter_instance = Filter(must=final_filter)
+            else:
+                filter_instance = Filter().load_dict(filter_instance)
+
         if self.storage.index.indices:
             return self._index_query(filter_instance, filter_ids, return_ids_only)
         return self._normal_query(filter_instance, filter_ids, return_ids_only)
 
-    def retrieve(self, external_id):
+    def retrieve(self, external_id, include_external_id=True):
         """
         Retrieve a record from the cache.
 
         Parameters:
             external_id: int
                 The external ID of the record.
+            include_external_id: bool
+                If True, the external ID will be included in the record.
 
         Returns:
             dict: The record.
         """
-        res = self.storage.retrieve_by_external_id(external_id)
+        res = self.storage.retrieve_by_external_id(external_id, include_external_id=include_external_id)
         if res:
-            return {"id": external_id, **list(res.values())[0]}
+            return res[0]
         return None
 
-    def retrieve_ids(self, external_ids: List[int]):
-        results = []
-        res = self.storage.retrieve_by_external_id(external_ids)
-        for external_id, value in zip(external_ids, list(res.values())):
-            results.append({"id": external_id, **value})
+    def retrieve_ids(self, external_ids: List[int], include_external_id=True):
+        """
+        Retrieve records from the cache.
+
+        Parameters:
+            external_ids: List[int]
+                The external IDs of the records.
+            include_external_id: bool
+                If True, the external ID will be included in the record.
+
+        Returns:
+            List[dict]: The records.
+        """
+        results = self.storage.retrieve_by_external_id(external_ids, include_external_id=include_external_id)
         return results if results else None
