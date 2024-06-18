@@ -92,6 +92,16 @@ class ClusterWorker:
         return REFIT
 
     def build_index(self, index_mode='IVF-FLAT', n_clusters=32):
+        """
+        Build the index for clustering.
+
+        Parameters:
+            index_mode (str): The index mode, either 'IVF-FLAT' or 'FLAT'.
+            n_clusters (int): The number of clusters.
+
+        Returns:
+            None
+        """
         raise_if(ValueError, not isinstance(n_clusters, int) or n_clusters <= 0,
                  'n_clusters must be int and greater than 0')
         raise_if(ValueError, index_mode not in ['IVF-FLAT', 'FLAT'], 'index_mode must be IVF-FLAT or FLAT')
@@ -139,6 +149,14 @@ class ClusterWorker:
             self.ivf_index.save(self.collections_path_parent / 'ivf_index')
 
     def remove_index(self):
+        """
+        Remove the index.
+
+        If all indices are removed, the index file will be removed.
+
+        Returns:
+            None
+        """
         self.ann_model = None
         self.ivf_index.clear_all()
         if (self.collections_path_parent / 'ivf_ann_model').exists():
