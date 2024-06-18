@@ -21,13 +21,6 @@ class _InstanceDistributor:
         if root_path is not None and (root_path.startswith('http://') or root_path.startswith('https://')):
             instance = HTTPClient(url=root_path, database_name=database_name)
         else:
-            import multiprocessing
-            from lynse.api.http_api.http_api import serve_queue
-            # start the message message_queue process
-            queue_process = multiprocessing.Process(target=serve_queue)
-            queue_process.daemon = True
-            queue_process.start()
-
             native_api_root_path = config.LYNSE_DEFAULT_ROOT_PATH
 
             instance = LocalClient((native_api_root_path / database_name).as_posix())
@@ -40,10 +33,10 @@ class VectorDBClient:
 
     def __init__(self, url: Union[str, None] = None):
         """
-        Initialize the Convergence client.
+        Initialize the LynseDB client.
 
         Parameters:
-            url (str): The URL of the Convergence server. If None, the client will use the native API.
+            url (str): The URL of the LynseDB server. If None, the client will use the native API.
         """
         if url is not None:
             from spinesUtils.asserts import raise_if
@@ -61,7 +54,7 @@ class VectorDBClient:
 
                 try:
                     rj = response.json()
-                    if rj != {'status': 'success', 'message': 'Convergence HTTP API'}:
+                    if rj != {'status': 'success', 'message': 'LynseDB HTTP API'}:
                         raise ConnectionError(f'Failed to connect to the server at {url}.')
                 except Exception as e:
                     print(e)
@@ -114,8 +107,8 @@ class VectorDBClient:
             database_name (str): The name of the database to get.
 
         Returns:
-            Convergence: (LocalClient, HTTPClient):
-                The appropriate Convergence client instance based on the root path.
+            LynseDB: (LocalClient, HTTPClient):
+                The appropriate LynseDB client instance based on the root path.
                 If the root path is a local path, return a LocalClient instance,
                 otherwise return a HTTPClient instance.
         """
