@@ -44,6 +44,9 @@ class DatabaseManager:
         if not (self.root_path / 'databases.json').exists():
             return []
 
+        if not (self.root_path / 'databases').exists():
+            return []
+
         folders = [f.name for f in (self.root_path / 'databases').iterdir() if f.is_dir()]
 
         with open(self.root_path / 'databases.json', 'r') as f:
