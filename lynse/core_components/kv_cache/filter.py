@@ -160,8 +160,6 @@ class Filter:
         self.any_fields = []
         self.must_not_fields = []
 
-        must_ids = []
-
         if must:
             for condition in must:
                 if isinstance(condition, FieldCondition):
