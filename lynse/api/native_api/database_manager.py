@@ -1,4 +1,5 @@
 import json
+import shutil
 
 from spinesUtils.asserts import raise_if
 
@@ -33,6 +34,7 @@ class DatabaseManager:
 
         if db_name in databases:
             databases.remove(db_name)
+            shutil.rmtree(self.root_path / db_name)
 
         with open(self.root_path / 'databases.json', 'w') as f:
             json.dump(databases, f)
@@ -44,17 +46,28 @@ class DatabaseManager:
         if not (self.root_path / 'databases.json').exists():
             return []
 
-        folders = [f.name for f in (self.root_path / 'databases').iterdir() if f.is_dir()]
+        self.root_path.mkdir(parents=True, exist_ok=True)
+
+        # if a folder does not contain fingerprint.db, exclude it
+        folders = [x.name for x in self.root_path.iterdir()
+                   if x.is_dir() and (x / '.fingerprint').exists()]
 
         with open(self.root_path / 'databases.json', 'r') as f:
             databases = json.load(f)
 
-        new_databases = []
+        for db in folders:
+            if db not in databases:
+                databases.append(db)
+
+        not_existed_db = []
         for db in databases:
-            if db in folders:
-                new_databases.append(db)
+            if db not in folders:
+                not_existed_db.append(db)
+
+        for db in not_existed_db:
+            databases.remove(db)
 
         with open(self.root_path / 'databases.json', 'w') as f:
-            json.dump(new_databases, f)
+            json.dump(databases, f)
 
-        return new_databases
+        return databases
