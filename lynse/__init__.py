@@ -1,8 +1,14 @@
 
-__version__ = '0.0.1'
+__version__ = '0.1.0'
 
-from lynse.api.http_api.http_api import launch_in_jupyter
-from lynse.core_components import kv_cache as field_models
+from pathlib import Path
+from typing import Union
+
+from lynse.api.http_api.http_api.app import launch_in_jupyter
+from .core_components import kv_cache as field_models
+from .configs.config import generate_config_file, load_config_file
+
+generate_config_file(), load_config_file()
 
 
 class _InstanceDistributor:
@@ -11,9 +17,9 @@ class _InstanceDistributor:
 
     def __new__(cls, root_path: Union[str, Path, None], database_name: str):
         from pathlib import Path
-        from lynse.api.native_api.high_level import LocalClient
-        from lynse.api.http_api.client_api import HTTPClient
-        from lynse.configs.config import config
+        from .api.native_api.high_level import LocalClient
+        from .api.http_api.client_api import HTTPClient
+        from .configs.config import config
 
         if isinstance(root_path, Path):
             root_path = root_path.as_posix()
@@ -21,83 +27,100 @@ class _InstanceDistributor:
         if root_path is not None and (root_path.startswith('http://') or root_path.startswith('https://')):
             instance = HTTPClient(url=root_path, database_name=database_name)
         else:
-            native_api_root_path = config.LYNSE_DEFAULT_ROOT_PATH
+            if root_path is None:
+                native_api_root_path = config.LYNSE_DEFAULT_ROOT_PATH
+            else:
+                # new features, root_path can be specified directly
+                native_api_root_path = Path(root_path)
 
-            instance = LocalClient((native_api_root_path / database_name).as_posix())
+            instance = LocalClient(native_api_root_path / database_name)
 
         return instance
 
 
 class VectorDBClient:
-    from typing import Union
-
-    def __init__(self, url: Union[str, None] = None):
+    def __init__(self, uri: Union[str, None, Path] = None):
         """
         Initialize the LynseDB client.
 
         Parameters:
-            url (str): The URL of the LynseDB server. If None, the client will use the native API.
+            uri (Pathlike or str or None): The URI of the LynseDB server. It can be either a local path or a remote URL.
+
+               - If it is a remote URL, the client will use the HTTP API.
+               - If it is a local path, the client will use the native API.
+                    The path refers to the root path of the database.
+               - If set to None, the client will use the native API,
+                    and the database will be stored in the default root path,
+                    which needs to be configured in the config file.
+
         """
-        if url is not None:
+        self._is_remote = uri is not None and (uri.startswith('http://') or uri.startswith('https://'))
+
+        if self._is_remote:
             from spinesUtils.asserts import raise_if
             import httpx
 
-            raise_if(ValueError, not isinstance(url, str), 'url must be a string')
-            raise_if(ValueError, not (url.startswith('http://') or url.startswith('https://')),
-                     'url must start with http:// or https://, '
-                     'if you are using native API, please pass None as url')
+            raise_if(ValueError, not isinstance(uri, (str, Path)),
+                     'uri must be a string, Pathlike or None')
+            if isinstance(uri, Path):
+                uri = uri.as_posix()
 
-            try:
-                response = httpx.get(url)
-                if response.status_code != 200:
-                    raise ConnectionError(f'Failed to connect to the server at {url}.')
-
+            if uri.startswith('http://') or uri.startswith('https://'):
                 try:
-                    rj = response.json()
-                    if rj != {'status': 'success', 'message': 'LynseDB HTTP API'}:
-                        raise ConnectionError(f'Failed to connect to the server at {url}.')
-                except Exception as e:
-                    print(e)
-                    raise ConnectionError(f'Failed to connect to the server at {url}.')
+                    response = httpx.get(uri)
+                    if response.status_code != 200:
+                        raise ConnectionError(f'Failed to connect to the server at {uri}.')
 
-            except httpx.RequestError:
-                raise ConnectionError(f'Failed to connect to the server at {url}.')
+                    try:
+                        rj = response.json()
+                        if rj != {'status': 'success', 'message': 'LynseDB HTTP API'}:
+                            raise ConnectionError(f'Failed to connect to the server at {uri}.')
+                    except Exception as e:
+                        print(e)
+                        raise ConnectionError(f'Failed to connect to the server at {uri}.')
 
-        self._url = url
+                except httpx.RequestError:
+                    raise ConnectionError(f'Failed to connect to the server at {uri}.')
+        else:
+            uri = Path(uri) if uri is not None else None
+
+        self._uri = uri
 
     def create_database(self, database_name: str, drop_if_exists: bool = False):
         """
-        Create a new database.
+        Create the database using a lazy mode, where entities are only created when they are actually used.
     
         Parameters:
             database_name (str): The name of the database to create.
             drop_if_exists (bool): Whether to drop the database if it already exists.
+                If set to True, the existing database will be immediately deleted before creating a new one.
 
         Returns:
             None
         """
-        from lynse.api.http_api.client_api import raise_error_response
-        from lynse.configs.config import config
+        from .api.http_api.client_api import raise_error_response
+        from .configs.config import config
         import httpx
 
-        if self._url is None:
-            from lynse.api.native_api.database_manager import DatabaseManager
+        if not self._is_remote:
+            from .api.native_api.database_manager import DatabaseManager
 
-            db_manager = DatabaseManager(root_path=config.LYNSE_DEFAULT_ROOT_PATH)
+            db_manager = DatabaseManager(root_path=self._uri or config.LYNSE_DEFAULT_ROOT_PATH)
             db_manager.register(db_name=database_name)
 
             if drop_if_exists:
-                _InstanceDistributor(root_path=None, database_name=database_name).drop_database()
+                _InstanceDistributor(root_path=self._uri or config.LYNSE_DEFAULT_ROOT_PATH,
+                                     database_name=database_name).drop_database()
         else:
             try:
-                rj = httpx.post(f'{self._url}/create_database', json={'database_name': database_name,
+                rj = httpx.post(f'{self._uri}/create_database', json={'database_name': database_name,
                                                                       'drop_if_exists': drop_if_exists})
                 if rj.status_code != 200:
                     raise_error_response(rj)
             except httpx.RequestError:
-                raise ConnectionError(f'Failed to connect to the server at {self._url}.')
+                raise ConnectionError(f'Failed to connect to the server at {self._uri}.')
 
-        return _InstanceDistributor(root_path=self._url, database_name=database_name)
+        return _InstanceDistributor(root_path=self._uri or config.LYNSE_DEFAULT_ROOT_PATH, database_name=database_name)
 
     def get_database(self, database_name: str):
         """
@@ -112,29 +135,30 @@ class VectorDBClient:
                 If the root path is a local path, return a LocalClient instance,
                 otherwise return a HTTPClient instance.
         """
-        from lynse.api.http_api.client_api import raise_error_response
         from spinesUtils.asserts import raise_if
-        from lynse.configs.config import config
+
+        from .api.http_api.client_api import raise_error_response
+        from .configs.config import config
         import httpx
 
-        if self._url is None:
-            from lynse.api.native_api.database_manager import DatabaseManager
+        if not self._is_remote:
+            from .api.native_api.database_manager import DatabaseManager
 
-            db_manager = DatabaseManager(root_path=config.LYNSE_DEFAULT_ROOT_PATH)
+            db_manager = DatabaseManager(root_path=self._uri or config.LYNSE_DEFAULT_ROOT_PATH)
             databases = db_manager.list_database()
             raise_if(ValueError, database_name not in databases, f'{database_name} does not exist.')
         else:
             try:
-                rj = httpx.get(f'{self._url}/list_databases')
+                rj = httpx.get(f'{self._uri}/list_databases')
                 if rj.status_code != 200:
                     raise_error_response(rj)
 
                 databases = rj.json()['params']['databases']
                 raise_if(ValueError, database_name not in databases, f'{database_name} does not exist.')
             except httpx.RequestError:
-                raise ConnectionError(f'Failed to connect to the server at {self._url}.')
+                raise ConnectionError(f'Failed to connect to the server at {self._uri}.')
 
-        return _InstanceDistributor(root_path=self._url, database_name=database_name)
+        return _InstanceDistributor(root_path=self._uri or config.LYNSE_DEFAULT_ROOT_PATH, database_name=database_name)
 
     def list_databases(self):
         """
@@ -143,24 +167,24 @@ class VectorDBClient:
         Returns:
             List: A list of all databases.
         """
-        from lynse.api.http_api.client_api import raise_error_response
+        from .api.http_api.client_api import raise_error_response
         import httpx
 
-        if self._url is None:
-            from lynse.api.native_api.database_manager import DatabaseManager
-            from lynse.configs.config import config
+        if not self._is_remote:
+            from .api.native_api.database_manager import DatabaseManager
+            from .configs.config import config
 
-            db_manager = DatabaseManager(root_path=config.LYNSE_DEFAULT_ROOT_PATH)
+            db_manager = DatabaseManager(root_path=self._uri or config.LYNSE_DEFAULT_ROOT_PATH)
             return db_manager.list_database()
         else:
             try:
-                rj = httpx.get(f'{self._url}/list_databases')
+                rj = httpx.get(f'{self._uri}/list_databases')
                 if rj.status_code != 200:
                     raise_error_response(rj)
 
                 return rj.json()['params']['databases']
             except httpx.RequestError:
-                raise ConnectionError(f'Failed to connect to the server at {self._url}.')
+                raise ConnectionError(f'Failed to connect to the server at {self._uri}.')
 
     def drop_database(self, database_name: str):
         """
@@ -172,25 +196,25 @@ class VectorDBClient:
         Returns:
             None
         """
-        from lynse.api.http_api.client_api import raise_error_response
+        from .api.http_api.client_api import raise_error_response
         import httpx
 
-        if self._url is None:
-            from lynse.api.native_api.database_manager import DatabaseManager
-            from lynse.configs.config import config
+        if not self._is_remote:
+            from .api.native_api.database_manager import DatabaseManager
+            from .configs.config import config
 
-            db_manager = DatabaseManager(root_path=config.LYNSE_DEFAULT_ROOT_PATH)
+            db_manager = DatabaseManager(root_path=self._uri or config.LYNSE_DEFAULT_ROOT_PATH)
             databases = db_manager.list_database()
             if database_name not in databases:
                 return
             db_manager.delete(database_name)
         else:
             try:
-                rj = httpx.post(f'{self._url}/delete_database', json={'database_name': database_name})
+                rj = httpx.post(f'{self._uri}/delete_database', json={'database_name': database_name})
                 if rj.status_code != 200:
                     raise_error_response(rj)
             except httpx.RequestError:
-                raise ConnectionError(f'Failed to connect to the server at {self._url}.')
+                raise ConnectionError(f'Failed to connect to the server at {self._uri}.')
 
 
 def load_and_register_module(module):
