@@ -1,34 +1,32 @@
-import json
 from datetime import datetime
 from pathlib import Path
 import shutil
 from typing import Union
 
 import numpy as np
-from lynse.computational_layer.engines import to_normalize
 from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
+from tqdm import tqdm
 
-from lynse.core_components.locks import ThreadLock
-from lynse.core_components.id_checker import IDChecker
-from lynse.core_components.scaler import ScalarQuantization
-from lynse.core_components.kv_cache import VeloKV
-from lynse.storage_layer.storage import PersistentFileStorage
-from lynse.storage_layer.wal import WALStorage
+from ..core_components.locks import ThreadLock
+from ..core_components.id_checker import IDChecker
+from ..core_components.kv_cache import VeloKV
+from ..storage_layer.storage import PersistentFileStorage
+from ..storage_layer.wal import WALStorage
 
 
 class MatrixSerializer:
     """
     The MatrixSerializer class is used to serialize and deserialize the matrix data.
     """
+
     def __init__(
             self,
             dim: int,
             collection_path: Union[str, Path],
             logger: Logger,
-            chunk_size: int = 1_000_000,
+            chunk_size: int = 100_000,
             dtypes: str = 'float32',
-            scaler_bits=None,
             warm_up: bool = False,
             cache_chunks: int = 20,
     ) -> None:
@@ -42,9 +40,6 @@ class MatrixSerializer:
             chunk_size (int): The size of each data chunk. Default is 1_000_000.
             dtypes (str): The data type of the vectors. Default is 'float32'.
                 Options are 'float16', 'float32' or 'float64'.
-            scaler_bits (int): The number of bits for scalar quantization. Default is None.
-                Options are 8, 16, 32. If None, scalar quantization will not be used.
-                The 8 bits for uint8, 16 bits for uint16, 32 bits for uint32.
             warm_up (bool): Whether to warm up the collection. Default is False.
             cache_chunks (int): The buffer size for the storage worker. Default is 20.
 
@@ -69,12 +64,6 @@ class MatrixSerializer:
         self.dim = dim
         # set chunk size
         self.chunk_size = chunk_size
-
-        # set scalar quantization bits
-        self.scaler_bits = scaler_bits if scaler_bits is not None else None
-        self.scaler = None
-        if self.scaler_bits is not None:
-            self._initialize_scalar_quantization()
 
         # initialize the storage worker
         self.storage_worker = PersistentFileStorage(self.collections_path_parent, self.dim,
@@ -111,12 +100,6 @@ class MatrixSerializer:
         # set filter path
         self.filter_path = self.collections_path_parent / 'id_filter'
 
-    def _initialize_scalar_quantization(self):
-        if self.sq_model_path.exists():
-            self.scaler = ScalarQuantization.load(self.sq_model_path)
-        else:
-            self.scaler = ScalarQuantization(bits=self.scaler_bits, decode_dtype=self.dtypes)
-
     def _initialize_fields_index(self):
         """initialize fields index"""
         self.kv_index = VeloKV(self.kv_index_path)
@@ -136,15 +119,16 @@ class MatrixSerializer:
 
         self.last_id = self.id_filter.find_max_value()
 
-    def dataloader(self, filename):
+    def dataloader(self, filename, as_mmap=True):
         """
         Generator for loading the database and index.
 
         Parameters:
             filename (str): The name of the file to load.
+            as_mmap (bool): Whether to use memory mapping. Default is False.
 
         Yields:
-            tuple: A tuple of (database, index, field).
+            tuple: A tuple of (database, id).
 
         Raises:
             FileNotFoundError: If the file does not exist.
@@ -152,9 +136,7 @@ class MatrixSerializer:
             PermissionError: If the file cannot be read due to permission issues.
             UnKnownError: If an unknown error occurs.
         """
-        data, indices = self.storage_worker.read(filename=filename)
-
-        return data, indices
+        return self.storage_worker.read(filename=filename, is_mmap=as_mmap)
 
     def commit_data(self, recover=False):
         if not recover:
@@ -164,11 +146,33 @@ class MatrixSerializer:
             start_msg = 'Recovering data...'
             end_msg = 'Recovering data done.'
 
-        self.logger.info(start_msg)
-        for data, indices, fields in self.wal_worker.get_file_iterator():
-            self.storage_worker.write(data, indices)
-            for _id, _field in zip(indices, fields):
+        self.logger.info(start_msg + '\n')
+
+        if self.shape[0] > 0:
+            if self.shape[0] % self.chunk_size == 0:
+                last_filename = f"chunk_{int(self.storage_worker.get_all_files()[-1].split('_')[-1]) + 1}"
+            else:
+                last_filename = self.storage_worker.get_all_files()[-1]
+        else:
+            last_filename = 'chunk_0'
+
+        # Only print progress bar if the logger level is less than 20, which means INFO or DEBUG
+        for data, ids, fields in tqdm(self.wal_worker.get_file_iterator(), desc="Data persisting",
+                                      total=self.wal_worker.file_number, unit='chunk', disable=self.logger.level > 20):
+            self.storage_worker.write(data, ids)
+            # store fields index
+            for _id, _field in zip(ids, fields):
                 self.kv_index.store(_field, int(_id))
+
+            # insert data to indexer
+            if hasattr(self, "indexer"):
+                self.indexer.index_insert(data, ids)
+
+        if hasattr(self, "indexer"):
+            self.indexer.ivf_insert(last_filename)
+            # update filenames
+            self.indexer.update_filenames()
+
         self.logger.info(end_msg)
         self.kv_index.commit()
         self.wal_worker.reincarnate()
@@ -190,23 +194,8 @@ class MatrixSerializer:
                 self.logger.debug('Saving id filter...')
                 self.id_filter.to_file(self.filter_path)
 
-                if self.storage_worker.get_shape()[0] >= 100000:
-                    filenames = self.storage_worker.get_all_files(separate=False)
-
-                    if not self.scaled_status_path.exists() \
-                            and self.scaler_bits is not None:
-                        # only run once
-                        self.storage_worker.update_quantizer(self.scaler)
-
-                        if filenames:
-                            self.storage_worker.write(filenames=filenames)
-
-                        with open(self.scaled_status_path, 'w') as f:
-                            json.dump({'status': True}, f)
-
-                if self.scaler_bits is not None:
-                    if self.scaler.fitted:
-                        self.scaler.save(self.sq_model_path)
+                # remove buffer
+                self._remove_buffer()
 
                 self.COMMIT_FLAG = True
 
@@ -227,15 +216,15 @@ class MatrixSerializer:
 
         return vector, index, field if field is not None else {}
 
-    def bulk_add_items(self, vectors, normalize: bool = False):
+    def bulk_add_items(self, vectors):
         """
         Bulk add vectors to the collection in batches.
 
-        Parameters:
-            vectors (list or tuple): A list or tuple of vectors to be saved. Each vector can be a tuple of (
-                vector, id, field).
-            normalize (bool): Whether to normalize the vectors. Default is False.
+        It is recommended to use incremental ids for best performance.
 
+        Parameters:
+            vectors (list or tuple): A list or tuple of vectors to be saved.
+                Each vector can be a tuple of (vector, id, field).
 
         Returns:
             list: A list of indices where the vectors are stored.
@@ -273,9 +262,6 @@ class MatrixSerializer:
                 field = {} if field is None else field
                 vector, id, field = self._process_vector_item(vector, id, field)
 
-                if normalize:
-                    vector = to_normalize(vector)
-
                 data.append(vector)
                 indices.append(id)
                 fields.append(field)
@@ -311,23 +297,25 @@ class MatrixSerializer:
             self.buffer = []
             self.buffer.append((vector, id, field))
 
-    def add_item(self, vector, id: int, field: dict = None, normalize: bool = False,
+    def add_item(self, vector, id: int, field: dict = None,
                  buffer_size: Union[None, int, bool] = None) -> int:
         """
         Add a single vector to the collection.
 
+        It is recommended to use incremental ids for best performance.
+
         Parameters:
             vector (np.ndarray): The vector to be added.
             id (int): The ID of the vector.
-            field (dict, optional, keyword-only): The field of the vector. Default is None. If None, the field will be
-                set to an empty string.
-            normalize (bool): Whether to normalize the vector. Default is False.
+            field (dict, optional, keyword-only): The field of the vector. Default is None.
+                If None, the field will be set to an empty string.
             buffer_size (int or bool or None): The buffer size for the storage worker. Default is None.
                 If None, the vector will be directly written to the disk.
                 If True, the buffer_size will be set to chunk_size,
                     and the vectors will be written to the disk when the buffer is full.
                 If False, the vector will be directly written to the disk.
                 If int, when the buffer is full, the vectors will be written to the disk.
+
         Returns:
             int: The ID of the added vector.
 
@@ -345,8 +333,6 @@ class MatrixSerializer:
                  f'id must be integer and greater than 0, got {id}')
 
         vector, id, field = self._process_vector_item(vector, id, field)
-        if normalize:
-            vector = to_normalize(vector)
 
         if buffer_size is not None and buffer_size is not False:
             if buffer_size is True:
@@ -373,10 +359,6 @@ class MatrixSerializer:
                 pass
 
             self.IS_DELETED = True
-
-            # reinitialize
-            if self.scaler_bits is not None:
-                self._initialize_scalar_quantization()
 
             self._initialize_fields_index()
             self._initialize_id_checker()
