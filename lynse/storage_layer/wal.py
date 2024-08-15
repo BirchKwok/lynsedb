@@ -5,10 +5,9 @@ import shutil
 import threading
 from pathlib import Path
 
-import h5py
 from spinesUtils.timer import Timer
 
-from lynse.core_components.locks import ThreadLock
+from ..core_components.locks import ThreadLock
 
 
 class WALStorage:
@@ -16,9 +15,16 @@ class WALStorage:
         self.storage_path = Path(storage_path) / "wal"
         self.storage_path.mkdir(parents=True, exist_ok=True)
 
-        self.log_dir = self.storage_path / f"{collection_name}-log"
-        self.read_dir = self.storage_path / f"{collection_name}-read"
-        self.state_dir = self.storage_path / f"{collection_name}-state"
+        self.log_dir = self.storage_path / f"log"
+        self.read_dir = self.storage_path / f"read"
+        self.state_dir = self.storage_path / f"state"
+
+        # rename the folder, the version upgrade has resulted in compatibility modifications
+        for _ in [self.storage_path / f"{collection_name}-log", self.storage_path / f"{collection_name}-read",
+                  self.storage_path / f"{collection_name}-state"]:
+            if _.exists():
+                _.rename(self.storage_path / f"{_.name.split('-')[-1].strip()}")
+
         self.log_dir.mkdir(exist_ok=True)
         self.read_dir.mkdir(exist_ok=True)
         self.state_dir.mkdir(exist_ok=True)
@@ -90,15 +96,13 @@ class WALStorage:
                 # Serialize fields using JSON
                 chunk_fields_serialized = [json.dumps(field) for field in chunk_fields]
 
-                # Save to HDF5 file
-                log_file_path = self.log_dir / f"log_{self.file_id}.h5"
+                # Save to NPZ file
+                log_file_path = self.log_dir / f"log_{self.file_id}.npz"
                 try:
-                    with h5py.File(log_file_path, 'w') as hf:
-                        hf.create_dataset('data', data=chunk_data)
-                        hf.create_dataset('indices', data=chunk_indices)
-                        hf.create_dataset('fields', data=np.array(chunk_fields_serialized, dtype=h5py.string_dtype()))
+                    np.savez(log_file_path, data=chunk_data, indices=chunk_indices,
+                             fields=np.array(chunk_fields_serialized))
                 except Exception as e:
-                    print(f"Error during HDF5 write: {e}")
+                    print(f"Error during NPZ write: {e}")
                     return
 
                 self.file_id += 1
@@ -127,10 +131,10 @@ class WALStorage:
     @staticmethod
     def read_log_data(log_filepath):
         try:
-            with h5py.File(log_filepath, 'r') as hf:
-                data = hf['data'][:]
-                indices = hf['indices'][:]
-                fields_serialized = hf['fields'][:]
+            with np.load(log_filepath, allow_pickle=True) as npzfile:
+                data = npzfile['data']
+                indices = npzfile['indices']
+                fields_serialized = npzfile['fields']
 
                 # Deserialize fields using JSON
                 fields = []
@@ -150,9 +154,9 @@ class WALStorage:
         with self.lock:
             self._flush_buffer_to_disk()
 
-            file_ids = sorted([int(i.stem.split('_')[-1]) for i in self.log_dir.glob('log_*.h5')])
+            file_ids = sorted([int(i.stem.split('_')[-1]) for i in self.log_dir.glob('log_*.npz')])
             for file_id in file_ids:
-                log_path = self.log_dir / f"log_{file_id}.h5"
+                log_path = self.log_dir / f"log_{file_id}.npz"
                 state_file_path = self.state_dir / f"state_{file_id}.txt"
                 if state_file_path.exists():
                     read_flag = self.read_dir / f"read_{file_id}.flag"
@@ -164,6 +168,10 @@ class WALStorage:
                         else:
                             print(f"Skipping corrupted file: {log_path}")
                     self._remove_state_file(file_id)
+
+    @property
+    def file_number(self):
+        return len(list(self.log_dir.glob('log_*.npz')))
 
     def cleanup(self):
         with self.lock:
