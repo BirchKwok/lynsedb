@@ -10,12 +10,11 @@ import pandas as pd
 from spinesUtils.asserts import raise_if
 from tqdm import trange
 
-from lynse.core_components.kv_cache import IndexSchema
-from lynse.core_components.kv_cache.filter import Filter
-from lynse.api import config, logger
-from lynse.core_components.locks import ThreadLock
-from lynse.utils.utils import SearchResultsCache
-from lynse.utils.poster import Poster
+from ...core_components.kv_cache import IndexSchema
+from ...core_components.kv_cache.filter import Filter
+from ...api import logger
+from ...core_components.locks import ThreadLock
+from ...utils.poster import Poster
 
 
 class ExecutionError(Exception):
@@ -68,10 +67,8 @@ class Collection:
             **params: The collection parameters.
                 - dim (int): The dimension of the vectors.
                 - chunk_size (int): The chunk size.
-                - distance (str): The distance metric.
                 - dtypes (str): The data types.
                 - use_cache (bool): Whether to use cache.
-                - scaler_bits (int): The scaler bits.
                 - n_threads (int): The number of threads.
                 - warm_up (bool): Whether to warm up.
                 - drop_if_exists (bool): Whether to drop the collection if it exists.
@@ -84,9 +81,6 @@ class Collection:
         self._collection_name = collection_name
         self._session = Poster()
         self._init_params = params
-
-        self.most_recent_search_report = {}
-        self.search_report = {}
 
         self.COMMIT_FLAG = False
 
@@ -170,15 +164,15 @@ class Collection:
             raise_error_response(response)
 
     def add_item(self, vector: Union[list[float], np.ndarray], id: int, *, field: Union[dict, None] = None,
-                 normalize: bool = False, buffer_size: int = True):
+                 buffer_size: int = True):
         """
         Add an item to the collection.
+        It is recommended to use incremental ids for best performance.
 
         Parameters:
             vector (list[float], np.ndarray): The vector of the item.
             id (int): The ID of the item.
             field (dict, optional): The fields of the item.
-            normalize (bool): Whether to normalize the vector. Default is False.
             buffer_size (int or bool): The buffer size.
                 Default is True, which means the default buffer size (1000) will be used.
                 If buffer_size is 0, the function will add the item directly.
@@ -217,7 +211,6 @@ class Collection:
                     "id": id if id is not None else None,
                     "field": field if field is not None else {},
                 },
-                "normalize": normalize
             }
 
             response = self._session.post(url, data=None, content=pack_data(data), headers=headers)
@@ -246,7 +239,6 @@ class Collection:
                         "database_name": self._database_name,
                         "collection_name": self._collection_name,
                         "items": mesosphere_list,
-                        "normalize": normalize
                     }
 
                     response = self._session.post(url, data=None, content=pack_data(data), headers=headers)
@@ -292,18 +284,17 @@ class Collection:
                 Tuple[Union[List, Tuple, np.ndarray], int, dict],
                 Tuple[Union[List, Tuple, np.ndarray], int]
             ]],
-            normalize: bool = False,
             batch_size: int = 1000,
             enable_progress_bar: bool = True
     ):
         """
         Add multiple items to the collection.
+        It is recommended to use incremental ids for best performance.
 
         Parameters:
             vectors (List[Tuple[Union[List, Tuple, np.ndarray], int, dict]],
             List[Tuple[Union[List, Tuple, np.ndarray], int]]):
                 The list of items to add. Each item is a tuple containing the vector, ID, and fields.
-            normalize (bool): Whether to normalize the vectors. Default is False.
             batch_size (int): The batch size. Default is 1000.
             enable_progress_bar (bool): Whether to enable the progress bar. Default is True.
 
@@ -339,7 +330,6 @@ class Collection:
                 "database_name": self._database_name,
                 "collection_name": self._collection_name,
                 "items": items_after_checking,
-                "normalize": normalize
             }
             # Send request using session to keep the connection alive
             response = self._session.post(url, content=pack_data(data), headers=headers)
@@ -371,7 +361,6 @@ class Collection:
         self._mesosphere_list = queue.Queue()
 
         response = self._session.post(url, content=pack_data(data), headers={'Content-Type': 'application/msgpack'})
-
 
         if response.status_code == 202:
             task_id = response.json().get('task_id')
@@ -448,12 +437,11 @@ class Collection:
         """
         Start an insert session.
         """
-        from lynse.execution_layer.session import DataOpsSession
+        from ...execution_layer.session import DataOpsSession
 
         return DataOpsSession(self)
 
-    @SearchResultsCache(config.LYNSE_SEARCH_CACHE_SIZE)
-    def _search(self, vector, k, distance, search_filter, normalize, return_fields=False, **kwargs):
+    def _search(self, vector, k, search_filter, return_fields=False, **kwargs):
         """
         Search the collection.
         """
@@ -468,11 +456,10 @@ class Collection:
             "collection_name": self._collection_name,
             "vector": vector if isinstance(vector, list) else vector.tolist(),
             "k": k,
-            'distance': distance,
             "search_filter": search_filter,
             "return_similarity": True,
-            "normalize": normalize,
-            "return_fields": return_fields
+            "return_fields": return_fields,
+            **kwargs
         }
         response = self._session.post(url, json=data)
 
@@ -482,10 +469,9 @@ class Collection:
             raise_error_response(response)
 
     def search(
-            self, vector: Union[list[float], np.ndarray], k: int = 10, distance: str = 'cosine',
+            self, vector: Union[list[float], np.ndarray], k: int = 10, distance: str = 'Cosine',
             search_filter: Union[Filter, None] = None,
-            normalize: bool = False,
-            return_fields: bool = False
+            return_fields: bool = False, **kwargs
     ):
         """
         Search the collection.
@@ -493,10 +479,16 @@ class Collection:
         Parameters:
             vector (list[float] or np.ndarray): The search vector.
             k (int): The number of results to return. Default is 10.
-            distance (str): The distance metric. Default is 'cosine'. It can be 'cosine' or 'L2' or 'IP'.
+            distance (str): The distance metric. Default is 'Cosine'. It can be 'Cosine' or 'L2' or 'IP',
+                the 'Cos' is the alias of 'Cosine'.
             search_filter (Filter, optional): The field filter to apply to the search, must be a Filter object.
-            normalize (bool): Whether to normalize the vector. Default is False.
             return_fields (bool): Whether to return the fields of the search results. Default is False.
+            kwargs (dict): Additional keyword arguments. The following are valid:
+                rescore (bool): Whether to rescore the results of binary or scaler quantization searches.
+                    Default is False. It is recommended to set it to True when the index mode is 'Binary'.
+                rescore_multiplier (int): The multiplier for the rescore operation.
+                    It is only available when rescore is True.
+                    If 'Binary' is in the index mode, the default is 10. Otherwise, the default is 2.
 
         Returns:
             Tuple: If return_fields is True, the indices, similarity scores,
@@ -507,31 +499,13 @@ class Collection:
             ValueError: If the collection has been deleted or does not exist.
             ExecutionError: If the server returns an error.
         """
-        self.most_recent_search_report = {}
-
-        tik = time.time()
-        if self._init_params['use_cache']:
-            rjson = self._search(vector=vector, k=k, distance=distance,
-                                 search_filter=search_filter, normalize=normalize, return_fields=return_fields)
-        else:
-            rjson = self._search(vector=vector, k=k, distance=distance, search_filter=search_filter,
-                                 now=time.time(), normalize=normalize, return_fields=return_fields)
+        rjson = self._search(vector=vector, k=k, distance=distance,
+                             search_filter=search_filter, return_fields=return_fields, **kwargs)
 
         tok = time.time()
 
-        self.most_recent_search_report['Collection Shape'] = self.shape
-        self.most_recent_search_report['Search Time'] = rjson['params']['items']['search time']
-        self.most_recent_search_report['Search Distance'] = rjson['params']['items']['distance']
-        self.most_recent_search_report['Search K'] = k
-
         ids, scores = np.array(rjson['params']['items']['ids']), np.array(rjson['params']['items']['scores'])
         fields = rjson['params']['items']['fields']
-
-        if ids is not None:
-            self.most_recent_search_report[f'Top {k} Results ID'] = ids
-            self.most_recent_search_report[f'Top {k} Results Similarity'] = scores
-
-        self.most_recent_search_report['Search Time'] = f"{tok - tik :>.5f} s"
 
         return ids, scores, fields
 
@@ -758,23 +732,6 @@ class Collection:
         else:
             raise_error_response(response)
 
-    @property
-    def search_report_(self):
-        """
-        Get the search report of the collection.
-
-        Returns:
-            str: The search report.
-        """
-        report = '\n* - MOST RECENT SEARCH REPORT -\n'
-        for key, value in self.most_recent_search_report.items():
-            if key == "Collection Shape":
-                value = self.shape
-
-            report += f'| - {key}: {value}\n'
-
-        return report
-
     def update_description(self, description: str):
         """
         Update the description of the collection.
@@ -901,10 +858,9 @@ class HTTPClient:
             collection: str,
             dim: int = None,
             chunk_size: int = 100_000,
-            distance: str = 'cosine',
+            distance: str = 'Cosine',
             dtypes: str = 'float32',
             use_cache: bool = True,
-            scaler_bits: Union[int, None] = 8,
             n_threads: Union[int, None] = 10,
             warm_up: bool = False,
             drop_if_exists: bool = False,
@@ -920,10 +876,9 @@ class HTTPClient:
                 When creating a new collection, the dimension of the vectors must be specified.
                 When loading an existing collection, the dimension of the vectors is automatically loaded.
             chunk_size (int): The chunk size. Default is 100,000.
-            distance (str): The distance metric. Default is 'cosine'.
+            distance (str): The distance metric. Default is 'Cosine'.
             dtypes (str): The data types. Default is 'float32'.
             use_cache (bool): Whether to use cache. Default is True.
-            scaler_bits (int): The scaler bits. Default is 8.
             n_threads (int): The number of threads. Default is 10.
             warm_up (bool): Whether to warm up. Default is False.
             drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
@@ -947,7 +902,6 @@ class HTTPClient:
             "distance": distance,
             "dtypes": dtypes,
             "use_cache": use_cache,
-            "scaler_bits": scaler_bits,
             "n_threads": n_threads,
             "warm_up": warm_up,
             "drop_if_exists": drop_if_exists,
@@ -962,7 +916,6 @@ class HTTPClient:
                 del data['database_name']
                 collection = Collection(url=self.url, database_name=self.database_name,
                                         collection_name=collection, **data)
-                collection._search.clear_cache()
                 return collection
             else:
                 raise_error_response(response)
