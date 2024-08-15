@@ -77,7 +77,11 @@ class ParametersValidator:
             else:
                 first_create = False
 
-            configs_json = self.database_path_parent / Path('configs.json')
+            # rename the configs file, the version upgrade has resulted in compatibility modifications
+            if (self.database_path_parent / 'configs.json').exists():
+                (self.database_path_parent / 'configs.json').rename(self.database_path_parent / 'pv-configs.json')
+
+            configs_json = self.database_path_parent / Path('pv-configs.json')
 
             if first_create or not configs_json.exists():
                 final_configs = self.save_configs(configs_json, update_configs_dict)
