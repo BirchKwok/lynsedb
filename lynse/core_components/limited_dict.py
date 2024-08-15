@@ -2,7 +2,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from lynse.core_components.locks import ThreadLock
+from ..core_components.locks import ThreadLock
 
 
 class LimitedDict:

@@ -5,8 +5,8 @@ import mmap
 from typing import Dict
 from pathlib import Path
 
-from lynse.core_components.kv_cache.index import Index
-from lynse.core_components.id_checker import IDChecker
+from ...core_components.kv_cache.index import Index
+from ...core_components.id_checker import IDChecker
 
 
 class KVCacheStorage:
@@ -105,7 +105,7 @@ class KVCacheStorage:
                 f.write(record_size.to_bytes(self.RECORD_HEADER_SIZE, 'big'))
                 f.write(packed_data)
                 self.id_mapping[internal_id] = offset
-        self.memory_store.clear()
+        self.memory_store = {}
 
         id_mapping_path = self.filepath.with_suffix('.idmap')
         with open(id_mapping_path, 'wb') as f:

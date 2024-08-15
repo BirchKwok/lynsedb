@@ -1,7 +1,7 @@
 import operator
 from typing import List
 
-from lynse.core_components.kv_cache import Filter, MatchField, FieldCondition
+from ...core_components.kv_cache import Filter, MatchField, FieldCondition
 
 
 class KVCacheQuery:
@@ -235,8 +235,8 @@ class KVCacheQuery:
         """
         if isinstance(filter_instance, dict):
             if ('must_fields' not in filter_instance or
-                                                  'must_not_fields' not in filter_instance or
-                                                  'any_fields' not in filter_instance):
+                    'must_not_fields' not in filter_instance or
+                    'any_fields' not in filter_instance):
                 final_filter = []
                 for key, value in filter_instance.items():
                     final_filter.append(FieldCondition(key=key, matcher=MatchField(value, comparator=operator.eq)))

@@ -1,4 +1,4 @@
-from lynse.core_components.locks import ThreadLock
+from ..core_components.locks import ThreadLock
 
 
 class SafeList(list):

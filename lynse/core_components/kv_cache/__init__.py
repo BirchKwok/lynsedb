@@ -1,7 +1,7 @@
 import os
 from typing import List
 
-from lynse.core_components.kv_cache.filter import MatchField, MatchID, FieldCondition, Filter, MatchRange
+from ...core_components.kv_cache.filter import MatchField, MatchID, FieldCondition, Filter, MatchRange
 
 
 class IndexSchema:
@@ -43,8 +43,8 @@ class VeloKV:
             as_temp_file: bool
                 If True, the cache will be stored in a temporary file.
         """
-        from lynse.core_components.kv_cache.kv_query import KVCacheQuery
-        from lynse.core_components.kv_cache.kv_storage import KVCacheStorage
+        from ...core_components.kv_cache.kv_query import KVCacheQuery
+        from ...core_components.kv_cache.kv_storage import KVCacheStorage
 
         self.storage = KVCacheStorage(filepath, as_temp_file=as_temp_file)
         self.query_handler = KVCacheQuery(self.storage)
