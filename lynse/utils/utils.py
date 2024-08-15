@@ -1,3 +1,4 @@
+import re
 import time
 from functools import wraps
 from pathlib import Path
@@ -94,3 +95,60 @@ def unavailable_if_deleted(func):
 def load_chunk_file(filename):
     np_array = np.load(filename, mmap_mode='r')
     return np_array
+
+
+def drop_duplicated_substr(source, target) -> str:
+    """
+    Remove all occurrences of the target string from the source string.
+
+    Parameters:
+        source (str): The source string.
+        target (str): The target string.
+
+    Returns:
+        str: The source string with all occurrences of the target string removed
+    """
+    t_len = len(target)
+    s_len = len(source)
+
+    indices_to_remove = []
+    i = 0
+
+    while i <= s_len - t_len:
+        if source[i:i + t_len] == target:
+            indices_to_remove.append(i)
+            i += t_len
+        else:
+            i += 1
+
+    result = []
+    last_index = 0
+
+    for start_index in indices_to_remove:
+        result.append(source[last_index:start_index])
+        last_index = start_index + t_len
+
+    result.append(source[last_index:])
+
+    return ''.join(result)
+
+
+def find_first_file_with_substr(directory, substr):
+    """
+    Find the first file with the specified substring or wildcard in the directory.
+
+    Parameters:
+        directory (str or Pathlike): The directory to search.
+        substr (str): The substring or wildcard pattern of the file to search for.
+
+    Returns:
+        path: The path to the first file with the specified substring or wildcard pattern in the directory.
+    """
+    # Convert wildcard pattern to regular expression
+    regex_pattern = re.compile(re.escape(substr).replace(r'\*', '.*'))
+
+    for file in Path(directory).iterdir():
+        if regex_pattern.search(file.name):
+            return file.absolute()
+
+    return None
