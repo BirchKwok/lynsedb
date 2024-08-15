@@ -3,7 +3,7 @@ from typing import Union, List, Tuple
 
 import numpy as np
 
-from lynse.utils import copy_doc
+from ..utils import copy_doc
 
 
 class DataOpsSession:
@@ -37,11 +37,11 @@ class DataOpsSession:
         return False
 
     def add_item(self, vector: Union[np.ndarray, list], id: int, *,
-                 field: dict = None, normalize=False, buffer_size: int = 10000) -> int:
-        return self.db.add_item(vector, id=id, field=field, normalize=normalize, buffer_size=buffer_size)
+                 field: dict = None, buffer_size: int = 10000) -> int:
+        return self.db.add_item(vector, id=id, field=field, buffer_size=buffer_size)
 
     def bulk_add_items(
             self, vectors: Union[List[Tuple[np.ndarray, int, dict]], List[Tuple[np.ndarray, int]]],
-            *, normalize=False, **kwargs
+            **kwargs
     ):
-        return self.db.bulk_add_items(vectors, normalize=normalize, **kwargs)
+        return self.db.bulk_add_items(vectors, **kwargs)
