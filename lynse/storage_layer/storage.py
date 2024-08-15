@@ -1,3 +1,4 @@
+import uuid
 from pathlib import Path
 import json
 from typing import Union
@@ -5,9 +6,9 @@ from typing import Union
 import numpy as np
 from spinesUtils.asserts import raise_if
 
-from lynse.core_components.limited_array import LimitedArray
-from lynse.core_components.locks import ThreadLock
-from lynse.utils.utils import load_chunk_file
+from ..core_components.limited_dict import LimitedDict
+from ..core_components.locks import ThreadLock
+from ..utils.utils import load_chunk_file
 
 
 class PersistentFileStorage:
@@ -15,8 +16,15 @@ class PersistentFileStorage:
 
     def __init__(self, collection_path, dimension, chunk_size, warm_up=False, cache_chunks=20):
         self.collection_path = Path(collection_path)
+        self.collection_name = self.collection_path.name
         self.collection_chunk_path = self.collection_path / 'chunk_data'
-        self.collection_chunk_indices_path = self.collection_path / 'chunk_indices_data'
+        self.collection_chunk_indices_path = self.collection_path / 'chunk_ids'
+
+        # # rename the ids folder, the version upgrade has resulted in compatibility modifications
+        if (self.collection_path / 'chunk_indices_data').exists():
+            (self.collection_path / 'chunk_indices_data').rename(self.collection_chunk_indices_path)
+
+        self.fingerprint_path = self.collection_path / 'fingerprint'
 
         self.collection_chunk_path.mkdir(parents=True, exist_ok=True)
         self.collection_chunk_indices_path.mkdir(parents=True, exist_ok=True)
@@ -28,13 +36,17 @@ class PersistentFileStorage:
         self.lock = ThreadLock()
 
         self.dataloader = DataLoader(dimension, collection_path, cache_chunks=cache_chunks, warm_up=warm_up)
+        self.initialize_fingerprint()
 
         if warm_up:
             self.dataloader.warm_up()
 
-    def update_quantizer(self, quantizer):
-        with self.lock:
-            self.quantizer = quantizer
+    def initialize_fingerprint(self):
+        if self.fingerprint_path.exists():
+            with open(self.fingerprint_path, 'r') as f:
+                self.fingerprint = f.readlines()[-1].strip()
+        else:
+            self.fingerprint: Union[str, None] = None
 
     def file_exists(self):
         """Check if the file exists."""
@@ -50,8 +62,8 @@ class PersistentFileStorage:
         return self.dataloader.load_data(filename, data_path, indices_path,
                                          update_memory=update_memory, is_mmap=is_mmap)
 
-    def get_all_files(self, separate=True, return_cache=False):
-        return self.dataloader.get_all_files(separate=separate, return_cache=return_cache)
+    def get_all_files(self, separate=False):
+        return self.dataloader.get_all_files(separate=separate)
 
     def read(self, filename, is_mmap=True, return_memory=True):
         """Read data from the specified filename if it exists."""
@@ -65,6 +77,11 @@ class PersistentFileStorage:
             return max(ids)
 
         return -1
+
+    def update_fingerprint(self):
+        self.fingerprint = uuid.uuid4().hex
+        with open(self.fingerprint_path, 'a') as f:
+            f.write(self.fingerprint + '\n')
 
     @staticmethod
     def _write_to_disk(data, indices, data_path, indices_path, filename):
@@ -221,6 +238,9 @@ class PersistentFileStorage:
             else:
                 self._incremental_write(data, indices=indices)
 
+            # update the fingerprint
+            self.update_fingerprint()
+
     def get_shape(self, read_type='all'):
         """Get the shape of the data.
         parameters:
@@ -237,9 +257,8 @@ class DataLoader:
         self.dimension = dimension
         self.collection_path = Path(collection_path)
         self.collection_chunk_path = self.collection_path / 'chunk_data'
-        self.collection_chunk_indices_path = self.collection_path / 'chunk_indices_data'
-        self.cache_filenames = []
-        self.cache = LimitedArray(dimension, cache_chunks) if (cache_chunks > 0 or cache_chunks == -1) else None
+        self.collection_chunk_indices_path = self.collection_path / 'chunk_ids'
+        self.cache = LimitedDict(cache_chunks) if (cache_chunks > 0 or cache_chunks == -1) else None
         self.lock = ThreadLock()
         if warm_up:
             self.warm_up()
@@ -254,7 +273,7 @@ class DataLoader:
             return
 
         if self.cache is not None:
-            filenames = self.get_all_files(separate=False)
+            filenames = self.get_all_files()
 
             for idx, filename in enumerate(filenames):
                 if not self.cache.is_reached_max_size:
@@ -263,7 +282,7 @@ class DataLoader:
     def write_to_memory(self, filename, data, indices):
         if self.cache is not None:
             if not self.cache.is_reached_max_size:
-                self.cache.add(filename, data, indices)
+                self.cache[filename] = (data, indices)
 
     def return_if_in_memory(self, filename):
         if self.cache is None:
@@ -288,23 +307,14 @@ class DataLoader:
 
         return data, indices
 
-    def get_all_files(self, separate=False, return_cache=False):
+    def get_all_files(self, separate=False):
         filenames = sorted([x.stem for x in self.collection_chunk_path.glob('chunk_*')],
                            key=lambda x: int(x.split('_')[-1]))
         if separate:
-            cache_filenames = []
-            local_filenames = []
-            for filename in filenames:
-                if self.cache and filename in self.cache:
-                    cache_filenames.append(filename)
-                else:
-                    local_filenames.append(filename)
-            if cache_filenames:
-                # cache_filenames only need the first one
-                return ([cache_filenames[0]] + local_filenames) if not return_cache else (
-                    cache_filenames[0], [cache_filenames[0]] + local_filenames
-                )
-            return local_filenames
+            if self.cache:
+                return [filename for filename in filenames if filename in self.cache], \
+                       [filename for filename in filenames if filename not in self.cache]
+            return [], filenames
 
         return filenames
 
