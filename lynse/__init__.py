@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Union
 
 from lynse.api.http_api.http_api.app import launch_in_jupyter
-from .core_components import kv_cache as field_models
+from .core_components import fields_cache as field_models
 from .configs.config import generate_config_file, load_config_file
 
 generate_config_file(), load_config_file()
@@ -222,7 +222,7 @@ def load_and_register_module(module):
     import importlib
     import sys
 
-    rename_modules = {'kv_cache': 'field_models'}
+    rename_modules = {'fields_cache': 'field_models'}
 
     try:
         if isinstance(module, str):

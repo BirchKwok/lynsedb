@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from ..core_components.locks import ThreadLock
 from ..core_components.id_checker import IDChecker
-from ..core_components.kv_cache import VeloKV
+from ..core_components.fields_cache import FieldsCache
 from ..storage_layer.storage import PersistentFileStorage
 from ..storage_layer.wal import WALStorage
 
@@ -93,8 +93,8 @@ class MatrixSerializer:
 
         # sq_model path
         self.sq_model_path = self.collections_path_parent / 'sq_model'
-        # kv_index path
-        self.kv_index_path = self.collections_path_parent / 'fields_index'
+        # field_index path
+        self.field_index_path = self.collections_path_parent / 'fields_index'
         # scaled_status path
         self.scaled_status_path = self.collections_path_parent / 'scaled_status.json'
         # set filter path
@@ -102,7 +102,7 @@ class MatrixSerializer:
 
     def _initialize_fields_index(self):
         """initialize fields index"""
-        self.kv_index = VeloKV(self.kv_index_path)
+        self.field_index = FieldsCache(self.field_index_path)
 
     def _initialize_id_checker(self):
         """initialize id checker and shape"""
@@ -162,7 +162,7 @@ class MatrixSerializer:
             self.storage_worker.write(data, ids)
             # store fields index
             for _id, _field in zip(ids, fields):
-                self.kv_index.store(_field, int(_id))
+                self.field_index.store(_field, int(_id))
 
             # insert data to indexer
             if hasattr(self, "indexer"):
@@ -174,7 +174,7 @@ class MatrixSerializer:
             self.indexer.update_filenames()
 
         self.logger.info(end_msg)
-        self.kv_index.commit()
+        self.field_index.commit()
         self.wal_worker.reincarnate()
 
     def commit(self):

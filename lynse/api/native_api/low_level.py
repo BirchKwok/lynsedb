@@ -7,14 +7,14 @@ from spinesUtils.asserts import raise_if, ParameterTypeAssert
 from spinesUtils.timer import Timer
 
 from ...configs.parameters_validator import ParametersValidator
-from ...core_components.kv_cache import VeloKV, IndexSchema
+from ...core_components.fields_cache import FieldsCache, IndexSchema
 from ...execution_layer.indexer import Indexer
 from ...execution_layer.search import Search
 from ...execution_layer.matrix_serializer import MatrixSerializer
 from ...utils import copy_doc
 from ...utils.utils import unavailable_if_deleted
 from ...api import logger
-from ...core_components.kv_cache.filter import Filter
+from ...core_components.fields_cache.filter import Filter
 
 
 class ExclusiveDB:
@@ -123,7 +123,7 @@ class ExclusiveDB:
         copy_doc(self.build_index, Indexer.build_index)
         copy_doc(self.remove_index, Indexer.remove_index)
         copy_doc(self.search, Search.search)
-        copy_doc(self.query, VeloKV.query)
+        copy_doc(self.query, FieldsCache.query)
 
         # pre_build_index if the ExclusiveDB instance is reloaded
         if self.shape[0] > 0:
@@ -219,7 +219,7 @@ class ExclusiveDB:
 
     @unavailable_if_deleted
     def query(self, filter_instance, filter_ids=None, return_ids_only=False):
-        return self._matrix_serializer.kv_index.query(filter_instance, filter_ids, return_ids_only)
+        return self._matrix_serializer.field_index.query(filter_instance, filter_ids, return_ids_only)
 
     @property
     def shape(self):
@@ -270,7 +270,7 @@ class ExclusiveDB:
 
         if data:
             return (np.vstack(data, dtype=dtypes)[:n], np.array(indices, dtype=np.uint64)[:n],
-                    self._matrix_serializer.kv_index.retrieve_ids(indices[:n], include_external_id=True))
+                    self._matrix_serializer.field_index.retrieve_ids(indices[:n], include_external_id=True))
         return np.array(data, dtype=dtypes), np.array(indices, dtype=np.uint64), []
 
     @unavailable_if_deleted
@@ -303,7 +303,7 @@ class ExclusiveDB:
 
         if data:
             return (np.vstack(data, dtype=dtypes)[-n:], np.array(indices, dtype=np.uint64)[-n:],
-                    self._matrix_serializer.kv_index.retrieve_ids(indices[-n:], include_external_id=True))
+                    self._matrix_serializer.field_index.retrieve_ids(indices[-n:], include_external_id=True))
         return np.array(data, dtype=dtypes), np.array(indices, dtype=np.uint64), []
 
     @unavailable_if_deleted
@@ -321,7 +321,7 @@ class ExclusiveDB:
 
         if data.shape[0] > 0:
             return np.array(data, dtype=data.dtypes), np.array(ids, dtype=np.uint64), \
-                self._matrix_serializer.kv_index.retrieve_ids(ids, include_external_id=True)
+                self._matrix_serializer.field_index.retrieve_ids(ids, include_external_id=True)
         return np.array(data, dtype=data.dtypes), np.array(ids, dtype=np.uint64), []
 
     @unavailable_if_deleted
@@ -335,7 +335,7 @@ class ExclusiveDB:
         """
         if not isinstance(schema, IndexSchema):
             raise TypeError("schema must be an instance of IndexSchema.")
-        self._matrix_serializer.kv_index.build_index(schema, rebuild_if_exists=rebuild_if_exists)
+        self._matrix_serializer.field_index.build_index(schema, rebuild_if_exists=rebuild_if_exists)
 
     @unavailable_if_deleted
     def remove_field_index(self, field_name):
@@ -345,14 +345,14 @@ class ExclusiveDB:
         Parameters:
             field_name (str): The name of the field.
         """
-        self._matrix_serializer.kv_index.remove_index(field_name)
+        self._matrix_serializer.field_index.remove_index(field_name)
 
     @unavailable_if_deleted
     def remove_all_field_indices(self):
         """
         Remove all the field indices.
         """
-        self._matrix_serializer.kv_index.remove_all_field_indices()
+        self._matrix_serializer.field_index.remove_all_field_indices()
 
     @unavailable_if_deleted
     def list_field_index(self):
@@ -362,7 +362,7 @@ class ExclusiveDB:
         Returns:
             list: The list of field indices.
         """
-        return self._matrix_serializer.kv_index.list_indices()
+        return self._matrix_serializer.field_index.list_indices()
 
     def delete(self):
         """

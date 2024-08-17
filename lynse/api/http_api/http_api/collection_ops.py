@@ -8,7 +8,7 @@ import msgpack
 from flask import request, jsonify, Response, Blueprint
 
 from ....configs.config import config
-from ....core_components.kv_cache import IndexSchema
+from ....core_components.fields_cache import IndexSchema
 from ....core_components.limited_dict import LimitedDict
 from ....core_components.safe_dict import SafeDict
 
@@ -231,7 +231,7 @@ def search():
         dict: The status of the operation.
     """
     from ....api.native_api.high_level import LocalClient
-    from ....core_components.kv_cache.filter import Filter
+    from ....core_components.fields_cache.filter import Filter
 
     data = request.json
     if not data:

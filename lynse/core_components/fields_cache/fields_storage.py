@@ -5,11 +5,11 @@ import mmap
 from typing import Dict
 from pathlib import Path
 
-from ...core_components.kv_cache.index import Index
+from ...core_components.fields_cache.index import Index
 from ...core_components.id_checker import IDChecker
 
 
-class KVCacheStorage:
+class FieldsStorage:
     RECORD_HEADER_SIZE = 4
 
     def __init__(self, filepath=None, as_temp_file=False):

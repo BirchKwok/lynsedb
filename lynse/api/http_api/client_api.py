@@ -10,8 +10,8 @@ import pandas as pd
 from spinesUtils.asserts import raise_if
 from tqdm import trange
 
-from ...core_components.kv_cache import IndexSchema
-from ...core_components.kv_cache.filter import Filter
+from ...core_components.fields_cache import IndexSchema
+from ...core_components.fields_cache.filter import Filter
 from ...api import logger
 from ...core_components.locks import ThreadLock
 from ...utils.poster import Poster

@@ -1,10 +1,10 @@
 import operator
 from typing import List
 
-from ...core_components.kv_cache import Filter, MatchField, FieldCondition
+from ...core_components.fields_cache import Filter, MatchField, FieldCondition
 
 
-class KVCacheQuery:
+class FieldsQuery:
     def __init__(self, storage):
         self.storage = storage
 

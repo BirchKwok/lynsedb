@@ -1,7 +1,7 @@
 import os
 from typing import List
 
-from ...core_components.kv_cache.filter import MatchField, MatchID, FieldCondition, Filter, MatchRange
+from ...core_components.fields_cache.filter import MatchField, MatchID, FieldCondition, Filter, MatchRange
 
 
 class IndexSchema:
@@ -32,10 +32,10 @@ class IndexSchema:
         return self
 
 
-class VeloKV:
+class FieldsCache:
     def __init__(self, filepath=None, as_temp_file=False):
         """
-        Create a VeloKV instance.
+        Create a FieldsCache instance.
 
         Parameters:
             filepath: str
@@ -43,11 +43,11 @@ class VeloKV:
             as_temp_file: bool
                 If True, the cache will be stored in a temporary file.
         """
-        from ...core_components.kv_cache.kv_query import KVCacheQuery
-        from ...core_components.kv_cache.kv_storage import KVCacheStorage
+        from ...core_components.fields_cache.fields_query import FieldsQuery
+        from ...core_components.fields_cache.fields_storage import FieldsStorage
 
-        self.storage = KVCacheStorage(filepath, as_temp_file=as_temp_file)
-        self.query_handler = KVCacheQuery(self.storage)
+        self.storage = FieldsStorage(filepath, as_temp_file=as_temp_file)
+        self.query_handler = FieldsQuery(self.storage)
         self.filepath = filepath
 
     def store(self, data: dict, external_id: int):
@@ -113,19 +113,19 @@ class VeloKV:
         """
         return self.query_handler.retrieve_ids(external_ids, include_external_id=include_external_id)
 
-    def concat(self, other: 'VeloKV') -> 'VeloKV':
+    def concat(self, other: 'FieldsCache') -> 'FieldsCache':
         """
         Concatenate two caches.
 
         Parameters:
-            other: VeloKV
+            other: FieldsCache
                 The other cache to concatenate.
 
         Returns:
-            VeloKV: The concatenated cache.
+            FieldsCache: The concatenated cache.
         """
-        if not isinstance(other, VeloKV):
-            raise ValueError("The other cache must be an instance of VeloKV.")
+        if not isinstance(other, FieldsCache):
+            raise ValueError("The other cache must be an instance of FieldsCache.")
         for external_id, data in other.storage.retrieve_all():
             self.store(data, external_id)
         return self
