@@ -1,15 +1,12 @@
 import json
 import os
 import shutil
-import uuid
-from threading import Thread
 
 import msgpack
 
 from flask import request, jsonify, Response, Blueprint
 
 from ....configs.config import config
-from ....core_components.limited_dict import LimitedDict
 from ....core_components.safe_dict import SafeDict
 
 
@@ -33,30 +30,17 @@ def index():
     return Response(json.dumps({'status': 'success', 'message': 'LynseDB HTTP API'}), mimetype='application/json')
 
 
-def perform_drop_database_task(task_id, data):
-    try:
-        shutil.rmtree(root_path / data['database_name'])
-        tasks[task_id] = {'status': 'success'}
-    except Exception as e:
-        tasks[task_id] = {'status': 'error', 'message': str(e)}
-
-
 @database_ops.route('/drop_database', methods=['POST'])
 def drop_database():
     data = request.json
     if not data or 'database_name' not in data:
         return jsonify({'error': 'No data provided or missing database_name'}), 400
 
-    # 生成任务ID
-    task_id = str(uuid.uuid4())
-    tasks[task_id] = {'status': 'Processing'}
-
-    # 启动新线程处理任务
-    thread = Thread(target=perform_drop_database_task, args=(task_id, data))
-    thread.start()
-
-    # 立即返回任务ID和Processing状态
-    return jsonify({'task_id': task_id, 'status': 'Processing'})
+    try:
+        shutil.rmtree(root_path / data['database_name'])
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @database_ops.route('/database_exists', methods=['POST'])
