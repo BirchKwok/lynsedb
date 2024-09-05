@@ -9,7 +9,7 @@ from ..core_components.locks import ThreadLock
 from ..storage_layer.storage import PersistentFileStorage
 from ..index.sq import IndexSQIP, IndexSQL2sq, IndexSQCos
 from ..index.binary import IndexBinaryJaccard, IndexBinaryHamming
-from ..index.flat import IndexFlatIP, IndexFlatL2, IndexFlatCos
+from ..index.flat import IndexFlatIP, IndexFlatL2sq, IndexFlatCos
 from .ivf import IVFCreator
 from ..utils.utils import drop_duplicated_substr, find_first_file_with_substr
 
@@ -20,35 +20,35 @@ _INDEX_ALIAS = {
     'IVF-L2sq': 'IVF-L2sq',
     'IVF-Cos-SQ8': 'IVF-Cos-SQ8',
     'IVF-Cos': 'IVF-Cos',
-    'IVF-Binary-Jaccard': 'IVF-Binary-Jaccard',
-    'IVF-Binary-Hamming': 'IVF-Binary-Hamming',
+    'IVF-Jaccard-Binary': 'IVF-Jaccard-Binary',
+    'IVF-Hamming-Binary': 'IVF-Hamming-Binary',
     'Flat-IP-SQ8': 'Flat-IP-SQ8',
     'FLAT': 'Flat-IP',
     'Flat-L2sq-SQ8': 'Flat-L2sq-SQ8',
     'Flat-L2sq': 'Flat-L2sq',
     'Flat-Cos-SQ8': 'Flat-Cos-SQ8',
     'Flat-Cos': 'Flat-Cos',
-    'Flat-Binary-Hamming': 'Flat-Binary-Hamming',
-    'Flat-Binary-Jaccard': 'Flat-Binary-Jaccard'
+    'Flat-Hamming-Binary': 'Flat-Hamming-Binary',
+    'Flat-Jaccard-Binary': 'Flat-Jaccard-Binary'
 }
 
 _IndexMapper = {
     'IVF-IP-SQ8': (IndexSQIP, IVFCreator),
     'IVF-IP': (IndexFlatIP, IVFCreator),
-    'IVF-L2sq-SQ8': (IndexFlatL2, IVFCreator),
-    'IVF-L2sq': (IndexFlatL2, IVFCreator),
+    'IVF-L2sq-SQ8': (IndexSQL2sq, IVFCreator),
+    'IVF-L2sq': (IndexFlatL2sq, IVFCreator),
     'IVF-Cos-SQ8': (IndexSQCos, IVFCreator),
     'IVF-Cos': (IndexFlatCos, IVFCreator),
-    'IVF-Binary-Jaccard': (IndexBinaryJaccard, IVFCreator),
-    'IVF-Binary-Hamming': (IndexBinaryHamming, IVFCreator),
+    'IVF-Jaccard-Binary': (IndexBinaryJaccard, IVFCreator),
+    'IVF-Hamming-Binary': (IndexBinaryHamming, IVFCreator),
     'Flat-IP-SQ8': (IndexSQIP, None),
     'Flat-IP': (IndexFlatIP, None),
     'Flat-L2sq-SQ8': (IndexSQL2sq, None),
-    'Flat-L2sq': (IndexFlatL2, None),
+    'Flat-L2sq': (IndexFlatL2sq, None),
     'Flat-Cos-SQ8': (IndexSQCos, None),
     'Flat-Cos': (IndexFlatCos, None),
-    'Flat-Binary-Jaccard': (IndexBinaryJaccard, None),
-    'Flat-Binary-Hamming': (IndexBinaryHamming, None)
+    'Flat-Jaccard-Binary': (IndexBinaryJaccard, None),
+    'Flat-Hamming-Binary': (IndexBinaryHamming, None)
 }
 
 
@@ -239,16 +239,16 @@ class Indexer:
                 - 'IVF-Cos-SQ8': IVF index with cosine similarity and scalar quantizer with 8 bits.
                     The distance is cosine similarity.
                 - 'IVF-Cos': IVF index with cosine similarity.
-                - 'IVF-Binary-Jaccard': IVF index with binary quantizer. The distance is Jaccard distance.
-                - 'IVF-Binary-Hamming': IVF index with binary quantizer. The distance is Hamming distance.
+                - 'IVF-Jaccard-Binary': IVF index with binary quantizer. The distance is Jaccard distance.
+                - 'IVF-Hamming-Binary': IVF index with binary quantizer. The distance is Hamming distance.
                 - 'Flat-IP-SQ8': Flat index with inner product and scalar quantizer with 8 bits.
                 - 'Flat-IP': Flat index with inner product. (Alias: 'FLAT')
                 - 'Flat-L2sq-SQ8': Flat index with squared L2 distance and scalar quantizer with 8 bits.
                 - 'Flat-L2sq': Flat index with squared L2 distance.
                 - 'Flat-Cos-SQ8': Flat index with cosine similarity and scalar quantizer with 8 bits.
                 - 'Flat-Cos': Flat index with cosine similarity.
-                - 'Flat-Binary-Jaccard': Flat index with binary quantizer. The distance is Jaccard distance.
-                - 'Flat-Binary-Hamming': Flat index with binary quantizer. The distance is Hamming distance.
+                - 'Flat-Jaccard-Binary': Flat index with binary quantizer. The distance is Jaccard distance.
+                - 'Flat-Hamming-Binary': Flat index with binary quantizer. The distance is Hamming distance.
             rebuild (bool): Whether to rebuild the index.
             kwargs: Additional keyword arguments. The following are available:
 
