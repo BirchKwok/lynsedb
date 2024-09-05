@@ -5,7 +5,6 @@ from functools import partial
 from pathlib import Path
 from typing import Union
 
-import pandas as pd
 from spinesUtils.asserts import ParameterTypeAssert
 
 from ...api import logger
@@ -87,7 +86,7 @@ class _Register:
         """
         return list(self.get_collections_details().keys())
 
-    def show_collections_details(self) -> pd.DataFrame:
+    def show_collections_details(self):
         """
         Show the collections in the database.
 
@@ -101,7 +100,12 @@ class _Register:
             if "database_path" in details[collection]:
                 del details[collection]["database_path"]
 
-        details = pd.DataFrame(details).T
+        try:
+            import pandas as pd
+            details = pd.DataFrame(details).T
+        except ImportError:
+            ...
+
         return details
 
     @ParameterTypeAssert({
@@ -228,13 +232,13 @@ class LocalClient:
         self._collections[collection] = ExclusiveDB(
             dim=dim, database_path=collection_path.as_posix(), chunk_size=chunk_size, dtypes=dtypes,
             use_cache=use_cache, n_threads=n_threads,
-            warm_up=warm_up, initialize_as_collection=True, cache_chunks=cache_chunks
+            warm_up=warm_up, cache_chunks=cache_chunks
         )
 
         self._register.register_collection(
             collection, dim=dim, database_path=collection_path.as_posix(), chunk_size=chunk_size, dtypes=dtypes,
             use_cache=use_cache, n_threads=n_threads,
-            warm_up=warm_up, initialize_as_collection=True, description=description, cache_chunks=cache_chunks
+            warm_up=warm_up, description=description, cache_chunks=cache_chunks
         )
 
         self._collections[collection].update_description = partial(self.update_collection_description, collection)
@@ -347,7 +351,7 @@ class LocalClient:
         """
         self._register.update_description(collection, description)
 
-    def show_collections_details(self) -> pd.DataFrame:
+    def show_collections_details(self):
         """
         Show the collections in the database.
 
@@ -367,7 +371,8 @@ class LocalClient:
         return self._root_path.as_posix()
 
     def __repr__(self):
-        return f"{self.STATUS} LynseDB(root_path='{self._root_path.as_posix()}')"
+        return (f'{self.__class__.__name__.replace("Client", "DatabaseInstance")}(name={self._root_path.name},'
+                f' exists={self.database_exists()})')
 
     def __str__(self):
-        return f"{self.STATUS} LynseDB(root_path='{self._root_path.as_posix()}')"
+        return self.__repr__()
