@@ -34,7 +34,6 @@
 #         "distance": "L2",
 #         "dtypes": "float32",
 #         "use_cache": True,
-#         "scaler_bits": 8,
 #         "n_threads": 4,
 #         "warm_up": True,
 #         "drop_if_exists": True
@@ -52,7 +51,6 @@
 #         "distance": "L2",
 #         "dtypes": "float32",
 #         "use_cache": True,
-#         "scaler_bits": 8,
 #         "n_threads": 4,
 #         "warm_up": True,
 #         "drop_if_exists": True
@@ -66,7 +64,7 @@
 #                 "database_name": "example_database",
 #                 "collection_name": "example_collection",
 #                 "dim": 4, "chunk_size": 1024, "distance": "L2",
-#                 "dtypes": "float32", "use_cache": True, "scaler_bits": 8,
+#                 "dtypes": "float32", "use_cache": True,
 #                 "n_threads": 4, "warm_up": True, "drop_if_exists": True, "buffer_size": 20
 #             }
 #     }
@@ -88,7 +86,6 @@
 #                 "age": 18
 #             },
 #         },
-#         "normalize": True
 #     }
 #
 #     header = {
@@ -204,7 +201,7 @@
 #         "collection_name": "example_collection",
 #         "vector": [0.1, 0.2, 0.3, 0.4],
 #         "k": 10,
-#         'distance': 'cosine',
+#         'distance': 'Cosine',
 #         "query_filter": {
 #             "must_fields": [
 #                 {
@@ -237,7 +234,7 @@
 #     assert rjson == {"status": "success", "params":
 #         {"database_name": "example_database", "collection_name": "example_collection", "items": {
 #             "k": 10, "ids": [1], "scores": [1],
-#             "distance": 'cosine', "query time": 0.0
+#             "distance": 'Cosine', "query time": 0.0
 #         }}}
 #
 #

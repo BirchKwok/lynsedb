@@ -3,6 +3,7 @@ import shutil
 
 import pytest
 
+from lynse.utils.utils import OpsError
 from test import ExclusiveDB
 import numpy as np
 
@@ -46,15 +47,15 @@ def test_using_api_after_database_deleted(capfd):
     db.delete()
 
     # using add_item function after database deleted, it should raise ValueError
-    with pytest.raises(ValueError):
+    with pytest.raises(OpsError):
         db.add_item(np.random.rand(1024), id=11)
 
     # using bulk_add_items function after database deleted, it should raise ValueError
-    with pytest.raises(ValueError):
+    with pytest.raises(OpsError):
         db.bulk_add_items([(np.random.rand(1024), 11)])
 
     # using query function after database deleted, it should raise ValueError
-    with pytest.raises(ValueError):
+    with pytest.raises(OpsError):
         db.search(np.random.rand(1024))
 
     # delete database

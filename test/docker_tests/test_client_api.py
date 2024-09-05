@@ -1,4 +1,5 @@
 import concurrent.futures
+import time
 
 from test import VectorDBClient, HTTPClient
 
@@ -21,6 +22,7 @@ def test_add_item():
     client = VectorDBClient('http://localhost:7637')
     db = client.create_database('test_db', drop_if_exists=True)
     collection = db.require_collection('test_collection', dim=4, drop_if_exists=True)
+    time.sleep(3)
     with collection.insert_session():
         id = collection.add_item([0.01, 0.34, 0.74, 0.31], id=1, field={'name': 'John Doe'})
         assert id == 1

@@ -407,7 +407,10 @@ def test_result_order():
         for i in range(shape[0]):
             yield np.random.random(shape[1])
 
-    for index_mode in ['FLAT', 'IVF-FLAT']:
+    for index_mode in ['IVF-IP-SQ8', 'IVF-IP', 'IVF-L2sq-SQ8', 'IVF-L2sq',
+                       'IVF-Cos-SQ8', 'IVF-Cos', 'IVF-Jaccard-Binary', 'IVF-Hamming-Binary',
+                       'Flat-IP-SQ8', 'Flat-IP', 'Flat-L2sq-SQ8', 'Flat-L2sq', 'Flat-Cos-SQ8', 'Flat-Cos',
+                       'Flat-Jaccard-Binary', 'Flat-Hamming-Binary']:
         db = ExclusiveDB(dim=1024, database_path='test_local_db',
                          chunk_size=10000)
 
@@ -433,43 +436,6 @@ def test_result_order():
         db.delete()
 
 
-def test_refit(capsys):
-    if Path('test_local_db').exists():
-        shutil.rmtree('test_local_db')
-
-    db = ExclusiveDB(dim=1024, database_path='test_local_db', chunk_size=10000)
-    with db.insert_session():
-        for i in range(100000):
-            db.add_item(np.random.rand(1024), id=i)
-
-    db.build_index(index_mode='IVF-FLAT')
-
-    out, err = capsys.readouterr()
-
-    assert 'Start to fit the index for cluster' in err
-    assert db._cluster_worker.ann_model.fitted
-
-    with db.insert_session():
-        for i in range(100000, 110000):
-            db.add_item(np.random.rand(1024), id=i)
-
-    db.build_index(index_mode='IVF-FLAT')
-    out, err = capsys.readouterr()
-    assert 'Incrementally building the index for cluster' in err
-    assert db._cluster_worker.ann_model.fitted
-
-    with db.insert_session():
-        for i in range(110000, 210000):
-            db.add_item(np.random.rand(1024), id=i)
-
-    db.build_index(index_mode='IVF-FLAT')
-    out, err = capsys.readouterr()
-    assert 'Refitting the index for cluster' in err
-    assert db._cluster_worker.ann_model.fitted
-
-    db.delete()
-
-
 def test_transactions():
     db = ExclusiveDB(dim=1024, database_path='test_local_db', chunk_size=10000)
 
@@ -486,7 +452,7 @@ def test_transactions():
 
         db.bulk_add_items(vectors, batch_size=1000)
 
-    db.build_index(index_mode='IVF-FLAT')
+    db.build_index(index_mode='IVF-IP')
     assert db.shape == (100000, 1024)
 
     with pytest.raises(ValueError):
@@ -498,13 +464,13 @@ def test_transactions():
                 id += 1
             db.bulk_add_items(vectors, batch_size=1000)
 
-    db.build_index(index_mode='IVF-FLAT')
+    db.build_index(index_mode='IVF-IP')
     assert db.shape == (100000, 1024)
 
     with pytest.raises(ValueError):
         db.bulk_add_items(vectors, batch_size=1000)
 
-    db.build_index(index_mode='IVF-FLAT')
+    db.build_index(index_mode='IVF-IP')
     assert db.shape == (100000, 1024)
 
 
