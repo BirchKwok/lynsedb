@@ -1,7 +1,5 @@
-import cloudpickle
-
 from .base import BaseIndex
-from ..computational_layer.engines import inner_product_distance as ip, l2sq, cosine as cos
+from ..computational_layer.engines import inner_product as ip, l2sq, cosine as cos
 
 
 class _IndexFlat(BaseIndex):
@@ -43,11 +41,7 @@ class _IndexFlat(BaseIndex):
         Parameters:
             filepath (str or Pathlike): The name of the file to save the model to.
         """
-        try:
-            with open(filepath, 'wb') as file:
-                cloudpickle.dump(self, file)
-        except IOError as e:
-            print(f"Error saving model: {e}")
+        ...
 
     def load(self, filepath):
         """
@@ -62,7 +56,7 @@ class _IndexFlat(BaseIndex):
         return self
 
 
-class IndexFlatL2(_IndexFlat):
+class IndexFlatL2sq(_IndexFlat):
     name = 'IndexFlatL2'
 
     def __init__(self):
@@ -87,7 +81,7 @@ class IndexFlatL2(_IndexFlat):
         encoded_vec, encoded_data = super().check_and_encode(original_vec=original_vec, encoded_vec=encoded_vec,
                                                              original_data=original_data, encoded_data=encoded_data)
 
-        return l2sq(encoded_vec, encoded_data, top_k)
+        return l2sq(encoded_vec, encoded_data, top_k, use_simd=False)
 
 
 class IndexFlatIP(_IndexFlat):
@@ -115,7 +109,7 @@ class IndexFlatIP(_IndexFlat):
         encoded_vec, encoded_data = super().check_and_encode(original_vec=original_vec, encoded_vec=encoded_vec,
                                                              original_data=original_data, encoded_data=encoded_data)
 
-        return ip(encoded_vec, encoded_data, top_k)
+        return ip(encoded_vec, encoded_data, top_k, use_simd=False)
 
 
 class IndexFlatCos(_IndexFlat):
@@ -143,4 +137,4 @@ class IndexFlatCos(_IndexFlat):
         encoded_vec, encoded_data = super().check_and_encode(original_vec=original_vec, encoded_vec=encoded_vec,
                                                              original_data=original_data, encoded_data=encoded_data)
 
-        return cos(encoded_vec, encoded_data, top_k)
+        return cos(encoded_vec, encoded_data, top_k, use_simd=False)
