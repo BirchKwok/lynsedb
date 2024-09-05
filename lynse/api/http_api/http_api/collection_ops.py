@@ -1,5 +1,4 @@
 import json
-import shutil
 import uuid
 from threading import Thread
 
@@ -11,7 +10,6 @@ from ....configs.config import config
 from ....core_components.fields_cache import IndexSchema
 from ....core_components.limited_dict import LimitedDict
 from ....core_components.safe_dict import SafeDict
-
 
 collection_ops = Blueprint('collection_ops', __name__)
 
@@ -33,34 +31,10 @@ def index():
     return Response(json.dumps({'status': 'success', 'message': 'LynseDB HTTP API'}), mimetype='application/json')
 
 
-def perform_required_task(task_id, data):
-    from ....api.native_api.high_level import LocalClient
-    try:
-        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
-        my_vec_db.require_collection(
-            collection=data['collection_name'],
-            dim=data['dim'],
-            chunk_size=data['chunk_size'],
-            dtypes=data['dtypes'],
-            use_cache=data['use_cache'],
-            n_threads=data['n_threads'],
-            warm_up=data['warm_up'],
-            drop_if_exists=data['drop_if_exists'],
-            description=data['description'],
-            cache_chunks=data['cache_chunks']
-        )
-        tasks[task_id] = {
-            'status': 'success',
-            'params': data
-        }
-    except KeyError as e:
-        tasks[task_id] = {'status': 'error', 'message': f'Missing required parameter {e}'}
-    except Exception as e:
-        tasks[task_id] = {'status': 'error', 'message': str(e)}
-
-
 @collection_ops.route('/required_collection', methods=['POST'])
 def required_collection():
+    from ....api.native_api.high_level import LocalClient
+
     data = request.json
     if not data:
         return jsonify({'error': 'No data provided'}), 400
@@ -82,57 +56,47 @@ def required_collection():
     if 'cache_chunks' not in data:
         data['cache_chunks'] = 20
 
-    task_id = str(uuid.uuid4())
-    tasks[task_id] = {'status': 'Processing'}
-
-    thread = Thread(target=perform_required_task, args=(task_id, data))
-    thread.start()
-
-    return jsonify({'task_id': task_id, 'status': 'Processing'})
-
-
-def perform_drop_task(task_id, data):
-    from ....api.native_api.high_level import LocalClient
     try:
         my_vec_db = LocalClient(root_path=root_path / data['database_name'])
-        my_vec_db.drop_collection(data['collection_name'])
-        tasks[task_id] = {
-            'status': 'success',
-            'params': {
-                'database_name': data['database_name'],
-                'collection_name': data['collection_name']
-            }
-        }
-    except KeyError as e:
-        tasks[task_id] = {'status': 'error', 'message': f'Missing required parameter {e}'}
+        my_vec_db.require_collection(
+            collection=data['collection_name'],
+            dim=data['dim'],
+            chunk_size=data['chunk_size'],
+            dtypes=data['dtypes'],
+            use_cache=data['use_cache'],
+            n_threads=data['n_threads'],
+            warm_up=data['warm_up'],
+            drop_if_exists=data['drop_if_exists'],
+            description=data['description'],
+            cache_chunks=data['cache_chunks']
+        )
+        return jsonify({'status': 'success', 'params': {
+            'database_name': data['database_name'],
+            'collection_name': data['collection_name']
+        }}), 200
     except Exception as e:
-        tasks[task_id] = {'status': 'error', 'message': str(e)}
+        return jsonify({'error': str(e)}), 500
 
 
 @collection_ops.route('/drop_collection', methods=['POST'])
 def drop_collection():
+    from ....api.native_api.high_level import LocalClient
+
     data = request.json
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
-    # 生成任务ID
-    task_id = str(uuid.uuid4())
-    tasks[task_id] = {'status': 'Processing'}
-
-    # 启动新线程处理任务
-    thread = Thread(target=perform_drop_task, args=(task_id, data))
-    thread.start()
-
-    # 立即返回任务ID和Processing状态
-    return jsonify({'task_id': task_id, 'status': 'Processing'})
-
-
-def perform_drop_database_task(task_id, data):
     try:
-        shutil.rmtree(root_path / data['database_name'])
-        tasks[task_id] = {'status': 'success'}
+        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
+        my_vec_db.drop_collection(data['collection_name'])
+        return jsonify({'status': 'success', 'params': {
+            'database_name': data['database_name'],
+            'collection_name': data['collection_name']}
+        }), 200
+    except KeyError as e:
+        return jsonify({'error': f'Missing required parameter {e}'}), 400
     except Exception as e:
-        tasks[task_id] = {'status': 'error', 'message': str(e)}
+        return jsonify({'error': str(e)}), 500
 
 
 @collection_ops.route('/show_collections', methods=['POST'])
@@ -145,16 +109,22 @@ def show_collections():
     from ....api.native_api.high_level import LocalClient
 
     data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    if 'database_name' not in data:
+        return jsonify({'error': 'Missing required parameter: database_name'}), 400
+
     try:
         my_vec_db = LocalClient(root_path=root_path / data['database_name'])
         collections = my_vec_db.show_collections()
+
         return Response(json.dumps({
             'status': 'success', 'params': {
                 'database_name': data['database_name'],
                 'collections': collections
             }
-        },
-            sort_keys=False), mimetype='application/json')
+        }, sort_keys=False), mimetype='application/json')
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -249,14 +219,19 @@ def search():
         else:
             search_filter = Filter().load_dict(data['search_filter'])
 
+        indexer = getattr(collection, '_indexer', None)
+        if indexer is not None:
+            index_mode_judge = 'Binary' not in indexer.index_mode
+        else:
+            index_mode_judge = False
+
         ids, scores, field = collection.search(
             vector=data['vector'], k=data['k'],
             search_filter=search_filter,
             return_fields=data.get('return_fields', False),
             rescore=data.get('rescore', False),
             rescore_multiplier=(data.get('rescore_multiplier', 2)
-                                if 'Binary' not in collection._matrix_serializer.indexer.index_mode
-                                else data.get('rescore_multiplier', 10))
+                                if index_mode_judge else data.get('rescore_multiplier', 10))
         )
 
         if ids is not None:
@@ -313,7 +288,7 @@ def commit():
         data = request.json
 
     if not data:
-        return jsonify({'error': '未提供数据'}), 400
+        return jsonify({'error': 'No data provided'}), 400
 
     task_id = str(uuid.uuid4())
     tasks[task_id] = {'status': 'Processing'}
@@ -332,7 +307,7 @@ def commit():
 def get_status(task_id):
     task = tasks.get(task_id)
     if not task:
-        return jsonify({'error': '任务未找到'}), 404
+        return jsonify({'error': 'Task not found'}), 404
 
     return jsonify(task)
 
@@ -904,6 +879,34 @@ def remove_all_field_indices():
         return Response(json.dumps({'status': 'success', 'params': {
             'database_name': data['database_name'],
             'collection_name': data['collection_name']
+        }}, sort_keys=False), mimetype='application/json')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@collection_ops.route('/index_mode', methods=['POST'])
+def index_mode():
+    """Get the index mode of a collection.
+
+    Returns:
+        dict: The status of the operation.
+    """
+    from ....api.native_api.high_level import LocalClient
+
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
+        collection = my_vec_db.get_collection(data['collection_name'])
+
+        index_mode = collection.index_mode
+
+        return Response(json.dumps({'status': 'success', 'params': {
+            'database_name': data['database_name'],
+            'collection_name': data['collection_name'],
+            'index_mode': index_mode
         }}, sort_keys=False), mimetype='application/json')
     except Exception as e:
         return jsonify({'error': str(e)}), 500
