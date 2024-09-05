@@ -49,19 +49,3 @@ class BaseIndex(ABC):
     def load(self, filepath):
         """Loads the model from a file."""
         pass
-
-    @staticmethod
-    def sort_dis(data, top_k=10, ascending=True, backend='numpy'):
-        """Sorts the data.
-
-        Parameters:
-            data (np.ndarray): The data to sort.
-            top_k (int): The number of top elements to return.
-            ascending (bool): Whether to sort in ascending order.
-            backend (str): The backend to use.
-
-        Returns:
-            (np.ndarray, np.ndarray): The top k values and their indices.
-        """
-        fs = FastSort(data, backend=backend)
-        return fs.topk(top_k, ascending)  # topk_values, topk_indices
