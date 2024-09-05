@@ -193,7 +193,14 @@ class FieldsStorage:
     def build_index(self, schema: Dict[str, type], rebuild_if_exists=False):
         self.auto_commit()
 
+        # pre-select data to check the schema
+        _, pre_select_data = next(self.retrieve_all())
+
         for index_name, index_type in schema.items():
+            # dtype check
+            if not isinstance(pre_select_data.get(index_name), index_type):
+                raise TypeError(f"Field {index_name} is not of type {index_type}")
+
             self.index.add_index(index_name, index_type, rebuild_if_exists)
         for external_id, data in self.retrieve_all():
             self.index.insert(data, external_id)
