@@ -1,8 +1,8 @@
 import cloudpickle
 import numpy as np
-import simsimd
 
 from .base import BaseIndex
+from ..computational_layer.engines import jaccard, hamming, inner_product
 
 
 class _IndexBinary(BaseIndex):
@@ -74,34 +74,6 @@ class _IndexBinary(BaseIndex):
         self.data = data if self.data is None else np.vstack([self.data, data])
         self.ids = ids if self.ids is None else np.hstack([self.ids, ids])
 
-    @staticmethod
-    def compute_hamming_distance(vec, mat):
-        """
-        Compute the Hamming distance between a binary vector and a binary matrix.
-
-        Parameters:
-            vec (np.ndarray): The binary vector.
-            mat (np.ndarray): The binary matrix.
-
-        Returns:
-            np.ndarray: The Hamming distance between the binary vector and the binary matrix.
-        """
-        return np.asarray(simsimd.hamming(vec, mat))
-
-    @staticmethod
-    def compute_jaccard_distance(vec, mat):
-        """
-        Compute the Jaccard distance between a binary vector and a binary matrix.
-
-        Parameters:
-            vec (np.ndarray): The binary vector.
-            mat (np.ndarray): The binary matrix.
-
-        Returns:
-            np.ndarray: The Jaccard distance between the binary vector and the binary matrix.
-        """
-        return np.asarray(simsimd.jaccard(vec, mat))
-
     def _generate_encoded_data(self, encoded_data):
         if encoded_data is None:
             encoded_data = self.data
@@ -115,8 +87,7 @@ class _IndexBinary(BaseIndex):
         else:
             query = original_vec
 
-        dis = simsimd.dot(query, decoded_sq_data)
-        ip_ids, ip_score = self.sort_dis(dis, top_k=top_k, ascending=False, backend='numpy')
+        ip_ids, ip_score = inner_product(query, decoded_sq_data, n=top_k, use_simd=True)
 
         return ids[ip_ids], ip_score
 
@@ -136,16 +107,14 @@ class _IndexBinary(BaseIndex):
                                                              original_data=original_data, encoded_data=encoded_data)
 
         if distance == 'Jaccard':
-            distance_func = self.compute_jaccard_distance
+            distance_func = jaccard
         elif distance == 'Hamming':
-            distance_func = self.compute_hamming_distance
+            distance_func = hamming
         else:
             raise ValueError(f"Invalid distance: {distance}")
 
-        distances = distance_func(encoded_vec, encoded_data)
-
         sort_topk = top_k * rescore_multiplier if rescore else top_k
-        _ids, scores = self.sort_dis(distances, top_k=sort_topk, ascending=True, backend='numpy')
+        _ids, scores = distance_func(encoded_vec, encoded_data, n=sort_topk, use_simd=True)
 
         if rescore:
             if subset_indices is not None:
