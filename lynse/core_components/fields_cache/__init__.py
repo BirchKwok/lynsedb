@@ -81,6 +81,9 @@ class FieldsCache:
             List[dict]: The records. If not return_ids_only, the records will be returned.
             List[int]: The external IDs. If return_ids_only, the external IDs will be returned.
         """
+        if not isinstance(filter_instance, Filter) and not isinstance(filter_instance, dict):
+            raise ValueError("The filter_instance must be an instance of Filter or a dict.")
+
         return self.query_handler.query(filter_instance, filter_ids, return_ids_only)
 
     def retrieve(self, external_id, include_external_id=False):
