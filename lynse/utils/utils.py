@@ -6,6 +6,14 @@ from pathlib import Path
 import numpy as np
 
 
+class OpsError(Exception):
+    """An exception that is raised when an error occurs during a database operation."""
+
+    def __init__(self, message):
+        self.message = message
+        super().__init__(self.message)
+
+
 class SearchResultsCache:
     """A decorator that caches the results of a function call with the same arguments."""
 
@@ -68,24 +76,32 @@ def unavailable_if_deleted(func):
 
     @wraps(func)
     def wrapper(*args, **kwargs):
-        if hasattr(args[0], '_initialize_as_collection'):
+        if hasattr(args[0], '_search'):
             # self is the first parameter
-            if args[0]._initialize_as_collection:
-                unit_name = 'collection'
-            else:
-                unit_name = 'database'
-
             db_name = Path(args[0]._database_path).name
 
             if args[0]._matrix_serializer.IS_DELETED:
-                raise ValueError(f"The {unit_name} `{db_name}` has been deleted, and the `{func.__name__}` function "
-                                 f"is unavailable.")
+                raise OpsError(f"The collection `{db_name}` has been deleted, and the `{func.__name__}` function "
+                               f"is unavailable.")
         else:
             db_name = Path(args[0].root_path).name
 
             if args[0].STATUS == 'DELETED':
-                raise ValueError(f"The `{db_name}` has been deleted, and the `{func.__name__}` function "
-                                 f"is unavailable.")
+                raise OpsError(f"The `{db_name}` has been deleted, and the `{func.__name__}` function "
+                               f"is unavailable.")
+
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+def unavailable_if_empty(func):
+    """A decorator that detects if the database is empty."""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if args[0].shape[0] == 0:
+            raise OpsError(f"The database is empty, and the `{func.__name__}` function is unavailable.")
 
         return func(*args, **kwargs)
 
@@ -152,3 +168,50 @@ def find_first_file_with_substr(directory, substr):
             return file.absolute()
 
     return None
+
+
+def collection_repr(collection):
+    """
+    Get the string representation of a collection.
+
+    Parameters:
+        collection (Collection): The collection to represent.
+
+    Returns:
+        str: The string representation of the collection.
+    """
+    return (f'{collection.name}CollectionInstance(\n'
+            f'    database="{collection._database_name}", \n'
+            f'    collection="{collection._collection_name}", \n'
+            f'    shape={collection.shape}'
+            f'\n)')
+
+
+def sort_and_get_top_k(arr, k):
+    """
+    Sort each row of a 1D or 2D array and return the top-k indices and values for each row.
+
+    Parameters:
+        arr (np.ndarray): 1D or 2D numpy array
+        k (int): Number of top elements to return
+
+    Returns:
+        tuple: (top_k_indices, top_k_values)
+            top_k_indices: Indices of top-k elements for each row
+            top_k_values: Values of top-k elements for each row
+    """
+    arr = np.asarray(arr)
+    
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    
+    n_rows, n_cols = arr.shape
+    
+    k = min(k, n_cols)
+    
+    sorted_indices = np.argsort(arr, axis=1)[:, ::-1]
+    
+    top_k_indices = sorted_indices[:, :k]
+    top_k_values = np.take_along_axis(arr, top_k_indices, axis=1)
+    
+    return top_k_indices, top_k_values
