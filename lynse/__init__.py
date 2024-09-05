@@ -4,7 +4,7 @@ __version__ = '0.1.0'
 from pathlib import Path
 from typing import Union
 
-from lynse.api.http_api.http_api.app import launch_in_jupyter
+from .api.http_api.http_api.app import launch_in_jupyter
 from .core_components import fields_cache as field_models
 from .configs.config import generate_config_file, load_config_file
 
@@ -25,7 +25,7 @@ class _InstanceDistributor:
             root_path = root_path.as_posix()
 
         if root_path is not None and (root_path.startswith('http://') or root_path.startswith('https://')):
-            instance = HTTPClient(url=root_path, database_name=database_name)
+            instance = HTTPClient(uri=root_path, database_name=database_name)
         else:
             if root_path is None:
                 native_api_root_path = config.LYNSE_DEFAULT_ROOT_PATH
@@ -48,10 +48,11 @@ class VectorDBClient:
 
                - If it is a remote URL, the client will use the HTTP API.
                - If it is a local path, the client will use the native API.
-                    The path refers to the root path of the database.
+                    The path refers to the root path of the LynseDB storage.
                - If set to None, the client will use the native API,
                     and the database will be stored in the default root path,
-                    which needs to be configured in the config file.
+                    when you need to change the default root path,
+                    you can set the environment variable LYNSE_DEFAULT_ROOT_PATH or change the config file.
 
         """
         self._is_remote = uri is not None and (uri.startswith('http://') or uri.startswith('https://'))
@@ -215,6 +216,13 @@ class VectorDBClient:
                     raise_error_response(rj)
             except httpx.RequestError:
                 raise ConnectionError(f'Failed to connect to the server at {self._uri}.')
+
+    def __repr__(self):
+        from .configs.config import config
+        return f'{self.__class__.__name__}(uri={self._uri or "DefaultRootPath"})'
+
+    def __str__(self):
+        return self.__repr__()
 
 
 def load_and_register_module(module):
