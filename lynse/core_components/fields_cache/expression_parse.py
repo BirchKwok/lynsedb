@@ -326,7 +326,8 @@ class ExpressionParser:
             return UnaryOpNode('not', expr)
         return self.parse_condition()
 
-    def parse_number(self, value):
+    @staticmethod
+    def parse_number(value):
         """
         Parse a string into a number (int or float) if possible.
         
@@ -356,14 +357,14 @@ class ExpressionParser:
         
         if op1 in ['>', '>='] and op2 in ['<', '<=']:
             if num1 > num2:
-                return (op2, val2)  # more strict upper limit
+                return op2, val2  # more strict upper limit
             else:
-                return (op1, val1)  # more strict lower limit
+                return op1, val1  # more strict lower limit
         elif op1 in ['<', '<='] and op2 in ['>', '>=']:
             if num1 < num2:
-                return (op2, val2)  # more strict lower limit
+                return op2, val2  # more strict lower limit
             else:
-                return (op1, val1)  # more strict upper limit
+                return op1, val1  # more strict upper limit
         else:
             # return the stricter limit for the same direction inequality
             if op1 in ['>', '>=']:
@@ -391,7 +392,8 @@ class ExpressionParser:
         middle = self.tokens[self.current]
         self.current += 1
 
-        if op in ['>', '<', '>=', '<='] and self.current < len(self.tokens) and self.tokens[self.current] in ['>', '<', '>=', '<=']:
+        if (op in ['>', '<', '>=', '<='] and self.current < len(self.tokens) and
+                self.tokens[self.current] in ['>', '<', '>=', '<=']):
             # detect double-sided range expression
             second_op = self.tokens[self.current]
             self.current += 1
