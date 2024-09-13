@@ -1,10 +1,6 @@
-import shutil
-from pathlib import Path
-import threading
-
 import pytest
 
-from test import ExclusiveDB, Filter, FieldCondition, MatchField, MatchID
+from test import Filter, FieldCondition, MatchField, MatchID
 import numpy as np
 import lynse
 
@@ -349,7 +345,6 @@ def test_multiple_initialization(dim=100, chunk_size=1000, dtypes='float32'):
         collection.bulk_add_items(items)
 
     assert collection.shape == (101, 100)
-    del collection
 
     collection = get_collection(dim=dim, chunk_size=chunk_size, dtypes=dtypes, drop_if_exists=False)
 
