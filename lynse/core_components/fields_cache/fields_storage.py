@@ -37,6 +37,9 @@ class FieldsStorage:
         self.max_entries = 100000
         self.use_index = False
 
+        self.all_fields = {} 
+        self._load_all_fields()  
+
     def _initialize_id_checker(self):
         self.id_filter = IDChecker()
 
@@ -67,11 +70,30 @@ class FieldsStorage:
             self.index.load(self.index_path)
             self.use_index = True
 
+    def _load_all_fields(self):
+        if self.filepath.exists() and self.filepath.stat().st_size > 0:
+            for _, data in self.retrieve_all():
+                for field, value in data.items():
+                    if field not in self.all_fields:
+                        self.all_fields[field] = type(value).__name__
+
     def auto_commit(self):
         if self.memory_store:
             self.commit()
 
     def store(self, data: dict, external_id: int):
+        """
+        Store a record in the cache.
+
+        Parameters:
+            data: dict
+                The record to store.
+            external_id: int
+                The external ID of the record.
+
+        Returns:
+            int: The internal ID of the record.
+        """
         if not isinstance(data, dict):
             raise ValueError("Only dictionaries are allowed as data.")
 
@@ -84,6 +106,9 @@ class FieldsStorage:
         self.memory_store[internal_id] = data
         self.external_to_internal[external_id] = internal_id
         self.current_internal_id += 1
+
+        for field, value in data.items():
+            self.all_fields[field] = type(value).__name__
 
         if self.use_index:
             self.index.insert(data, internal_id)
@@ -118,6 +143,12 @@ class FieldsStorage:
             f.write(packed_mapping)
 
         self.id_filter.to_file(self.filter_path)
+
+        # save field list
+        fields_path = self.filepath.with_suffix('.fields')
+        with open(fields_path, 'wb') as f:
+            packed_fields = msgpack.packb(list(self.all_fields))
+            f.write(packed_fields)
 
         if self.use_index:
             self.index.save(self.index_path)
@@ -179,6 +210,10 @@ class FieldsStorage:
         if self.index_path.exists():
             self.index_path.unlink()
 
+        fields_path = self.filepath.with_suffix('.fields')
+        if fields_path.exists():
+            fields_path.unlink()
+
         self.memory_store.clear()
         self.id_mapping.clear()
         self.external_to_internal.clear()
@@ -189,6 +224,7 @@ class FieldsStorage:
         self.max_entries = None
         self.use_index = False
         self.index = None
+        self.all_fields = set()
 
     def build_index(self, schema: Dict[str, type], rebuild_if_exists=False):
         self.auto_commit()
@@ -220,3 +256,15 @@ class FieldsStorage:
 
     def commit(self):
         self._flush_to_disk()
+
+    def list_fields(self):
+        """
+        Return all field names and their types.
+
+        Returns:
+            dict: A dictionary with field names as keys and field types as values.
+        """
+        def _warp_field_name(field):
+            return f":{field}:" if field not in [':id:', ''] else field
+
+        return {_warp_field_name(field): dtype for field, dtype in self.all_fields.copy().items()}
