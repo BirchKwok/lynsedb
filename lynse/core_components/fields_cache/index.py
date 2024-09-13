@@ -25,12 +25,33 @@ class Trie:
         node.ids.add(record_id)
 
     def search(self, key):
-        node = self.root
-        for char in key:
-            if char not in node.children:
-                return set()
-            node = node.children[char]
-        return node.ids if node.is_end_of_word else set()
+        if isinstance(key, (list, tuple)):
+            return self._batch_search(map(str, key))
+        else:
+            return self._search_single(str(key))
+
+    def _batch_search(self, keys):
+        results = set()
+        current_nodes = {self.root: set(keys)}
+        
+        while current_nodes:
+            next_nodes = {}
+            for node, prefixes in current_nodes.items():
+                for prefix in prefixes:
+                    if not prefix:
+                        if node.is_end_of_word:
+                            results.update(node.ids)
+                    else:
+                        char = prefix[0]
+                        if char in node.children:
+                            child = node.children[char]
+                            next_prefix = prefix[1:]
+                            if child not in next_nodes:
+                                next_nodes[child] = set()
+                            next_nodes[child].add(next_prefix)
+            current_nodes = next_nodes
+        
+        return results
 
     def starts_with(self, prefix):
         def collect_all_words(node):
@@ -154,19 +175,20 @@ class BPlusTree:
 
     def _range_search(self, node, start_key, end_key, result):
         idx = 0
-        while idx < len(node.keys) and (start_key is None or node.keys[idx][0] < start_key):
+        while idx < len(node.keys) and (start_key is not None and node.keys[idx][0] < start_key):
             idx += 1
 
-        while idx < len(node.keys) and (end_key is None or node.keys[idx][0] <= end_key):
-            if node.is_leaf:
+        if node.is_leaf:
+            while idx < len(node.keys) and (end_key is None or node.keys[idx][0] <= end_key):
                 result.add(node.keys[idx][1])
-            else:
+                idx += 1
+        else:
+            while idx < len(node.keys) and (end_key is None or node.keys[idx][0] <= end_key):
                 self._range_search(node.children[idx], start_key, end_key, result)
                 result.add(node.keys[idx][1])
-            idx += 1
-
-        if not node.is_leaf:
-            self._range_search(node.children[idx], start_key, end_key, result)
+                idx += 1
+            if idx < len(node.children):
+                self._range_search(node.children[idx], start_key, end_key, result)
 
 
 class Index:
@@ -181,7 +203,7 @@ class Index:
             if rebuild_if_exists:
                 self.remove_index(field)
             else:
-                raise ValueError(f"Index for field '{field}' already exists.")
+                return
 
         if field_type == str:
             self.indices[field] = Trie()
