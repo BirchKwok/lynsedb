@@ -20,8 +20,8 @@ class ASTNode(ABC):
     @abstractmethod
     def evaluate(self):
         """
-        Evaluate the AST node.
-        
+        Evaluates the AST node.
+
         Returns:
             Filter: The evaluated filter.
         """
@@ -36,10 +36,10 @@ class BinaryOpNode(ASTNode):
 
     def evaluate(self):
         """
-        Evaluate the binary operation node.
-        
+        Evaluates the binary operation node.
+
         Returns:
-            Filter: The combined filter based on the operation.
+            Filter: A filter based on the operator combination.
         """
         left_val = self.left.evaluate()
         right_val = self.right.evaluate()
@@ -60,14 +60,18 @@ class UnaryOpNode(ASTNode):
 
     def evaluate(self):
         """
-        Evaluate the unary operation node.
-        
+        Evaluates the unary operation node.
+
         Returns:
-            Filter: The negated filter for 'not' operation.
+            Filter: For the 'not' operation, returns the inverted filter.
         """
         result = self.expr.evaluate()
         if self.op == 'not':
-            return Filter(must_not=result.must_fields)
+            return Filter(
+                must=result.must_not_fields,
+                must_not=result.must_fields,
+                any=result.any_fields
+            )
         else:
             raise ValueError(f"Unknown unary operator: {self.op}")
 
@@ -80,40 +84,42 @@ class ConditionNode(ASTNode):
 
     def evaluate(self):
         """
-        Evaluate the condition node.
-        
+        Evaluates the condition node.
+
         Returns:
-            Filter: The filter based on the condition.
+            Filter: A filter based on the condition.
         """
         field = self.field.replace(':', '')
-        if field == 'id':
+        field = ':id:' if field == 'id' else field
+
+        if field == ':id:':
             value = [int(v.strip()) for v in self.value.strip('[]').split(',')]
             if self.op == 'not in':
-                return Filter(must_not=[FieldCondition(':id:', MatchID(value))])
-            else:
-                return Filter(must=[FieldCondition(':id:', MatchID(value))])
+                return Filter(must_not=[FieldCondition(field, MatchID(value))])
+            elif self.op == 'in':
+                return Filter(must=[FieldCondition(field, MatchID(value))])
+
+        if self.op in ['in', 'not in']:
+            value = [v.strip() for v in self.value.strip('[]').split(',')]
+            value = [self.parse_number(v) for v in value]
         else:
-            if self.op in ['in', 'not in']:
-                value = [v.strip() for v in self.value.strip('[]').split(',')]
-                value = [self.parse_number(v) for v in value]
-            else:
-                value = self.parse_number(self.value)
-            comparator = operator_map[self.op]
-            condition = FieldCondition(field,
-                                       MatchField(value, comparator, all_comparators=False, not_in=self.op == 'not in'))
-            if self.op.startswith('not'):
-                return Filter(must_not=[condition])
-            else:
-                return Filter(must=[condition])
+            value = self.parse_number(self.value)
+        comparator = operator_map[self.op]
+        condition = FieldCondition(field,
+                                   MatchField(value, comparator, all_comparators=False, not_in=self.op == 'not in'))
+        if self.op.startswith('not') and self.op != 'not in':
+            return Filter(must_not=[condition])
+        else:
+            return Filter(must=[condition])
 
     @staticmethod
     def parse_number(value):
         """
-        Parse a string into a number (int or float) if possible.
-        
+        Parses a string into a number (int or float) if possible.
+
         Parameters:
-            value (str): The string to parse.
-        
+            value (str): The string to be parsed.
+
         Returns:
             int, float, or str: The parsed value.
         """
@@ -135,29 +141,31 @@ class RangeNode(ASTNode):
 
     def evaluate(self):
         """
-        Evaluate the range node.
+        Evaluates the range node.
 
         Returns:
-            Filter: The filter based on the range condition.
+            Filter: A filter based on the range condition.
         """
         field = self.field.replace(':', '')
+        field = ':id:' if field == 'id' else field
+
         start = self.parse_number(self.start)
         end = self.parse_number(self.end)
 
-        # determine the actual start and end values
+        # Determine actual start and end values
         if self.start_op in ['>', '>='] and self.end_op in ['>', '>=']:
             start, end = end, start
-            
+
         if start > end:
-            raise ValueError(f"Invalid range expression: start value {start} is greater than end value {end}.")
-        
+            raise ValueError(f"Invalid range expression: Start value {start} is greater than end value {end}.")
+
         start_inclusive = self.end_op in ['>=', '<=']
         end_inclusive = self.start_op in ['<=', '>=']
-            
+
         if start == end:
             if not (start_inclusive and end_inclusive):
-                raise ValueError(f"Invalid range expression: when start value equals end value, "
-                                 f"both sides must use one of ['==', '!=', '>=', '<='].")
+                raise ValueError(f"Invalid range expression: When the start value equals the end value, "
+                                 f"both must use one of ['==', '!=', '>=', '<='].")
             inclusive = True
         else:
             if start_inclusive and end_inclusive:
@@ -175,11 +183,11 @@ class RangeNode(ASTNode):
     @staticmethod
     def parse_number(value):
         """
-        Parse a string into a number (int or float) if possible.
-        
+        Parses a string into a number (int or float) if possible.
+
         Parameters:
-            value (str): The string to parse.
-        
+            value (str): The string to be parsed.
+
         Returns:
             int, float, or str: The parsed value.
         """
@@ -193,21 +201,34 @@ class RangeNode(ASTNode):
 
 class ExpressionParser:
     """
-    Utilizing Abstract Syntax Trees (ASTs) and the Visitor pattern,
-        "FieldExpression" is employed to parse and evaluate string expressions into Filter objects.
+    FieldExpression is a string parser used to parse field expressions. 
+
+    It can reassemble the parsing result into a Filter object of LynseDB, which can filter the query result. 
+    Its main implementation idea is to efficiently create Filters 
+        without requiring users to learn the use of complex filtering components such as MatchRange and FieldCondition.
+
+    It is an important component of LynseDB and can effectively improve the user-friendliness of LynseDB.
 
     Supported syntax:
-        :field: represents a field, e.g., :order:, :name:, etc.
-        :id: special reserved word for matching IDs
+        - :field: represents a field, e.g., :order:, :name:, etc.
+        - :id: special reserved word for matching IDs
 
     Supported comparison operators:
-        ==, !=, >=, <=, >, <
+        - ==
+        - !=
+        - \>=
+        - <=
+        - \>
+        - <
 
     Supported logical operators:
-        and, or, not, in
+        - and
+        - or
+        - not
+        - in
 
     Supported parentheses:
-        ()
+        - ()
         
     Examples:
         - :order: > 1
@@ -218,7 +239,7 @@ class ExpressionParser:
         - :id: in [1, 2]
         - :id: not in [1, 2]
         - :id: in [1, 2] and :order: >= 1 and :name: >= 1.3 and (:order: == 2 or :name: == 3) and not (:tt: == 2)
-    
+
     Usage:
         >>> expression = ":order: > 1 and :name: >= 1.3 and (:order: == 2 or :name: == 3) and not (:tt: == 2)"
         >>> parser = ExpressionParser(expression)
@@ -239,18 +260,19 @@ class ExpressionParser:
 
     Efficient syntax:
         - Use () to group expressions for better readability and maintainability.
-          Specially when using 'not' operator.
-        - Use 'not in' instead of 'not :field: in [value]' when possible.
-        - Use 'not (:field: in [value])' or 'not (:field: not in [value])'.
+        Specially when using `not` operator.
+        - Use `not in` instead of `not :field: in [value]` when possible.
+        - Use `not (:field: in [value])` or `not (:field: in [value])`, it can be more efficient.
+
 
     """
 
     def __init__(self, expression):
         """
-        Initialize the ExpressionParser.
+        Initialize ExpressionParser.
 
         Parameters:
-            expression (str): The expression to parse.
+            expression (str): The expression to be parsed.
         """
         if not expression or expression.strip() == '':
             raise ValueError("Expression cannot be empty.")
@@ -259,7 +281,7 @@ class ExpressionParser:
         self.current = 0
 
         if not self.tokens:
-            raise ValueError("Unable to parse the expression, please check the syntax.")
+            raise ValueError("Unable to parse expression, please check the syntax.")
 
     @staticmethod
     def tokenize(expression):
@@ -267,7 +289,7 @@ class ExpressionParser:
         Tokenize the input expression.
 
         Parameters:
-            expression (str): The expression to tokenize.
+            expression (str): The expression to be tokenized.
 
         Returns:
             list: A list of tokens.
@@ -281,13 +303,13 @@ class ExpressionParser:
         Parse the expression.
 
         Returns:
-            ASTNode: The root node of the Abstract Syntax Tree.
+            ASTNode: The root node of the abstract syntax tree.
         """
         return self.parse_or()
 
     def parse_or(self):
         """
-        Parse 'or' expressions.
+        Parse 'or' expression.
 
         Returns:
             ASTNode: The parsed node.
@@ -301,7 +323,7 @@ class ExpressionParser:
 
     def parse_and(self):
         """
-        Parse 'and' expressions.
+        Parse 'and' expression.
 
         Returns:
             ASTNode: The parsed node.
@@ -315,25 +337,43 @@ class ExpressionParser:
 
     def parse_not(self):
         """
-        Parse 'not' expressions.
+        Parse 'not' expression.
 
         Returns:
             ASTNode: The parsed node.
         """
         if self.current < len(self.tokens) and self.tokens[self.current] == 'not':
             self.current += 1
-            expr = self.parse_condition()
+            expr = self.parse_not()
             return UnaryOpNode('not', expr)
-        return self.parse_condition()
+        else:
+            return self.parse_primary()
+
+    def parse_primary(self):
+        """
+        Parse the basic expression (parentheses and conditions).
+
+        Returns:
+            ASTNode: The parsed node.
+        """
+        if self.tokens[self.current] == '(':
+            self.current += 1
+            node = self.parse_or()
+            if self.current >= len(self.tokens) or self.tokens[self.current] != ')':
+                raise ValueError("Missing right parenthesis")
+            self.current += 1 
+            return node
+        else:
+            return self.parse_condition()
 
     @staticmethod
     def parse_number(value):
         """
         Parse a string into a number (int or float) if possible.
-        
+
         Parameters:
-            value (str): The string to parse.
-        
+            value (str): The string to be parsed.
+
         Returns:
             int, float, or str: The parsed value.
         """
@@ -345,28 +385,28 @@ class ExpressionParser:
     def compare_values(self, op1, val1, op2, val2):
         """
         Compare two values and return the stricter limit.
-        
+
         Parameters:
-            op1 (str): The operator for the first value.
+            op1 (str): The operator of the first value.
             val1 (str): The first value.
-            op2 (str): The operator for the second value.
+            op2 (str): The operator of the second value.
             val2 (str): The second value.
         """
         num1 = self.parse_number(val1)
         num2 = self.parse_number(val2)
-        
+
         if op1 in ['>', '>='] and op2 in ['<', '<=']:
             if num1 > num2:
-                return op2, val2  # more strict upper limit
+                return op2, val2  # The stricter upper limit
             else:
-                return op1, val1  # more strict lower limit
+                return op1, val1  # The stricter lower limit
         elif op1 in ['<', '<='] and op2 in ['>', '>=']:
             if num1 < num2:
-                return op2, val2  # more strict lower limit
+                return op2, val2  # The stricter lower limit
             else:
-                return op1, val1  # more strict upper limit
+                return op1, val1  # The stricter upper limit
         else:
-            # return the stricter limit for the same direction inequality
+            # For the same direction inequality, return the stricter limit
             if op1 in ['>', '>=']:
                 return (op1, val1) if num1 > num2 else (op2, val2)
             else:
@@ -379,52 +419,38 @@ class ExpressionParser:
         Returns:
             ASTNode: The parsed node (ConditionNode or RangeNode).
         """
-        if self.tokens[self.current] == '(':
-            self.current += 1
-            node = self.parse_or()
-            self.current += 1  # skip the right parenthesis
-            return node
-
+        if self.current < len(self.tokens) - 2 and self.tokens[self.current + 1] in ['>', '<', '>=', '<=']:
+            # Detect range expressions, e.g., "1 < :field: < 10"
+            left = self.tokens[self.current]
+            op1 = self.tokens[self.current + 1]
+            middle = self.tokens[self.current + 2]
+            if self.current + 3 < len(self.tokens) and self.tokens[self.current + 3] in ['>', '<', '>=', '<=']:
+                op2 = self.tokens[self.current + 3]
+                right = self.tokens[self.current + 4]
+                self.current += 5
+                return RangeNode(middle, left, right, op1, op2)
+        # Standard condition parsing
         left = self.tokens[self.current]
         self.current += 1
+        if self.current >= len(self.tokens):
+            raise ValueError("Expression is incomplete, missing operator and value.")
         op = self.tokens[self.current]
-        self.current += 1
-        middle = self.tokens[self.current]
-        self.current += 1
-
-        if (op in ['>', '<', '>=', '<='] and self.current < len(self.tokens) and
-                self.tokens[self.current] in ['>', '<', '>=', '<=']):
-            # detect double-sided range expression
-            second_op = self.tokens[self.current]
+        if op == 'not' and self.current + 1 < len(self.tokens):
+            op = 'not ' + self.tokens[self.current + 1]
             self.current += 1
-            right = self.tokens[self.current]
-            self.current += 1
+        self.current += 1
+        if self.current >= len(self.tokens):
+            raise ValueError("Expression is incomplete, missing value.")
+        right = self.tokens[self.current]
+        self.current += 1
 
-            if ':' in middle:
-                # if the field is in the middle
-                if (op in ['<', '<='] and second_op in ['<', '<=']) or (op in ['>', '>='] and second_op in ['>', '>=']):
-                    # same direction inequality, create RangeNode
-                    return RangeNode(middle, left, right, op, second_op)
-                else:
-                    # reverse inequality, choose the stricter limit
-                    strict_op, strict_val = self.compare_values(op, left, second_op, right)
-                    # check if the field is in the middle
-                    if ':' in middle:
-                        # if the strict value is on the left side of the field, reverse the operator
-                        if strict_op == op:
-                            strict_op = self.reverse_op(strict_op)
-
-                        return ConditionNode(middle, strict_op, strict_val)
-                    else:
-                        return ConditionNode(left, strict_op, strict_val)
-            else:
-                # if the field is not in the middle, keep the original logic
-                return ConditionNode(middle, op, left)
-
+        # Check if the field is on the left side
         if ':' in left:
-            return ConditionNode(left, op, middle)
+            return ConditionNode(left, op, right)
         else:
-            return ConditionNode(middle, op, left)
+            # Field on the right side, reverse the operator
+            op = self.reverse_op(op)
+            return ConditionNode(right, op, left)
 
     @staticmethod
     def reverse_op(op):
@@ -432,7 +458,7 @@ class ExpressionParser:
         Reverse the comparison operator.
 
         Parameters:
-            op (str): The operator to reverse.
+            op (str): The operator to be reversed.
 
         Returns:
             str: The reversed operator.
@@ -445,7 +471,7 @@ class ExpressionParser:
         Get the final filter by parsing and evaluating the expression.
 
         Returns:
-            Filter: The resulting filter.
+            Filter: The generated filter.
         """
         ast = self.parse()
         return ast.evaluate()
