@@ -181,7 +181,6 @@ class LocalClient:
         self._collections = {}
         self.STATUS = 'INITIALIZED'
 
-    @unavailable_if_deleted
     def require_collection(
             self,
             collection: str,
