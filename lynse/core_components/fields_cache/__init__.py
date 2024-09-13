@@ -1,7 +1,8 @@
 import os
 from typing import List
 
-from ...core_components.fields_cache.filter import MatchField, MatchID, FieldCondition, Filter, MatchRange
+from .filter import MatchField, MatchID, FieldCondition, Filter, MatchRange
+from .expression_parse import ExpressionParser
 
 
 class IndexSchema:
@@ -23,11 +24,11 @@ class IndexSchema:
     def add_int_index(self, field_name: str):
         self._add_index(field_name, int)
 
-    def to_json(self):
+    def to_dict(self):
         indices = {k: v.__name__ for k, v in self.indices.items()}
         return indices
 
-    def load_from_json(self, schema_dict):
+    def load_from_dict(self, schema_dict):
         self.indices = {k: eval(v) for k, v in schema_dict.items()}
         return self
 
@@ -65,12 +66,12 @@ class FieldsCache:
         """
         return self.storage.store(data, external_id)
 
-    def query(self, filter_instance, filter_ids=None, return_ids_only=True):
+    def query(self, query_filter, filter_ids=None, return_ids_only=True):
         """
-        Query the cache.
+        Query the fields cache.
 
         Parameters:
-            filter_instance: Filter or dict
+            query_filter: Filter or dict or FieldExpression (string)
                 The filter object or the specify data to filter.
             filter_ids: List[int]
                 The list of external IDs to filter.
@@ -81,10 +82,11 @@ class FieldsCache:
             List[dict]: The records. If not return_ids_only, the records will be returned.
             List[int]: The external IDs. If return_ids_only, the external IDs will be returned.
         """
-        if not isinstance(filter_instance, Filter) and not isinstance(filter_instance, dict):
-            raise ValueError("The filter_instance must be an instance of Filter or a dict.")
+        if (not isinstance(query_filter, Filter) and not isinstance(query_filter, dict)
+                and not isinstance(query_filter, str)):
+            raise ValueError("The filter_instance must be an instance of Filter or a dict or a FieldExpression string.")
 
-        return self.query_handler.query(filter_instance, filter_ids, return_ids_only)
+        return self.query_handler.query(query_filter, filter_ids, return_ids_only)
 
     def retrieve(self, external_id, include_external_id=False):
         """
@@ -155,14 +157,39 @@ class FieldsCache:
         Build an index for the cache.
 
         Parameters:
-            schema: IndexSchema
-                The index schema.
+            schema (IndexSchema or Field name string): The index schema or the field name string. 
+                When passing the field name string, the field name must be wrapped with ':',
+                like ':vector:', ':timestamp:'.
             rebuild_if_exists: bool
                 If True, the index will be rebuilt if it already exists.
 
         Returns:
             None
+
+        Note:
+            The :id: is a reserved field name and cannot be used.
         """
+        if isinstance(schema, str):
+            if schema == ':id:':
+                raise ValueError("The field name ':id:' is reserved.")
+            
+            schema_type = self.storage.list_fields().get(schema, None)
+            schema = schema.strip(':')
+
+            if schema_type is None:
+                raise ValueError(f"Field '{schema}' not found in the cache.")
+
+            schema_cls = IndexSchema()
+
+            if schema_type == 'str':
+                schema_cls.add_string_index(schema)
+            elif schema_type == 'int':
+                schema_cls.add_int_index(schema)
+            else:
+                raise ValueError(f"Unsupported field type: {schema_type}")
+
+            schema = schema_cls
+
         if not schema.indices:
             raise ValueError("The index schema is empty.")
         self.storage.build_index(schema.indices, rebuild_if_exists)
@@ -204,4 +231,5 @@ class FieldsCache:
         Returns:
             List[str]: The list of indices.
         """
-        return list(self.storage.index.indices.keys())
+        return [":" + i + ":" if i not in [':id:', ''] else i 
+                for i in list(self.storage.index.indices.keys())]
