@@ -2,8 +2,8 @@ from flask import Flask
 from waitress import serve
 import socket
 
-from .database_ops import database_ops
-from .collection_ops import collection_ops
+from lynse.api.http_api.http_api.database_ops import database_ops
+from lynse.api.http_api.http_api.collection_ops import collection_ops
 
 
 app = Flask(__name__)
