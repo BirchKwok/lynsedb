@@ -2,14 +2,16 @@ import shutil
 from pathlib import Path
 
 import pytest
+import threading
 
 from test import ExclusiveDB, Filter, FieldCondition, MatchField, MatchID
 import numpy as np
 
 
 def get_database(dim=100, database_path='test_local_db', chunk_size=1000, dtypes='float32'):
-    if Path(database_path).exists():
-        shutil.rmtree(database_path)
+    with threading.Lock():
+        if Path(database_path).exists():
+            ExclusiveDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes).delete()
 
     database = ExclusiveDB(dim=dim, database_path=database_path, chunk_size=chunk_size, dtypes=dtypes)
     return database
