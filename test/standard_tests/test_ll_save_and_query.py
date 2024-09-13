@@ -39,6 +39,7 @@ def test_add_single_item_without_id_and_field():
     assert database.shape == (1, 100)
 
     database.delete()
+    del database
 
 
 def test_add_single_item_with_id_and_field():
@@ -50,6 +51,7 @@ def test_add_single_item_with_id_and_field():
     assert database.shape == (1, 100)
 
     database.delete()
+    del database
 
 
 def test_bulk_add_item_without_id_and_field():
@@ -65,6 +67,7 @@ def test_bulk_add_item_without_id_and_field():
     assert database.shape == (101, 100)
 
     database.delete()
+    del database
 
 
 def test_bulk_add_item_with_id_and_field():
@@ -80,6 +83,7 @@ def test_bulk_add_item_with_id_and_field():
     assert database.shape == (101, 100)
 
     database.delete()
+    del database
 
 
 def test_add_bulk_item_with_id_and_chinese_field():
@@ -95,6 +99,7 @@ def test_add_bulk_item_with_id_and_chinese_field():
     assert database.shape == (101, 100)
 
     database.delete()
+    del database
 
 
 def test_query_without_field():
@@ -109,6 +114,7 @@ def test_query_without_field():
     assert all(i in database._id_filter for i in n)
 
     database.delete()
+    del database
 
 
 def test_query_with_field():
@@ -127,6 +133,7 @@ def test_query_with_field():
     assert all(10 <= i < 20 for i in n)
 
     database.delete()
+    del database
 
 
 def test_query_with_list_field():
@@ -148,6 +155,7 @@ def test_query_with_list_field():
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
     database.delete()
+    del database
 
 
 def test_query_with_chinese_field():
@@ -168,6 +176,7 @@ def test_query_with_chinese_field():
     assert all(10 <= i < 20 for i in n)
 
     database.delete()
+    del database
 
 
 def test_query_with_chinese_list_field():
@@ -189,6 +198,7 @@ def test_query_with_chinese_list_field():
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
     database.delete()
+    del database
 
 
 def test_query_with_subset_indices():
@@ -207,6 +217,7 @@ def test_query_with_subset_indices():
     assert all(i < 10 for i in n)
 
     database.delete()
+    del database
 
 
 def test_query_with_subset_indices_and_field():
@@ -228,6 +239,7 @@ def test_query_with_subset_indices_and_field():
     assert all(i < 10 for i in n)
 
     database.delete()
+    del database
 
 
 def test_query_with_subset_indices_and_list_field():
@@ -252,7 +264,7 @@ def test_query_with_subset_indices_and_list_field():
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
     database.delete()
-
+    del database
 
 def test_query_with_subset_indices_and_chinese_field():
     database = get_database_for_query(with_field=True, field_prefix='测试_')
@@ -273,6 +285,7 @@ def test_query_with_subset_indices_and_chinese_field():
     assert all(i < 10 for i in n)
 
     database.delete()
+    del database
 
 
 def test_query_with_subset_indices_and_chinese_list_field():
@@ -298,6 +311,7 @@ def test_query_with_subset_indices_and_chinese_list_field():
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
     database.delete()
+    del database
 
 
 def test_query_stability_of_mvdb_files():
@@ -326,6 +340,7 @@ def test_query_stability_of_mvdb_files():
         assert all(10 <= i < 20 for i in n)
 
     database.delete()
+    del database
 
 
 # Test whether calling bulk_add_items multiple times can insert data normally
@@ -349,6 +364,7 @@ def test_multiple_bulk_add_items():
     assert database.shape == (202, 100)
 
     database.delete()
+    del database
 
 
 def test_multiple_bulk_add_items_with_insert_session():
@@ -372,6 +388,7 @@ def test_multiple_bulk_add_items_with_insert_session():
     assert database.shape == (202, 100)
 
     database.delete()
+    del database
 
 
 # Test if secondary initialization can properly initialize and query
@@ -398,6 +415,7 @@ def test_multiple_initialization(dim=100, database_path='test_local_db', chunk_s
 
     assert database.shape == (202, 100)
     database.delete()
+    del database
 
 
 def test_result_order():
@@ -436,6 +454,8 @@ def test_result_order():
             assert len(index) == len(score) == 10
 
             db.delete()
+
+            del db
 
 
 def test_transactions():
