@@ -4,11 +4,7 @@ from test import Filter, FieldCondition, MatchField, MatchID
 import numpy as np
 import lynse
 
-try:
-    lynse.launch_in_jupyter()
-except Exception as e:
-    pass
-client = lynse.VectorDBClient("http://127.0.0.1:7637")
+client = lynse.VectorDBClient()
 database = client.create_database(database_name='test_local_db', drop_if_exists=True)
 
 
