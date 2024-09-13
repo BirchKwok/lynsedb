@@ -9,7 +9,7 @@ import httpx
 from spinesUtils.asserts import raise_if
 from tqdm import trange
 
-from ...core_components.fields_cache import IndexSchema
+from ...core_components.fields_cache import IndexSchema, ExpressionParser
 from ...core_components.fields_cache.filter import Filter
 from ...api import logger
 from ...core_components.locks import ThreadLock
@@ -52,7 +52,338 @@ def pack_data(data):
     return packed_data
 
 
+class HTTPClient:
+    """
+    The HTTPClient class is used to interact with the LynseDB server.
+    """
+    def __init__(self, uri, database_name):
+        """
+        Initialize the client.
+
+        Parameters:
+            uri (str): The URI of the server, must start with "http://" or "https://".
+            database_name (str): The name of the database.
+
+        Raises:
+            TypeError: If the URI is not a string.
+            ValueError: If the URI does not start with "http://" or "https://".
+            ConnectionError: If the server cannot be connected to.
+        """
+
+        raise_if(TypeError, not isinstance(uri, str), 'The URI must be a string.')
+        raise_if(ValueError, not uri.startswith('http://') or uri.startswith('https://'),
+                 'The URI must start with "http://" or "https://".')
+
+        self._session = httpx.Client()
+
+        if uri.endswith('/'):
+            self.uri = uri[:-1]
+        else:
+            self.uri = uri
+
+        self.database_name = database_name
+
+    def require_collection(
+            self,
+            collection: str,
+            dim: int = None,
+            chunk_size: int = 100_000,
+            dtypes: str = 'float32',
+            use_cache: bool = True,
+            n_threads: Union[int, None] = 10,
+            warm_up: bool = False,
+            drop_if_exists: bool = False,
+            description: str = None,
+            cache_chunks: int = 20
+    ):
+        """
+        Create a collection.
+
+        Parameters:
+            collection (str): The name of the collection.
+            dim (int): The dimension of the vectors. Default is None.
+                When creating a new collection, the dimension of the vectors must be specified.
+                When loading an existing collection, the dimension of the vectors is automatically loaded.
+            chunk_size (int): The chunk size. Default is 100,000.
+            dtypes (str): The data types. Default is 'float32'.
+            use_cache (bool): Whether to use cache. Default is True.
+            n_threads (int): The number of threads. Default is 10.
+            warm_up (bool): Whether to warm up. Default is False.
+            drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
+            description (str): A description of the collection. Default is None.
+                The description is limited to 500 characters.
+            cache_chunks (int): The number of chunks to cache. Default is 20.
+
+        Returns:
+            Collection: The collection object.
+
+        Raises:
+            ConnectionError: If the server cannot be connected to.
+        """
+        uri = f'{self.uri}/required_collection'
+
+        data = {
+            "database_name": self.database_name,
+            "collection_name": collection,
+            "dim": dim,
+            "chunk_size": chunk_size,
+            "dtypes": dtypes,
+            "use_cache": use_cache,
+            "n_threads": n_threads,
+            "warm_up": warm_up,
+            "drop_if_exists": drop_if_exists,
+            "description": description,
+            "cache_chunks": cache_chunks
+        }
+
+        try:
+            response = self._session.post(uri, json=data)
+            if response.status_code == 200:
+                del data['collection_name']
+                del data['database_name']
+                collection = Collection(uri=self.uri, database_name=self.database_name,
+                                        collection_name=collection, **data)
+                return collection
+            else:
+                raise_error_response(response)
+        except httpx.RequestError:
+            raise ConnectionError(f'Failed to connect to the server at {uri}.')
+
+    def get_collection(self, collection: str, cache_chunks=20, warm_up=True):
+        """
+        Get a collection.
+
+        Parameters:
+            collection (str): The name of the collection.
+            cache_chunks (int): The number of chunks to cache. Default is 20.
+            warm_up (bool): Whether to warm up. Default is True.
+
+        Returns:
+            Collection: The collection object.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        uri = f'{self.uri}/is_collection_exists'
+        data = {"database_name": self.database_name, "collection_name": collection}
+        response = self._session.post(uri, json=data)
+
+        if response.status_code == 200 and response.json()['params']['exists']:
+            uri = f'{self.uri}/get_collection_config'
+            data = {"database_name": self.database_name, "collection_name": collection}
+            response = self._session.post(uri, json=data)
+
+            params = response.json()['params']['config']
+            params.update({'cache_chunks': cache_chunks, 'warm_up': warm_up})
+
+            return Collection(uri=self.uri, database_name=self.database_name, collection_name=collection,
+                              **params)
+        else:
+            raise_error_response(response)
+
+    def drop_collection(self, collection: str):
+        """
+        Drop a collection.
+
+        Parameters:
+            collection (str): The name of the collection.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        try:
+            _ = self.get_collection(collection)
+        except ExecutionError:
+            pass
+
+        uri = f'{self.uri}/drop_collection'
+        data = {"database_name": self.database_name, "collection_name": collection}
+        return self._session.post(uri, json=data).json()
+
+    def drop_database(self):
+        """
+        Drop the database.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        if not self.database_exists()['params']['exists']:
+            return {'status': 'success', 'message': 'The database does not exist.'}
+
+        uri = f'{self.uri}/drop_database'
+        data = {"database_name": self.database_name}
+        response = self._session.post(uri, json=data)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def database_exists(self):
+        """
+        Check if the database exists.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        uri = f'{self.uri}/database_exists'
+        data = {"database_name": self.database_name}
+        response = self._session.post(uri, json=data)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def show_collections(self):
+        """
+        Show all collections in the database.
+
+        Returns:
+            List: The list of collections.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        uri = f'{self.uri}/show_collections'
+        data = {"database_name": self.database_name}
+        response = self._session.post(uri, json=data)
+
+        if response.status_code == 200:
+            return response.json()['params']['collections']
+        else:
+            raise_error_response(response)
+
+    def set_environment(self, env: dict):
+        """
+        Set the environment variables.
+
+        Parameters:
+            env (dict): The environment variables. It can be specified on the same time or separately.
+                - LYNSE_LOG_LEVEL: The log level.
+                - LYNSE_LOG_PATH: The log path.
+                - LYNSE_TRUNCATE_LOG: Whether to truncate the log.
+                - LYNSE_LOG_WITH_TIME: Whether to log with time.
+                - LYNSE_KMEANS_EPOCHS: The number of epochs for KMeans.
+                - LYNSE_SEARCH_CACHE_SIZE: The search cache size.
+                - LYNSE_DATALOADER_BUFFER_SIZE: The dataloader buffer size.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            TypeError: If the value of an environment variable is not a string.
+            ExecutionError: If the server returns an error.
+        """
+        uri = f'{self.uri}/set_environment'
+
+        env_list = ['LYNSE_LOG_LEVEL', 'LYNSE_LOG_PATH', 'LYNSE_TRUNCATE_LOG', 'LYNSE_LOG_WITH_TIME',
+                    'LYNSE_KMEANS_EPOCHS', 'LYNSE_SEARCH_CACHE_SIZE', 'LYNSE_DATALOADER_BUFFER_SIZE']
+
+        data = {"database_name": self.database_name}
+        for key in env:
+            if key in env_list:
+                raise_if(TypeError, not isinstance(env[key], str), f'The value of {key} must be a string.')
+                data[key] = env[key]
+
+        response = self._session.post(uri, json=data)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def get_environment(self):
+        """
+        Get the environment variables.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        uri = f'{self.uri}/get_environment'
+        data = {"database_name": self.database_name}
+        response = self._session.post(uri, json=data)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def update_collection_description(self, collection: str, description: str):
+        """
+        Update the description of a collection.
+
+        Parameters:
+            collection (str): The name of the collection.
+            description (str): The description of the collection.
+
+        Returns:
+            dict: The response from the server.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        uri = f'{self.uri}/update_collection_description'
+        data = {"database_name": self.database_name, "collection_name": collection, "description": description}
+        response = self._session.post(uri, json=data)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def show_collections_details(self):
+        """
+        Show all collections in the database with details.
+
+        Returns:
+            pandas.DataFrame: The details of the collections.
+
+        Raises:
+            ExecutionError: If the server returns an error.
+        """
+        uri = f'{self.uri}/show_collections_details'
+        data = {"database_name": self.database_name}
+        response = self._session.post(uri, json=data)
+
+        if response.status_code == 200:
+            rj = response.json()['params']['collections']
+            try:
+                import pandas as pd
+                rj = pd.DataFrame(rj)
+            except ImportError:
+                ...
+
+            return rj
+        else:
+            raise_error_response(response)
+
+    def __repr__(self):
+        if self.database_exists()['params']['exists']:
+            return f"RemoteDatabaseInstance(name={self.database_name}, exists=True)"
+        else:
+            return f"RemoteDatabaseInstance(name={self.database_name}, exists=False)"
+
+    def __str__(self):
+        return self.__repr__()
+
+
 class Collection:
+    """
+    The Collection class is used to interact with a collection in the LynseDB.
+    """
     name = "Remote"
 
     def __init__(self, uri, database_name, collection_name, **params):
@@ -389,6 +720,43 @@ class Collection:
         else:
             raise_error_response(response)
 
+    def is_id_exists(self, id: int):
+        """
+        Check if an ID exists in the collection.
+
+        Parameters:
+            id (int): The ID to check.
+
+        Returns:
+            is_id_exists(Bool): Whether the ID exists in the collection.
+        """
+        uri = f'{self._uri}/is_id_exists'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name, "id": id}
+        response = self._session.post(uri, json=data)
+
+        if response.status_code == 200:
+            return response.json()['params']['is_id_exists']
+        else:
+            raise_error_response(response)
+
+    @property
+    def max_id(self):
+        """
+        Get the maximum ID in the collection.
+
+        Returns:
+            int: The maximum ID in the collection.
+        """
+        uri = f'{self._uri}/max_id'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name}
+
+        response = self._session.post(uri, json=data)
+
+        if response.status_code == 200:
+            return response.json()['params']['max_id']
+        else:
+            raise_error_response(response)
+
     def build_index(self, index_mode: str = 'IVF-FLAT', n_clusters: int = 16):
         """
         Build the index of the collection.
@@ -451,8 +819,13 @@ class Collection:
         """
         uri = f'{self._uri}/search'
 
+        raise_if(ValueError, not isinstance(search_filter, (Filter, type(None), str)),
+                 'search_filter must be Filter or None or FieldExpression string.')
+
+        if isinstance(search_filter, str):
+            search_filter = ExpressionParser(search_filter).to_filter()
+
         if search_filter is not None:
-            raise_if(TypeError, not isinstance(search_filter, Filter), 'The search filter must be a Filter object.')
             search_filter = search_filter.to_dict()
 
         data = {
@@ -461,7 +834,6 @@ class Collection:
             "vector": vector if isinstance(vector, list) else vector.tolist(),
             "k": k,
             "search_filter": search_filter,
-            "return_similarity": True,
             "return_fields": return_fields,
             **kwargs
         }
@@ -478,16 +850,16 @@ class Collection:
             return_fields: bool = False, **kwargs
     ):
         """
-        Search the collection.
+        Search the database for the vectors most similar to the given vector.
 
         Parameters:
-            vector (list[float] or np.ndarray): The search vectors, it can be a single vector or a list of vectors.
+            vector (np.ndarray or list): The search vectors, it can be a single vector or a list of vectors.
                 The vectors must have the same dimension as the vectors in the database,
                 and the type of vector can be a list or a numpy array.
-            k (int): The number of results to return. Default is 10.
-            search_filter (Filter, optional): The field filter to apply to the search, must be a Filter object.
-            return_fields (bool): Whether to return the fields of the search results. Default is False.
-            kwargs (dict): Additional keyword arguments. The following are valid:
+            k (int): The number of nearest vectors to return.
+            search_filter (Filter or FilterExpression string, optional): The filter to apply to the search.
+            return_fields (bool): Whether to return the fields of the search results.
+            kwargs: Additional keyword arguments. The following are valid:
                 rescore (bool): Whether to rescore the results of binary or scaler quantization searches.
                     Default is False. It is recommended to set it to True when the index mode is 'Binary'.
                 rescore_multiplier (int): The multiplier for the rescore operation.
@@ -605,12 +977,12 @@ class Collection:
         else:
             raise_error_response(response)
 
-    def query(self, filter_instance, filter_ids=None, return_ids_only=False):
+    def query(self, query_filter, filter_ids=None, return_ids_only=False):
         """
         Query the collection.
 
         Parameters:
-            filter_instance (Filter or dict): The filter object.
+            query_filter (Filter or dict): The filter object.
             filter_ids (list[int]): The list of IDs to filter.
             return_ids_only (bool): Whether to return the IDs only.
 
@@ -621,11 +993,22 @@ class Collection:
         Raises:
             ExecutionError: If the server returns an error.
         """
+
         uri = f'{self._uri}/query'
+
+        raise_if(ValueError, not isinstance(query_filter, (Filter, str, type(None), dict)),
+                 'query_filter must be Filter or dict or FieldExpression string or None.')
+
+        if isinstance(query_filter, str):
+            query_filter = ExpressionParser(query_filter).to_filter()
+
+        if query_filter is not None and isinstance(query_filter, Filter):
+            query_filter = query_filter.to_dict()
+
         data = {
             "database_name": self._database_name,
             "collection_name": self._collection_name,
-            "filter_instance": filter_instance.to_dict() if isinstance(filter_instance, Filter) else filter_instance,
+            "query_filter": query_filter,
             "filter_ids": filter_ids,
             "return_ids_only": return_ids_only
         }
@@ -634,6 +1017,45 @@ class Collection:
 
         if response.status_code == 200:
             return response.json()['params']['result']
+        else:
+            raise_error_response(response)
+
+    def query_vectors(self, query_filter, filter_ids=None):
+        """
+        Query the vector data by the filter.
+
+        Parameters:
+            query_filter (Filter or dict or FieldExpression str or None):
+                The filter object or the specify data to filter.
+            filter_ids (list[int]):
+                The list of external IDs to filter. Default is None.
+
+        Returns:
+            (Tuple[List[np.ndarray], List[int], List[Dict]]): The vectors, IDs, and fields of the items.
+        """
+        uri = f'{self._uri}/query_vectors'
+
+        raise_if(ValueError, not isinstance(query_filter, (Filter, str, type(None), dict)),
+                 'query_filter must be Filter or dict or FieldExpression string or None.')
+
+        if isinstance(query_filter, str):
+            query_filter = ExpressionParser(query_filter).to_filter()
+
+        if query_filter is not None and isinstance(query_filter, Filter):
+            query_filter = query_filter.to_dict()
+
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "query_filter": query_filter,
+            "filter_ids": filter_ids,
+        }
+
+        response = self._session.post(uri, json=data)
+
+        if response.status_code == 200:
+            result = response.json()['params']['result']
+            return np.asarray(result[0]), np.array(result[1]), result[2]
         else:
             raise_error_response(response)
 
@@ -658,7 +1080,7 @@ class Collection:
         data = {
             "database_name": self._database_name,
             "collection_name": self._collection_name,
-            "schema": schema.to_json(),
+            "schema": schema.to_dict(),
             "rebuild_if_exists": rebuild_if_exists
         }
 
@@ -734,6 +1156,22 @@ class Collection:
         else:
             raise_error_response(response)
 
+    def list_fields(self):
+        """
+        List all fields of a collection.
+
+        Returns:
+            dict: The status of the operation.
+        """
+        uri = f'{self._uri}/list_fields'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name}
+        response = self._session.post(uri, json=data)
+
+        if response.status_code == 200:
+            return response.json()['params']['fields']
+        else:
+            raise_error_response(response)
+
     def update_description(self, description: str):
         """
         Update the description of the collection.
@@ -778,333 +1216,25 @@ class Collection:
         else:
             raise_error_response(response)
 
-    def __repr__(self):
-        return collection_repr(self)
-
-    def __str__(self):
-        return self.__repr__()
-
-
-class HTTPClient:
-    def __init__(self, uri, database_name):
+    @property
+    def index_mode(self):
         """
-        Initialize the client.
-
-        Parameters:
-            uri (str): The URI of the server, must start with "http://" or "https://".
-            database_name (str): The name of the database.
-
-        Raises:
-            TypeError: If the URI is not a string.
-            ValueError: If the URI does not start with "http://" or "https://".
-            ConnectionError: If the server cannot be connected to.
-        """
-
-        raise_if(TypeError, not isinstance(uri, str), 'The URI must be a string.')
-        raise_if(ValueError, not uri.startswith('http://') or uri.startswith('https://'),
-                 'The URI must start with "http://" or "https://".')
-
-        self._session = httpx.Client()
-
-        if uri.endswith('/'):
-            self.uri = uri[:-1]
-        else:
-            self.uri = uri
-
-        self.database_name = database_name
-
-    def require_collection(
-            self,
-            collection: str,
-            dim: int = None,
-            chunk_size: int = 100_000,
-            dtypes: str = 'float32',
-            use_cache: bool = True,
-            n_threads: Union[int, None] = 10,
-            warm_up: bool = False,
-            drop_if_exists: bool = False,
-            description: str = None,
-            cache_chunks: int = 20
-    ):
-        """
-        Create a collection.
-
-        Parameters:
-            collection (str): The name of the collection.
-            dim (int): The dimension of the vectors. Default is None.
-                When creating a new collection, the dimension of the vectors must be specified.
-                When loading an existing collection, the dimension of the vectors is automatically loaded.
-            chunk_size (int): The chunk size. Default is 100,000.
-            dtypes (str): The data types. Default is 'float32'.
-            use_cache (bool): Whether to use cache. Default is True.
-            n_threads (int): The number of threads. Default is 10.
-            warm_up (bool): Whether to warm up. Default is False.
-            drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
-            description (str): A description of the collection. Default is None.
-                The description is limited to 500 characters.
-            cache_chunks (int): The number of chunks to cache. Default is 20.
+        Get the index mode of the collection.
 
         Returns:
-            Collection: The collection object.
-
-        Raises:
-            ConnectionError: If the server cannot be connected to.
+            str: The index mode of the collection.
         """
-        uri = f'{self.uri}/required_collection'
-
-        data = {
-            "database_name": self.database_name,
-            "collection_name": collection,
-            "dim": dim,
-            "chunk_size": chunk_size,
-            "dtypes": dtypes,
-            "use_cache": use_cache,
-            "n_threads": n_threads,
-            "warm_up": warm_up,
-            "drop_if_exists": drop_if_exists,
-            "description": description,
-            "cache_chunks": cache_chunks
-        }
-
-        try:
-            response = self._session.post(uri, json=data)
-            if response.status_code == 200:
-                del data['collection_name']
-                del data['database_name']
-                collection = Collection(uri=self.uri, database_name=self.database_name,
-                                        collection_name=collection, **data)
-                return collection
-            else:
-                raise_error_response(response)
-        except httpx.RequestError:
-            raise ConnectionError(f'Failed to connect to the server at {uri}.')
-
-    def get_collection(self, collection: str, cache_chunks=20, warm_up=True):
-        """
-        Get a collection.
-
-        Parameters:
-            collection (str): The name of the collection.
-            cache_chunks (int): The number of chunks to cache. Default is 20.
-            warm_up (bool): Whether to warm up. Default is True.
-
-        Returns:
-            Collection: The collection object.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        uri = f'{self.uri}/is_collection_exists'
-        data = {"database_name": self.database_name, "collection_name": collection}
-        response = self._session.post(uri, json=data)
-
-        if response.status_code == 200 and response.json()['params']['exists']:
-            uri = f'{self.uri}/get_collection_config'
-            data = {"database_name": self.database_name, "collection_name": collection}
-            response = self._session.post(uri, json=data)
-
-            params = response.json()['params']['config']
-            params.update({'cache_chunks': cache_chunks, 'warm_up': warm_up})
-
-            return Collection(uri=self.uri, database_name=self.database_name, collection_name=collection,
-                              **params)
-        else:
-            raise_error_response(response)
-
-    def drop_collection(self, collection: str):
-        """
-        Drop a collection.
-
-        Parameters:
-            collection (str): The name of the collection.
-
-        Returns:
-            dict: The response from the server.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        try:
-            _ = self.get_collection(collection)
-        except ExecutionError:
-            pass
-
-        uri = f'{self.uri}/drop_collection'
-        data = {"database_name": self.database_name, "collection_name": collection}
-        return self._session.post(uri, json=data).json()
-
-    def drop_database(self):
-        """
-        Drop the database.
-
-        Returns:
-            dict: The response from the server.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        if not self.database_exists()['params']['exists']:
-            return {'status': 'success', 'message': 'The database does not exist.'}
-
-        uri = f'{self.uri}/drop_database'
-        data = {"database_name": self.database_name}
+        uri = f'{self._uri}/index_mode'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name}
         response = self._session.post(uri, json=data)
 
         if response.status_code == 200:
-            return response.json()
-        else:
-            raise_error_response(response)
-
-    def database_exists(self):
-        """
-        Check if the database exists.
-
-        Returns:
-            dict: The response from the server.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        uri = f'{self.uri}/database_exists'
-        data = {"database_name": self.database_name}
-        response = self._session.post(uri, json=data)
-
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise_error_response(response)
-
-    def show_collections(self):
-        """
-        Show all collections in the database.
-
-        Returns:
-            List: The list of collections.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        uri = f'{self.uri}/show_collections'
-        data = {"database_name": self.database_name}
-        response = self._session.post(uri, json=data)
-
-        if response.status_code == 200:
-            return response.json()['params']['collections']
-        else:
-            raise_error_response(response)
-
-    def set_environment(self, env: dict):
-        """
-        Set the environment variables.
-
-        Parameters:
-            env (dict): The environment variables. It can be specified on the same time or separately.
-                - LYNSE_LOG_LEVEL: The log level.
-                - LYNSE_LOG_PATH: The log path.
-                - LYNSE_TRUNCATE_LOG: Whether to truncate the log.
-                - LYNSE_LOG_WITH_TIME: Whether to log with time.
-                - LYNSE_KMEANS_EPOCHS: The number of epochs for KMeans.
-                - LYNSE_SEARCH_CACHE_SIZE: The search cache size.
-                - LYNSE_DATALOADER_BUFFER_SIZE: The dataloader buffer size.
-
-        Returns:
-            dict: The response from the server.
-
-        Raises:
-            TypeError: If the value of an environment variable is not a string.
-            ExecutionError: If the server returns an error.
-        """
-        uri = f'{self.uri}/set_environment'
-
-        env_list = ['LYNSE_LOG_LEVEL', 'LYNSE_LOG_PATH', 'LYNSE_TRUNCATE_LOG', 'LYNSE_LOG_WITH_TIME',
-                    'LYNSE_KMEANS_EPOCHS', 'LYNSE_SEARCH_CACHE_SIZE', 'LYNSE_DATALOADER_BUFFER_SIZE']
-
-        data = {"database_name": self.database_name}
-        for key in env:
-            if key in env_list:
-                raise_if(TypeError, not isinstance(env[key], str), f'The value of {key} must be a string.')
-                data[key] = env[key]
-
-        response = self._session.post(uri, json=data)
-
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise_error_response(response)
-
-    def get_environment(self):
-        """
-        Get the environment variables.
-
-        Returns:
-            dict: The response from the server.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        uri = f'{self.uri}/get_environment'
-        data = {"database_name": self.database_name}
-        response = self._session.post(uri, json=data)
-
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise_error_response(response)
-
-    def update_collection_description(self, collection: str, description: str):
-        """
-        Update the description of a collection.
-
-        Parameters:
-            collection (str): The name of the collection.
-            description (str): The description of the collection.
-
-        Returns:
-            dict: The response from the server.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        uri = f'{self.uri}/update_collection_description'
-        data = {"database_name": self.database_name, "collection_name": collection, "description": description}
-        response = self._session.post(uri, json=data)
-
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise_error_response(response)
-
-    def show_collections_details(self):
-        """
-        Show all collections in the database with details.
-
-        Returns:
-            pandas.DataFrame: The details of the collections.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        uri = f'{self.uri}/show_collections_details'
-        data = {"database_name": self.database_name}
-        response = self._session.post(uri, json=data)
-
-        if response.status_code == 200:
-            rj = response.json()['params']['collections']
-            try:
-                import pandas as pd
-                rj = pd.DataFrame(rj)
-            except ImportError:
-                ...
-
-            return rj
+            return response.json()['params']['index_mode']
         else:
             raise_error_response(response)
 
     def __repr__(self):
-        if self.database_exists()['params']['exists']:
-            return f"RemoteDatabaseInstance(name={self.database_name}, exists=True)"
-        else:
-            return f"RemoteDatabaseInstance(name={self.database_name}, exists=False)"
+        return collection_repr(self)
 
     def __str__(self):
         return self.__repr__()
