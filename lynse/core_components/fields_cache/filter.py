@@ -44,7 +44,7 @@ class MatchRange:
 class MatchField:
     name: str = 'MatchField'
 
-    def __init__(self, value, comparator=operator.eq, all_comparators=False):
+    def __init__(self, value, comparator=operator.eq, all_comparators=False, not_in=False):
         """
         Initialize a MatchField instance with a specific value and comparator.
 
@@ -54,10 +54,14 @@ class MatchField:
             all_comparators: Whether to apply the comparator to all values in the list or tuple.
                 If True, all values in the list or tuple must satisfy the comparison condition.
                 If False, at least one value in the list or tuple must satisfy the comparison condition.
+            not_in: Whether to negate the comparison condition.
         """
         self.value = value
         self.comparator = comparator
         self.all_comparators = all_comparators
+        self.not_in = not_in
+        raise_if(ValueError, all_comparators is True and not_in is True,
+                 "all_comparators and not_in cannot be True at the same time.")
 
     def match(self, data_value):
         """
@@ -70,10 +74,13 @@ class MatchField:
             bool: True if the data attribute matches the specified value, otherwise False.
         """
         if isinstance(self.value, (list, tuple)):
-            if self.all_comparators:
-                return all([self.comparator(data_value, value) for value in self.value])
+            if not self.not_in:
+                if self.all_comparators:
+                    return all([self.comparator(data_value, value) for value in self.value])
+                else:
+                    return data_value in self.value
             else:
-                return any([self.comparator(data_value, value) for value in self.value])
+                return data_value not in self.value
 
         return self.comparator(data_value, self.value)
 
@@ -112,12 +119,12 @@ class FieldCondition:
 
         Parameters:
             key: The key of the data attribute to compare.
-                If using MatchID, this should be the special key ':match_id:'.
+                If using MatchID, this should be the special key ':id:'.
             matcher: The MatchField, MatchID, or MatchRange instance to compare the data attribute with.
         """
         self.matcher = matcher
         if matcher is not None:
-            self.key = ':match_id:' if isinstance(matcher, MatchID) else key
+            self.key = ':id:' if isinstance(matcher, MatchID) else key
         else:
             self.key = key
 
@@ -134,7 +141,7 @@ class FieldCondition:
         Returns:
             bool: True if the data attribute matches the specified value, otherwise False.
         """
-        if self.key == ':match_id:':
+        if self.key == ':id:':
             attribute_value = external_id
         else:
             attribute_value = data.get(self.key)
@@ -142,7 +149,7 @@ class FieldCondition:
         if attribute_value is not None:
             return self.matcher.match(attribute_value)
         return False
-
+    
 
 class Filter:
     __slots__ = ['must_fields', 'any_fields', 'must_not_fields']
@@ -150,6 +157,8 @@ class Filter:
     def __init__(self, must=None, any=None, must_not=None):
         """
         Initialize a Filter instance with must and any conditions.
+
+        The filter result must satisfy both must_fields and any_fields, but not must_not_fields.
 
         Parameters:
             must: A list of conditions that must be satisfied.
@@ -177,9 +186,17 @@ class Filter:
         if must_not:
             for condition in must_not:
                 if isinstance(condition, FieldCondition):
+                    if isinstance(getattr(condition, "matcher"), MatchField):
+                        if condition.matcher.not_in:
+                            condition.matcher.not_in = False  # Needs to reverse the not_in flag in must_not conditions
+                            condition.matcher.all_comparators = False
                     self.must_not_fields.append(condition)
                 else:
                     raise ValueError("Invalid condition type.")
+
+        self.must_fields = self._to_unique_list(self.must_fields)
+        self.any_fields = self._to_unique_list(self.any_fields)
+        self.must_not_fields = self._to_unique_list(self.must_not_fields)
 
     def to_dict(self):
         """
@@ -196,7 +213,9 @@ class Filter:
                     'key': condition.key,
                     'matcher': {
                         'value': condition.matcher.value,
-                        'comparator': condition.matcher.comparator.__name__
+                        'comparator': condition.matcher.comparator.__name__,
+                        'all_comparators': condition.matcher.all_comparators,
+                        'not_in': condition.matcher.not_in
                     }
                 } if isinstance(condition.matcher, MatchField) else {
                     'key': condition.key,
@@ -213,7 +232,9 @@ class Filter:
                     'key': condition.key,
                     'matcher': {
                         'value': condition.matcher.value,
-                        'comparator': condition.matcher.comparator.__name__
+                        'comparator': condition.matcher.comparator.__name__,
+                        'all_comparators': condition.matcher.all_comparators,
+                        'not_in': condition.matcher.not_in
                     }
                 } if isinstance(condition.matcher, MatchField) else {
                     'key': condition.key,
@@ -230,7 +251,9 @@ class Filter:
                     'key': condition.key,
                     'matcher': {
                         'value': condition.matcher.value,
-                        'comparator': condition.matcher.comparator.__name__
+                        'comparator': condition.matcher.comparator.__name__,
+                        'all_comparators': condition.matcher.all_comparators,
+                        'not_in': condition.matcher.not_in
                     }
                 } if isinstance(condition.matcher, MatchField) else {
                     'key': condition.key,
@@ -255,12 +278,15 @@ class Filter:
 
         for condition in data.get('must_fields', []):
             if 'ids' in condition:
-                self.must_fields.append(FieldCondition(':match_id:', MatchID(condition['ids'])))
+                self.must_fields.append(FieldCondition(':id:', MatchID(condition['ids'])))
             elif 'value' in condition['matcher']:
                 self.must_fields.append(FieldCondition(condition['key'],
                                                        MatchField(
                                                            condition['matcher']['value'],
-                                                           getattr(operator, condition['matcher']['comparator']))))
+                                                           getattr(operator, condition['matcher']['comparator']),
+                                                           condition['matcher']['all_comparators'],
+                                                           condition['matcher']['not_in']
+                                                       )))
             else:
                 self.must_fields.append(FieldCondition(condition['key'],
                                                        MatchRange(
@@ -270,12 +296,15 @@ class Filter:
 
         for condition in data.get('any_fields', []):
             if 'ids' in condition:
-                self.any_fields.append(FieldCondition(':match_id:', MatchID(condition['ids'])))
+                self.any_fields.append(FieldCondition(':id:', MatchID(condition['ids'])))
             elif 'value' in condition['matcher']:
                 self.any_fields.append(FieldCondition(condition['key'],
                                                       MatchField(
                                                           condition['matcher']['value'],
-                                                          getattr(operator, condition['matcher']['comparator']))))
+                                                          getattr(operator, condition['matcher']['comparator']),
+                                                          condition['matcher']['all_comparators'],
+                                                          condition['matcher']['not_in']
+                                                      )))
             else:
                 self.any_fields.append(FieldCondition(condition['key'],
                                                       MatchRange(
@@ -285,19 +314,66 @@ class Filter:
 
         for condition in data.get('must_not_fields', []):
             if 'ids' in condition:
-                self.must_not_fields.append(FieldCondition(':match_id:', MatchID(condition['ids'])))
+                self.must_not_fields.append(FieldCondition(':id:', MatchID(condition['ids'])))
             elif 'value' in condition['matcher']:
                 self.must_not_fields.append(FieldCondition(
                     condition['key'], MatchField(
                         condition['matcher']['value'],
-                        getattr(operator, condition['matcher']['comparator']))))
+                        getattr(operator, condition['matcher']['comparator']),
+                        condition['matcher']['all_comparators'],
+                        condition['matcher']['not_in']
+                    )))
             else:
                 self.must_not_fields.append(FieldCondition(
                     condition['key'], MatchRange(
                         condition['matcher']['start'],
                         condition['matcher']['end'],
                         condition['matcher']['inclusive'])))
+        
+        self.must_fields = self._to_unique_list(self.must_fields)
+        self.any_fields = self._to_unique_list(self.any_fields)
+        self.must_not_fields = self._to_unique_list(self.must_not_fields)
+        
         return self
 
+    @staticmethod
+    def _to_unique_list(conditions):
+        """
+        Remove duplicate conditions from the list.
+
+        Parameters:
+            conditions: The list of conditions to remove duplicates from.
+
+        Returns:
+            list: A list of conditions with duplicates removed.
+        """
+        unique_conditions = []
+        for condition in conditions:
+            if not any(Filter._conditions_equal(condition, unique_cond) for unique_cond in unique_conditions):
+                unique_conditions.append(condition)
+        return unique_conditions
+
+    @staticmethod
+    def _conditions_equal(cond1, cond2):
+        """
+        Compare two FieldCondition objects for equality.
+
+        Parameters:
+            cond1: The first FieldCondition object.
+            cond2: The second FieldCondition object.
+
+        Returns:
+            bool: True if the conditions are equal, False otherwise.
+        """
+        if not isinstance(cond1, FieldCondition) or not isinstance(cond2, FieldCondition):
+            return False
+        if cond1.key != cond2.key:
+            return False
+        if type(cond1.matcher) != type(cond2.matcher):
+            return False
+        if isinstance(cond1.matcher, (MatchField, MatchID, MatchRange)):
+            return cond1.matcher.__dict__ == cond2.matcher.__dict__
+        return cond1.matcher == cond2.matcher
+    
     def __hash__(self):
         return hash(msgpack.packb(self.to_dict()))
