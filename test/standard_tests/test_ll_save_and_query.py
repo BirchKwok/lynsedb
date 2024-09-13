@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -411,29 +412,30 @@ def test_result_order():
                        'IVF-Cos-SQ8', 'IVF-Cos', 'IVF-Jaccard-Binary', 'IVF-Hamming-Binary',
                        'Flat-IP-SQ8', 'Flat-IP', 'Flat-L2sq-SQ8', 'Flat-L2sq', 'Flat-Cos-SQ8', 'Flat-Cos',
                        'Flat-Jaccard-Binary', 'Flat-Hamming-Binary']:
-        db = ExclusiveDB(dim=1024, database_path='test_local_db',
-                         chunk_size=10000)
+        with threading.RLock():
+            db = ExclusiveDB(dim=10, database_path='test_local_db',
+                            chunk_size=10000)
 
-        # You can perform this operation multiple times, and the data will be appended to the database.
-        with db.insert_session():
-            # Define the initial ID.
-            id = 0
-            vectors = []
-            for t in get_test_vectors((100000, 1024)):
-                if id == 0:
-                    query = t
-                vectors.append((t, id))
-                id += 1
+            # You can perform this operation multiple times, and the data will be appended to the database.
+            with db.insert_session():
+                # Define the initial ID.
+                id = 0
+                vectors = []
+                for t in get_test_vectors((100000, 10)):
+                    if id == 0:
+                        query = t
+                    vectors.append((t, id))
+                    id += 1
 
-            # Here, normalization can be directly specified, achieving the same effect as `t = t / np.linalg.norm(t) `.
-            db.bulk_add_items(vectors)
+                # Here, normalization can be directly specified, achieving the same effect as `t = t / np.linalg.norm(t) `.
+                db.bulk_add_items(vectors)
 
-        db.build_index(index_mode=index_mode)
-        index, score, field = db.search(query, k=10)
+            db.build_index(index_mode=index_mode)
+            index, score, field = db.search(query, k=10)
 
-        assert len(index) == len(score) == 10
+            assert len(index) == len(score) == 10
 
-        db.delete()
+            db.delete()
 
 
 def test_transactions():
