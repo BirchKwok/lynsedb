@@ -8,7 +8,6 @@ from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
 from tqdm import tqdm
 
-from ..core_components.locks import ThreadLock
 from ..core_components.id_checker import IDChecker
 from ..core_components.fields_cache import FieldsCache
 from ..storage_layer.storage import PersistentFileStorage
@@ -75,8 +74,6 @@ class MatrixSerializer:
 
         self._initialize_fields_index()
         self._initialize_id_checker()
-
-        self.threadlock = ThreadLock()
 
         # log_dir exists and not empty
         if self.wal_worker.log_dir.exists() and any(self.wal_worker.log_dir.iterdir()):
@@ -169,7 +166,8 @@ class MatrixSerializer:
                 self.indexer.index_insert(data, ids)
 
         if hasattr(self, "indexer"):
-            self.indexer.ivf_insert(last_filename)
+            if self.indexer.ivf is not None:
+                self.indexer.ivf_insert(last_filename)
             # update filenames
             self.indexer.update_filenames()
 
@@ -181,25 +179,24 @@ class MatrixSerializer:
         """
         Save the collection, ensuring that all data is written to disk.
         """
-        with self.threadlock:
-            if not self.COMMIT_FLAG:
-                self.logger.info('Saving data...')
-                if hasattr(self, 'buffer'):
-                    if len(self.buffer) > 0:
-                        self.bulk_add_items(self.buffer)
+        if not self.COMMIT_FLAG:
+            self.logger.info('Saving data...')
+            if hasattr(self, 'buffer'):
+                if len(self.buffer) > 0:
+                    self.bulk_add_items(self.buffer)
 
-                self.commit_data()
+            self.commit_data()
 
-                # save id filter
-                self.logger.debug('Saving id filter...')
-                self.id_filter.to_file(self.filter_path)
+            # save id filter
+            self.logger.debug('Saving id filter...')
+            self.id_filter.to_file(self.filter_path)
 
-                # remove buffer
-                self._remove_buffer()
+            # remove buffer
+            self._remove_buffer()
 
-                self.COMMIT_FLAG = True
+            self.COMMIT_FLAG = True
 
-                self.last_commit_time = datetime.now()
+            self.last_commit_time = datetime.now()
 
     def _process_vector_item(self, vector, index, field):
         if index in self.id_filter:
@@ -298,7 +295,7 @@ class MatrixSerializer:
             self.buffer.append((vector, id, field))
 
     def add_item(self, vector, id: int, field: dict = None,
-                 buffer_size: Union[None, int, bool] = None) -> int:
+                 buffer_size: Union[None, int, bool] = True) -> int:
         """
         Add a single vector to the collection.
 
@@ -309,7 +306,7 @@ class MatrixSerializer:
             id (int): The ID of the vector.
             field (dict, optional, keyword-only): The field of the vector. Default is None.
                 If None, the field will be set to an empty string.
-            buffer_size (int or bool or None): The buffer size for the storage worker. Default is None.
+            buffer_size (int or bool or None): The buffer size for the storage worker. Default is True.
                 If None, the vector will be directly written to the disk.
                 If True, the buffer_size will be set to chunk_size,
                     and the vectors will be written to the disk when the buffer is full.
@@ -349,30 +346,28 @@ class MatrixSerializer:
 
     def delete(self):
         """Delete collection."""
-        with self.threadlock:
-            if not self.collections_path_parent.exists():
-                return None
+        if not self.collections_path_parent.exists():
+            return None
 
-            try:
-                shutil.rmtree(self.collections_path_parent)
-            except FileNotFoundError:
-                pass
+        try:
+            shutil.rmtree(self.collections_path_parent)
+        except FileNotFoundError:
+            pass
 
-            self.IS_DELETED = True
+        self.IS_DELETED = True
 
-            self._initialize_fields_index()
-            self._initialize_id_checker()
+        self._initialize_fields_index()
+        self._initialize_id_checker()
 
-            # clear cache
-            self.storage_worker.clear_cache()
+        # clear cache
+        self.storage_worker.clear_cache()
 
-            # stop wal
-            self.wal_worker.stop()
+        # stop wal
+        self.wal_worker.stop()
 
     @property
     def shape(self):
         """
         Get the shape of the collection.
         """
-        with self.threadlock:
-            return tuple(self.storage_worker.get_shape(read_type='all'))
+        return tuple(self.storage_worker.get_shape(read_type='all'))
