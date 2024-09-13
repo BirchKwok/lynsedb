@@ -42,3 +42,46 @@ class IDChecker:
 
     def find_max_value(self):
         return max(self.ids) if self.ids else -1
+
+    def filter_ids(self, matcher):
+        """
+        Filter the IDs based on the matcher.
+
+        Parameters:
+            matcher: Matcher
+                The matcher to use for filtering.
+
+        Returns:
+            List[int]: The filtered IDs.
+        """
+        if matcher.matcher.name == "MatchField":
+            comparator_name = matcher.matcher.comparator.__name__
+            value = matcher.matcher.value
+
+            if comparator_name == 'eq':
+                return [value] if value in self.ids else []
+            elif comparator_name == 'ne':
+                return list(self.ids - BitMap([value]))
+            elif comparator_name == 'le':
+                return [id for id in self.ids if id <= value]
+            elif comparator_name == 'ge':
+                return [id for id in self.ids if id >= value]
+            elif comparator_name == 'lt':
+                return [id for id in self.ids if id < value]
+            elif comparator_name == 'gt':
+                return [id for id in self.ids if id > value]
+        elif matcher.matcher.name == "MatchRange":
+            start, end, inclusive = matcher.matcher.start, matcher.matcher.end, matcher.matcher.inclusive
+            if inclusive is True:
+                return [id for id in self.ids if start <= id <= end]
+            elif inclusive is False:
+                return [id for id in self.ids if start < id < end]
+            elif inclusive == "left":
+                return [id for id in self.ids if start <= id < end]
+            elif inclusive == "right":
+                return [id for id in self.ids if start < id <= end]
+        
+        return [id for id in self.ids if matcher.evaluate(data=None, external_id=id)]
+    
+    def retrieve_all_ids(self, return_set=False):
+        return list(self.ids) if not return_set else set(self.ids)
