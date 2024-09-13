@@ -109,7 +109,7 @@ def unavailable_if_empty(func):
 
 
 def load_chunk_file(filename):
-    np_array = np.load(filename, mmap_mode='r')
+    np_array = np.asarray(np.load(filename, mmap_mode='r'))
     return np_array
 
 
