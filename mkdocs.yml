@@ -1,0 +1,101 @@
+site_name: LynseDB
+
+theme:
+  name: material  # 使用 Material 主题（可选）
+  logo: img/logo.png
+  favicon: img/favicon.png
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.top
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.path
+    - toc.integrate
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.select
+    - content.code.annotate
+
+  extra:
+    version:
+      provider: mike
+      alias: true
+
+  palette:
+
+    # Palette toggle for automatic mode
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default 
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    # Palette toggle for dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  
+  font:
+    text: false
+    code: Roboto Mono
+
+markdown_extensions:
+  - toc:
+      permalink: true
+      permalink_class: headerlink
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google  # 使用 Google 风格的 docstring
+            show_source: true        # 显示源码链接
+            sort: source
+            render_markdown: true
+
+extra:
+  paths:
+    - lynse
+
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Tutorials:
+    - Add vectors: tutorials/add_vectors.md
+  - FieldExpression: FieldExpression.md
+  - API Reference:
+    - Client Distribution: client.md
+    - HTTP API:
+      - App: http_api/serve_api/app.md
+      - HTTP Serve: 
+        - Collection: http_api/serve_api/collection_ops.md
+        - Database: http_api/serve_api/database_ops.md
+      - HTTP Client: http_api/client_api.md
+    - Native API:
+      - ExclusiveDB: native_api/low_level.md
+      - Local Client: native_api/high_level.md
+
+repo_url: https://github.com/BirchKwok/LynseDB
+repo_name: birchkwok/LynseDB
