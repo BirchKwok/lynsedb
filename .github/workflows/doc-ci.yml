@@ -34,7 +34,7 @@ jobs:
             mkdocs-material-
 
       # Install MkDocs, Mike, and theme
-      - run: pip install mkdocs-material mike
+      - run: pip install mkdocs-material mike mkdocstrings-python
 
       # Build and deploy using mike
       - run: |
