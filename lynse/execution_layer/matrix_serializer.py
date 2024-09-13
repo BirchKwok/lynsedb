@@ -8,6 +8,7 @@ from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
 from tqdm import tqdm
 
+from ..core_components.locks import ThreadLock
 from ..core_components.id_checker import IDChecker
 from ..core_components.fields_cache import FieldsCache
 from ..storage_layer.storage import PersistentFileStorage
@@ -51,6 +52,8 @@ class MatrixSerializer:
         self.IS_DELETED = False
 
         self.logger = logger
+
+        self.threadlock = ThreadLock()
 
         # set parent path
         self._initialize_components_path(collection_path)
@@ -179,24 +182,25 @@ class MatrixSerializer:
         """
         Save the collection, ensuring that all data is written to disk.
         """
-        if not self.COMMIT_FLAG:
-            self.logger.info('Saving data...')
-            if hasattr(self, 'buffer'):
-                if len(self.buffer) > 0:
-                    self.bulk_add_items(self.buffer)
+        with self.threadlock:
+            if not self.COMMIT_FLAG:
+                self.logger.info('Saving data...')
+                if hasattr(self, 'buffer'):
+                    if len(self.buffer) > 0:
+                        self.bulk_add_items(self.buffer)
 
-            self.commit_data()
+                self.commit_data()
 
-            # save id filter
-            self.logger.debug('Saving id filter...')
-            self.id_filter.to_file(self.filter_path)
+                # save id filter
+                self.logger.debug('Saving id filter...')
+                self.id_filter.to_file(self.filter_path)
 
-            # remove buffer
-            self._remove_buffer()
+                # remove buffer
+                self._remove_buffer()
 
-            self.COMMIT_FLAG = True
+                self.COMMIT_FLAG = True
 
-            self.last_commit_time = datetime.now()
+                self.last_commit_time = datetime.now()
 
     def _process_vector_item(self, vector, index, field):
         if index in self.id_filter:
@@ -346,28 +350,30 @@ class MatrixSerializer:
 
     def delete(self):
         """Delete collection."""
-        if not self.collections_path_parent.exists():
-            return None
+        with self.threadlock:
+            if not self.collections_path_parent.exists():
+                return None
 
-        try:
-            shutil.rmtree(self.collections_path_parent)
-        except FileNotFoundError:
-            pass
+            try:
+                shutil.rmtree(self.collections_path_parent)
+            except FileNotFoundError:
+                pass
 
-        self.IS_DELETED = True
+            self.IS_DELETED = True
 
-        self._initialize_fields_index()
-        self._initialize_id_checker()
+            self._initialize_fields_index()
+            self._initialize_id_checker()
 
-        # clear cache
-        self.storage_worker.clear_cache()
+            # clear cache
+            self.storage_worker.clear_cache()
 
-        # stop wal
-        self.wal_worker.stop()
+            # stop wal
+            self.wal_worker.stop()
 
     @property
     def shape(self):
         """
         Get the shape of the collection.
         """
-        return tuple(self.storage_worker.get_shape(read_type='all'))
+        with self.threadlock:
+            return tuple(self.storage_worker.get_shape(read_type='all'))
