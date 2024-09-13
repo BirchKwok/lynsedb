@@ -39,6 +39,14 @@ class _InstanceDistributor:
 
 
 class VectorDBClient:
+    """
+    This class determines whether it is local or remote based on the URI, thereby implementing the distribution of local and remote client communication.
+    The data storage location is also determined accordingly.
+
+    - **When `uri` is None**: The local client is used by default, and the data is stored under the default root path.
+    - **When `uri` is a local path**: The local client is used, and the data is stored under the specified path.
+    - **When `uri` is a remote URL**: The remote client is used, and the data is stored on the remote server.
+    """
     def __init__(self, uri: Union[str, None, Path] = None):
         """
         Initialize the LynseDB client.
@@ -225,7 +233,7 @@ class VectorDBClient:
         return self.__repr__()
 
 
-def load_and_register_module(module):
+def _load_and_register_module(module):
     """Dynamically import and register a module under the current module namespace."""
     import importlib
     import sys
@@ -248,4 +256,4 @@ def load_and_register_module(module):
     sys.modules[f'{current_module_name}.{module_name}'] = module
 
 
-load_and_register_module(field_models)
+_load_and_register_module(field_models)
