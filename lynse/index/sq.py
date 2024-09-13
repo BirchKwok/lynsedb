@@ -1,10 +1,9 @@
 import numpy as np
 import cloudpickle
-import simsimd
 from spinesUtils.asserts import raise_if
 
 from .base import BaseIndex
-from ..computational_layer.engines import inner_product_distance as ip
+from ..computational_layer.engines import inner_product as ip, l2sq, cosine
 
 
 class _IndexSQ(BaseIndex):
@@ -27,10 +26,8 @@ class _IndexSQ(BaseIndex):
         """
         Fit the model with the entire dataset to determine the global minimum and maximum range values.
 
-        Parameters
-        ----------
-        vectors : np.ndarray
-            The vectors to fit the model with.
+        Parameters:
+            vectors (np.ndarray): The input data.
         """
         self.min_vals = np.min(vectors, axis=0)
         self.max_vals = np.max(vectors, axis=0)
@@ -92,9 +89,14 @@ class _IndexSQ(BaseIndex):
         Pre-select the top-k indices and values.
         """
         encoded_vec = self.encode(vec)
-        dis = simsimd.dot(encoded_vec, data)
-        pre_select_ids = self.sort_dis(dis, top_k=topk, ascending=False, backend='numpy')[0]
+        pre_select_ids = cosine(encoded_vec, data, n=topk, use_simd=False)[0]
         return self.decode(data[pre_select_ids]), ids[pre_select_ids]
+
+    @staticmethod
+    def _input_dtype_convert(original_vec, decoded_data):
+        if original_vec.dtype != decoded_data.dtype:
+            original_vec = original_vec.astype(decoded_data.dtype)
+        return original_vec
 
     def compute_l2_distance(self, vec, mat, topk):
         """
@@ -109,11 +111,9 @@ class _IndexSQ(BaseIndex):
         Returns:
             np.ndarray: The L2 distance between the query vector and the quantized matrix.
         """
-        dis = simsimd.sqeuclidean(vec, mat)
-        return self.sort_dis(dis, top_k=topk, ascending=True, backend='numpy')
+        return l2sq(vec, mat, n=topk, use_simd=True)
 
-    @staticmethod
-    def compute_inner_product(vec, mat, topk):
+    def compute_inner_product(self, vec, mat, topk):
         """
         Compute the inner product between the query vector and the quantized matrix.
 
@@ -125,7 +125,7 @@ class _IndexSQ(BaseIndex):
         Returns:
             np.ndarray: The inner product between the query vector and the quantized matrix.
         """
-        return ip(vec, mat, n=topk)
+        return ip(self._input_dtype_convert(vec, mat), mat, n=topk, use_simd=False)
 
     def compute_cosine_similarity(self, vec, mat, topk):
         """
@@ -139,8 +139,7 @@ class _IndexSQ(BaseIndex):
         Returns:
             np.ndarray: The cosine similarity between the query vector and the quantized matrix.
         """
-        res = simsimd.cosine(vec, mat)
-        return self.sort_dis(res, top_k=topk, ascending=True, backend='numpy')
+        return cosine(self._input_dtype_convert(vec, mat), mat, n=topk, use_simd=False)
 
     def save(self, filepath):
         """
@@ -268,7 +267,6 @@ class IndexSQIP(_IndexSQ):
 
         decoded_data, ids = self._pre_select_topk(original_vec, encoded_data, ids,
                                                   top_k * rescore_multiplier)
-
         _ids, scores = self.compute_inner_product(original_vec, decoded_data, topk=top_k)
         return ids[_ids], scores * -1
 
