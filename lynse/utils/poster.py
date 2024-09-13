@@ -2,7 +2,7 @@ import httpx
 
 
 class Poster:
-    def __init__(self, retries=3, timeout=None, http2=True):
+    def __init__(self, retries=3, timeout=None, http2=False):
         """
         A class for making HTTP requests.
 
