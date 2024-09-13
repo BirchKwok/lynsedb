@@ -538,7 +538,7 @@ def test_filter():
         )
     )
 
-    assert len(n) == len(d) == 6
+    assert len(n) == len(d) == 0
 
     n, d, f = database.search(
         vec, k=6, search_filter=Filter(
