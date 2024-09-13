@@ -43,7 +43,7 @@ def main():
 
 def launch_in_jupyter(host: str = '127.0.0.1', port: int = 7637, threads: int = 10):
     """
-    Launch the HTTP API server in Jupyter notebook.
+    Launch the HTTP API server in Python environment.
 
     Parameters:
         host (str): The host to bind to. Default is '127.0.0.1'
@@ -53,7 +53,6 @@ def launch_in_jupyter(host: str = '127.0.0.1', port: int = 7637, threads: int = 
     Returns:
         None
     """
-    # use another thread to start the server
     import threading
     if host == '0.0.0.0':
         local_ip = get_local_ip()
