@@ -135,6 +135,8 @@ class _Register:
 class LocalClient:
     """
     A singleton class for the local LynseDB client.
+    Using the LocalClient class, users can create and access database instances, 
+    as well as operate on the collections within them (Low-Level API).
     This class is thread-safe only. Using it in multiple processes will result in a race condition.
     """
     _instance = None
@@ -143,6 +145,12 @@ class LocalClient:
     def __new__(cls, root_path: Union[Path, str]):
         """
         Create a new instance or return the existing instance of the class.
+
+        Parameters:
+            root_path (Path or str): The root path of the database.
+
+        Returns:
+            LocalClient (LocalClient): The instance of the class.
         """
         if cls._instance is not None and cls._last_root_path != root_path:
             cls._instance = None
@@ -256,7 +264,7 @@ class LocalClient:
             warm_up (bool): Whether to warm up the database. Default is True.
 
         Returns:
-            ExclusiveDB: The collection.
+            (ExclusiveDB): The collection.
         """
         from ...api.native_api.low_level import ExclusiveDB
 
@@ -282,7 +290,7 @@ class LocalClient:
                 Which means share the data with the original collection.
 
         Returns:
-            ExclusiveDB: The copied collection.
+            (ExclusiveDB): The copied collection.
 
         Raises:
             NotImplementedError: This method is not implemented yet.
@@ -295,7 +303,7 @@ class LocalClient:
         Show the collections in the database.
 
         Returns:
-            list: The list of collections in the database.
+            List: The list of collections in the database.
         """
         return self._register.show_collections()
 
@@ -306,6 +314,9 @@ class LocalClient:
 
         Parameters:
             collection (str): The name of the collection to delete.
+
+        Returns:
+            None
         """
 
         if collection in self._collections:
@@ -331,6 +342,9 @@ class LocalClient:
     def drop_database(self):
         """
         Delete the database.
+
+        Returns:
+            None
         """
         if self.STATUS == 'DELETED':
             return
@@ -348,6 +362,9 @@ class LocalClient:
         Parameters:
             collection (str): The name of the collection.
             description (None or str or int or float or bool): The description of the collection.
+
+        Returns:
+            None
         """
         self._register.update_description(collection, description)
 
@@ -356,18 +373,27 @@ class LocalClient:
         Show the collections in the database.
 
         Returns:
-            list: The list of collections in the database.
+            (Dict or DataFrame): The details of the collections in the database.
         """
         return self._register.show_collections_details()
 
     def database_exists(self):
         """
         Check if the database exists.
+
+        Returns:
+            (Bool): Whether the database exists.
         """
         return self._root_path.exists()
 
     @property
     def root_path(self):
+        """
+        Get the root path of the database.
+
+        Returns:
+            (str): The root path of the database.
+        """
         return self._root_path.as_posix()
 
     def __repr__(self):
