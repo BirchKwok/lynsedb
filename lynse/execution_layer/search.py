@@ -4,6 +4,7 @@ import numpy as np
 from spinesUtils.asserts import check_has_param
 
 from ..configs.config import config
+from ..core_components.fields_cache import ExpressionParser
 from ..execution_layer.matrix_serializer import MatrixSerializer
 from ..utils.utils import SearchResultsCache
 from ..core_components.limited_sort import LimitedSorted
@@ -185,11 +186,11 @@ class Search:
         )
 
     @SearchResultsCache(config.LYNSE_SEARCH_CACHE_SIZE, config.LYNSE_SEARCH_CACHE_EXPIRE_SECONDS)
-    def _single_search(self, vector, k=12, search_filter=None, return_fields=False, **kwargs):
+    def single_search(self, vector, k=12, search_filter=None, return_fields=False, **kwargs):
         """
         Search the database for the vectors most similar to the given vector in batches.
         """
-        if self.matrix_serializer.indexer.index_mode.split('-')[-1] not in ['SQ8', 'Jaccard', 'Hamming']:
+        if self.matrix_serializer.indexer.index_mode.split('-')[-1] not in ['SQ8', 'Binary']:
             res_ids, res_scores = self._flat_search(vector, k, search_filter)
         else:
             params = {
@@ -216,7 +217,7 @@ class Search:
 
         return res_ids, res_scores, res_fields
 
-    def _multi_search(self, vectors, k=12, search_filter=None, return_fields=False, **kwargs):
+    def multi_search(self, vectors, k=12, search_filter=None, return_fields=False, **kwargs):
         """
         Search the database for the vectors most similar to the given vectors in batches.
         """
@@ -224,11 +225,8 @@ class Search:
         scores = []
         fields = []
 
-        if len(vectors.shape) == 1:
-            vectors = vectors.reshape(1, -1)
-
         for i, vector in enumerate(vectors):
-            res_ids, res_scores, res_fields = self._single_search(vector, k, search_filter, return_fields, **kwargs)
+            res_ids, res_scores, res_fields = self.single_search(vector, k, search_filter, return_fields, **kwargs)
             ids.append(res_ids)
             scores.append(res_scores)
             fields.append(res_fields)
@@ -244,7 +242,7 @@ class Search:
                 The vectors must have the same dimension as the vectors in the database,
                 and the type of vector can be a list or a numpy array.
             k (int): The number of nearest vectors to return.
-            search_filter (Filter, optional): The field filter to apply to the search.
+            search_filter (Filter or FilterExpression string, optional): The filter to apply to the search.
             return_fields (bool): Whether to return the fields of the search results.
             kwargs: Additional keyword arguments. The following are valid:
                 rescore (bool): Whether to rescore the results of binary or scaler quantization searches.
@@ -267,10 +265,13 @@ class Search:
         if not isinstance(vector, np.ndarray):
             vector = np.asarray(vector).squeeze()
 
+        if isinstance(search_filter, str):
+            search_filter = ExpressionParser(search_filter).to_filter()
+
         if vector.shape[0] > 1:
-            return self._multi_search(vector, k, search_filter, return_fields, **kwargs)
+            return self.multi_search(vector, k, search_filter, return_fields, **kwargs)
         else:
-            return self._single_search(vector, k, search_filter, return_fields, **kwargs)
+            return self.single_search(vector, k, search_filter, return_fields, **kwargs)
 
     def __del__(self):
         if self.executors is not None:
