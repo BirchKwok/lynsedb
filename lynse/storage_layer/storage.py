@@ -42,11 +42,12 @@ class PersistentFileStorage:
             self.dataloader.warm_up()
 
     def initialize_fingerprint(self):
-        if self.fingerprint_path.exists():
-            with open(self.fingerprint_path, 'r') as f:
-                self.fingerprint = f.readlines()[-1].strip()
-        else:
-            self.fingerprint: Union[str, None] = None
+        with self.lock:
+            if self.fingerprint_path.exists():
+                with open(self.fingerprint_path, 'r') as f:
+                    self.fingerprint = f.readlines()[-1].strip()
+            else:
+                self.fingerprint: Union[str, None] = None
 
     def file_exists(self):
         """Check if the file exists."""
@@ -79,9 +80,10 @@ class PersistentFileStorage:
         return -1
 
     def update_fingerprint(self):
-        self.fingerprint = uuid.uuid4().hex
-        with open(self.fingerprint_path, 'a') as f:
-            f.write(self.fingerprint + '\n')
+        with self.lock:
+            self.fingerprint = uuid.uuid4().hex
+            with open(self.fingerprint_path, 'a') as f:
+                f.write(self.fingerprint + '\n')
 
     @staticmethod
     def _write_to_disk(data, indices, data_path, indices_path, filename):
@@ -92,101 +94,103 @@ class PersistentFileStorage:
             np.save(f, indices)
 
     def _incremental_write(self, data, indices):
-        if not isinstance(data, np.ndarray):
-            data = np.vstack(data)
+        with self.lock:
+            if not isinstance(data, np.ndarray):
+                data = np.vstack(data)
 
-        if not isinstance(indices, np.ndarray):
-            indices = np.array(indices)
+            if not isinstance(indices, np.ndarray):
+                indices = np.array(indices)
 
-        collection_subfile_path = self.collection_chunk_path
-        collection_indices_path = self.collection_chunk_indices_path
-        file_prefix = 'chunk'
+            collection_subfile_path = self.collection_chunk_path
+            collection_indices_path = self.collection_chunk_indices_path
+            file_prefix = 'chunk'
 
-        last_file_id = self.get_last_id()
+            last_file_id = self.get_last_id()
 
-        # read info file to get the shape of the data
-        # file shape
-        # save the total shape of the data
-        if not (self.collection_path / 'info.json').exists():
-            total_shape = [0, self.dimension]
-            with open(self.collection_path / 'info.json', 'w') as f:
-                json.dump({"total_shape": total_shape}, f)
-        else:
-            with open(self.collection_path / 'info.json', 'r') as f:
-                total_shape = json.load(f)['total_shape']
+            # read info file to get the shape of the data
+            # file shape
+            # save the total shape of the data
+            if not (self.collection_path / 'info.json').exists():
+                total_shape = [0, self.dimension]
+                with open(self.collection_path / 'info.json', 'w') as f:
+                    json.dump({"total_shape": total_shape}, f)
+            else:
+                with open(self.collection_path / 'info.json', 'r') as f:
+                    total_shape = json.load(f)['total_shape']
 
-        # after quantization, the disk data and memory data will be changed to quantized data
-        if self.quantizer is not None:
-            data = self.quantizer.fit_transform(data)
+            # after quantization, the disk data and memory data will be changed to quantized data
+            if self.quantizer is not None:
+                data = self.quantizer.fit_transform(data)
 
-        data_shape = len(data)
+            data_shape = len(data)
 
-        # new file
-        if total_shape[0] % self.chunk_size == 0 or last_file_id == -1:
-            while len(data) != 0:
-                last_file_id = self.get_last_id()
+            # new file
+            if total_shape[0] % self.chunk_size == 0 or last_file_id == -1:
+                while len(data) != 0:
+                    last_file_id = self.get_last_id()
 
-                temp_data = data[:self.chunk_size]
-                temp_indices = indices[:self.chunk_size]
+                    temp_data = data[:self.chunk_size]
+                    temp_indices = indices[:self.chunk_size]
 
-                data = data[self.chunk_size:]
-                indices = indices[self.chunk_size:]
-
-                filename = f'{file_prefix}_{last_file_id + 1}'
-                # save data
-                self._write_to_disk(temp_data, temp_indices, collection_subfile_path, collection_indices_path,
-                                    filename)
-
-                self._write_to_memory(filename, temp_data, temp_indices)
-        # append data to the last file
-        else:
-            already_stack = False
-            while len(data) != 0:
-                last_file_id = self.get_last_id()
-                # run once
-                if not already_stack:
-                    temp_index = self.chunk_size - (total_shape[0] % self.chunk_size)
-                    temp_data = data[:temp_index]
-                    temp_indices = indices[:temp_index]
-
-                    data = data[temp_index:]
-                    indices = indices[temp_index:]
-                    already_stack = True
-
-                    # save data
-                    old_data = np.load(collection_subfile_path / f'{file_prefix}_{last_file_id}')
-                    temp_data = np.vstack((old_data, temp_data))
-                    # save indices
-                    old_indices = np.load(collection_indices_path / f'{file_prefix}_{last_file_id}')
-                    temp_indices = np.concatenate((old_indices, temp_indices))
-
-                    filename = f'{file_prefix}_{last_file_id}'
-                    self._write_to_disk(temp_data, temp_indices, collection_subfile_path,
-                                        collection_indices_path, filename)
-
-                    self._write_to_memory(filename, temp_data, temp_indices)
-                else:
-                    temp_index = min(self.chunk_size, len(data))
-                    temp_data = data[:temp_index]
-                    temp_indices = indices[:temp_index]
-
-                    data = data[temp_index:]
-                    indices = indices[temp_index:]
+                    data = data[self.chunk_size:]
+                    indices = indices[self.chunk_size:]
 
                     filename = f'{file_prefix}_{last_file_id + 1}'
-                    self._write_to_disk(temp_data, temp_indices, collection_subfile_path,
-                                        collection_indices_path, filename)
+                    # save data
+                    self._write_to_disk(temp_data, temp_indices, collection_subfile_path, collection_indices_path,
+                                        filename)
 
                     self._write_to_memory(filename, temp_data, temp_indices)
+            # append data to the last file
+            else:
+                already_stack = False
+                while len(data) != 0:
+                    last_file_id = self.get_last_id()
+                    # run once
+                    if not already_stack:
+                        temp_index = self.chunk_size - (total_shape[0] % self.chunk_size)
+                        temp_data = data[:temp_index]
+                        temp_indices = indices[:temp_index]
 
-        with open(self.collection_path / 'info.json', 'w') as f:
-            total_shape[0] += data_shape
-            json.dump({"total_shape": total_shape}, f)
+                        data = data[temp_index:]
+                        indices = indices[temp_index:]
+                        already_stack = True
+
+                        # save data
+                        old_data = np.load(collection_subfile_path / f'{file_prefix}_{last_file_id}')
+                        temp_data = np.vstack((old_data, temp_data))
+                        # save indices
+                        old_indices = np.load(collection_indices_path / f'{file_prefix}_{last_file_id}')
+                        temp_indices = np.concatenate((old_indices, temp_indices))
+
+                        filename = f'{file_prefix}_{last_file_id}'
+                        self._write_to_disk(temp_data, temp_indices, collection_subfile_path,
+                                            collection_indices_path, filename)
+
+                        self._write_to_memory(filename, temp_data, temp_indices)
+                    else:
+                        temp_index = min(self.chunk_size, len(data))
+                        temp_data = data[:temp_index]
+                        temp_indices = indices[:temp_index]
+
+                        data = data[temp_index:]
+                        indices = indices[temp_index:]
+
+                        filename = f'{file_prefix}_{last_file_id + 1}'
+                        self._write_to_disk(temp_data, temp_indices, collection_subfile_path,
+                                            collection_indices_path, filename)
+
+                        self._write_to_memory(filename, temp_data, temp_indices)
+
+            with open(self.collection_path / 'info.json', 'w') as f:
+                total_shape[0] += data_shape
+                json.dump({"total_shape": total_shape}, f)
 
     def _overwrite(self, filenames):
         """fit the quantizer and overwrite the data in the file."""
-        if self.quantizer is not None:
-            datas = []
+        with self.lock:
+            if self.quantizer is not None:
+                datas = []
             all_indices = {}
             limit_shape = 0
             for filename in filenames:
@@ -269,24 +273,27 @@ class DataLoader:
 
     def warm_up(self):
         """Load the data from the file to the memory."""
-        if not self.file_exists():
-            return
+        with self.lock:
+            if not self.file_exists():
+                return
 
-        if self.cache is not None:
-            filenames = self.get_all_files()
+            if self.cache is not None:
+                filenames = self.get_all_files()
 
-            for idx, filename in enumerate(filenames):
-                if not self.cache.is_reached_max_size:
-                    self.read(filename, return_memory=False)
+                for idx, filename in enumerate(filenames):
+                    if not self.cache.is_reached_max_size:
+                        self.read(filename, return_memory=False)
 
     def write_to_memory(self, filename, data, indices):
-        if self.cache is not None:
-            if not self.cache.is_reached_max_size:
-                self.cache[filename] = (data, indices)
+        with self.lock:
+            if self.cache is not None:
+                if not self.cache.is_reached_max_size:
+                    self.cache[filename] = (data, indices)
 
     def return_if_in_memory(self, filename):
-        if self.cache is None:
-            return None
+        with self.lock:
+            if self.cache is None:
+                return None
 
         res = self.cache.get(filename)
 
@@ -308,61 +315,65 @@ class DataLoader:
         return data, indices
 
     def get_all_files(self, separate=False):
-        filenames = sorted([x.stem for x in self.collection_chunk_path.glob('chunk_*')],
-                           key=lambda x: int(x.split('_')[-1]))
-        if separate:
-            if self.cache:
-                return [filename for filename in filenames if filename in self.cache], \
-                       [filename for filename in filenames if filename not in self.cache]
-            return [], filenames
+        with self.lock:
+            filenames = sorted([x.stem for x in self.collection_chunk_path.glob('chunk_*')],
+                               key=lambda x: int(x.split('_')[-1]))
+            if separate:
+                if self.cache:
+                    return [filename for filename in filenames if filename in self.cache], \
+                        [filename for filename in filenames if filename not in self.cache]
+                return [], filenames
 
-        return filenames
+            return filenames
 
     def read(self, filename, is_mmap=True, return_memory=True):
         """Read data from the specified filename if it exists."""
-        if not self.file_exists():
-            return
+        with self.lock:
+            if not self.file_exists():
+                return
 
-        if not return_memory:
-            return self.load_data(filename, self.collection_chunk_path, self.collection_chunk_indices_path,
-                                  is_mmap=is_mmap)
+            if not return_memory:
+                return self.load_data(filename, self.collection_chunk_path, self.collection_chunk_indices_path,
+                                    is_mmap=is_mmap)
 
-        return self.return_if_in_memory(filename) or self.load_data(filename, self.collection_chunk_path,
+            return self.return_if_in_memory(filename) or self.load_data(filename, self.collection_chunk_path,
                                                                     self.collection_chunk_indices_path,
                                                                     is_mmap=is_mmap)
 
     def read_by_id(self, filename, id=None):
         """Read the data from the file as a memory-mapped file."""
-        idx_filter = lambda x: np.isin(indices, id, assume_unique=True) if id is not None else None
+        with self.lock:
+            idx_filter = lambda x: np.isin(indices, id, assume_unique=True) if id is not None else None
 
-        data, indices = self.read(filename, is_mmap=True)
-        if not isinstance(indices, np.ndarray):
-            indices = np.asarray(indices)
+            data, indices = self.read(filename, is_mmap=True)
+            if not isinstance(indices, np.ndarray):
+                indices = np.asarray(indices)
 
-        inter_idx = idx_filter(indices)
+            inter_idx = idx_filter(indices)
 
-        if inter_idx is None or (not np.any(inter_idx)):
-            return np.array([]), np.array([])
+            if inter_idx is None or (not np.any(inter_idx)):
+                return np.array([]), np.array([])
 
-        data = np.asarray(data[inter_idx])
-        indices = indices[inter_idx]
+            data = np.asarray(data[inter_idx])
+            indices = indices[inter_idx]
 
-        return data, indices
+            return data, indices
 
     def read_by_only_id(self, id: Union[int, list]):
-        if isinstance(id, int):
-            id = [id]
+        with self.lock:
+            if isinstance(id, int):
+                id = [id]
 
-        filenames = self.get_all_files()
-        data = []
-        indices = []
-        for filename in filenames:
-            _data, _indices = self.read_by_id(filename, id)
-            if len(_data) > 0:
-                data.append(_data)
-                indices.append(_indices)
+            filenames = self.get_all_files()
+            data = []
+            indices = []
+            for filename in filenames:
+                _data, _indices = self.read_by_id(filename, id)
+                if len(_data) > 0:
+                    data.append(_data)
+                    indices.append(_indices)
 
-        return np.vstack(data), np.concatenate(indices)
+            return np.vstack(data), np.concatenate(indices)
 
     def get_shape(self, read_type='all'):
         """Get the shape of the data.
@@ -390,5 +401,6 @@ class DataLoader:
                     return json.load(f)['total_shape']
 
     def clear_cache(self):
-        if self.cache is not None:
-            self.cache.clear()
+        with self.lock:
+            if self.cache is not None:
+                self.cache.clear()
