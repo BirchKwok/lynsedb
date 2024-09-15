@@ -38,7 +38,7 @@ jobs:
 
       # Build and deploy using mike
       - run: |
-          mike deploy --push --update-aliases 0.1.1 latest
+          mike deploy --push --update-aliases 0.1.2 latest
           
       # Optionally, publish to GitHub Pages
       - name: Deploy to GitHub Pages
