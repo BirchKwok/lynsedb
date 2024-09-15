@@ -8,7 +8,7 @@ from spinesUtils.asserts import raise_if
 
 from ..core_components.limited_dict import LimitedDict
 from ..core_components.locks import ThreadLock
-from ..utils.utils import load_chunk_file
+from ..utils.utils import NpyLoader
 
 
 class PersistentFileStorage:
@@ -32,7 +32,6 @@ class PersistentFileStorage:
         self.dimension = dimension
         self.chunk_size = chunk_size
 
-        self.quantizer = None
         self.lock = ThreadLock()
 
         self.dataloader = DataLoader(dimension, collection_path, cache_chunks=cache_chunks, warm_up=warm_up)
@@ -58,10 +57,6 @@ class PersistentFileStorage:
 
     def _write_to_memory(self, filename, data, indices):
         self.dataloader.write_to_memory(filename, data, indices)
-
-    def _load_data(self, filename, data_path, indices_path, update_memory=True, is_mmap=True):
-        return self.dataloader.load_data(filename, data_path, indices_path,
-                                         update_memory=update_memory, is_mmap=is_mmap)
 
     def get_all_files(self, separate=False):
         return self.dataloader.get_all_files(separate=separate)
@@ -93,7 +88,7 @@ class PersistentFileStorage:
         with open(indices_path / filename, 'wb') as f:
             np.save(f, indices)
 
-    def _incremental_write(self, data, indices):
+    def _write(self, data, indices):
         with self.lock:
             if not isinstance(data, np.ndarray):
                 data = np.vstack(data)
@@ -117,10 +112,6 @@ class PersistentFileStorage:
             else:
                 with open(self.collection_path / 'info.json', 'r') as f:
                     total_shape = json.load(f)['total_shape']
-
-            # after quantization, the disk data and memory data will be changed to quantized data
-            if self.quantizer is not None:
-                data = self.quantizer.fit_transform(data)
 
             data_shape = len(data)
 
@@ -157,10 +148,12 @@ class PersistentFileStorage:
                         already_stack = True
 
                         # save data
-                        old_data = np.load(collection_subfile_path / f'{file_prefix}_{last_file_id}')
+                        with open(collection_subfile_path / f'{file_prefix}_{last_file_id}', 'rb') as f:
+                            old_data = np.load(f)
                         temp_data = np.vstack((old_data, temp_data))
                         # save indices
-                        old_indices = np.load(collection_indices_path / f'{file_prefix}_{last_file_id}')
+                        with open(collection_indices_path / f'{file_prefix}_{last_file_id}', 'rb') as f:
+                            old_indices = np.load(f)
                         temp_indices = np.concatenate((old_indices, temp_indices))
 
                         filename = f'{file_prefix}_{last_file_id}'
@@ -186,38 +179,6 @@ class PersistentFileStorage:
                 total_shape[0] += data_shape
                 json.dump({"total_shape": total_shape}, f)
 
-    def _overwrite(self, filenames):
-        """fit the quantizer and overwrite the data in the file."""
-        with self.lock:
-            if self.quantizer is not None:
-                datas = []
-            all_indices = {}
-            limit_shape = 0
-            for filename in filenames:
-                _data, _idx = self.read(filename, is_mmap=False, return_memory=False)
-                limit_shape += len(_data)
-                all_indices[filename] = ([limit_shape - len(_data), limit_shape], _idx)
-                datas.append(_data)
-                if limit_shape >= 200000:
-                    break
-
-            fitted_data = self.quantizer.fit_transform(np.vstack(datas))
-
-            if self.dataloader.cache is not None:
-                self.dataloader.clear_cache()
-
-            for filename in filenames:
-                if filename in all_indices:
-                    data, indices = (fitted_data[all_indices[filename][0][0]: all_indices[filename][0][1]],
-                                     all_indices[filename][1])
-                else:
-                    data, indices = self.read(filename, is_mmap=False, return_memory=False)
-                    data = self.quantizer.encode(data)
-
-                self._write_to_disk(data, indices,
-                                    self.collection_chunk_path, self.collection_chunk_indices_path, filename)
-                self._write_to_memory(filename, data, indices)
-
     def read_by_id(self, filename, id=None):
         """Read the data from the file as a memory-mapped file."""
         return self.dataloader.read_by_id(filename, id=id)
@@ -234,13 +195,10 @@ class PersistentFileStorage:
         """
         return self.dataloader.read_by_only_id(id=id)
 
-    def write(self, data=None, indices=None, filenames=None):
+    def write(self, data=None, indices=None):
         """Write the data to the file."""
         with self.lock:
-            if filenames:
-                self._overwrite(filenames)
-            else:
-                self._incremental_write(data, indices=indices)
+            self._write(data, indices=indices)
 
             # update the fingerprint
             self.update_fingerprint()
@@ -305,10 +263,16 @@ class DataLoader:
     def load_data(self, filename, data_path, indices_path, update_memory=True, is_mmap=True):
         with self.lock:
             if not is_mmap:
-                data, indices = np.load(data_path / filename), np.load(indices_path / filename)
+                with open(data_path / filename, 'rb') as f:
+                    data = np.load(f)
+                with open(indices_path / filename, 'rb') as f:
+                    indices = np.load(f)
             else:
-                data, indices = load_chunk_file(data_path / filename), load_chunk_file(indices_path / filename)
-
+                with NpyLoader(data_path / filename) as _data:
+                    data = np.asarray(_data)
+                with NpyLoader(indices_path / filename) as _indices:
+                    indices = np.asarray(_indices)
+                    
         if update_memory:
             self.write_to_memory(filename, np.asarray(data), np.asarray(indices))
 
@@ -333,7 +297,11 @@ class DataLoader:
                 return
 
             if not return_memory:
-                return self.load_data(filename, self.collection_chunk_path, self.collection_chunk_indices_path,
+                if is_mmap:
+                    return self.load_data(filename, self.collection_chunk_path, self.collection_chunk_indices_path,
+                                    is_mmap=is_mmap)
+                else:
+                    return self.load_data(filename, self.collection_chunk_path, self.collection_chunk_indices_path,
                                     is_mmap=is_mmap)
 
             return self.return_if_in_memory(filename) or self.load_data(filename, self.collection_chunk_path,
