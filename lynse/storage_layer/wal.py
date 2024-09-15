@@ -2,7 +2,6 @@ import numpy as np
 import json
 import os
 import shutil
-import threading
 from pathlib import Path
 
 from spinesUtils.timer import Timer
@@ -44,7 +43,6 @@ class WALStorage:
 
         # Start periodic flush thread
         self.running = True
-        self.stop_event = threading.Event()
 
     def write_log_data(self, data, indices, fields):
         with self.lock:
