@@ -274,7 +274,7 @@ class DataLoader:
                     indices = np.asarray(_indices)
                     
         if update_memory:
-            self.write_to_memory(filename, np.asarray(data), np.asarray(indices))
+            self.write_to_memory(filename, data, indices)
 
         return data, indices
 
@@ -297,11 +297,7 @@ class DataLoader:
                 return
 
             if not return_memory:
-                if is_mmap:
-                    return self.load_data(filename, self.collection_chunk_path, self.collection_chunk_indices_path,
-                                    is_mmap=is_mmap)
-                else:
-                    return self.load_data(filename, self.collection_chunk_path, self.collection_chunk_indices_path,
+                return self.load_data(filename, self.collection_chunk_path, self.collection_chunk_indices_path,
                                     is_mmap=is_mmap)
 
             return self.return_if_in_memory(filename) or self.load_data(filename, self.collection_chunk_path,
