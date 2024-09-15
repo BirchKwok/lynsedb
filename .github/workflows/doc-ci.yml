@@ -36,18 +36,10 @@ jobs:
       # Install MkDocs, Mike, and theme
       - run: pip install mkdocs-material mike mkdocstrings-python
 
-      # Check version exists, then build and deploy
-      - name: Build and deploy documentation
-        run: |
-          # Check if 1.0 version exists
-          if mike list | grep -q "1.0"; then
-            echo "Version 1.0 exists, updating existing version"
-            mike deploy --update --push 1.0
-          else
-            echo "Version 1.0 does not exist, creating new version"
-            mike deploy --push --update-aliases 1.0 latest
-          fi
-
+      # Build and deploy using mike
+      - run: |
+          mike deploy --push --update-aliases 0.1.1 latest
+          
       # Optionally, publish to GitHub Pages
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
