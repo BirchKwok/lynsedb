@@ -1,3 +1,6 @@
+import os
+import shutil
+import time
 import pytest
 
 from test import Filter, FieldCondition, MatchField, MatchID
@@ -6,6 +9,22 @@ import lynse
 
 client = lynse.VectorDBClient()
 database = client.create_database(database_name='test_local_db', drop_if_exists=True)
+
+
+@pytest.fixture
+def cleanup():
+    # 在测试前执行清理
+    db_path = os.path.expanduser('~/.LynseDB/databases/test_local_db')
+    if os.path.exists(db_path):
+        shutil.rmtree(db_path)
+    time.sleep(0.1)  # 给系统一些时间来完全释放资源
+
+    yield  # 这里会运行测试
+
+    # 在测试后执行清理
+    if os.path.exists(db_path):
+        shutil.rmtree(db_path)
+    time.sleep(0.1)
 
 
 def get_collection(dim=100, chunk_size=1000, dtypes='float32', drop_if_exists=True):
@@ -27,7 +46,7 @@ def get_collection_for_query(*args, with_field=True, field_prefix='test_', **kwa
     return collection
 
 
-def test_add_single_item_without_id_and_field():
+def test_add_single_item_without_id_and_field(cleanup):
     collection = get_collection(drop_if_exists=True)
     id = collection.add_item(np.ones(100), id=1)
 
@@ -36,7 +55,7 @@ def test_add_single_item_without_id_and_field():
     assert collection.shape == (1, 100)
 
 
-def test_add_single_item_with_id_and_field():
+def test_add_single_item_with_id_and_field(cleanup):
     collection = get_collection(drop_if_exists=True)
     id = collection.add_item(np.ones(100), id=1, field={"test": 1})
 
@@ -45,7 +64,7 @@ def test_add_single_item_with_id_and_field():
     assert collection.shape == (1, 100)
 
 
-def test_bulk_add_item_without_id_and_field():
+def test_bulk_add_item_without_id_and_field(cleanup):
     collection = get_collection(drop_if_exists=True)
     items = []
     for i in range(101):
@@ -58,7 +77,7 @@ def test_bulk_add_item_without_id_and_field():
     assert collection.shape == (101, 100)
 
 
-def test_bulk_add_item_with_id_and_field():
+def test_bulk_add_item_with_id_and_field(cleanup):
     collection = get_collection(drop_if_exists=True)
     items = []
     for i in range(101):
@@ -71,7 +90,7 @@ def test_bulk_add_item_with_id_and_field():
     assert collection.shape == (101, 100)
 
 
-def test_add_bulk_item_with_id_and_chinese_field():
+def test_add_bulk_item_with_id_and_chinese_field(cleanup):
     collection = get_collection(drop_if_exists=True)
     items = []
     for i in range(101):
@@ -84,7 +103,7 @@ def test_add_bulk_item_with_id_and_chinese_field():
     assert collection.shape == (101, 100)
 
 
-def test_query_without_field():
+def test_query_without_field(cleanup):
     collection = get_collection_for_query(with_field=False)
 
     vec = np.random.random(100)
@@ -95,7 +114,7 @@ def test_query_without_field():
     assert all(i in collection._id_filter for i in n)
 
 
-def test_query_with_field():
+def test_query_with_field(cleanup):
     collection = get_collection_for_query(with_field=True, drop_if_exists=True)
 
     vec = np.random.random(100)
@@ -111,7 +130,7 @@ def test_query_with_field():
     assert all(10 <= i < 20 for i in n)
 
 
-def test_query_with_list_field():
+def test_query_with_list_field(cleanup):
     collection = get_collection_for_query(with_field=True, drop_if_exists=True)
 
     vec = np.random.random(100)
@@ -130,7 +149,7 @@ def test_query_with_list_field():
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
 
-def test_query_with_chinese_field():
+def test_query_with_chinese_field(cleanup):
     collection = get_collection_for_query(with_field=True, field_prefix='测试_')
 
     vec = np.random.random(100)
@@ -148,7 +167,7 @@ def test_query_with_chinese_field():
     assert all(10 <= i < 20 for i in n)
 
 
-def test_query_with_chinese_list_field():
+def test_query_with_chinese_list_field(cleanup):
     collection = get_collection_for_query(with_field=True, field_prefix='测试_')
 
     vec = np.random.random(100)
@@ -167,7 +186,7 @@ def test_query_with_chinese_list_field():
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
 
-def test_query_with_subset_indices():
+def test_query_with_subset_indices(cleanup):
     collection = get_collection_for_query(with_field=True, drop_if_exists=True)
 
     vec = np.random.random(100)
@@ -183,7 +202,7 @@ def test_query_with_subset_indices():
     assert all(i < 10 for i in n)
 
 
-def test_query_with_subset_indices_and_field():
+def test_query_with_subset_indices_and_field(cleanup):
     collection = get_collection_for_query(with_field=True, field_prefix='test_')
 
     vec = np.random.random(100)
@@ -202,7 +221,7 @@ def test_query_with_subset_indices_and_field():
     assert all(i < 10 for i in n)
 
 
-def test_query_with_subset_indices_and_list_field():
+def test_query_with_subset_indices_and_list_field(cleanup):
     collection = get_collection_for_query(with_field=True, drop_if_exists=True)
 
     vec = np.random.random(100)
@@ -224,7 +243,7 @@ def test_query_with_subset_indices_and_list_field():
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
 
-def test_query_with_subset_indices_and_chinese_field():
+def test_query_with_subset_indices_and_chinese_field(cleanup):
     collection = get_collection_for_query(with_field=True, field_prefix='测试_')
 
     vec = np.random.random(100)
@@ -243,7 +262,7 @@ def test_query_with_subset_indices_and_chinese_field():
     assert all(i < 10 for i in n)
 
 
-def test_query_with_subset_indices_and_chinese_list_field():
+def test_query_with_subset_indices_and_chinese_list_field(cleanup):
     collection = get_collection_for_query(with_field=True, field_prefix='测试_')
 
     vec = np.random.random(100)
@@ -266,7 +285,7 @@ def test_query_with_subset_indices_and_chinese_list_field():
     assert all((10 <= i < 20) or (70 <= i < 80) for i in n)
 
 
-def test_query_stability_of_mvdb_files():
+def test_query_stability_of_mvdb_files(cleanup):
     collection = get_collection_for_query(with_field=True, drop_if_exists=True)
     vec = np.random.random(100)
     last_n, last_d, last_f = collection.search(
@@ -292,8 +311,7 @@ def test_query_stability_of_mvdb_files():
         assert all(10 <= i < 20 for i in n)
 
 
-# Test whether calling bulk_add_items multiple times can insert data normally
-def test_multiple_bulk_add_items():
+def test_multiple_bulk_add_items(cleanup):
     collection = get_collection(drop_if_exists=True)
     items = []
     for i in range(101):
@@ -313,7 +331,7 @@ def test_multiple_bulk_add_items():
     assert collection.shape == (202, 100)
 
 
-def test_multiple_bulk_add_items_with_insert_session():
+def test_multiple_bulk_add_items_with_insert_session(cleanup):
     collection = get_collection(drop_if_exists=True)
     items = []
     for i in range(101):
@@ -334,8 +352,8 @@ def test_multiple_bulk_add_items_with_insert_session():
     assert collection.shape == (202, 100)
 
 
-# Test if secondary initialization can properly initialize and query
-def test_multiple_initialization(dim=100, chunk_size=1000, dtypes='float32'):
+def test_multiple_initialization(cleanup):
+    dim = 100; chunk_size = 1000; dtypes = 'float32'
     collection = get_collection(drop_if_exists=True, dim=dim, chunk_size=chunk_size, dtypes=dtypes)
     items = []
     for i in range(101):
@@ -358,7 +376,7 @@ def test_multiple_initialization(dim=100, chunk_size=1000, dtypes='float32'):
     assert collection.shape == (202, 100)
 
 
-def test_result_order():
+def test_result_order(cleanup):
     def get_test_vectors(shape):
         for i in range(shape[0]):
             yield np.random.random(shape[1])
@@ -387,7 +405,7 @@ def test_result_order():
         assert len(index) == len(score) == 10
 
 
-def test_transactions():
+def test_transactions(cleanup):
     collection = get_collection(dim=1024, chunk_size=10000, drop_if_exists=True)
 
     def get_test_vectors(shape):
@@ -425,7 +443,7 @@ def test_transactions():
     assert collection.shape == (100000, 1024)
 
 
-def test_filter():
+def test_filter(cleanup):
     collection = get_collection_for_query(with_field=True, drop_if_exists=True)
 
     vec = np.random.random(100)
