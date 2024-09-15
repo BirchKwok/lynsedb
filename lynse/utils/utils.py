@@ -109,7 +109,7 @@ def unavailable_if_empty(func):
 
 
 def load_chunk_file(filename):
-    np_array = np.asarray(np.load(filename, mmap_mode='r'))
+    np_array = np.load(filename)
     return np_array
 
 
@@ -117,20 +117,21 @@ class NpyLoader:
     def __init__(self, filename):
         self.filename = filename
         self.np_array = None
-        self.mmap = None
+        # self.mmap = None
 
     def __enter__(self):
         self.np_array = load_chunk_file(self.filename)
 
-        self.mmap = getattr(self.np_array, 'base', None)
+        # self.mmap = getattr(self.np_array, 'base', None)
 
         return self.np_array
     
     def __exit__(self, exc_type, exc_value, traceback):
-        if self.np_array is not None:
-            del self.np_array
-            if self.mmap is not None and hasattr(self.mmap, 'close'):
-                self.mmap.close()
+        pass
+        # if self.np_array is not None:
+        #     del self.np_array
+        #     if self.mmap is not None and hasattr(self.mmap, 'close'):
+        #         self.mmap.close()
 
 
 
