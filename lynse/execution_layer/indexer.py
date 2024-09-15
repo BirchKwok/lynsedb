@@ -166,8 +166,7 @@ class Indexer:
                                                     f'{self.storage_worker.fingerprint}.*SQ8.index')
                     )
 
-                sq8_data = np.load(self.index_data_path / f'{self.storage_worker.fingerprint}.sqd',
-                                   mmap_mode='r')
+                sq8_data = np.load(self.index_data_path / f'{self.storage_worker.fingerprint}.sqd')
 
                 _index.data = binary_data
                 _index.ids = binary_ids

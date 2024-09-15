@@ -262,16 +262,22 @@ class DataLoader:
 
     def load_data(self, filename, data_path, indices_path, update_memory=True, is_mmap=True):
         with self.lock:
-            if not is_mmap:
-                with open(data_path / filename, 'rb') as f:
+            with open(data_path / filename, 'rb') as f:
                     data = np.load(f)
-                with open(indices_path / filename, 'rb') as f:
-                    indices = np.load(f)
-            else:
-                with NpyLoader(data_path / filename) as _data:
-                    data = np.asarray(_data)
-                with NpyLoader(indices_path / filename) as _indices:
-                    indices = np.asarray(_indices)
+            with open(indices_path / filename, 'rb') as f:
+                indices = np.load(f)
+
+            # ignore mmap
+            # if not is_mmap:
+            #     with open(data_path / filename, 'rb') as f:
+            #         data = np.load(f)
+            #     with open(indices_path / filename, 'rb') as f:
+            #         indices = np.load(f)
+            # else:
+            #     with NpyLoader(data_path / filename) as _data:
+            #         data = np.asarray(_data)
+            #     with NpyLoader(indices_path / filename) as _indices:
+            #         indices = np.asarray(_indices)
                     
         if update_memory:
             self.write_to_memory(filename, data, indices)
