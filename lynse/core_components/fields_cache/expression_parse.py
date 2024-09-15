@@ -200,7 +200,7 @@ class RangeNode(ASTNode):
 
 
 class ExpressionParser:
-    """
+    r"""
     FieldExpression is a string parser used to parse field expressions. 
 
     It can reassemble the parsing result into a Filter object of LynseDB, which can filter the query result. 
