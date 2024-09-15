@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 import shutil
+import time
 from typing import Union
 
 import numpy as np
@@ -354,10 +355,26 @@ class MatrixSerializer:
             if not self.collections_path_parent.exists():
                 return None
 
-            try:
-                shutil.rmtree(self.collections_path_parent)
-            except FileNotFoundError:
-                pass
+            # stop wal
+            self.wal_worker.stop()
+
+            retries = 3
+            delay = 1  # 每次重试的间隔时间（秒）
+
+            for attempt in range(retries):
+                try:
+                    shutil.rmtree(self.collections_path_parent)
+                    self.logger.info(f"Successfully deleted directory {self.collections_path_parent}")
+                    break
+                except PermissionError as e:
+                    if attempt < retries - 1:
+                        self.logger.warning(f"Failed to delete directory, attempting {attempt + 1}...")
+                        time.sleep(delay)
+                    else:
+                        self.logger.error(f"Failed to delete directory {self.collections_path_parent}, file may be locked.")
+                        raise e
+                except Exception as e:
+                    self.logger.error(f"Error deleting: {e}")
 
             self.IS_DELETED = True
 
@@ -366,9 +383,6 @@ class MatrixSerializer:
 
             # clear cache
             self.storage_worker.clear_cache()
-
-            # stop wal
-            self.wal_worker.stop()
 
     @property
     def shape(self):
