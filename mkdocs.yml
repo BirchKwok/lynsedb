@@ -1,7 +1,12 @@
 site_name: LynseDB
+site_author: Birch Kwok
+site_url: https://birchkwok.github.io/LynseDB/
+
+repo_url: https://github.com/BirchKwok/LynseDB
+repo_name: birchkwok/LynseDB
 
 theme:
-  name: material  # 使用 Material 主题（可选）
+  name: material 
   logo: img/logo.png
   favicon: img/favicon.png
   features:
@@ -19,11 +24,7 @@ theme:
     - content.code.copy
     - content.code.select
     - content.code.annotate
-
-  extra:
-    version:
-      provider: mike
-      alias: true
+  custom_dir: overrides
 
   palette:
 
@@ -51,6 +52,15 @@ theme:
     text: false
     code: Roboto Mono
 
+extra:
+  version:
+    provider: mike
+    alias: true
+    default: latest
+    branch: gh-pages
+  paths:
+    - lynse
+
 markdown_extensions:
   - toc:
       permalink: true
@@ -74,11 +84,6 @@ plugins:
             sort: source
             render_markdown: true
 
-extra:
-  paths:
-    - lynse
-
-
 nav:
   - Home: index.md
   - Quickstart: quickstart.md
@@ -97,5 +102,4 @@ nav:
       - ExclusiveDB: native_api/low_level.md
       - Local Client: native_api/high_level.md
 
-repo_url: https://github.com/BirchKwok/LynseDB
-repo_name: birchkwok/LynseDB
+
