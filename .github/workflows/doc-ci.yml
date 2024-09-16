@@ -62,19 +62,7 @@ jobs:
       - name: Update index.html
         run: |
           latest_version=$(cat versions.json | jq -r '.[-1].version')
-          echo "<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-  <meta http-equiv=\"refresh\" content=\"0; url=/${latest_version}/\">
-  <title>Redirecting...</title>
-  <script type=\"text/javascript\">
-    window.location.href = \"/${latest_version}/\"
-  </script>
-</head>
-<body>
-  If you are not redirected, <a href=\"/${latest_version}/\">click here</a>.
-</body>
-</html>" > index.html
+          sed "s/VERSION_PLACEHOLDER/${latest_version}/g" index-template.html > index.html
           git add index.html
           git commit -m "Update index.html to redirect to $latest_version"
           git push origin gh-pages
