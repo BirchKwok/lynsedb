@@ -15,7 +15,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Checkout index-template.html specifically
+      # Checkout index-template.html specifically from main branch
       - name: Checkout index-template.html
         run: git checkout origin/main -- .github/workflows/index-template.html
 
@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Install MkDocs
+      # Install MkDocs and dependencies
       - run: pip install mkdocs-material mkdocstrings-python
 
       # Read version from VERSION file
@@ -46,26 +46,45 @@ jobs:
         run: |
           git fetch origin gh-pages
           git checkout gh-pages
+          
+          # Create the versioned directory for the new version
           mkdir -p ${{ env.VERSION }}
           cp -r site/* ${{ env.VERSION }}/
+
+          # Update versions.json
           if [ -f versions.json ]; then
             versions=$(cat versions.json | jq -c ". + [{\"version\": \"${{ env.VERSION }}\", \"title\": \"${{ env.VERSION }}\", \"aliases\": []}] | unique_by(.version)")
             echo $versions > versions.json
           else
             echo "[{\"version\": \"${{ env.VERSION }}\", \"title\": \"${{ env.VERSION }}\", \"aliases\": []}]" > versions.json
           fi
-          git add .
-          git commit -m "Deploy version ${{ env.VERSION }}"
-          git push origin gh-pages
+
+          # Debugging output to check changes
+          echo "Checking for changes..."
+          git status
+          ls -l ${{ env.VERSION }}
+          cat versions.json
+
+          # Commit and push if there are changes
+          if [[ `git status --porcelain` ]]; then
+            git add .
+            git commit -m "Deploy version ${{ env.VERSION }}"
+            git push origin gh-pages
+          else
+            echo "No changes to commit."
+          fi
 
       # Update index.html to redirect to the latest version
       - name: Update index.html
         run: |
           latest_version=$(cat versions.json | jq -r '.[-1].version')
           sed "s/VERSION_PLACEHOLDER/${latest_version}/g" index-template.html > index.html
-          if ! git diff --exit-code index.html; then
+
+          # Check if index.html was modified
+          if [[ `git status --porcelain index.html` ]]; then
             git add index.html
             git commit -m "Update index.html to redirect to $latest_version"
             git push origin gh-pages
           else
             echo "No changes in index.html, skipping commit."
+          fi
