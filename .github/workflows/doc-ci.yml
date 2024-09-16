@@ -24,37 +24,57 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Caching dependencies
-      - run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
-      - uses: actions/cache@v4
-        with:
-          key: mkdocs-material-${{ env.cache_id }}
-          path: .cache
-          restore-keys: |
-            mkdocs-material-
-
-      # Install MkDocs, Mike, and theme
-      - run: pip install mkdocs-material mike mkdocstrings-python
+      # Install MkDocs
+      - run: pip install mkdocs-material mkdocstrings-python
 
       # Read version from VERSION file
       - name: Read VERSION file
+        run: echo "VERSION=$(cat VERSION)" >> $GITHUB_ENV
+
+      # Build documentation using MkDocs
+      - name: Build MkDocs
+        run: mkdocs build --clean
+
+      # Switch to gh-pages branch and move files
+      - name: Deploy to gh-pages branch
         run: |
-          if [ -f VERSION ]; then
-            echo "VERSION=$(cat VERSION)" >> $GITHUB_ENV
+          git fetch origin gh-pages:gh-pages
+          git checkout gh-pages
+          
+          # Create versioned directory for the new version
+          mkdir -p ${{ env.VERSION }}
+          cp -r site/* ${{ env.VERSION }}/
+          
+          # Update versions.json to match mike format
+          if [ -f versions.json ]; then
+            versions=$(cat versions.json | jq -c ". + [{\"version\": \"${{ env.VERSION }}\", \"title\": \"${{ env.VERSION }}\", \"aliases\": []}] | unique_by(.version)")
+            echo $versions > versions.json
           else
-            echo "VERSION file not found"
-            exit 1
+            echo "[{\"version\": \"${{ env.VERSION }}\", \"title\": \"${{ env.VERSION }}\", \"aliases\": []}]" > versions.json
           fi
 
-      # Build and deploy using mike
-      - run: |
-          mike deploy --push --update-aliases ${{ env.VERSION }} latest
-          mike set-default --push latest
-          mike serve
-
-      # Optionally, publish to GitHub Pages
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site
+          # Commit and push changes
+          git add .
+          git commit -m "Deploy version ${{ env.VERSION }}"
+          git push origin gh-pages
+          
+          # Update index.html to redirect to the latest version
+      - name: Update index.html
+        run: |
+          latest_version=$(cat versions.json | jq -r '.[-1].version')
+          echo "<!DOCTYPE html>
+    <html lang=\"en\">
+    <head>
+    <meta http-equiv=\"refresh\" content=\"0; url=/${latest_version}/\">
+    <title>Redirecting...</title>
+    <script type=\"text/javascript\">
+    window.location.href = \"/${latest_version}/\"
+    </script>
+    </head>
+    <body>
+    If you are not redirected, <a href=\"/${latest_version}/\">click here</a>.
+    </body>
+    </html>" > index.html
+          git add index.html
+          git commit -m "Update index.html to redirect to $latest_version"
+          git push origin gh-pages
