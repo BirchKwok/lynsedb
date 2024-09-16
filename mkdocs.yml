@@ -24,6 +24,7 @@ theme:
     - content.code.copy
     - content.code.select
     - content.code.annotate
+
   custom_dir: overrides
 
   palette:
@@ -57,7 +58,6 @@ extra:
     provider: mike
     alias: true
     default: latest
-    branch: gh-pages
   paths:
     - lynse
 
