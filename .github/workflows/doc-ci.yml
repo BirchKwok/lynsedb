@@ -38,7 +38,7 @@ jobs:
 
       # Build and deploy using mike
       - run: |
-          git ls-remote --heads origin gh-pages && git fetch origin gh-pages --depth=1
+          git ls-remote --exit-code --heads origin gh-pages && git fetch origin gh-pages --depth=1 || git checkout --orphan gh-pages
           mike deploy --push --update-aliases 0.1.2 latest
           mike set-default --push latest
           
