@@ -24,9 +24,6 @@ theme:
     - content.code.copy
     - content.code.select
     - content.code.annotate
-    - version-switcher
-
-  custom_dir: overrides
 
   palette:
 
@@ -55,10 +52,6 @@ theme:
     code: Roboto Mono
 
 extra:
-  version:
-    provider: mike
-    alias: true
-    default: latest
   paths:
     - lynse
 
@@ -80,8 +73,8 @@ plugins:
       handlers:
         python:
           options:
-            docstring_style: google  # 使用 Google 风格的 docstring
-            show_source: true        # 显示源码链接
+            docstring_style: google
+            show_source: true
             sort: source
             render_markdown: true
 
