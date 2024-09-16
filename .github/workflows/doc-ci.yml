@@ -38,7 +38,9 @@ jobs:
 
       # Build and deploy using mike
       - run: |
+          git fetch origin gh-pages --depth=1
           mike deploy --push --update-aliases 0.1.2 latest
+          mike set-default --push latest
           
       # Optionally, publish to GitHub Pages
       - name: Deploy to GitHub Pages
