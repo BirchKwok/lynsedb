@@ -24,6 +24,7 @@ theme:
     - content.code.copy
     - content.code.select
     - content.code.annotate
+    - version-switcher
 
   custom_dir: overrides
 
