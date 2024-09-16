@@ -37,6 +37,7 @@ jobs:
 
       # Switch to gh-pages branch and move files
       - name: Deploy to gh-pages branch
+        continue-on-error: true
         run: |
           git fetch origin gh-pages:gh-pages
           git checkout gh-pages
