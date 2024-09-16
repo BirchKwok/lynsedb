@@ -12,12 +12,6 @@ jobs:
     steps:
       # Checkout repository
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      # Checkout index-template.html specifically from main branch
-      - name: Checkout index-template.html
-        run: git checkout origin/main -- .github/workflows/index-template.html
 
       # Configure Git credentials
       - name: Configure Git Credentials
@@ -30,61 +24,37 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Install MkDocs and dependencies
-      - run: pip install mkdocs-material mkdocstrings-python
+      # Caching dependencies
+      - run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
+      - uses: actions/cache@v4
+        with:
+          key: mkdocs-material-${{ env.cache_id }}
+          path: .cache
+          restore-keys: |
+            mkdocs-material-
+
+      # Install MkDocs, Mike, and theme
+      - run: pip install mkdocs-material mike mkdocstrings-python
 
       # Read version from VERSION file
       - name: Read VERSION file
-        run: echo "VERSION=$(cat VERSION)" >> $GITHUB_ENV
-
-      # Build documentation using MkDocs
-      - name: Build MkDocs
-        run: mkdocs build --clean
-
-      # Switch to gh-pages branch and move files
-      - name: Deploy to gh-pages branch
         run: |
-          git fetch origin gh-pages
-          git checkout gh-pages
-          
-          # Create the versioned directory for the new version
-          mkdir -p ${{ env.VERSION }}
-          cp -r site/* ${{ env.VERSION }}/
-
-          # Update versions.json
-          if [ -f versions.json ]; then
-            versions=$(cat versions.json | jq -c ". + [{\"version\": \"${{ env.VERSION }}\", \"title\": \"${{ env.VERSION }}\", \"aliases\": []}] | unique_by(.version)")
-            echo $versions > versions.json
+          if [ -f VERSION ]; then
+            echo "VERSION=$(cat VERSION)" >> $GITHUB_ENV
           else
-            echo "[{\"version\": \"${{ env.VERSION }}\", \"title\": \"${{ env.VERSION }}\", \"aliases\": []}]" > versions.json
+            echo "VERSION file not found"
+            exit 1
           fi
 
-          # Debugging output to check changes
-          echo "Checking for changes..."
-          git status
-          ls -l ${{ env.VERSION }}
-          cat versions.json
+      # Build and deploy using mike
+      - run: |
+          mike deploy --push --update-aliases ${{ env.VERSION }} latest
+          mike set-default --push latest
+          mike serve
 
-          # Commit and push if there are changes
-          if [[ `git status --porcelain` ]]; then
-            git add .
-            git commit -m "Deploy version ${{ env.VERSION }}"
-            git push origin gh-pages
-          else
-            echo "No changes to commit."
-          fi
-
-      # Update index.html to redirect to the latest version
-      - name: Update index.html
-        run: |
-          latest_version=$(cat versions.json | jq -r '.[-1].version')
-          sed "s/VERSION_PLACEHOLDER/${latest_version}/g" index-template.html > index.html
-
-          # Check if index.html was modified
-          if [[ `git status --porcelain index.html` ]]; then
-            git add index.html
-            git commit -m "Update index.html to redirect to $latest_version"
-            git push origin gh-pages
-          else
-            echo "No changes in index.html, skipping commit."
-          fi
+      # Optionally, publish to GitHub Pages
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
