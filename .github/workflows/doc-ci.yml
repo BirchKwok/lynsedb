@@ -61,7 +61,7 @@ jobs:
       # Update index.html to redirect to the latest version
       - name: Update index.html
         run: |
-          latest_version=$(cat versions.json | jq -r '.[-1].version')
+          latest_version=$(jq -r '.[-1].version' versions.json)
           cat <<EOF > index.html
 <!DOCTYPE html>
 <html lang="en">
