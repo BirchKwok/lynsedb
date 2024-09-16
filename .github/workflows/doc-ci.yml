@@ -59,10 +59,18 @@ jobs:
           git push origin gh-pages
 
       # Update index.html to redirect to the latest version
+      # Update index.html to redirect to the latest version
       - name: Update index.html
         run: |
           latest_version=$(cat versions.json | jq -r '.[-1].version')
           sed "s/VERSION_PLACEHOLDER/${latest_version}/g" .github/workflows/index-template.html > index.html
-          git add index.html
-          git commit -m "Update index.html to redirect to $latest_version"
-          git push origin gh-pages
+          
+          # Check if index.html was modified
+          if ! git diff --exit-code index.html; then
+            git add index.html
+            git commit -m "Update index.html to redirect to $latest_version"
+            git push origin gh-pages
+          else
+            echo "No changes in index.html, skipping commit."
+          fi
+
