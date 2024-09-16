@@ -12,6 +12,12 @@ jobs:
     steps:
       # Checkout repository
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Checkout index-template.html specifically
+      - name: Checkout index-template.html
+        run: git checkout origin/main -- .github/workflows/index-template.html
 
       # Configure Git credentials
       - name: Configure Git Credentials
@@ -24,7 +30,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Install MkDocs and dependencies
+      # Install MkDocs
       - run: pip install mkdocs-material mkdocstrings-python
 
       # Read version from VERSION file
@@ -63,15 +69,12 @@ jobs:
       - name: Update index.html
         run: |
           latest_version=$(cat versions.json | jq -r '.[-1].version')
-
-          # Ensure the correct path to index-template.html
           sed "s/VERSION_PLACEHOLDER/${latest_version}/g" .github/workflows/index-template.html > index.html
           
           # Check if index.html was modified
-          if git diff --exit-code index.html; then
-            echo "No changes in index.html, skipping commit."
-          else
+          if ! git diff --exit-code index.html; then
             git add index.html
             git commit -m "Update index.html to redirect to $latest_version"
             git push origin gh-pages
-          fi
+          else
+            echo "No changes in index.html, skipping commit."
