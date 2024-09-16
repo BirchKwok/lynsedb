@@ -62,7 +62,7 @@ jobs:
       - name: Update index.html
         run: |
           latest_version=$(cat versions.json | jq -r '.[-1].version')
-          sed "s/VERSION_PLACEHOLDER/${latest_version}/g" index-template.html > index.html
+          sed "s/VERSION_PLACEHOLDER/${latest_version}/g" .github/workflows/index-template.html > index.html
           git add index.html
           git commit -m "Update index.html to redirect to $latest_version"
           git push origin gh-pages
