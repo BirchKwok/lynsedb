@@ -37,8 +37,8 @@ jobs:
       - run: pip install mkdocs-material mike mkdocstrings-python
 
       # Build and deploy using mike
+      # git fetch origin gh-pages --depth=1
       - run: |
-          git ls-remote --exit-code --heads origin gh-pages && git fetch origin gh-pages --depth=1 || git checkout --orphan gh-pages
           mike deploy --push --update-aliases 0.1.2 latest
           mike set-default --push latest
           
