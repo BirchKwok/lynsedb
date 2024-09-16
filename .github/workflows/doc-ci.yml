@@ -43,24 +43,17 @@ jobs:
 
       # Switch to gh-pages branch and move files
       - name: Deploy to gh-pages branch
-        continue-on-error: true
         run: |
-          git fetch origin gh-pages:gh-pages
+          git fetch origin gh-pages
           git checkout gh-pages
-          
-          # Create versioned directory for the new version
           mkdir -p ${{ env.VERSION }}
           cp -r site/* ${{ env.VERSION }}/
-          
-          # Update versions.json to match mike format
           if [ -f versions.json ]; then
             versions=$(cat versions.json | jq -c ". + [{\"version\": \"${{ env.VERSION }}\", \"title\": \"${{ env.VERSION }}\", \"aliases\": []}] | unique_by(.version)")
             echo $versions > versions.json
           else
             echo "[{\"version\": \"${{ env.VERSION }}\", \"title\": \"${{ env.VERSION }}\", \"aliases\": []}]" > versions.json
           fi
-
-          # Commit and push changes
           git add .
           git commit -m "Deploy version ${{ env.VERSION }}"
           git push origin gh-pages
@@ -70,8 +63,6 @@ jobs:
         run: |
           latest_version=$(cat versions.json | jq -r '.[-1].version')
           sed "s/VERSION_PLACEHOLDER/${latest_version}/g" index-template.html > index.html
-          
-          # Check if index.html was modified
           if ! git diff --exit-code index.html; then
             git add index.html
             git commit -m "Update index.html to redirect to $latest_version"
