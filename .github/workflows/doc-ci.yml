@@ -12,7 +12,7 @@ jobs:
     steps:
       # Checkout repository
       - uses: actions/checkout@v4
-      
+
       # Configure Git credentials
       - name: Configure Git Credentials
         run: |
@@ -25,7 +25,7 @@ jobs:
           python-version: "3.11"
 
       # Caching dependencies
-      - run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV 
+      - run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
       - uses: actions/cache@v4
         with:
           key: mkdocs-material-${{ env.cache_id }}
@@ -36,15 +36,24 @@ jobs:
       # Install MkDocs, Mike, and theme
       - run: pip install mkdocs-material mike mkdocstrings-python
 
+      # Read version from VERSION file
+      - name: Read VERSION file
+        run: |
+          if [ -f VERSION ]; then
+            echo "VERSION=$(cat VERSION)" >> $GITHUB_ENV
+          else
+            echo "VERSION file not found"
+            exit 1
+          fi
+
       # Build and deploy using mike
       - run: |
-          git fetch origin gh-pages --depth=1
-          mike deploy --push --update-aliases 0.1.2 latest
+          mike deploy --push --update-aliases ${{ env.VERSION }} latest
           mike set-default --push latest
-          
+
       # Optionally, publish to GitHub Pages
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site  # This is where mkdocs outputs the built site
+          publish_dir: ./site
