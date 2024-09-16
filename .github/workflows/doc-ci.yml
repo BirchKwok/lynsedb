@@ -1,8 +1,8 @@
-name: doc-ci 
+name: doc-ci
 on:
   push:
     branches:
-      - master 
+      - master
       - main
 permissions:
   contents: write
@@ -57,26 +57,24 @@ jobs:
           git add .
           git commit -m "Deploy version ${{ env.VERSION }}"
           git push origin gh-pages
-          
+
       # Update index.html to redirect to the latest version
       - name: Update index.html
         run: |
-          latest_version=$(jq -r '.[-1].version' versions.json)
-          cat <<EOF > index.html
-<!DOCTYPE html>
-<html lang="en">
+          latest_version=$(cat versions.json | jq -r '.[-1].version')
+          echo "<!DOCTYPE html>
+<html lang=\"en\">
 <head>
-  <meta http-equiv="refresh" content="0; url=/${latest_version}/">
+  <meta http-equiv=\"refresh\" content=\"0; url=/${latest_version}/\">
   <title>Redirecting...</title>
-  <script type="text/javascript">
-    window.location.href = "/${latest_version}/"
+  <script type=\"text/javascript\">
+    window.location.href = \"/${latest_version}/\"
   </script>
 </head>
 <body>
-  If you are not redirected, <a href="/${latest_version}/">click here</a>.
+  If you are not redirected, <a href=\"/${latest_version}/\">click here</a>.
 </body>
-</html>
-EOF
+</html>" > index.html
           git add index.html
           git commit -m "Update index.html to redirect to $latest_version"
           git push origin gh-pages
