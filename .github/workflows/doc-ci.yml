@@ -69,7 +69,7 @@ jobs:
       - name: Update index.html
         run: |
           latest_version=$(cat versions.json | jq -r '.[-1].version')
-          sed "s/VERSION_PLACEHOLDER/${latest_version}/g" .github/workflows/index-template.html > index.html
+          sed "s/VERSION_PLACEHOLDER/${latest_version}/g" index-template.html > index.html
           
           # Check if index.html was modified
           if ! git diff --exit-code index.html; then
