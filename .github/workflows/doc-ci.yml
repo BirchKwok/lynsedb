@@ -50,6 +50,7 @@ jobs:
       - run: |
           mike deploy --push --update-aliases ${{ env.VERSION }} latest
           mike set-default --push latest
+          mike serve
 
       # Optionally, publish to GitHub Pages
       - name: Deploy to GitHub Pages
