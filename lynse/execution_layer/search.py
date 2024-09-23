@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
+from lynse.computational_layer.engines import inner_product
 from spinesUtils.asserts import check_has_param
 
 from ..configs.config import config
@@ -33,7 +34,7 @@ class Search:
 
         self.n_threads = n_threads
 
-        self.executors = None
+        self.executors = ThreadPoolExecutor(max_workers=self.n_threads)
 
     def _narrow_down_ids(self, search_filter):
         """
@@ -71,10 +72,21 @@ class Search:
                 subset_indices = np.intersect1d(subset_indices, ivf_subset_indices)
 
         if subset_indices is not None:
-            database_chunk, index_chunk = self.matrix_serializer.storage_worker.read_by_id(filename,
-                                                                                           id=subset_indices)
+            if filename not in self.matrix_serializer.storage_worker.dataloader.cache:
+                database_chunk, index_chunk = self.matrix_serializer.storage_worker.mmap_read(filename)
+                filter_indices = np.isin(index_chunk, subset_indices)
+                database_chunk = database_chunk[filter_indices]
+                index_chunk = index_chunk[filter_indices]
+            else:
+                database_chunk, index_chunk = self.matrix_serializer.storage_worker.dataloader.cache[filename]
+                filter_indices = np.isin(index_chunk, subset_indices)
+                database_chunk = database_chunk[filter_indices]
+                index_chunk = index_chunk[filter_indices]
         else:
-            database_chunk, index_chunk = self.matrix_serializer.dataloader(filename)
+            if filename not in self.matrix_serializer.storage_worker.dataloader.cache:
+                database_chunk, index_chunk = self.matrix_serializer.storage_worker.mmap_read(filename)
+            else:
+                database_chunk, index_chunk = self.matrix_serializer.storage_worker.dataloader.cache[filename]
 
         if len(index_chunk) == 0:
             return [], [], []
@@ -109,18 +121,21 @@ class Search:
 
         subset_indices = self._narrow_down_ids(search_filter)
 
-        cache_filenames, local_filenames = self.matrix_serializer.storage_worker.get_all_files(separate=True)
+        npy_filenames = self.matrix_serializer.storage_worker.get_all_files(separate=False)
 
         limited_sorted = LimitedSorted(n=k)
 
-        def batch_search(is_ivf=True, cid=None, sort=True):
-            nonlocal subset_indices, local_filenames, cache_filenames
+        def batch_search(is_ivf=True, cid=None, directly_return=True):
+            nonlocal subset_indices, npy_filenames
 
             ivf_subset_indices = None if not is_ivf else self.matrix_serializer.indexer.ivf.ivf_index.get_entries(cid)
 
             distance_func = self.matrix_serializer.indexer.index.search
 
-            if cache_filenames:
+            if is_ivf:
+                npy_filenames = list(filter(lambda x: x in ivf_subset_indices, npy_filenames))
+
+            if npy_filenames:
                 _ = [
                     i for i in map(
                         lambda x: self._search_chunk(
@@ -129,31 +144,11 @@ class Search:
                             distance_func,
                             ivf_subset_indices[x] if ivf_subset_indices is not None else None,
                             topk=k
-                        ), cache_filenames
+                        ), npy_filenames
                     )
                 ]
 
-            if local_filenames:
-                multi_threads = False
-                if (not is_ivf) and len(local_filenames) > 1 and self.executors is None:
-                    self.executors = ThreadPoolExecutor(max_workers=self.n_threads)
-                    multi_threads = True
-
-                map_func = self.executors.map if multi_threads else map
-
-                _ = [
-                    i for i in map_func(
-                        lambda x: self._search_chunk(
-                            vector, subset_indices, x,
-                            limited_sorted,
-                            distance_func,
-                            ivf_subset_indices[x] if ivf_subset_indices is not None else None,
-                            topk=k
-                        ), local_filenames
-                    )
-                ]
-
-            if sort:
+            if directly_return:
                 res_ids, res_scores = limited_sorted.get_top_n()
 
                 return (
@@ -165,17 +160,14 @@ class Search:
             return batch_search(is_ivf=False)
 
         # otherwise, use IVF-FLAT
-        cluster_id_sorted = self.matrix_serializer.indexer.index.search(
-            encoded_vec=vector, encoded_data=self.matrix_serializer.indexer.ivf.ann_model.cluster_centers_,
-            top_k=self.matrix_serializer.indexer.ivf.ann_model.cluster_centers_.shape[0]
+        cluster_id_sorted = inner_product(
+            vector, self.matrix_serializer.indexer.ivf.ann_model.cluster_centers_,
+            n=self.matrix_serializer.indexer.ivf.ann_model.cluster_centers_.shape[0],
+            use_simd=False
         )[0].tolist()
-        predict_id = self.matrix_serializer.indexer.ivf.ann_model.predict(vector.reshape(1, -1))[0]
-
-        cluster_id_sorted.remove(predict_id)
-        cluster_id_sorted.insert(0, predict_id)
 
         for cluster_id in cluster_id_sorted:
-            batch_search(cid=cluster_id, sort=False, is_ivf=True)
+            batch_search(cid=cluster_id, directly_return=False, is_ivf=True)
 
             if len(limited_sorted) >= k:
                 break
