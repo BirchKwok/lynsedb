@@ -108,27 +108,6 @@ def unavailable_if_empty(func):
     return wrapper
 
 
-def load_chunk_file(filename):
-    np_array = np.load(filename, mmap_mode='r')
-    return np_array
-
-
-class NpyLoader:
-    def __init__(self, filename):
-        self.filename = filename
-        self.np_array = None
-
-    def __enter__(self):
-        self.np_array = load_chunk_file(self.filename)
-        return self.np_array
-    
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.np_array._mmap.close()
-        self.np_array = None
-
-
-
-
 def drop_duplicated_substr(source, target) -> str:
     """
     Remove all occurrences of the target string from the source string.
@@ -217,17 +196,17 @@ def sort_and_get_top_k(arr, k):
             top_k_values: Values of top-k elements for each row
     """
     arr = np.asarray(arr)
-    
+
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
-    
+
     n_rows, n_cols = arr.shape
-    
+
     k = min(k, n_cols)
-    
+
     sorted_indices = np.argsort(arr, axis=1)[:, ::-1]
-    
+
     top_k_indices = sorted_indices[:, :k]
     top_k_values = np.take_along_axis(arr, top_k_indices, axis=1)
-    
+
     return top_k_indices, top_k_values
