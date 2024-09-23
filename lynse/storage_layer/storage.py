@@ -8,6 +8,7 @@ from spinesUtils.asserts import raise_if
 
 from ..core_components.limited_dict import LimitedDict
 from ..core_components.locks import ThreadLock
+from ..utils.utils import safe_mmap_reader
 
 
 class PersistentFileStorage:
@@ -232,8 +233,8 @@ class DataLoader:
         return (self.collection_chunk_path / 'chunk_0').exists()
 
     def mmap_read(self, filename):
-        return (np.load(self.collection_chunk_path / filename, mmap_mode='r'),
-                np.load(self.collection_chunk_indices_path / filename, mmap_mode='r'))
+        return safe_mmap_reader(self.collection_chunk_path / filename), \
+               safe_mmap_reader(self.collection_chunk_indices_path / filename)
 
     def warm_up(self):
         """Load the data from the file to the memory."""

@@ -210,3 +210,20 @@ def sort_and_get_top_k(arr, k):
     top_k_values = np.take_along_axis(arr, top_k_indices, axis=1)
 
     return top_k_indices, top_k_values
+
+
+def safe_mmap_reader(path, ids=None):
+    """
+    Open a file in memory-mapped mode.
+
+    Parameters:
+        path (str or Pathlike): The path to the file.
+        ids (list): The slices to read from the file.
+
+    Returns:
+        np.ndarray: The numpy ndarray.
+    """
+    if ids is None:
+        return np.asarray(memoryview(np.load(path, "r")))
+
+    return np.asarray(memoryview(np.load(path, "r")[ids]))
