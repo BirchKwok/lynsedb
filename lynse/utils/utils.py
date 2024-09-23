@@ -223,7 +223,12 @@ def safe_mmap_reader(path, ids=None):
     Returns:
         np.ndarray: The numpy ndarray.
     """
+    mmap_file = np.load(path, "r")
     if ids is None:
-        return np.asarray(memoryview(np.load(path, "r")))
+        array = np.asarray(memoryview(mmap_file))
+    else:
+        array = np.asarray(memoryview(mmap_file[ids]))
 
-    return np.asarray(memoryview(np.load(path, "r")[ids]))
+    # Close the mmap file
+    mmap_file._mmap.close()
+    return array
