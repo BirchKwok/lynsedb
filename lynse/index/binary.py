@@ -175,6 +175,19 @@ class _IndexBinary(BaseIndex):
             print(f"Error loading model: {e}")
             return None
 
+    def __del__(self):
+        if self.means is not None:
+            del self.means
+
+        if self.data is not None:
+            del self.data
+
+        if self.ids is not None:
+            del self.ids
+
+        if self.sq8_data is not None:
+            del self.sq8_data
+
 
 class IndexBinaryJaccard(_IndexBinary):
     name = 'IndexBinaryJaccard'
