@@ -8,7 +8,6 @@ from spinesUtils.asserts import raise_if
 
 from ..core_components.limited_dict import LimitedDict
 from ..core_components.locks import ThreadLock
-from ..utils.utils import NpyLoader
 
 
 class PersistentFileStorage:
@@ -61,9 +60,12 @@ class PersistentFileStorage:
     def get_all_files(self, separate=False):
         return self.dataloader.get_all_files(separate=separate)
 
-    def read(self, filename, is_mmap=True, return_memory=True):
+    def read(self, filename, return_memory=True):
         """Read data from the specified filename if it exists."""
-        return self.dataloader.read(filename, is_mmap=is_mmap, return_memory=return_memory)
+        return self.dataloader.read(filename, return_memory=return_memory)
+
+    def mmap_read(self, filename):
+        return self.dataloader.mmap_read(filename)
 
     def get_last_id(self):
         ids = [int(i.stem.split('_')[-1])
@@ -229,6 +231,10 @@ class DataLoader:
         """Check if the file exists."""
         return (self.collection_chunk_path / 'chunk_0').exists()
 
+    def mmap_read(self, filename):
+        return (np.load(self.collection_chunk_path / filename, mmap_mode='r'),
+                np.load(self.collection_chunk_indices_path / filename, mmap_mode='r'))
+
     def warm_up(self):
         """Load the data from the file to the memory."""
         with self.lock:
@@ -258,27 +264,15 @@ class DataLoader:
         if res is None or (len(res) == 2 and res[0] is None):
             return None
 
-        return res  # data, indices
+        return res
 
-    def load_data(self, filename, data_path, indices_path, update_memory=True, is_mmap=True):
+    def load_data(self, filename, data_path, indices_path, update_memory=True):
         with self.lock:
             with open(data_path / filename, 'rb') as f:
-                    data = np.load(f)
+                data = np.load(f)
             with open(indices_path / filename, 'rb') as f:
                 indices = np.load(f)
 
-            # ignore mmap
-            # if not is_mmap:
-            #     with open(data_path / filename, 'rb') as f:
-            #         data = np.load(f)
-            #     with open(indices_path / filename, 'rb') as f:
-            #         indices = np.load(f)
-            # else:
-            #     with NpyLoader(data_path / filename) as _data:
-            #         data = np.asarray(_data)
-            #     with NpyLoader(indices_path / filename) as _indices:
-            #         indices = np.asarray(_indices)
-                    
         if update_memory:
             self.write_to_memory(filename, data, indices)
 
@@ -296,26 +290,24 @@ class DataLoader:
 
             return filenames
 
-    def read(self, filename, is_mmap=True, return_memory=True):
+    def read(self, filename, return_memory=True):
         """Read data from the specified filename if it exists."""
         with self.lock:
             if not self.file_exists():
                 return
 
             if not return_memory:
-                return self.load_data(filename, self.collection_chunk_path, self.collection_chunk_indices_path,
-                                    is_mmap=is_mmap)
+                return self.load_data(filename, self.collection_chunk_path, self.collection_chunk_indices_path)
 
             return self.return_if_in_memory(filename) or self.load_data(filename, self.collection_chunk_path,
-                                                                    self.collection_chunk_indices_path,
-                                                                    is_mmap=is_mmap)
+                                                                        self.collection_chunk_indices_path)
 
     def read_by_id(self, filename, id=None):
         """Read the data from the file as a memory-mapped file."""
         with self.lock:
             idx_filter = lambda x: np.isin(indices, id, assume_unique=True) if id is not None else None
 
-            data, indices = self.read(filename, is_mmap=True)
+            data, indices = self.read(filename)
             if not isinstance(indices, np.ndarray):
                 indices = np.asarray(indices)
 
