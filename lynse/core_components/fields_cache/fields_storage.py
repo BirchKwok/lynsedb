@@ -37,8 +37,8 @@ class FieldsStorage:
         self.max_entries = 100000
         self.use_index = False
 
-        self.all_fields = {} 
-        self._load_all_fields()  
+        self.all_fields = {}
+        self._load_all_fields()
 
     def _initialize_id_checker(self):
         self.id_filter = IDChecker()

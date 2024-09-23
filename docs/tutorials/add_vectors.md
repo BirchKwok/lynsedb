@@ -33,11 +33,11 @@ with collection.insert_session() as session:
 # collection.commit()
 ```
 
-    
+
     2024-09-13 10:44:57 - LynseDB - INFO - Saving data...
     2024-09-13 10:44:57 - LynseDB - INFO - Writing chunk to storage...
     Data persisting: 100%|██████████| 1/1 [00:00<00:00, 264.76chunk/s]
-    
+
     2024-09-13 10:44:57 - LynseDB - INFO - Writing chunk to storage done.
     2024-09-13 10:44:57 - LynseDB - INFO - Pre-building the index...
     2024-09-13 10:44:57 - LynseDB - INFO - Building an index using the `Flat-IP` index mode...
@@ -58,8 +58,8 @@ print(collection)
 ```
 
     LocalCollectionInstance(
-        database="my_vec_db", 
-        collection="test_add_vectors", 
+        database="my_vec_db",
+        collection="test_add_vectors",
         shape=(1, 128)
     )
 
@@ -89,11 +89,11 @@ with collection.insert_session() as session:
 print(ids)
 ```
 
-    
+
     2024-09-13 10:45:14 - LynseDB - INFO - Saving data...
     2024-09-13 10:45:14 - LynseDB - INFO - Writing chunk to storage...
     Data persisting: 100%|██████████| 1/1 [00:00<00:00, 460.86chunk/s]
-    
+
     2024-09-13 10:45:14 - LynseDB - INFO - Writing chunk to storage done.
     2024-09-13 10:45:14 - LynseDB - INFO - Pre-building the index...
     2024-09-13 10:45:14 - LynseDB - INFO - Building an index using the `Flat-IP` index mode...
@@ -108,8 +108,7 @@ print(collection)
 ```
 
     LocalCollectionInstance(
-        database="my_vec_db", 
-        collection="test_min_vec", 
+        database="my_vec_db",
+        collection="test_min_vec",
         shape=(10, 128)
     )
-

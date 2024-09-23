@@ -6,7 +6,7 @@ repo_url: https://github.com/BirchKwok/LynseDB
 repo_name: birchkwok/LynseDB
 
 theme:
-  name: material 
+  name: material
   logo: img/logo.png
   favicon: img/favicon.png
   features:
@@ -35,7 +35,7 @@ theme:
 
     # Palette toggle for light mode
     - media: "(prefers-color-scheme: light)"
-      scheme: default 
+      scheme: default
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
@@ -46,7 +46,7 @@ theme:
       toggle:
         icon: material/brightness-4
         name: Switch to system preference
-  
+
   font:
     text: false
     code: Roboto Mono
@@ -88,12 +88,10 @@ nav:
     - Client Distribution: client.md
     - HTTP API:
       - App: http_api/serve_api/app.md
-      - HTTP Serve: 
+      - HTTP Serve:
         - Collection: http_api/serve_api/collection_ops.md
         - Database: http_api/serve_api/database_ops.md
       - HTTP Client: http_api/client_api.md
     - Native API:
       - ExclusiveDB: native_api/low_level.md
       - Local Client: native_api/high_level.md
-
-

@@ -17,7 +17,7 @@
 </p>
 
 
-**LynseDB** is a vector database implemented purely in Python, designed to be lightweight, server-optional, and easy to deploy locally or remotely. It offers straightforward and clear Python APIs, aiming to lower the entry barrier for using vector databases. 
+**LynseDB** is a vector database implemented purely in Python, designed to be lightweight, server-optional, and easy to deploy locally or remotely. It offers straightforward and clear Python APIs, aiming to lower the entry barrier for using vector databases.
 
 It focuses on achieving 100% recall, prioritizing recall accuracy over high-speed search performance. This approach ensures that users can reliably retrieve all relevant vector data, making LynseDB particularly suitable for applications that require responses within hundreds of milliseconds.
 
@@ -35,7 +35,7 @@ It focuses on achieving 100% recall, prioritizing recall accuracy over high-spee
 
 - Not yet backward compatible
 
-LynseDB is actively being updated, and API backward compatibility is not guaranteed. You should use version numbers as a strong constraint during deployment to avoid unnecessary feature conflicts and errors. 
+LynseDB is actively being updated, and API backward compatibility is not guaranteed. You should use version numbers as a strong constraint during deployment to avoid unnecessary feature conflicts and errors.
 
 - Data size constraints
 
@@ -70,6 +70,6 @@ After installing the [Client API package](#install-client-api-package-mandatory)
 docker pull birchkwok/LynseDB:latest
 ```
 
-## License 
+## License
 ### Apache License
 [Version 2.0, January 2004](https://www.apache.org/licenses/LICENSE-2.0)

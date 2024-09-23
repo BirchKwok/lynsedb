@@ -7,24 +7,24 @@ import lynse
 print("LynseDB version is: ", lynse.__version__)
 ```
 
-    LynseDB version is:  0.1.0
+    LynseDB version is:  0.1.2
 
 
 ### Initialize Database
 
-LynseDB now supports HTTP API and Python native code API. 
+LynseDB now supports HTTP API and Python native code API.
 
 
-The HTTP API mode requires starting an HTTP server beforehand. You have two options: 
+The HTTP API mode requires starting an HTTP server beforehand. You have two options:
 - start directly.
-  
+
   For direct startup, the default port is 7637. You can run the following command in the terminal to start the service:
 ```shell
 lynse run --host localhost --port 7637
 ```
 
 - within Docker
-  
+
   In Docker, You can run the following command in the terminal to start the service:
 ```shell
 docker run -p 7637:7637 birchkwok/LynseDB:latest
@@ -40,9 +40,9 @@ docker run -p 80:7637 birchkwok/LynseDB:latest
 - test if api available
 
   You can directly request in the browser http://localhost:7637
-  
+
   For port 80, you can use this url: http://localhost
-  
+
   If the image is bound to port 80 of the host in remote deployment, you can directly access it http://your_host_ip
 
 
@@ -67,7 +67,7 @@ my_db = client.create_database("test_db", drop_if_exists=True)
 
 **`WARNING`**
 
-When using the `require_collection` method to request a collection, if the `drop_if_exists` parameter is set to True, it will delete all content of the collection if it already exists. 
+When using the `require_collection` method to request a collection, if the `drop_if_exists` parameter is set to True, it will delete all content of the collection if it already exists.
 
 A safer method is to use the `get_collection` method. It is recommended to use the `require_collection` method only when you need to reinitialize a collection or create a new one.
 
@@ -77,7 +77,7 @@ collection = my_db.require_collection("test_collection", dim=4, drop_if_exists=T
 ```
 
 #### show database collections
-
+If the pandas library is installed, `show_collections_details` method will show as a pandas dataframe. Otherwise, it will be a dict.
 
 ```python linenums="1"
 my_db.show_collections_details()
@@ -198,36 +198,36 @@ It is strongly recommended to use the `insert_session` context manager for inser
 
 ```python linenums="1"
 with collection.insert_session() as session:
-    id = session.add_item(vector=[0.01, 0.34, 0.74, 0.31], id=1, field={'field': 'test_1', 'order': 0})   # id = 0
-    id = session.add_item(vector=[0.36, 0.43, 0.56, 0.12], id=2, field={'field': 'test_1', 'order': 1})   # id = 1
-    id = session.add_item(vector=[0.03, 0.04, 0.10, 0.51], id=3, field={'field': 'test_2', 'order': 2})   # id = 2
-    id = session.add_item(vector=[0.11, 0.44, 0.23, 0.24], id=4, field={'field': 'test_2', 'order': 3})   # id = 3
-    id = session.add_item(vector=[0.91, 0.43, 0.44, 0.67], id=5, field={'field': 'test_2', 'order': 4})   # id = 4
-    id = session.add_item(vector=[0.92, 0.12, 0.56, 0.19], id=6, field={'field': 'test_3', 'order': 5})   # id = 5
-    id = session.add_item(vector=[0.18, 0.34, 0.56, 0.71], id=7, field={'field': 'test_1', 'order': 6})   # id = 6
-    id = session.add_item(vector=[0.01, 0.33, 0.14, 0.31], id=8, field={'field': 'test_2', 'order': 7})   # id = 7
-    id = session.add_item(vector=[0.71, 0.75, 0.91, 0.82], id=9, field={'field': 'test_3', 'order': 8})   # id = 8
-    id = session.add_item(vector=[0.75, 0.44, 0.38, 0.75], id=10, field={'field': 'test_1', 'order': 9})  # id = 9
+    id = session.add_item(vector=[0.01, 0.34, 0.74, 0.31], id=1, field={'field': 'test_1', 'order': 0})   # id = 1
+    id = session.add_item(vector=[0.36, 0.43, 0.56, 0.12], id=2, field={'field': 'test_1', 'order': 1})   # id = 2
+    id = session.add_item(vector=[0.03, 0.04, 0.10, 0.51], id=3, field={'field': 'test_2', 'order': 2})   # id = 3
+    id = session.add_item(vector=[0.11, 0.44, 0.23, 0.24], id=4, field={'field': 'test_2', 'order': 3})   # id = 4
+    id = session.add_item(vector=[0.91, 0.43, 0.44, 0.67], id=5, field={'field': 'test_2', 'order': 4})   # id = 5
+    id = session.add_item(vector=[0.92, 0.12, 0.56, 0.19], id=6, field={'field': 'test_3', 'order': 5})   # id = 6
+    id = session.add_item(vector=[0.18, 0.34, 0.56, 0.71], id=7, field={'field': 'test_1', 'order': 6})   # id = 7
+    id = session.add_item(vector=[0.01, 0.33, 0.14, 0.31], id=8, field={'field': 'test_2', 'order': 7})   # id = 8
+    id = session.add_item(vector=[0.71, 0.75, 0.91, 0.82], id=9, field={'field': 'test_3', 'order': 8})   # id = 9
+    id = session.add_item(vector=[0.75, 0.44, 0.38, 0.75], id=10, field={'field': 'test_1', 'order': 9})  # id = 10
 
 # If you do not use the insert_session function, you need to manually call the commit function to submit the data
 # collection.commit()
 
 # or use the bulk_add_items function
 # with collection.insert_session():
-#     ids = collection.bulk_add_items([([0.01, 0.34, 0.74, 0.31], 0, {'field': 'test_1', 'order': 0}), 
-#                                      ([0.36, 0.43, 0.56, 0.12], 1, {'field': 'test_1', 'order': 1}), 
+#     ids = collection.bulk_add_items([([0.01, 0.34, 0.74, 0.31], 0, {'field': 'test_1', 'order': 0}),
+#                                      ([0.36, 0.43, 0.56, 0.12], 1, {'field': 'test_1', 'order': 1}),
 #                                      ([0.03, 0.04, 0.10, 0.51], 2, {'field': 'test_2', 'order': 2}),
-#                                      ([0.11, 0.44, 0.23, 0.24], 3, {'field': 'test_2', 'order': 3}), 
-#                                      ([0.91, 0.43, 0.44, 0.67], 4, {'field': 'test_2', 'order': 4}), 
+#                                      ([0.11, 0.44, 0.23, 0.24], 3, {'field': 'test_2', 'order': 3}),
+#                                      ([0.91, 0.43, 0.44, 0.67], 4, {'field': 'test_2', 'order': 4}),
 #                                      ([0.92, 0.12, 0.56, 0.19], 5, {'field': 'test_3', 'order': 5}),
-#                                      ([0.18, 0.34, 0.56, 0.71], 6, {'field': 'test_1', 'order': 6}), 
-#                                      ([0.01, 0.33, 0.14, 0.31], 7, {'field': 'test_2', 'order': 7}), 
+#                                      ([0.18, 0.34, 0.56, 0.71], 6, {'field': 'test_1', 'order': 6}),
+#                                      ([0.01, 0.33, 0.14, 0.31], 7, {'field': 'test_2', 'order': 7}),
 #                                      ([0.71, 0.75, 0.91, 0.82], 8, {'field': 'test_3', 'order': 8}),
 #                                      ([0.75, 0.44, 0.38, 0.75], 9, {'field': 'test_1', 'order': 9})])
-# print(ids)  # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+# print(ids)  # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 ```
 
-    
+
     2024-09-12 17:33:36 - LynseDB - INFO - Task status: {'status': 'Processing'}
     2024-09-12 17:33:38 - LynseDB - INFO - Task status: {'result': {'collection_name': 'test_collection', 'database_name': 'test_db'}, 'status': 'Success'}
 
@@ -293,9 +293,9 @@ ids, scores, fields = collection.search(
     vector=[0.36, 0.43, 0.56, 0.12],
     k=10,
     search_filter="""
-        :field: == 'test_1' and 
-        ((0 <= :order: <= 8) or (:id: in [1, 2, 3, 4, 5])) and 
-        not (:id: == 8 and :order: >= 8) 
+        :field: == 'test_1' and
+        ((0 <= :order: <= 8) or (:id: in [1, 2, 3, 4, 5])) and
+        not (:id: == 8 and :order: >= 8)
     """,
     return_fields=False
 )
@@ -312,13 +312,13 @@ print("fields: ", fields)
 
 ### Use Filter for freer conditional expression
 
-Using the Filter class for result filtering can maximize Recall. 
+Using the Filter class for result filtering can maximize Recall.
 
-The Filter class now supports `must`, `any`, and `must_not` parameters, all of which only accept list-type argument values. 
+The Filter class now supports `must`, `any`, and `must_not` parameters, all of which only accept list-type argument values.
 
-The filtering conditions in `must` must be met, those in `must_not` must not be met. 
+The filtering conditions in `must` must be met, those in `must_not` must not be met.
 
-After filtering with `must` and `must_not` conditions, the conditions in `any` will be considered, and at least one of the conditions in `any` must be met. 
+After filtering with `must` and `must_not` conditions, the conditions in `any` will be considered, and at least one of the conditions in `any` must be met.
 
 The filter result must satisfy both `must` and `any`, but not `must_not`.
 
@@ -337,10 +337,10 @@ ids, scores, fields = collection.search(
         ],
         any=[
             FieldCondition(key='order', matcher=MatchRange(start=0, end=8, inclusive=True)),
-            FieldCondition(key=":match_id:", matcher=MatchID([1, 2, 3, 4, 5])),  # Support for filtering IDs
+            FieldCondition(key=":id:", matcher=MatchID([1, 2, 3, 4, 5])),  # Support for filtering IDs
         ],
         must_not=[
-            FieldCondition(key=":match_id:", matcher=MatchID([8])),
+            FieldCondition(key=":id:", matcher=MatchID([8])),
             FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),
         ]
     ),
@@ -364,9 +364,9 @@ print("fields: ", fields)
 
 ```python linenums="1"
 collection.query("""
-    :field: == 'test_1' and 
-    ((0 <= :order: <= 8) or (:id: in [1, 2, 3, 4, 5])) and 
-    not (:id: == 8 and :order: >= 8) 
+    :field: == 'test_1' and
+    ((0 <= :order: <= 8) or (:id: in [1, 2, 3, 4, 5])) and
+    not (:id: == 8 and :order: >= 8)
 """)
 ```
 
@@ -447,9 +447,9 @@ Much like query, you can query using either the FieldExpression string or the Fi
 
 ```python linenums="1"
 collection.query_vectors("""
-    :field: == 'test_1' and 
-    ((0 <= :order: <= 8) or (:id: in [1, 2, 3, 4, 5])) and 
-    not (:id: == 8 and :order: >= 8) 
+    :field: == 'test_1' and
+    ((0 <= :order: <= 8) or (:id: in [1, 2, 3, 4, 5])) and
+    not (:id: == 8 and :order: >= 8)
 """)
 ```
 
@@ -515,7 +515,3 @@ my_db
 
 
     RemoteDatabaseInstance(name=test_db, exists=False)
-
-
-
-

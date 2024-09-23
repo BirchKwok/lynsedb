@@ -80,8 +80,8 @@ class IDChecker:
                 return [id for id in self.ids if start <= id < end]
             elif inclusive == "right":
                 return [id for id in self.ids if start < id <= end]
-        
+
         return [id for id in self.ids if matcher.evaluate(data=None, external_id=id)]
-    
+
     def retrieve_all_ids(self, return_set=False):
         return list(self.ids) if not return_set else set(self.ids)

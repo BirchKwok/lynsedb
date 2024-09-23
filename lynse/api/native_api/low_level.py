@@ -24,7 +24,7 @@ class ExclusiveDB:
     so it is not thread-safe or process-safe.
 
     Note:
-        This class is not called at the top level, but is called through the LocalClient class. 
+        This class is not called at the top level, but is called through the LocalClient class.
         When directly operating on data by calling this class, users need to be clear about what they are doing.
     """
     name = "Local"
@@ -67,7 +67,7 @@ class ExclusiveDB:
             use_cache (bool): Whether to use cache for search. Default is True.
             n_threads (int): The number of threads to use for parallel processing. Default is 10.
             warm_up (bool): Whether to warm up the database. Default is False.
-            cache_chunks (int): The buffer size for reading and writing data. Default is 20.
+            cache_chunks (int): The number of chunks to cache in memory. Default is 20.
 
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
@@ -139,7 +139,7 @@ class ExclusiveDB:
             field (dict, optional, keyword-only): The field of the vector. Default is None.
                 If None, the field will be set to an empty string.
             buffer_size (int or bool or None): The buffer size for the storage worker. Default is True.
-                
+
                 - If None, the vector will be directly written to the disk.
                 - If True, the buffer_size will be set to chunk_size,
                     and the vectors will be written to the disk when the buffer is full.
@@ -265,7 +265,7 @@ class ExclusiveDB:
                     If 'Binary' is in the index mode, the default is 10. Otherwise, the default is 2.
 
         Returns:
-            (Tuple[List[int], List[float], List[Dict]] or Tuple[List[int], List[float], None]): 
+            (Tuple[List[int], List[float], List[Dict]] or Tuple[List[int], List[float], None]):
                 If return_fields is True, the indices, similarity scores,
                 and fields of the nearest vectors in the database.
                 Otherwise, the indices and similarity scores of the nearest vectors in the database.
@@ -361,7 +361,7 @@ class ExclusiveDB:
         Parameters:
             query_filter (Filter or dict or FieldExpression str or None):
                 The filter object or the specify data to filter.
-            filter_ids (list[int]): 
+            filter_ids (list[int]):
                 The list of external IDs to filter. Default is None.
 
         Returns:
@@ -502,7 +502,7 @@ class ExclusiveDB:
             id (int or list): The external ID or list of external IDs.
 
         Returns:
-            (Tuple[np.ndarray, List[int], List[Dict]], Tuple[np.ndarray, int, Dict]): 
+            (Tuple[np.ndarray, List[int], List[Dict]], Tuple[np.ndarray, int, Dict]):
                 The vectors, IDs, and fields of the items.
         """
         data, ids = self._matrix_serializer.storage_worker.read_by_only_id(id)
@@ -530,7 +530,7 @@ class ExclusiveDB:
         Build an index for the field.
 
         Parameters:
-            schema (IndexSchema or Field name string): The schema of the field or the field name string. 
+            schema (IndexSchema or Field name string): The schema of the field or the field name string.
                 When passing the field name string, the field name must be wrapped with ':', like ':vector:', ':timestamp:'.
             rebuild_if_exists (bool): Whether to rebuild the index if it already exists.
 
@@ -587,7 +587,7 @@ class ExclusiveDB:
     def delete(self):
         """
         Delete the database.
-        
+
         This API is not part of the Collection in the HTTP API, but rather part of the HTTPClient in the HTTP API
         Users must call this API through the HTTPClient when they want to delete a collection on the server.
 

@@ -157,7 +157,7 @@ class FieldsCache:
         Build an index for the cache.
 
         Parameters:
-            schema (IndexSchema or Field name string): The index schema or the field name string. 
+            schema (IndexSchema or Field name string): The index schema or the field name string.
                 When passing the field name string, the field name must be wrapped with ':',
                 like ':vector:', ':timestamp:'.
             rebuild_if_exists: bool
@@ -172,7 +172,7 @@ class FieldsCache:
         if isinstance(schema, str):
             if schema == ':id:':
                 raise ValueError("The field name ':id:' is reserved.")
-            
+
             schema_type = self.storage.list_fields().get(schema, None)
             schema = schema.strip(':')
 
@@ -231,5 +231,5 @@ class FieldsCache:
         Returns:
             List[str]: The list of indices.
         """
-        return [":" + i + ":" if i not in [':id:', ''] else i 
+        return [":" + i + ":" if i not in [':id:', ''] else i
                 for i in list(self.storage.index.indices.keys())]

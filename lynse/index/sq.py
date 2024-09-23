@@ -217,13 +217,13 @@ class IndexSQL2sq(_IndexSQ):
     def search(self, original_vec=None, top_k=10, rescore_multiplier=2, subset_indices=None):
         """
         Search for the nearest neighbors of the input data.
-        
+
         Parameters:
             original_vec (np.ndarray): The original vector.
             top_k (int): The number of nearest neighbors to return.
             rescore_multiplier (int): The rescore multiplier.
             subset_indices (np.ndarray): The subset indices.
-            
+
         Returns:
             (np.ndarray, np.ndarray): The top k indices and their distances.
         """
@@ -264,6 +264,7 @@ class IndexSQIP(_IndexSQ):
             filtered_indices = np.isin(ids, subset_indices, assume_unique=True)
             encoded_data = encoded_data[filtered_indices]
             ids = ids[filtered_indices]
+
 
         decoded_data, ids = self._pre_select_topk(original_vec, encoded_data, ids,
                                                   top_k * rescore_multiplier)

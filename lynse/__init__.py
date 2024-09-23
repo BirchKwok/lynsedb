@@ -98,7 +98,7 @@ class VectorDBClient:
     def create_database(self, database_name: str, drop_if_exists: bool = False):
         """
         Create the database using a lazy mode, where entities are only created when they are actually used.
-    
+
         Parameters:
             database_name (str): The name of the database to create.
             drop_if_exists (bool): Whether to drop the database if it already exists.

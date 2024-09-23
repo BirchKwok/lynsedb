@@ -9,7 +9,7 @@ class FastSort:
     def topk(self, k, ascending=True):
         axis = 0
         k = min(k, self.data.shape[axis])
-        
+
         if ascending:
             partitioned_indices = np.argpartition(self.data, k-1, axis=axis)
             topk_indices = partitioned_indices[:k]

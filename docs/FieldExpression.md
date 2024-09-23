@@ -1,6 +1,6 @@
 # FieldExpression
 
-**FieldExpression** is a string parser used to parse field expressions. 
+**FieldExpression** is a string parser used to parse field expressions.
 
 It can reassemble the parsing result into a Filter object of LynseDB, which can filter the query result. Its main implementation idea is to efficiently create Filters without requiring users to learn the use of complex filtering components such as MatchRange and FieldCondition.
 
@@ -26,7 +26,7 @@ It is an important component of LynseDB and can effectively improve the user-fri
 
 - **Supported parentheses**:
     - ()
-    
+
 - **Examples**:
     - :order: > 1
     - :order: >= 1
@@ -55,7 +55,7 @@ It is an important component of LynseDB and can effectively improve the user-fri
             {'key': 'tt', 'matcher': {'value': 2, 'comparator': 'eq'}}
         ]
     }
-``` 
+```
 
 - **Efficient syntax**:
     - Use () to group expressions for better readability and maintainability.

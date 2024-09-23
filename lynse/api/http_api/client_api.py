@@ -106,13 +106,13 @@ class HTTPClient:
                 When loading an existing collection, the dimension of the vectors is automatically loaded.
             chunk_size (int): The chunk size. Default is 100,000.
             dtypes (str): The data types. Default is 'float32'.
-            use_cache (bool): Whether to use cache. Default is True.
+            use_cache (bool): Whether to use cache for search. Default is True.
             n_threads (int): The number of threads. Default is 10.
             warm_up (bool): Whether to warm up. Default is False.
             drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
             description (str): A description of the collection. Default is None.
                 The description is limited to 500 characters.
-            cache_chunks (int): The number of chunks to cache. Default is 20.
+            cache_chunks (int): The number of chunks to cache in memory. Default is 20.
 
         Returns:
             Collection: The collection object.

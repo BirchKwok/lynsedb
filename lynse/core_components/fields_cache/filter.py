@@ -149,7 +149,7 @@ class FieldCondition:
         if attribute_value is not None:
             return self.matcher.match(attribute_value)
         return False
-    
+
 
 class Filter:
     __slots__ = ['must_fields', 'any_fields', 'must_not_fields']
@@ -329,11 +329,11 @@ class Filter:
                         condition['matcher']['start'],
                         condition['matcher']['end'],
                         condition['matcher']['inclusive'])))
-        
+
         self.must_fields = self._to_unique_list(self.must_fields)
         self.any_fields = self._to_unique_list(self.any_fields)
         self.must_not_fields = self._to_unique_list(self.must_not_fields)
-        
+
         return self
 
     @staticmethod
@@ -374,6 +374,6 @@ class Filter:
         if isinstance(cond1.matcher, (MatchField, MatchID, MatchRange)):
             return cond1.matcher.__dict__ == cond2.matcher.__dict__
         return cond1.matcher == cond2.matcher
-    
+
     def __hash__(self):
         return hash(msgpack.packb(self.to_dict()))

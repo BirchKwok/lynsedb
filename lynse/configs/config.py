@@ -186,7 +186,7 @@ def load_config_file(path=Path(os.path.expanduser('~')) / '.lynsedb_configs.yaml
         config_dict = yaml.load(file)
         if config_dict is None:
             config_dict = {}
-        
+
         for key, value in config_dict.items():
             if "PATH" in key and isinstance(value, str):
                 value = Path(value)

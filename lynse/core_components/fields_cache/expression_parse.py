@@ -201,10 +201,10 @@ class RangeNode(ASTNode):
 
 class ExpressionParser:
     r"""
-    FieldExpression is a string parser used to parse field expressions. 
+    FieldExpression is a string parser used to parse field expressions.
 
-    It can reassemble the parsing result into a Filter object of LynseDB, which can filter the query result. 
-    Its main implementation idea is to efficiently create Filters 
+    It can reassemble the parsing result into a Filter object of LynseDB, which can filter the query result.
+    Its main implementation idea is to efficiently create Filters
         without requiring users to learn the use of complex filtering components such as MatchRange and FieldCondition.
 
     It is an important component of LynseDB and can effectively improve the user-friendliness of LynseDB.
@@ -229,7 +229,7 @@ class ExpressionParser:
 
     Supported parentheses:
         - ()
-        
+
     Examples:
         - :order: > 1
         - :order: >= 1
@@ -361,7 +361,7 @@ class ExpressionParser:
             node = self.parse_or()
             if self.current >= len(self.tokens) or self.tokens[self.current] != ')':
                 raise ValueError("Missing right parenthesis")
-            self.current += 1 
+            self.current += 1
             return node
         else:
             return self.parse_condition()

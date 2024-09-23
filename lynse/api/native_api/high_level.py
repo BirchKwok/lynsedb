@@ -135,7 +135,7 @@ class _Register:
 class LocalClient:
     """
     A singleton class for the local LynseDB client.
-    Using the LocalClient class, users can create and access database instances, 
+    Using the LocalClient class, users can create and access database instances,
     as well as operate on the collections within them (Low-Level API).
     This class is thread-safe only. Using it in multiple processes will result in a race condition.
     """

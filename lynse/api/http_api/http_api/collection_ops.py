@@ -776,7 +776,7 @@ def query_vectors():
     Returns:
         dict: The status of the operation.
     """
-    from ....api.native_api.high_level import LocalClient   
+    from ....api.native_api.high_level import LocalClient
 
     data = request.json
     if not data:
@@ -856,7 +856,7 @@ def list_fields():
         }}, sort_keys=False), mimetype='application/json')
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    
+
 
 @collection_ops.route('/list_field_index', methods=['POST'])
 def list_field_index():
@@ -995,7 +995,7 @@ def is_id_exists():
         }}, sort_keys=False), mimetype='application/json')
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    
+
 
 @collection_ops.route('/max_id', methods=['POST'])
 def max_id():
@@ -1023,4 +1023,3 @@ def max_id():
         }}, sort_keys=False), mimetype='application/json')
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    

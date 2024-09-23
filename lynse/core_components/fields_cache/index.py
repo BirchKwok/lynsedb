@@ -33,7 +33,7 @@ class Trie:
     def _batch_search(self, keys):
         results = set()
         current_nodes = {self.root: set(keys)}
-        
+
         while current_nodes:
             next_nodes = {}
             for node, prefixes in current_nodes.items():
@@ -50,7 +50,7 @@ class Trie:
                                 next_nodes[child] = set()
                             next_nodes[child].add(next_prefix)
             current_nodes = next_nodes
-        
+
         return results
 
     def starts_with(self, prefix):
