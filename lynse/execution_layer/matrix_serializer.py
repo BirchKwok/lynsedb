@@ -120,13 +120,12 @@ class MatrixSerializer:
 
         self.last_id = self.id_filter.find_max_value()
 
-    def dataloader(self, filename, as_mmap=True):
+    def dataloader(self, filename):
         """
         Generator for loading the database and index.
 
         Parameters:
             filename (str): The name of the file to load.
-            as_mmap (bool): Whether to use memory mapping. Default is False.
 
         Yields:
             tuple: A tuple of (database, id).
@@ -137,7 +136,7 @@ class MatrixSerializer:
             PermissionError: If the file cannot be read due to permission issues.
             UnKnownError: If an unknown error occurs.
         """
-        return self.storage_worker.read(filename=filename, is_mmap=as_mmap)
+        return self.storage_worker.read(filename=filename)
 
     def commit_data(self, recover=False):
         if not recover:
