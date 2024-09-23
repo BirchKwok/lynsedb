@@ -1,3 +1,4 @@
+import os
 import re
 import time
 from functools import wraps
@@ -221,14 +222,15 @@ def safe_mmap_reader(path, ids=None):
         ids (list): The slices to read from the file.
 
     Returns:
-        np.ndarray: The numpy ndarray.
+        np.ndarray or np.memmap: If the system is Windows, the file will be directly loaded into memory.
+            Otherwise, the file will be memory-mapped.
     """
-    mmap_file = np.load(path, "r")
-    if ids is None:
-        array = np.asarray(memoryview(mmap_file))
+    if os.name == 'nt':
+        mmap_mode = None
     else:
-        array = np.asarray(memoryview(mmap_file[ids]))
+        mmap_mode = 'r'
 
-    # Close the mmap file
-    mmap_file._mmap.close()
-    return array
+    if ids is None:
+        return np.load(path, mmap_mode=mmap_mode)
+
+    return np.load(path, mmap_mode=mmap_mode)[ids]
