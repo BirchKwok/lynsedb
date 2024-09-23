@@ -146,10 +146,8 @@ class Indexer:
             if not (self.index_data_path / f'{self.storage_worker.fingerprint}.bd').exists():
                 _index = _rebuild()
             else:
-                with open(self.index_data_path / f'{self.storage_worker.fingerprint}.bd', 'rb') as file:
-                    binary_data = np.load(file, mmap_mode='r')
-                with open(self.index_ids_path / f'{self.storage_worker.fingerprint}.bi', 'rb') as file:
-                    binary_ids = np.load(file, mmap_mode='r')
+                binary_data = np.load(self.index_data_path / f'{self.storage_worker.fingerprint}.bd', mmap_mode='r')
+                binary_ids = np.load(self.index_ids_path / f'{self.storage_worker.fingerprint}.bi', mmap_mode='r')
 
                 # load sq8 data as a view, used for rescore
                 if (not (self.index_data_path / f'{self.storage_worker.fingerprint}.sqd').exists()) or (
