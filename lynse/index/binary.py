@@ -185,8 +185,9 @@ class _IndexBinary(BaseIndex):
         if self.ids is not None:
             del self.ids
 
-        if self.sq8_data is not None:
-            del self.sq8_data
+        if hasattr(self, 'sq8_data'):
+            if self.sq8_data is not None:
+                del self.sq8_data
 
 
 class IndexBinaryJaccard(_IndexBinary):
