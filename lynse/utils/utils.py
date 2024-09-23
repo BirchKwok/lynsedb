@@ -222,7 +222,7 @@ def safe_mmap_reader(path, ids=None):
         ids (list): The slices to read from the file.
 
     Returns:
-        np.ndarray or np.memmap: If the system is Windows, the file will be directly loaded into memory.
+        np.ndarray: If the system is Windows, the file will be directly loaded into memory.
             Otherwise, the file will be memory-mapped.
     """
     if os.name == 'nt':
@@ -231,6 +231,6 @@ def safe_mmap_reader(path, ids=None):
         mmap_mode = 'r'
 
     if ids is None:
-        return np.load(path, mmap_mode=mmap_mode)
+        return np.asarray(memoryview(np.load(path, mmap_mode=mmap_mode)))
 
-    return np.load(path, mmap_mode=mmap_mode)[ids]
+    return np.asarray(memoryview(np.load(path, mmap_mode=mmap_mode)[ids]))

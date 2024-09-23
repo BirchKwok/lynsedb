@@ -71,8 +71,9 @@ class Search:
             else:
                 subset_indices = np.intersect1d(subset_indices, ivf_subset_indices)
 
+        cache = self.matrix_serializer.storage_worker.dataloader.cache
         if subset_indices is not None:
-            if filename not in self.matrix_serializer.storage_worker.dataloader.cache:
+            if cache is None or filename not in cache:
                 database_chunk, index_chunk = self.matrix_serializer.storage_worker.mmap_read(filename)
                 filter_indices = np.isin(index_chunk, subset_indices)
                 database_chunk = database_chunk[filter_indices]
@@ -83,7 +84,7 @@ class Search:
                 database_chunk = database_chunk[filter_indices]
                 index_chunk = index_chunk[filter_indices]
         else:
-            if filename not in self.matrix_serializer.storage_worker.dataloader.cache:
+            if cache is None or filename not in cache:
                 database_chunk, index_chunk = self.matrix_serializer.storage_worker.mmap_read(filename)
             else:
                 database_chunk, index_chunk = self.matrix_serializer.storage_worker.dataloader.cache[filename]
