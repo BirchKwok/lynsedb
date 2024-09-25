@@ -27,14 +27,14 @@ lynse run --host localhost --port 7637
 
   In Docker, You can run the following command in the terminal to start the service:
 ```shell
-docker run -p 7637:7637 birchkwok/LynseDB:latest
+docker run -p 7637:7637 birchkwok/lynsedb:latest
 ```
 - Remote deploy
 
   If you want to deploy remotely, you can bind the image to port 80 of the remote host, or allow the host to open access to port 7637.
   such as:
 ```shell
-docker run -p 80:7637 birchkwok/LynseDB:latest
+docker run -p 80:7637 birchkwok/lynsedb:latest
 ```
 
 - test if api available
