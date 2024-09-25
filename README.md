@@ -66,5 +66,5 @@ You must first [install Docker](https://docs.docker.com/engine/install/) on the 
 After installing the [Client API package](#install-client-api-package-mandatory):
 
 ```shell
-docker pull birchkwok/LynseDB:latest
+docker pull birchkwok/lynsedb:latest
 ```
