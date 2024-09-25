@@ -30,6 +30,4 @@ jobs:
             mkdocs-material-
       - run: pip install mkdocs-material mkdocstrings-python mike
       - run: |
-          git pull origin gh-pages
           mike deploy --push --update-aliases 0.1.5 latest
-          mike set-default --push latest
