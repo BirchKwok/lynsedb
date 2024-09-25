@@ -31,3 +31,4 @@ jobs:
       - run: pip install mkdocs-material mkdocstrings-python mike
       - run: |
           mike deploy --push --update-aliases 0.1.5 latest
+          mike set-default --push latest
