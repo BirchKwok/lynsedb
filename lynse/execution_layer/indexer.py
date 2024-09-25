@@ -62,7 +62,6 @@ class Indexer:
     ):
         self.logger = logger
         self.dataloader = dataloader
-        self.ann_model = None
         self.storage_worker = storage_worker
         self.collections_path_parent = Path(collections_path_parent)
         self.index_data_path = self.collections_path_parent / 'index_data'
