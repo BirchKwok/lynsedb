@@ -10,10 +10,10 @@ class ParametersValidator:
     """Database configuration, define once and can not be changed.
 
     """
-    def __init__(self, update_configs: list, logger: Logger):
-        raise_if(TypeError, not isinstance(update_configs, list), "update_configs must be a list.")
+    def __init__(self, immutable_param: list, logger: Logger):
+        raise_if(TypeError, not isinstance(immutable_param, list), "update_configs must be a list.")
 
-        self.update_configs_list = update_configs
+        self.update_configs_list = immutable_param
         self.logger = logger
 
     def check_configs(self, configs: dict, update_configs_dict: dict):

@@ -30,7 +30,7 @@ class ExclusiveDB:
     name = "Local"
 
     @ParametersValidator(
-        update_configs=['dim', 'chunk_size', 'dtypes'],
+        immutable_param=['dim', 'chunk_size', 'dtypes'],
         logger=logger
     )
     @ParameterTypeAssert({
