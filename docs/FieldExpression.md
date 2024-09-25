@@ -39,6 +39,7 @@ It is an important component of LynseDB and can effectively improve the user-fri
 
 - **Usage**:
 ```python linenums="1"
+    >>> from lynse.field_models import ExpressionParser
     >>> expression = ":order: > 1 and :name: >= 1.3 and (:order: == 2 or :name: == 3) and not (:tt: == 2)"
     >>> parser = ExpressionParser(expression)
     >>> pfilter = parser.to_filter()
