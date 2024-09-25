@@ -1,0 +1,1608 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+        <meta name="author" content="Birch Kwok">
+      
+      
+        <link rel="canonical" href="https://birchkwok.github.io/LynseDB/0.1.4/quickstart/">
+      
+      
+        <link rel="prev" href="..">
+      
+      
+        <link rel="next" href="../tutorials/add_vectors/">
+      
+      
+      <link rel="icon" href="../img/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.5.36">
+    
+    
+      
+        <title>Quickstart - LynseDB</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.06209087.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=False:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"False";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#quick-start" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="LynseDB" class="md-header__button md-logo" aria-label="LynseDB" data-md-component="logo">
+      
+  <img src="../img/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            LynseDB
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Quickstart
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9zM20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12zm-9.15 3.96h2.3L12 9z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      <label class="md-header__button md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+      </label>
+      <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/BirchKwok/LynseDB" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.6.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2024 Fonticons, Inc.--><path d="M439.55 236.05 244 40.45a28.87 28.87 0 0 0-40.81 0l-40.66 40.63 51.52 51.52c27.06-9.14 52.68 16.77 43.39 43.68l49.66 49.66c34.23-11.8 61.18 31 35.47 56.69-26.49 26.49-70.21-2.87-56-37.34L240.22 199v121.85c25.3 12.54 22.26 41.85 9.08 55a34.34 34.34 0 0 1-48.55 0c-17.57-17.6-11.07-46.91 11.25-56v-123c-20.8-8.51-24.6-30.74-18.64-45L142.57 101 8.45 235.14a28.86 28.86 0 0 0 0 40.81l195.61 195.6a28.86 28.86 0 0 0 40.8 0l194.69-194.69a28.86 28.86 0 0 0 0-40.81"/></svg>
+  </div>
+  <div class="md-source__repository">
+    birchkwok/LynseDB
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
+        
+  
+    
+  
+  Quickstart
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../tutorials/add_vectors/" class="md-tabs__link">
+          
+  
+  Tutorials
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../FieldExpression/" class="md-tabs__link">
+        
+  
+    
+  
+  FieldExpression
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../client/" class="md-tabs__link">
+          
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+  
+
+<nav class="md-nav md-nav--primary md-nav--lifted md-nav--integrated" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="LynseDB" class="md-nav__button md-logo" aria-label="LynseDB" data-md-component="logo">
+      
+  <img src="../img/logo.png" alt="logo">
+
+    </a>
+    LynseDB
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/BirchKwok/LynseDB" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.6.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2024 Fonticons, Inc.--><path d="M439.55 236.05 244 40.45a28.87 28.87 0 0 0-40.81 0l-40.66 40.63 51.52 51.52c27.06-9.14 52.68 16.77 43.39 43.68l49.66 49.66c34.23-11.8 61.18 31 35.47 56.69-26.49 26.49-70.21-2.87-56-37.34L240.22 199v121.85c25.3 12.54 22.26 41.85 9.08 55a34.34 34.34 0 0 1-48.55 0c-17.57-17.6-11.07-46.91 11.25-56v-123c-20.8-8.51-24.6-30.74-18.64-45L142.57 101 8.45 235.14a28.86 28.86 0 0 0 0 40.81l195.61 195.6a28.86 28.86 0 0 0 40.8 0l194.69-194.69a28.86 28.86 0 0 0 0-40.81"/></svg>
+  </div>
+  <div class="md-source__repository">
+    birchkwok/LynseDB
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  <span class="md-ellipsis">
+    Home
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  <span class="md-ellipsis">
+    Quickstart
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  <span class="md-ellipsis">
+    Quickstart
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#initialize-database" class="md-nav__link">
+    <span class="md-ellipsis">
+      Initialize Database
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#create-a-collection" class="md-nav__link">
+    <span class="md-ellipsis">
+      create a collection
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="create a collection">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#show-database-collections" class="md-nav__link">
+    <span class="md-ellipsis">
+      show database collections
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#update-description" class="md-nav__link">
+    <span class="md-ellipsis">
+      update description
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#add-vectors" class="md-nav__link">
+    <span class="md-ellipsis">
+      Add vectors
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#find-the-nearest-neighbors-of-a-given-vector" class="md-nav__link">
+    <span class="md-ellipsis">
+      Find the nearest neighbors of a given vector
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#list-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      List data
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#use-fieldexpression-for-result-filtering" class="md-nav__link">
+    <span class="md-ellipsis">
+      Use FieldExpression for result filtering
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Use FieldExpression for result filtering">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#use-filter-for-freer-conditional-expression" class="md-nav__link">
+    <span class="md-ellipsis">
+      Use Filter for freer conditional expression
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#query-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      Query fields
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Query fields">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#query-via-fieldexpression" class="md-nav__link">
+    <span class="md-ellipsis">
+      Query via FieldExpression
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#query-via-filter" class="md-nav__link">
+    <span class="md-ellipsis">
+      Query via Filter
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#exact-match" class="md-nav__link">
+    <span class="md-ellipsis">
+      Exact Match
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fuzzy-match" class="md-nav__link">
+    <span class="md-ellipsis">
+      Fuzzy Match
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#query-vectors" class="md-nav__link">
+    <span class="md-ellipsis">
+      Query Vectors
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Query Vectors">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#drop-a-collection" class="md-nav__link">
+    <span class="md-ellipsis">
+      Drop a collection
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#drop-the-database" class="md-nav__link">
+    <span class="md-ellipsis">
+      Drop the database
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  <span class="md-ellipsis">
+    Tutorials
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            Tutorials
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/add_vectors/" class="md-nav__link">
+        
+  
+  <span class="md-ellipsis">
+    Add vectors
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../FieldExpression/" class="md-nav__link">
+        
+  
+  <span class="md-ellipsis">
+    FieldExpression
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  <span class="md-ellipsis">
+    API Reference
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            API Reference
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../client/" class="md-nav__link">
+        
+  
+  <span class="md-ellipsis">
+    Client Distribution
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_2" id="__nav_5_2_label" tabindex="0">
+            
+  
+  <span class="md-ellipsis">
+    HTTP API
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_2">
+            <span class="md-nav__icon md-icon"></span>
+            HTTP API
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../http_api/serve_api/app/" class="md-nav__link">
+        
+  
+  <span class="md-ellipsis">
+    App
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_2_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_2_2" id="__nav_5_2_2_label" tabindex="0">
+            
+  
+  <span class="md-ellipsis">
+    HTTP Serve
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="3" aria-labelledby="__nav_5_2_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_2_2">
+            <span class="md-nav__icon md-icon"></span>
+            HTTP Serve
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../http_api/serve_api/collection_ops/" class="md-nav__link">
+        
+  
+  <span class="md-ellipsis">
+    Collection
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../http_api/serve_api/database_ops/" class="md-nav__link">
+        
+  
+  <span class="md-ellipsis">
+    Database
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../http_api/client_api/" class="md-nav__link">
+        
+  
+  <span class="md-ellipsis">
+    HTTP Client
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_3" id="__nav_5_3_label" tabindex="0">
+            
+  
+  <span class="md-ellipsis">
+    Native API
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_3">
+            <span class="md-nav__icon md-icon"></span>
+            Native API
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../native_api/low_level/" class="md-nav__link">
+        
+  
+  <span class="md-ellipsis">
+    ExclusiveDB
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../native_api/high_level/" class="md-nav__link">
+        
+  
+  <span class="md-ellipsis">
+    Local Client
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+  
+  
+
+
+<h1 id="quick-start">Quick Start<a class="headerlink" href="#quick-start" title="Permanent link">&para;</a></h1>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-1">1</a></span>
+<span class="normal"><a href="#__codelineno-0-2">2</a></span>
+<span class="normal"><a href="#__codelineno-0-3">3</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1"></a><span class="kn">import</span> <span class="nn">lynse</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;LynseDB version is: &quot;</span><span class="p">,</span> <span class="n">lynse</span><span class="o">.</span><span class="n">__version__</span><span class="p">)</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>LynseDB version is:  0.1.3
+</code></pre></div>
+<h3 id="initialize-database">Initialize Database<a class="headerlink" href="#initialize-database" title="Permanent link">&para;</a></h3>
+<p>LynseDB now supports HTTP API and Python native code API.</p>
+<p>The HTTP API mode requires starting an HTTP server beforehand. You have two options:
+- start directly.</p>
+<p>For direct startup, the default port is 7637. You can run the following command in the terminal to start the service:
+<div class="language-shell highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>lynse<span class="w"> </span>run<span class="w"> </span>--host<span class="w"> </span>localhost<span class="w"> </span>--port<span class="w"> </span><span class="m">7637</span>
+</span></code></pre></div></p>
+<ul>
+<li>within Docker</li>
+</ul>
+<p>In Docker, You can run the following command in the terminal to start the service:
+<div class="language-shell highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>docker<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span><span class="m">7637</span>:7637<span class="w"> </span>birchkwok/lynsedb:latest
+</span></code></pre></div>
+- Remote deploy</p>
+<p>If you want to deploy remotely, you can bind the image to port 80 of the remote host, or allow the host to open access to port 7637.
+  such as:
+<div class="language-shell highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>docker<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span><span class="m">80</span>:7637<span class="w"> </span>birchkwok/lynsedb:latest
+</span></code></pre></div></p>
+<ul>
+<li>test if api available</li>
+</ul>
+<p>You can directly request in the browser http://localhost:7637</p>
+<p>For port 80, you can use this url: http://localhost</p>
+<p>If the image is bound to port 80 of the host in remote deployment, you can directly access it http://your_host_ip</p>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-4-1">1</a></span>
+<span class="normal"><a href="#__codelineno-4-2">2</a></span>
+<span class="normal"><a href="#__codelineno-4-3">3</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1"></a><span class="c1"># If you are in a Jupyter environment, you can use this method to start the backend server</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2"></a><span class="c1"># Ignore this code if you are using docker</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3"></a><span class="n">lynse</span><span class="o">.</span><span class="n">launch_in_jupyter</span><span class="p">()</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>Server running at http://127.0.0.1:7637
+</code></pre></div>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-5-1">1</a></span>
+<span class="normal"><a href="#__codelineno-5-2">2</a></span>
+<span class="normal"><a href="#__codelineno-5-3">3</a></span>
+<span class="normal"><a href="#__codelineno-5-4">4</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1"></a><span class="c1"># Use the HTTP API mode, it is suitable for use in production environments.</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2"></a><span class="n">client</span> <span class="o">=</span> <span class="n">lynse</span><span class="o">.</span><span class="n">VectorDBClient</span><span class="p">(</span><span class="s2">&quot;http://127.0.0.1:7637&quot;</span><span class="p">)</span>  <span class="c1"># If no url is passed, the native api is used.</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3"></a><span class="c1"># Create a database named &quot;test_db&quot;, if it already exists, delete it and rebuild it.</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4"></a><span class="n">my_db</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">create_database</span><span class="p">(</span><span class="s2">&quot;test_db&quot;</span><span class="p">,</span> <span class="n">drop_if_exists</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span></code></pre></div></td></tr></table></div>
+<h3 id="create-a-collection">create a collection<a class="headerlink" href="#create-a-collection" title="Permanent link">&para;</a></h3>
+<p><strong><code>WARNING</code></strong></p>
+<p>When using the <code>require_collection</code> method to request a collection, if the <code>drop_if_exists</code> parameter is set to True, it will delete all content of the collection if it already exists.</p>
+<p>A safer method is to use the <code>get_collection</code> method. It is recommended to use the <code>require_collection</code> method only when you need to reinitialize a collection or create a new one.</p>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-6-1">1</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1"></a><span class="n">collection</span> <span class="o">=</span> <span class="n">my_db</span><span class="o">.</span><span class="n">require_collection</span><span class="p">(</span><span class="s2">&quot;test_collection&quot;</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span> <span class="n">drop_if_exists</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;demo collection&quot;</span><span class="p">)</span>
+</span></code></pre></div></td></tr></table></div>
+<h4 id="show-database-collections">show database collections<a class="headerlink" href="#show-database-collections" title="Permanent link">&para;</a></h4>
+<p>If the pandas library is installed, <code>show_collections_details</code> method will show as a pandas dataframe. Otherwise, it will be a dict.</p>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-7-1">1</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1"></a><span class="n">my_db</span><span class="o">.</span><span class="n">show_collections_details</span><span class="p">()</span>
+</span></code></pre></div></td></tr></table></div>
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>dim</th>
+      <th>chunk_size</th>
+      <th>dtypes</th>
+      <th>use_cache</th>
+      <th>n_threads</th>
+      <th>warm_up</th>
+      <th>description</th>
+      <th>cache_chunks</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>test_collection</th>
+      <td>4</td>
+      <td>100000</td>
+      <td>float32</td>
+      <td>True</td>
+      <td>10</td>
+      <td>False</td>
+      <td>demo collection</td>
+      <td>20</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h4 id="update-description">update description<a class="headerlink" href="#update-description" title="Permanent link">&para;</a></h4>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-8-1">1</a></span>
+<span class="normal"><a href="#__codelineno-8-2">2</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">update_description</span><span class="p">(</span><span class="s2">&quot;Hello World&quot;</span><span class="p">)</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2"></a><span class="n">my_db</span><span class="o">.</span><span class="n">show_collections_details</span><span class="p">()</span>
+</span></code></pre></div></td></tr></table></div>
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>dim</th>
+      <th>chunk_size</th>
+      <th>dtypes</th>
+      <th>use_cache</th>
+      <th>n_threads</th>
+      <th>warm_up</th>
+      <th>description</th>
+      <th>cache_chunks</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>test_collection</th>
+      <td>4</td>
+      <td>100000</td>
+      <td>float32</td>
+      <td>True</td>
+      <td>10</td>
+      <td>False</td>
+      <td>Hello World</td>
+      <td>20</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="add-vectors">Add vectors<a class="headerlink" href="#add-vectors" title="Permanent link">&para;</a></h3>
+<p>When inserting vectors, the collection requires manually running the <code>commit</code> function or inserting within the <code>insert_session</code> function context manager, which will run the <code>commit</code> function in the background.</p>
+<p>It is strongly recommended to use the <code>insert_session</code> context manager for insertion, as this provides more comprehensive data security features during the insertion process.</p>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-9-1"> 1</a></span>
+<span class="normal"><a href="#__codelineno-9-2"> 2</a></span>
+<span class="normal"><a href="#__codelineno-9-3"> 3</a></span>
+<span class="normal"><a href="#__codelineno-9-4"> 4</a></span>
+<span class="normal"><a href="#__codelineno-9-5"> 5</a></span>
+<span class="normal"><a href="#__codelineno-9-6"> 6</a></span>
+<span class="normal"><a href="#__codelineno-9-7"> 7</a></span>
+<span class="normal"><a href="#__codelineno-9-8"> 8</a></span>
+<span class="normal"><a href="#__codelineno-9-9"> 9</a></span>
+<span class="normal"><a href="#__codelineno-9-10">10</a></span>
+<span class="normal"><a href="#__codelineno-9-11">11</a></span>
+<span class="normal"><a href="#__codelineno-9-12">12</a></span>
+<span class="normal"><a href="#__codelineno-9-13">13</a></span>
+<span class="normal"><a href="#__codelineno-9-14">14</a></span>
+<span class="normal"><a href="#__codelineno-9-15">15</a></span>
+<span class="normal"><a href="#__codelineno-9-16">16</a></span>
+<span class="normal"><a href="#__codelineno-9-17">17</a></span>
+<span class="normal"><a href="#__codelineno-9-18">18</a></span>
+<span class="normal"><a href="#__codelineno-9-19">19</a></span>
+<span class="normal"><a href="#__codelineno-9-20">20</a></span>
+<span class="normal"><a href="#__codelineno-9-21">21</a></span>
+<span class="normal"><a href="#__codelineno-9-22">22</a></span>
+<span class="normal"><a href="#__codelineno-9-23">23</a></span>
+<span class="normal"><a href="#__codelineno-9-24">24</a></span>
+<span class="normal"><a href="#__codelineno-9-25">25</a></span>
+<span class="normal"><a href="#__codelineno-9-26">26</a></span>
+<span class="normal"><a href="#__codelineno-9-27">27</a></span>
+<span class="normal"><a href="#__codelineno-9-28">28</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1"></a><span class="k">with</span> <span class="n">collection</span><span class="o">.</span><span class="n">insert_session</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2"></a>    <span class="nb">id</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.01</span><span class="p">,</span> <span class="mf">0.34</span><span class="p">,</span> <span class="mf">0.74</span><span class="p">,</span> <span class="mf">0.31</span><span class="p">],</span> <span class="nb">id</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="p">{</span><span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_1&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">0</span><span class="p">})</span>   <span class="c1"># id = 1</span>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3"></a>    <span class="nb">id</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.36</span><span class="p">,</span> <span class="mf">0.43</span><span class="p">,</span> <span class="mf">0.56</span><span class="p">,</span> <span class="mf">0.12</span><span class="p">],</span> <span class="nb">id</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="p">{</span><span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_1&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">1</span><span class="p">})</span>   <span class="c1"># id = 2</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4"></a>    <span class="nb">id</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.03</span><span class="p">,</span> <span class="mf">0.04</span><span class="p">,</span> <span class="mf">0.10</span><span class="p">,</span> <span class="mf">0.51</span><span class="p">],</span> <span class="nb">id</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="p">{</span><span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_2&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">2</span><span class="p">})</span>   <span class="c1"># id = 3</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5"></a>    <span class="nb">id</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.11</span><span class="p">,</span> <span class="mf">0.44</span><span class="p">,</span> <span class="mf">0.23</span><span class="p">,</span> <span class="mf">0.24</span><span class="p">],</span> <span class="nb">id</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="p">{</span><span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_2&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">3</span><span class="p">})</span>   <span class="c1"># id = 4</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6"></a>    <span class="nb">id</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.91</span><span class="p">,</span> <span class="mf">0.43</span><span class="p">,</span> <span class="mf">0.44</span><span class="p">,</span> <span class="mf">0.67</span><span class="p">],</span> <span class="nb">id</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="p">{</span><span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_2&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">4</span><span class="p">})</span>   <span class="c1"># id = 5</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7"></a>    <span class="nb">id</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.92</span><span class="p">,</span> <span class="mf">0.12</span><span class="p">,</span> <span class="mf">0.56</span><span class="p">,</span> <span class="mf">0.19</span><span class="p">],</span> <span class="nb">id</span><span class="o">=</span><span class="mi">6</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="p">{</span><span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_3&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">5</span><span class="p">})</span>   <span class="c1"># id = 6</span>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8"></a>    <span class="nb">id</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.18</span><span class="p">,</span> <span class="mf">0.34</span><span class="p">,</span> <span class="mf">0.56</span><span class="p">,</span> <span class="mf">0.71</span><span class="p">],</span> <span class="nb">id</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="p">{</span><span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_1&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">6</span><span class="p">})</span>   <span class="c1"># id = 7</span>
+</span><span id="__span-9-9"><a id="__codelineno-9-9" name="__codelineno-9-9"></a>    <span class="nb">id</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.01</span><span class="p">,</span> <span class="mf">0.33</span><span class="p">,</span> <span class="mf">0.14</span><span class="p">,</span> <span class="mf">0.31</span><span class="p">],</span> <span class="nb">id</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="p">{</span><span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_2&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">7</span><span class="p">})</span>   <span class="c1"># id = 8</span>
+</span><span id="__span-9-10"><a id="__codelineno-9-10" name="__codelineno-9-10"></a>    <span class="nb">id</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.71</span><span class="p">,</span> <span class="mf">0.75</span><span class="p">,</span> <span class="mf">0.91</span><span class="p">,</span> <span class="mf">0.82</span><span class="p">],</span> <span class="nb">id</span><span class="o">=</span><span class="mi">9</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="p">{</span><span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_3&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">8</span><span class="p">})</span>   <span class="c1"># id = 9</span>
+</span><span id="__span-9-11"><a id="__codelineno-9-11" name="__codelineno-9-11"></a>    <span class="nb">id</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.75</span><span class="p">,</span> <span class="mf">0.44</span><span class="p">,</span> <span class="mf">0.38</span><span class="p">,</span> <span class="mf">0.75</span><span class="p">],</span> <span class="nb">id</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="p">{</span><span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_1&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">9</span><span class="p">})</span>  <span class="c1"># id = 10</span>
+</span><span id="__span-9-12"><a id="__codelineno-9-12" name="__codelineno-9-12"></a>
+</span><span id="__span-9-13"><a id="__codelineno-9-13" name="__codelineno-9-13"></a><span class="c1"># If you do not use the insert_session function, you need to manually call the commit function to submit the data</span>
+</span><span id="__span-9-14"><a id="__codelineno-9-14" name="__codelineno-9-14"></a><span class="c1"># collection.commit()</span>
+</span><span id="__span-9-15"><a id="__codelineno-9-15" name="__codelineno-9-15"></a>
+</span><span id="__span-9-16"><a id="__codelineno-9-16" name="__codelineno-9-16"></a><span class="c1"># or use the bulk_add_items function</span>
+</span><span id="__span-9-17"><a id="__codelineno-9-17" name="__codelineno-9-17"></a><span class="c1"># with collection.insert_session():</span>
+</span><span id="__span-9-18"><a id="__codelineno-9-18" name="__codelineno-9-18"></a><span class="c1">#     ids = collection.bulk_add_items([([0.01, 0.34, 0.74, 0.31], 0, {&#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 0}),</span>
+</span><span id="__span-9-19"><a id="__codelineno-9-19" name="__codelineno-9-19"></a><span class="c1">#                                      ([0.36, 0.43, 0.56, 0.12], 1, {&#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 1}),</span>
+</span><span id="__span-9-20"><a id="__codelineno-9-20" name="__codelineno-9-20"></a><span class="c1">#                                      ([0.03, 0.04, 0.10, 0.51], 2, {&#39;field&#39;: &#39;test_2&#39;, &#39;order&#39;: 2}),</span>
+</span><span id="__span-9-21"><a id="__codelineno-9-21" name="__codelineno-9-21"></a><span class="c1">#                                      ([0.11, 0.44, 0.23, 0.24], 3, {&#39;field&#39;: &#39;test_2&#39;, &#39;order&#39;: 3}),</span>
+</span><span id="__span-9-22"><a id="__codelineno-9-22" name="__codelineno-9-22"></a><span class="c1">#                                      ([0.91, 0.43, 0.44, 0.67], 4, {&#39;field&#39;: &#39;test_2&#39;, &#39;order&#39;: 4}),</span>
+</span><span id="__span-9-23"><a id="__codelineno-9-23" name="__codelineno-9-23"></a><span class="c1">#                                      ([0.92, 0.12, 0.56, 0.19], 5, {&#39;field&#39;: &#39;test_3&#39;, &#39;order&#39;: 5}),</span>
+</span><span id="__span-9-24"><a id="__codelineno-9-24" name="__codelineno-9-24"></a><span class="c1">#                                      ([0.18, 0.34, 0.56, 0.71], 6, {&#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 6}),</span>
+</span><span id="__span-9-25"><a id="__codelineno-9-25" name="__codelineno-9-25"></a><span class="c1">#                                      ([0.01, 0.33, 0.14, 0.31], 7, {&#39;field&#39;: &#39;test_2&#39;, &#39;order&#39;: 7}),</span>
+</span><span id="__span-9-26"><a id="__codelineno-9-26" name="__codelineno-9-26"></a><span class="c1">#                                      ([0.71, 0.75, 0.91, 0.82], 8, {&#39;field&#39;: &#39;test_3&#39;, &#39;order&#39;: 8}),</span>
+</span><span id="__span-9-27"><a id="__codelineno-9-27" name="__codelineno-9-27"></a><span class="c1">#                                      ([0.75, 0.44, 0.38, 0.75], 9, {&#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 9})])</span>
+</span><span id="__span-9-28"><a id="__codelineno-9-28" name="__codelineno-9-28"></a><span class="c1"># print(ids)  # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>2024-09-12 17:33:36 - LynseDB - INFO - Task status: {&#39;status&#39;: &#39;Processing&#39;}
+2024-09-12 17:33:38 - LynseDB - INFO - Task status: {&#39;result&#39;: {&#39;collection_name&#39;: &#39;test_collection&#39;, &#39;database_name&#39;: &#39;test_db&#39;}, &#39;status&#39;: &#39;Success&#39;}
+</code></pre></div>
+<h3 id="find-the-nearest-neighbors-of-a-given-vector">Find the nearest neighbors of a given vector<a class="headerlink" href="#find-the-nearest-neighbors-of-a-given-vector" title="Permanent link">&para;</a></h3>
+<p>The default similarity measure for query is Inner Product (IP). You can specify cosine or L2 to obtain the similarity measure you need.</p>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-10-1">1</a></span>
+<span class="normal"><a href="#__codelineno-10-2">2</a></span>
+<span class="normal"><a href="#__codelineno-10-3">3</a></span>
+<span class="normal"><a href="#__codelineno-10-4">4</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1"></a><span class="n">ids</span><span class="p">,</span> <span class="n">scores</span><span class="p">,</span> <span class="n">fields</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.36</span><span class="p">,</span> <span class="mf">0.43</span><span class="p">,</span> <span class="mf">0.56</span><span class="p">,</span> <span class="mf">0.12</span><span class="p">],</span> <span class="n">k</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">distance</span><span class="o">=</span><span class="s2">&quot;cosine&quot;</span><span class="p">,</span> <span class="n">return_fields</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;ids: &quot;</span><span class="p">,</span> <span class="n">ids</span><span class="p">)</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;scores: &quot;</span><span class="p">,</span> <span class="n">scores</span><span class="p">)</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;fields: &quot;</span><span class="p">,</span> <span class="n">fields</span><span class="p">)</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>ids:  [ 9  5 10]
+scores:  [ 0.18610001 -0.16069996 -0.23799998]
+fields:  [{&#39;:id:&#39;: 9, &#39;field&#39;: &#39;test_3&#39;, &#39;order&#39;: 8}, {&#39;:id:&#39;: 5, &#39;field&#39;: &#39;test_2&#39;, &#39;order&#39;: 4}, {&#39;:id:&#39;: 10, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 9}]
+</code></pre></div>
+<h3 id="list-data">List data<a class="headerlink" href="#list-data" title="Permanent link">&para;</a></h3>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-11-1">1</a></span>
+<span class="normal"><a href="#__codelineno-11-2">2</a></span>
+<span class="normal"><a href="#__codelineno-11-3">3</a></span>
+<span class="normal"><a href="#__codelineno-11-4">4</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1"></a><span class="n">ids</span><span class="p">,</span> <span class="n">scores</span><span class="p">,</span> <span class="n">fields</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">head</span><span class="p">(</span><span class="mi">5</span><span class="p">)</span>
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;ids: &quot;</span><span class="p">,</span> <span class="n">ids</span><span class="p">)</span>
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;scores: &quot;</span><span class="p">,</span> <span class="n">scores</span><span class="p">)</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;fields: &quot;</span><span class="p">,</span> <span class="n">fields</span><span class="p">)</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>ids:  [1 2 3 4 5]
+scores:  [[0.01       0.34       0.74000001 0.31      ]
+ [0.36000001 0.43000001 0.56       0.12      ]
+ [0.03       0.04       0.1        0.50999999]
+ [0.11       0.44       0.23       0.23999999]
+ [0.91000003 0.43000001 0.44       0.67000002]]
+fields:  [{&#39;:id:&#39;: 1, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 0}, {&#39;:id:&#39;: 2, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 1}, {&#39;:id:&#39;: 3, &#39;field&#39;: &#39;test_2&#39;, &#39;order&#39;: 2}, {&#39;:id:&#39;: 4, &#39;field&#39;: &#39;test_2&#39;, &#39;order&#39;: 3}, {&#39;:id:&#39;: 5, &#39;field&#39;: &#39;test_2&#39;, &#39;order&#39;: 4}]
+</code></pre></div>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-12-1">1</a></span>
+<span class="normal"><a href="#__codelineno-12-2">2</a></span>
+<span class="normal"><a href="#__codelineno-12-3">3</a></span>
+<span class="normal"><a href="#__codelineno-12-4">4</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1"></a><span class="n">ids</span><span class="p">,</span> <span class="n">scores</span><span class="p">,</span> <span class="n">fields</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">tail</span><span class="p">(</span><span class="mi">5</span><span class="p">)</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;ids: &quot;</span><span class="p">,</span> <span class="n">ids</span><span class="p">)</span>
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;scores: &quot;</span><span class="p">,</span> <span class="n">scores</span><span class="p">)</span>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;fields: &quot;</span><span class="p">,</span> <span class="n">fields</span><span class="p">)</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>ids:  [ 6  7  8  9 10]
+scores:  [[0.92000002 0.12       0.56       0.19      ]
+ [0.18000001 0.34       0.56       0.70999998]
+ [0.01       0.33000001 0.14       0.31      ]
+ [0.70999998 0.75       0.91000003 0.81999999]
+ [0.75       0.44       0.38       0.75      ]]
+fields:  [{&#39;:id:&#39;: 6, &#39;field&#39;: &#39;test_3&#39;, &#39;order&#39;: 5}, {&#39;:id:&#39;: 7, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 6}, {&#39;:id:&#39;: 8, &#39;field&#39;: &#39;test_2&#39;, &#39;order&#39;: 7}, {&#39;:id:&#39;: 9, &#39;field&#39;: &#39;test_3&#39;, &#39;order&#39;: 8}, {&#39;:id:&#39;: 10, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 9}]
+</code></pre></div>
+<h2 id="use-fieldexpression-for-result-filtering">Use FieldExpression for result filtering<a class="headerlink" href="#use-fieldexpression-for-result-filtering" title="Permanent link">&para;</a></h2>
+<p>See <a href="../FieldExpression/">FieldExpression Tutorial</a></p>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-13-1"> 1</a></span>
+<span class="normal"><a href="#__codelineno-13-2"> 2</a></span>
+<span class="normal"><a href="#__codelineno-13-3"> 3</a></span>
+<span class="normal"><a href="#__codelineno-13-4"> 4</a></span>
+<span class="normal"><a href="#__codelineno-13-5"> 5</a></span>
+<span class="normal"><a href="#__codelineno-13-6"> 6</a></span>
+<span class="normal"><a href="#__codelineno-13-7"> 7</a></span>
+<span class="normal"><a href="#__codelineno-13-8"> 8</a></span>
+<span class="normal"><a href="#__codelineno-13-9"> 9</a></span>
+<span class="normal"><a href="#__codelineno-13-10">10</a></span>
+<span class="normal"><a href="#__codelineno-13-11">11</a></span>
+<span class="normal"><a href="#__codelineno-13-12">12</a></span>
+<span class="normal"><a href="#__codelineno-13-13">13</a></span>
+<span class="normal"><a href="#__codelineno-13-14">14</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1"></a><span class="n">ids</span><span class="p">,</span> <span class="n">scores</span><span class="p">,</span> <span class="n">fields</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">search</span><span class="p">(</span>
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2"></a>    <span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.36</span><span class="p">,</span> <span class="mf">0.43</span><span class="p">,</span> <span class="mf">0.56</span><span class="p">,</span> <span class="mf">0.12</span><span class="p">],</span>
+</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3"></a>    <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span>
+</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4"></a>    <span class="n">search_filter</span><span class="o">=</span><span class="s2">&quot;&quot;&quot;</span>
+</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5"></a><span class="s2">        :field: == &#39;test_1&#39; and</span>
+</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6"></a><span class="s2">        ((0 &lt;= :order: &lt;= 8) or (:id: in [1, 2, 3, 4, 5])) and</span>
+</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7"></a><span class="s2">        not (:id: == 8 and :order: &gt;= 8)</span>
+</span><span id="__span-13-8"><a id="__codelineno-13-8" name="__codelineno-13-8"></a><span class="s2">    &quot;&quot;&quot;</span><span class="p">,</span>
+</span><span id="__span-13-9"><a id="__codelineno-13-9" name="__codelineno-13-9"></a>    <span class="n">return_fields</span><span class="o">=</span><span class="kc">False</span>
+</span><span id="__span-13-10"><a id="__codelineno-13-10" name="__codelineno-13-10"></a><span class="p">)</span>
+</span><span id="__span-13-11"><a id="__codelineno-13-11" name="__codelineno-13-11"></a>
+</span><span id="__span-13-12"><a id="__codelineno-13-12" name="__codelineno-13-12"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;ids: &quot;</span><span class="p">,</span> <span class="n">ids</span><span class="p">)</span>
+</span><span id="__span-13-13"><a id="__codelineno-13-13" name="__codelineno-13-13"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;scores: &quot;</span><span class="p">,</span> <span class="n">scores</span><span class="p">)</span>
+</span><span id="__span-13-14"><a id="__codelineno-13-14" name="__codelineno-13-14"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;fields: &quot;</span><span class="p">,</span> <span class="n">fields</span><span class="p">)</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>ids:  [2 7 1]
+scores:  [-0.35749996 -0.39020002 -0.39859998]
+fields:  None
+</code></pre></div>
+<h3 id="use-filter-for-freer-conditional-expression">Use Filter for freer conditional expression<a class="headerlink" href="#use-filter-for-freer-conditional-expression" title="Permanent link">&para;</a></h3>
+<p>Using the Filter class for result filtering can maximize Recall.</p>
+<p>The Filter class now supports <code>must</code>, <code>any</code>, and <code>must_not</code> parameters, all of which only accept list-type argument values.</p>
+<p>The filtering conditions in <code>must</code> must be met, those in <code>must_not</code> must not be met.</p>
+<p>After filtering with <code>must</code> and <code>must_not</code> conditions, the conditions in <code>any</code> will be considered, and at least one of the conditions in <code>any</code> must be met.</p>
+<p>The filter result must satisfy both <code>must</code> and <code>any</code>, but not <code>must_not</code>.</p>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-14-1"> 1</a></span>
+<span class="normal"><a href="#__codelineno-14-2"> 2</a></span>
+<span class="normal"><a href="#__codelineno-14-3"> 3</a></span>
+<span class="normal"><a href="#__codelineno-14-4"> 4</a></span>
+<span class="normal"><a href="#__codelineno-14-5"> 5</a></span>
+<span class="normal"><a href="#__codelineno-14-6"> 6</a></span>
+<span class="normal"><a href="#__codelineno-14-7"> 7</a></span>
+<span class="normal"><a href="#__codelineno-14-8"> 8</a></span>
+<span class="normal"><a href="#__codelineno-14-9"> 9</a></span>
+<span class="normal"><a href="#__codelineno-14-10">10</a></span>
+<span class="normal"><a href="#__codelineno-14-11">11</a></span>
+<span class="normal"><a href="#__codelineno-14-12">12</a></span>
+<span class="normal"><a href="#__codelineno-14-13">13</a></span>
+<span class="normal"><a href="#__codelineno-14-14">14</a></span>
+<span class="normal"><a href="#__codelineno-14-15">15</a></span>
+<span class="normal"><a href="#__codelineno-14-16">16</a></span>
+<span class="normal"><a href="#__codelineno-14-17">17</a></span>
+<span class="normal"><a href="#__codelineno-14-18">18</a></span>
+<span class="normal"><a href="#__codelineno-14-19">19</a></span>
+<span class="normal"><a href="#__codelineno-14-20">20</a></span>
+<span class="normal"><a href="#__codelineno-14-21">21</a></span>
+<span class="normal"><a href="#__codelineno-14-22">22</a></span>
+<span class="normal"><a href="#__codelineno-14-23">23</a></span>
+<span class="normal"><a href="#__codelineno-14-24">24</a></span>
+<span class="normal"><a href="#__codelineno-14-25">25</a></span>
+<span class="normal"><a href="#__codelineno-14-26">26</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1"></a><span class="kn">import</span> <span class="nn">operator</span>
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2"></a>
+</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3"></a><span class="kn">from</span> <span class="nn">lynse.field_models</span> <span class="kn">import</span> <span class="n">Filter</span><span class="p">,</span> <span class="n">FieldCondition</span><span class="p">,</span> <span class="n">MatchField</span><span class="p">,</span> <span class="n">MatchID</span><span class="p">,</span> <span class="n">MatchRange</span>
+</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4"></a>
+</span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5"></a><span class="n">ids</span><span class="p">,</span> <span class="n">scores</span><span class="p">,</span> <span class="n">fields</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">search</span><span class="p">(</span>
+</span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6"></a>    <span class="n">vector</span><span class="o">=</span><span class="p">[</span><span class="mf">0.36</span><span class="p">,</span> <span class="mf">0.43</span><span class="p">,</span> <span class="mf">0.56</span><span class="p">,</span> <span class="mf">0.12</span><span class="p">],</span>
+</span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7"></a>    <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span>
+</span><span id="__span-14-8"><a id="__codelineno-14-8" name="__codelineno-14-8"></a>    <span class="n">search_filter</span><span class="o">=</span><span class="n">Filter</span><span class="p">(</span>
+</span><span id="__span-14-9"><a id="__codelineno-14-9" name="__codelineno-14-9"></a>        <span class="n">must</span><span class="o">=</span><span class="p">[</span>
+</span><span id="__span-14-10"><a id="__codelineno-14-10" name="__codelineno-14-10"></a>            <span class="n">FieldCondition</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s1">&#39;field&#39;</span><span class="p">,</span> <span class="n">matcher</span><span class="o">=</span><span class="n">MatchField</span><span class="p">(</span><span class="s1">&#39;test_1&#39;</span><span class="p">)),</span>  <span class="c1"># Support for filtering fields</span>
+</span><span id="__span-14-11"><a id="__codelineno-14-11" name="__codelineno-14-11"></a>        <span class="p">],</span>
+</span><span id="__span-14-12"><a id="__codelineno-14-12" name="__codelineno-14-12"></a>        <span class="nb">any</span><span class="o">=</span><span class="p">[</span>
+</span><span id="__span-14-13"><a id="__codelineno-14-13" name="__codelineno-14-13"></a>            <span class="n">FieldCondition</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s1">&#39;order&#39;</span><span class="p">,</span> <span class="n">matcher</span><span class="o">=</span><span class="n">MatchRange</span><span class="p">(</span><span class="n">start</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">inclusive</span><span class="o">=</span><span class="kc">True</span><span class="p">)),</span>
+</span><span id="__span-14-14"><a id="__codelineno-14-14" name="__codelineno-14-14"></a>            <span class="n">FieldCondition</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s2">&quot;:id:&quot;</span><span class="p">,</span> <span class="n">matcher</span><span class="o">=</span><span class="n">MatchID</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">])),</span>  <span class="c1"># Support for filtering IDs</span>
+</span><span id="__span-14-15"><a id="__codelineno-14-15" name="__codelineno-14-15"></a>        <span class="p">],</span>
+</span><span id="__span-14-16"><a id="__codelineno-14-16" name="__codelineno-14-16"></a>        <span class="n">must_not</span><span class="o">=</span><span class="p">[</span>
+</span><span id="__span-14-17"><a id="__codelineno-14-17" name="__codelineno-14-17"></a>            <span class="n">FieldCondition</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s2">&quot;:id:&quot;</span><span class="p">,</span> <span class="n">matcher</span><span class="o">=</span><span class="n">MatchID</span><span class="p">([</span><span class="mi">8</span><span class="p">])),</span>
+</span><span id="__span-14-18"><a id="__codelineno-14-18" name="__codelineno-14-18"></a>            <span class="n">FieldCondition</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s1">&#39;order&#39;</span><span class="p">,</span> <span class="n">matcher</span><span class="o">=</span><span class="n">MatchField</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="n">comparator</span><span class="o">=</span><span class="n">operator</span><span class="o">.</span><span class="n">ge</span><span class="p">)),</span>
+</span><span id="__span-14-19"><a id="__codelineno-14-19" name="__codelineno-14-19"></a>        <span class="p">]</span>
+</span><span id="__span-14-20"><a id="__codelineno-14-20" name="__codelineno-14-20"></a>    <span class="p">),</span>
+</span><span id="__span-14-21"><a id="__codelineno-14-21" name="__codelineno-14-21"></a>    <span class="n">return_fields</span><span class="o">=</span><span class="kc">False</span>
+</span><span id="__span-14-22"><a id="__codelineno-14-22" name="__codelineno-14-22"></a><span class="p">)</span>
+</span><span id="__span-14-23"><a id="__codelineno-14-23" name="__codelineno-14-23"></a>
+</span><span id="__span-14-24"><a id="__codelineno-14-24" name="__codelineno-14-24"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;ids: &quot;</span><span class="p">,</span> <span class="n">ids</span><span class="p">)</span>
+</span><span id="__span-14-25"><a id="__codelineno-14-25" name="__codelineno-14-25"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;scores: &quot;</span><span class="p">,</span> <span class="n">scores</span><span class="p">)</span>
+</span><span id="__span-14-26"><a id="__codelineno-14-26" name="__codelineno-14-26"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;fields: &quot;</span><span class="p">,</span> <span class="n">fields</span><span class="p">)</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>ids:  [2 7 1]
+scores:  [-0.35749996 -0.39020002 -0.39859998]
+fields:  None
+</code></pre></div>
+<h3 id="query-fields">Query fields<a class="headerlink" href="#query-fields" title="Permanent link">&para;</a></h3>
+<h4 id="query-via-fieldexpression">Query via FieldExpression<a class="headerlink" href="#query-via-fieldexpression" title="Permanent link">&para;</a></h4>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-15-1">1</a></span>
+<span class="normal"><a href="#__codelineno-15-2">2</a></span>
+<span class="normal"><a href="#__codelineno-15-3">3</a></span>
+<span class="normal"><a href="#__codelineno-15-4">4</a></span>
+<span class="normal"><a href="#__codelineno-15-5">5</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="s2">&quot;&quot;&quot;</span>
+</span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2"></a><span class="s2">    :field: == &#39;test_1&#39; and</span>
+</span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3"></a><span class="s2">    ((0 &lt;= :order: &lt;= 8) or (:id: in [1, 2, 3, 4, 5])) and</span>
+</span><span id="__span-15-4"><a id="__codelineno-15-4" name="__codelineno-15-4"></a><span class="s2">    not (:id: == 8 and :order: &gt;= 8)</span>
+</span><span id="__span-15-5"><a id="__codelineno-15-5" name="__codelineno-15-5"></a><span class="s2">&quot;&quot;&quot;</span><span class="p">)</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>[{&#39;:id:&#39;: 1, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 0},
+ {&#39;:id:&#39;: 2, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 1},
+ {&#39;:id:&#39;: 7, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 6}]
+</code></pre></div>
+<h4 id="query-via-filter">Query via Filter<a class="headerlink" href="#query-via-filter" title="Permanent link">&para;</a></h4>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-16-1"> 1</a></span>
+<span class="normal"><a href="#__codelineno-16-2"> 2</a></span>
+<span class="normal"><a href="#__codelineno-16-3"> 3</a></span>
+<span class="normal"><a href="#__codelineno-16-4"> 4</a></span>
+<span class="normal"><a href="#__codelineno-16-5"> 5</a></span>
+<span class="normal"><a href="#__codelineno-16-6"> 6</a></span>
+<span class="normal"><a href="#__codelineno-16-7"> 7</a></span>
+<span class="normal"><a href="#__codelineno-16-8"> 8</a></span>
+<span class="normal"><a href="#__codelineno-16-9"> 9</a></span>
+<span class="normal"><a href="#__codelineno-16-10">10</a></span>
+<span class="normal"><a href="#__codelineno-16-11">11</a></span>
+<span class="normal"><a href="#__codelineno-16-12">12</a></span>
+<span class="normal"><a href="#__codelineno-16-13">13</a></span>
+<span class="normal"><a href="#__codelineno-16-14">14</a></span>
+<span class="normal"><a href="#__codelineno-16-15">15</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1"></a><span class="n">query_filter</span><span class="o">=</span><span class="n">Filter</span><span class="p">(</span>
+</span><span id="__span-16-2"><a id="__codelineno-16-2" name="__codelineno-16-2"></a>    <span class="n">must</span><span class="o">=</span><span class="p">[</span>
+</span><span id="__span-16-3"><a id="__codelineno-16-3" name="__codelineno-16-3"></a>        <span class="n">FieldCondition</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s1">&#39;field&#39;</span><span class="p">,</span> <span class="n">matcher</span><span class="o">=</span><span class="n">MatchField</span><span class="p">(</span><span class="s1">&#39;test_1&#39;</span><span class="p">)),</span>  <span class="c1"># Support for filtering fields</span>
+</span><span id="__span-16-4"><a id="__codelineno-16-4" name="__codelineno-16-4"></a>    <span class="p">],</span>
+</span><span id="__span-16-5"><a id="__codelineno-16-5" name="__codelineno-16-5"></a>    <span class="nb">any</span><span class="o">=</span><span class="p">[</span>
+</span><span id="__span-16-6"><a id="__codelineno-16-6" name="__codelineno-16-6"></a>        <span class="n">FieldCondition</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s1">&#39;order&#39;</span><span class="p">,</span> <span class="n">matcher</span><span class="o">=</span><span class="n">MatchRange</span><span class="p">(</span><span class="n">start</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">inclusive</span><span class="o">=</span><span class="kc">True</span><span class="p">)),</span>
+</span><span id="__span-16-7"><a id="__codelineno-16-7" name="__codelineno-16-7"></a>        <span class="n">FieldCondition</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s2">&quot;:id:&quot;</span><span class="p">,</span> <span class="n">matcher</span><span class="o">=</span><span class="n">MatchID</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">])),</span>  <span class="c1"># Support for filtering IDs</span>
+</span><span id="__span-16-8"><a id="__codelineno-16-8" name="__codelineno-16-8"></a>    <span class="p">],</span>
+</span><span id="__span-16-9"><a id="__codelineno-16-9" name="__codelineno-16-9"></a>    <span class="n">must_not</span><span class="o">=</span><span class="p">[</span>
+</span><span id="__span-16-10"><a id="__codelineno-16-10" name="__codelineno-16-10"></a>        <span class="n">FieldCondition</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s2">&quot;:id:&quot;</span><span class="p">,</span> <span class="n">matcher</span><span class="o">=</span><span class="n">MatchID</span><span class="p">([</span><span class="mi">8</span><span class="p">])),</span>
+</span><span id="__span-16-11"><a id="__codelineno-16-11" name="__codelineno-16-11"></a>        <span class="n">FieldCondition</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s1">&#39;order&#39;</span><span class="p">,</span> <span class="n">matcher</span><span class="o">=</span><span class="n">MatchField</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="n">comparator</span><span class="o">=</span><span class="n">operator</span><span class="o">.</span><span class="n">ge</span><span class="p">)),</span>
+</span><span id="__span-16-12"><a id="__codelineno-16-12" name="__codelineno-16-12"></a>    <span class="p">]</span>
+</span><span id="__span-16-13"><a id="__codelineno-16-13" name="__codelineno-16-13"></a><span class="p">)</span>
+</span><span id="__span-16-14"><a id="__codelineno-16-14" name="__codelineno-16-14"></a>
+</span><span id="__span-16-15"><a id="__codelineno-16-15" name="__codelineno-16-15"></a><span class="n">collection</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">query_filter</span><span class="p">)</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>[{&#39;:id:&#39;: 1, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 0},
+ {&#39;:id:&#39;: 2, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 1},
+ {&#39;:id:&#39;: 7, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 6}]
+</code></pre></div>
+<h4 id="exact-match">Exact Match<a class="headerlink" href="#exact-match" title="Permanent link">&para;</a></h4>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-17-1">1</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-17-1"><a id="__codelineno-17-1" name="__codelineno-17-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">query</span><span class="p">({</span><span class="s1">&#39;:id:&#39;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_1&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">0</span><span class="p">})</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>[{&#39;:id:&#39;: 1, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 0}]
+</code></pre></div>
+<h4 id="fuzzy-match">Fuzzy Match<a class="headerlink" href="#fuzzy-match" title="Permanent link">&para;</a></h4>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-18-1">1</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-18-1"><a id="__codelineno-18-1" name="__codelineno-18-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">query</span><span class="p">({</span><span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_1&#39;</span><span class="p">})</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>[{&#39;:id:&#39;: 1, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 0},
+ {&#39;:id:&#39;: 2, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 1},
+ {&#39;:id:&#39;: 10, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 9},
+ {&#39;:id:&#39;: 7, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 6}]
+</code></pre></div>
+<h2 id="query-vectors">Query Vectors<a class="headerlink" href="#query-vectors" title="Permanent link">&para;</a></h2>
+<p>Much like query, you can query using either the FieldExpression string or the Filter class, fuzzy match, or exact match.</p>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-19-1">1</a></span>
+<span class="normal"><a href="#__codelineno-19-2">2</a></span>
+<span class="normal"><a href="#__codelineno-19-3">3</a></span>
+<span class="normal"><a href="#__codelineno-19-4">4</a></span>
+<span class="normal"><a href="#__codelineno-19-5">5</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-19-1"><a id="__codelineno-19-1" name="__codelineno-19-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">query_vectors</span><span class="p">(</span><span class="s2">&quot;&quot;&quot;</span>
+</span><span id="__span-19-2"><a id="__codelineno-19-2" name="__codelineno-19-2"></a><span class="s2">    :field: == &#39;test_1&#39; and</span>
+</span><span id="__span-19-3"><a id="__codelineno-19-3" name="__codelineno-19-3"></a><span class="s2">    ((0 &lt;= :order: &lt;= 8) or (:id: in [1, 2, 3, 4, 5])) and</span>
+</span><span id="__span-19-4"><a id="__codelineno-19-4" name="__codelineno-19-4"></a><span class="s2">    not (:id: == 8 and :order: &gt;= 8)</span>
+</span><span id="__span-19-5"><a id="__codelineno-19-5" name="__codelineno-19-5"></a><span class="s2">&quot;&quot;&quot;</span><span class="p">)</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>(array([1, 2, 7]),
+ array([[0.01      , 0.34      , 0.74000001, 0.31      ],
+        [0.36000001, 0.43000001, 0.56      , 0.12      ],
+        [0.18000001, 0.34      , 0.56      , 0.70999998]]),
+ [{&#39;:id:&#39;: 1, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 0},
+  {&#39;:id:&#39;: 2, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 1},
+  {&#39;:id:&#39;: 7, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 6}])
+</code></pre></div>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-20-1">1</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-20-1"><a id="__codelineno-20-1" name="__codelineno-20-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">query_vectors</span><span class="p">({</span><span class="s1">&#39;field&#39;</span><span class="p">:</span> <span class="s1">&#39;test_1&#39;</span><span class="p">})</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>(array([ 1,  2,  7, 10]),
+ array([[0.01      , 0.34      , 0.74000001, 0.31      ],
+        [0.36000001, 0.43000001, 0.56      , 0.12      ],
+        [0.18000001, 0.34      , 0.56      , 0.70999998],
+        [0.75      , 0.44      , 0.38      , 0.75      ]]),
+ [{&#39;:id:&#39;: 1, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 0},
+  {&#39;:id:&#39;: 2, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 1},
+  {&#39;:id:&#39;: 7, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 6},
+  {&#39;:id:&#39;: 10, &#39;field&#39;: &#39;test_1&#39;, &#39;order&#39;: 9}])
+</code></pre></div>
+<h3 id="drop-a-collection">Drop a collection<a class="headerlink" href="#drop-a-collection" title="Permanent link">&para;</a></h3>
+<p><code>WARNING: This operation cannot be undone</code></p>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-21-1">1</a></span>
+<span class="normal"><a href="#__codelineno-21-2">2</a></span>
+<span class="normal"><a href="#__codelineno-21-3">3</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-21-1"><a id="__codelineno-21-1" name="__codelineno-21-1"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Collection list before dropping:&quot;</span><span class="p">,</span> <span class="n">my_db</span><span class="o">.</span><span class="n">show_collections</span><span class="p">())</span>
+</span><span id="__span-21-2"><a id="__codelineno-21-2" name="__codelineno-21-2"></a><span class="n">status</span> <span class="o">=</span> <span class="n">my_db</span><span class="o">.</span><span class="n">drop_collection</span><span class="p">(</span><span class="s2">&quot;test_collection&quot;</span><span class="p">)</span>
+</span><span id="__span-21-3"><a id="__codelineno-21-3" name="__codelineno-21-3"></a><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Collection list after dropped:&quot;</span><span class="p">,</span> <span class="n">my_db</span><span class="o">.</span><span class="n">show_collections</span><span class="p">())</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>Collection list before dropping: [&#39;test_collection&#39;]
+Collection list after dropped: []
+</code></pre></div>
+<h2 id="drop-the-database">Drop the database<a class="headerlink" href="#drop-the-database" title="Permanent link">&para;</a></h2>
+<p><code>WARNING: This operation cannot be undone</code></p>
+<div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-22-1">1</a></span>
+<span class="normal"><a href="#__codelineno-22-2">2</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-22-1"><a id="__codelineno-22-1" name="__codelineno-22-1"></a><span class="n">my_db</span><span class="o">.</span><span class="n">drop_database</span><span class="p">()</span>
+</span><span id="__span-22-2"><a id="__codelineno-22-2" name="__codelineno-22-2"></a><span class="n">my_db</span>
+</span></code></pre></div></td></tr></table></div>
+<div class="language-text highlight"><pre><span></span><code>RemoteDatabaseInstance(name=test_db, exists=False)
+</code></pre></div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    <script id="__config" type="application/json">{"base": "..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.top", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.path", "toc.integrate", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.select", "content.code.annotate"], "search": "../assets/javascripts/workers/search.6ce7567c.min.js", "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.56dfad97.min.js"></script>
+      
+    
+  </body>
+</html>
