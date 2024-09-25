@@ -7,7 +7,7 @@ import lynse
 print("LynseDB version is: ", lynse.__version__)
 ```
 
-    LynseDB version is:  0.1.5
+    LynseDB version is:  0.2.0
 
 
 ### Initialize Database
