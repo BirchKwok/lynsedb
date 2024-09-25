@@ -19,6 +19,9 @@ jobs:
         with:
           python-version: 3.x
       - run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
+
+      - name: Clear Cache
+        run: rm -rf .cache
       - uses: actions/cache@v4
         with:
           key: mkdocs-material-${{ env.cache_id }}
