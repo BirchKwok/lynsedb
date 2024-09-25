@@ -54,6 +54,8 @@ theme:
 extra:
   paths:
     - lynse
+  version:
+    provider: mike
 
 markdown_extensions:
   - toc:

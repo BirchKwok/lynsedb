@@ -28,5 +28,7 @@ jobs:
           path: .cache
           restore-keys: |
             mkdocs-material-
-      - run: pip install mkdocs-material mkdocstrings-python
-      - run: mkdocs gh-deploy --force
+      - run: pip install mkdocs-material mkdocstrings-python mike
+      - run: |
+          mike deploy --push --update-aliases 0.1.4 latest
+          mike set-default --push latest
