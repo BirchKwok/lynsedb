@@ -82,6 +82,9 @@ class ExclusiveDB:
         if not 10000 <= chunk_size <= 500000:
             logger.warning('The recommended chunk size is between 10,000 and 500,000.')
 
+        # In order to have enough data to index the segment
+        raise_if(ValueError, chunk_size <= 1000, 'chunk_size must greater than 1000.')
+
         self._database_path = database_path
         self._database_name = Path(database_path).parent.name
         self._collection_name = Path(database_path).name
