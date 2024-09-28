@@ -4,6 +4,7 @@ from functools import wraps
 from pathlib import Path
 
 import numpy as np
+from lynse.core_components.locks import ThreadLock
 
 
 class OpsError(Exception):
@@ -210,17 +211,16 @@ class SafeMmapReader:
         return np.asarray(mmap_handle[ids])
 
     def close(self):
-        closed = []
-        if self.opened_handles:
-            for idx, handle in enumerate(self.opened_handles):
-                try:
-                    handle._mmap.close()
-                    closed.append(idx)
-                except Exception:
-                    pass
+        with ThreadLock():
+            if self.opened_handles:
+                not_closed = []
+                for handle in self.opened_handles:
+                    try:
+                        handle._mmap.close()
+                    except Exception:
+                        not_closed.append(handle)
 
-        self.opened_handles = [self.opened_handles[i]
-                               for i in range(len(self.opened_handles)) if i not in closed]
+                self.opened_handles = not_closed
 
     def __del__(self):
         self.close()
