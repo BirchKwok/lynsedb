@@ -1,4 +1,3 @@
-import os
 import re
 import time
 from functools import wraps
@@ -183,54 +182,45 @@ def collection_repr(collection):
             f'\n)')
 
 
-def sort_and_get_top_k(arr, k):
+class SafeMmapReader:
     """
-    Sort each row of a 1D or 2D array and return the top-k indices and values for each row.
-
-    Parameters:
-        arr (np.ndarray): 1D or 2D numpy array
-        k (int): Number of top elements to return
-
-    Returns:
-        tuple: (top_k_indices, top_k_values)
-            top_k_indices: Indices of top-k elements for each row
-            top_k_values: Values of top-k elements for each row
+    A class for reading files in memory-mapped mode and automatically closing them.
     """
-    arr = np.asarray(arr)
+    def __init__(self):
+        self.opened_handles = []
 
-    if arr.ndim == 1:
-        arr = arr.reshape(1, -1)
+    def safe_mmap_reader(self, path, ids=None):
+        """
+        Open a file in memory-mapped mode.
 
-    n_rows, n_cols = arr.shape
+        Parameters:
+            path (str or Pathlike): The path to the file.
+            ids (list): The slices to read from the file.
 
-    k = min(k, n_cols)
+        Returns:
+            np.ndarray: If the system is Windows, the file will be directly loaded into memory.
+                Otherwise, the file will be memory-mapped.
+        """
+        mmap_handle = np.load(path, mmap_mode="r")
+        self.opened_handles.append(mmap_handle)
 
-    sorted_indices = np.argsort(arr, axis=1)[:, ::-1]
+        if ids is None:
+            return np.asarray(mmap_handle)
 
-    top_k_indices = sorted_indices[:, :k]
-    top_k_values = np.take_along_axis(arr, top_k_indices, axis=1)
+        return np.asarray(mmap_handle[ids])
 
-    return top_k_indices, top_k_values
+    def close(self):
+        closed = []
+        if self.opened_handles:
+            for idx, handle in enumerate(self.opened_handles):
+                try:
+                    handle._mmap.close()
+                    closed.append(idx)
+                except Exception:
+                    pass
 
+        self.opened_handles = [self.opened_handles[i]
+                               for i in range(len(self.opened_handles)) if i not in closed]
 
-def safe_mmap_reader(path, ids=None):
-    """
-    Open a file in memory-mapped mode.
-
-    Parameters:
-        path (str or Pathlike): The path to the file.
-        ids (list): The slices to read from the file.
-
-    Returns:
-        np.ndarray: If the system is Windows, the file will be directly loaded into memory.
-            Otherwise, the file will be memory-mapped.
-    """
-    if os.name == 'nt':
-        mmap_mode = None
-    else:
-        mmap_mode = 'r'
-
-    if ids is None:
-        return np.asarray(memoryview(np.load(path, mmap_mode=mmap_mode)))
-
-    return np.asarray(memoryview(np.load(path, mmap_mode=mmap_mode)[ids]))
+    def __del__(self):
+        self.close()

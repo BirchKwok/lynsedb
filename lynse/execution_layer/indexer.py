@@ -11,7 +11,7 @@ from ..index.sq import IndexSQIP, IndexSQL2sq, IndexSQCos
 from ..index.binary import IndexBinaryJaccard, IndexBinaryHamming
 from ..index.flat import IndexFlatIP, IndexFlatL2sq, IndexFlatCos
 from .ivf import IVFCreator
-from ..utils.utils import drop_duplicated_substr, find_first_file_with_substr, safe_mmap_reader
+from ..utils.utils import drop_duplicated_substr, find_first_file_with_substr, SafeMmapReader
 
 _INDEX_ALIAS = {
     'IVF-IP-SQ8': 'IVF-IP-SQ8',
@@ -77,6 +77,8 @@ class Indexer:
         self.ivf = None
         self.index_mode = None
         self.current_index_mode = None
+
+        self.mmap_reader = SafeMmapReader()
 
     def _build_flat_index(self, index_mode: str):
         """
@@ -145,8 +147,8 @@ class Indexer:
             if not (self.index_data_path / f'{self.storage_worker.fingerprint}.bd').exists():
                 _index = _rebuild()
             else:
-                binary_data = safe_mmap_reader(self.index_data_path / f'{self.storage_worker.fingerprint}.bd')
-                binary_ids = safe_mmap_reader(self.index_ids_path / f'{self.storage_worker.fingerprint}.bi')
+                binary_data = self.mmap_reader.safe_mmap_reader(self.index_data_path / f'{self.storage_worker.fingerprint}.bd')
+                binary_ids = self.mmap_reader.safe_mmap_reader(self.index_ids_path / f'{self.storage_worker.fingerprint}.bi')
 
                 # load sq8 data as a view, used for rescore
                 if (not (self.index_data_path / f'{self.storage_worker.fingerprint}.sqd').exists()) or (
@@ -163,7 +165,7 @@ class Indexer:
                                                     f'{self.storage_worker.fingerprint}.*SQ8.index')
                     )
 
-                sq8_data = safe_mmap_reader(self.index_data_path / f'{self.storage_worker.fingerprint}.sqd')
+                sq8_data = self.mmap_reader.safe_mmap_reader(self.index_data_path / f'{self.storage_worker.fingerprint}.sqd')
 
                 _index.data = binary_data
                 _index.ids = binary_ids
@@ -190,8 +192,8 @@ class Indexer:
             ):
                 _index = _rebuild()
             else:
-                sq8_data = safe_mmap_reader(self.index_data_path / f'{self.storage_worker.fingerprint}.sqd')
-                sq8_ids = safe_mmap_reader(self.index_ids_path / f'{self.storage_worker.fingerprint}.sqi')
+                sq8_data = self.mmap_reader.safe_mmap_reader(self.index_data_path / f'{self.storage_worker.fingerprint}.sqd')
+                sq8_ids = self.mmap_reader.safe_mmap_reader(self.index_ids_path / f'{self.storage_worker.fingerprint}.sqi')
 
                 _index.data = sq8_data
                 _index.ids = sq8_ids
@@ -251,6 +253,9 @@ class Indexer:
         Returns:
             None
         """
+        # close the old index
+        self.close_mapped_index()
+
         # clear the old data first
         self._remove_old_data()
 
@@ -359,3 +364,9 @@ class Indexer:
         self.current_index_mode = 'Flat-IP'  # Default index mode
 
         self.logger.info('Index removed.')
+
+    def close_mapped_index(self):
+        self.mmap_reader.close()
+
+    def __del__(self):
+        self.close_mapped_index()

@@ -8,7 +8,7 @@ from spinesUtils.asserts import raise_if
 
 from ..core_components.limited_dict import LimitedDict
 from ..core_components.locks import ThreadLock
-from ..utils.utils import safe_mmap_reader
+from ..utils.utils import SafeMmapReader
 
 
 class PersistentFileStorage:
@@ -228,13 +228,15 @@ class DataLoader:
         if warm_up:
             self.warm_up()
 
+        self.mmap_reader = SafeMmapReader()
+
     def file_exists(self):
         """Check if the file exists."""
         return (self.collection_chunk_path / 'chunk_0').exists()
 
     def mmap_read(self, filename):
-        return safe_mmap_reader(self.collection_chunk_path / filename), \
-               safe_mmap_reader(self.collection_chunk_indices_path / filename)
+        return self.mmap_reader.safe_mmap_reader(self.collection_chunk_path / filename), \
+               self.mmap_reader.safe_mmap_reader(self.collection_chunk_indices_path / filename)
 
     def warm_up(self):
         """Load the data from the file to the memory."""
@@ -367,3 +369,6 @@ class DataLoader:
         with self.lock:
             if self.cache is not None:
                 self.cache.clear()
+
+    def __del__(self):
+        self.mmap_reader.close()

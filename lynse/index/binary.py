@@ -150,6 +150,7 @@ class _IndexBinary(BaseIndex):
         """
         if self.data is None:
             return
+
         with open(filepath1, 'wb') as f:
             np.save(f, self.data)
         with open(filepath2, 'wb') as f:

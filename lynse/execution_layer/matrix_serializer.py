@@ -357,8 +357,12 @@ class MatrixSerializer:
             # stop wal
             self.wal_worker.stop()
 
+            # close indexer
+            if hasattr(self, "indexer"):
+                self.indexer.close_mapped_index()
+
             retries = 3
-            delay = 1  # 每次重试的间隔时间（秒）
+            delay = 1
 
             for attempt in range(retries):
                 try:
