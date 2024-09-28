@@ -189,6 +189,7 @@ class SafeMmapReader:
     """
     def __init__(self):
         self.opened_handles = []
+        self.lock = ThreadLock()
 
     def safe_mmap_reader(self, path, ids=None):
         """
@@ -202,25 +203,33 @@ class SafeMmapReader:
             np.ndarray: If the system is Windows, the file will be directly loaded into memory.
                 Otherwise, the file will be memory-mapped.
         """
-        mmap_handle = np.load(path, mmap_mode="r")
-        self.opened_handles.append(mmap_handle)
+        try:
+            mmap_handle = np.load(path, mmap_mode="r")
+        except Exception as e:
+            raise IOError(f"Failed to load file {path}: {e}")
+
+        with self.lock:
+            self.opened_handles.append(mmap_handle)
 
         if ids is None:
-            return np.asarray(mmap_handle)
+            return mmap_handle
 
-        return np.asarray(mmap_handle[ids])
+        return mmap_handle[ids]
 
     def close(self):
-        with ThreadLock():
-            if self.opened_handles:
-                not_closed = []
-                for handle in self.opened_handles:
-                    try:
-                        handle._mmap.close()
-                    except Exception:
-                        not_closed.append(handle)
-
-                self.opened_handles = not_closed
+        with self.lock:
+            for handle in self.opened_handles:
+                try:
+                    handle._mmap.close()
+                except Exception:
+                    continue  # Handle closing errors silently
+            self.opened_handles.clear()
 
     def __del__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
