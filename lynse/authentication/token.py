@@ -2,11 +2,12 @@ import datetime
 import hashlib
 import sqlite3
 import os
-import logging
 import re
 from pathlib import Path
 from typing import Union
 from getpass import getpass
+
+from spinesUtils.logging import Logger
 
 
 class AuthenticationError(Exception):
@@ -17,8 +18,8 @@ class Authentication:
     """
     Authentication class for the LynseDB project
     """
-    def __init__(self, path: str):
-        self._logger = logging.getLogger(__name__)
+    def __init__(self, path: str, logger: Logger):
+        self._logger = logger
         self._path = Path(path).absolute() / "authentication.db"
         self._generate_table()
         self._alter_table_add_group()
@@ -111,10 +112,10 @@ class Authentication:
             new_passwd = getpass("Enter new password: ")
             warning_message = self._check_passwd(new_passwd)
             if warning_message:
-                print(warning_message)
+                self._logger.info(warning_message)
                 time_to_try -= 1
                 if time_to_try == 0:
-                    print("Too many attempts.")
+                    self._logger.info("Too many attempts.")
                     return None
             else:
                 return new_passwd
@@ -148,10 +149,10 @@ class Authentication:
             given_old_passwd_token = hashlib.sha256((combined_data + old_salt).encode()).hexdigest()
 
             if old_passwd_token != given_old_passwd_token:
-                print("Incorrect old password.")
+                self._logger.info("Incorrect old password.")
                 time_to_try -= 1
                 if time_to_try == 0:
-                    print("Too many attempts.")
+                    self._logger.info("Too many attempts.")
                     return None
             else:
                 return old_passwd
@@ -165,10 +166,10 @@ class Authentication:
         while time_to_try > 0:
             valid_new_passwd = getpass("Enter new password again: ")
             if new_passwd != valid_new_passwd:
-                print("New passwords do not match.")
+                self._logger.info("New passwords do not match.")
                 time_to_try -= 1
                 if time_to_try == 0:
-                    print("Too many attempts.")
+                    self._logger.info("Too many attempts.")
                     return False
             else:
                 return True
@@ -199,7 +200,7 @@ class Authentication:
             return None
 
         if old_passwd and new_passwd == old_passwd:
-            print("New password cannot be the same as the old password.")
+            self._logger.info("New password cannot be the same as the old password.")
             return None
 
         if not self._confirm_new_password(new_passwd):
@@ -231,7 +232,7 @@ class Authentication:
             c.execute("SELECT COUNT(*) FROM tokens WHERE username = 'admin'")
             admin_exists = c.fetchone()[0] > 0
         if not admin_exists:
-            print("Cannot create user account without an admin account.")
+            self._logger.info("Cannot create user account without an admin account.")
             return None
 
         # let user choose group name
@@ -242,15 +243,15 @@ class Authentication:
             if self._validate_group_name(group_name):
                 break
             else:
-                print("Invalid group name. Only uppercase letters and '_' and numbers are allowed.")
+                self._logger.info("Invalid group name. Only uppercase letters and '_' and numbers are allowed.")
                 time_to_try -= 1
                 if time_to_try == 0:
-                    print("Too many attempts.")
+                    self._logger.info("Too many attempts.")
                     return None
 
         username = input("Enter username: ").strip()
         while not self._validate_username(username):
-            print("Invalid username. Use 3-20 characters (letters and digits, not all digits) and not 'admin'.")
+            self._logger.info("Invalid username. Use 3-20 characters (letters and digits, not all digits) and not 'admin'.")
             username = input("Enter username: ").strip()
 
         # # Check if username exists in the group
@@ -278,7 +279,7 @@ class Authentication:
             return None
 
         if result and new_passwd == old_passwd:
-            print("New password cannot be the same as the old password.")
+            self._logger.info("New password cannot be the same as the old password.")
             return None
 
         if not self._confirm_new_password(new_passwd):
@@ -305,7 +306,7 @@ class Authentication:
         """
         admin_token, admin_salt = self._get_admin_token()
         if admin_token is None or admin_salt is None:
-            print("Admin account not found.")
+            self._logger.info("Admin account not found.")
             return False
 
         role = 'admin'
@@ -317,10 +318,10 @@ class Authentication:
             given_admin_passwd_token = hashlib.sha256((combined_data + admin_salt).encode()).hexdigest()
 
             if admin_token != given_admin_passwd_token:
-                print("Incorrect admin password.")
+                self._logger.info("Incorrect admin password.")
                 time_to_try -= 1
                 if time_to_try == 0:
-                    print("Too many attempts.")
+                    self._logger.info("Too many attempts.")
                     return False
             else:
                 break
@@ -328,11 +329,11 @@ class Authentication:
         group_name = input("Enter group name of the user to delete: ").strip()
         username = input("Enter username to delete: ").strip()
         if not self._validate_group_name(group_name):
-            print("Invalid group name. Only uppercase letters and '_' and numbers are allowed.")
+            self._logger.info("Invalid group name. Only uppercase letters and '_' and numbers are allowed.")
             return False
 
         if username.lower() == 'admin':
-            print("Cannot delete the admin account.")
+            self._logger.info("Cannot delete the admin account.")
             return False
 
         with sqlite3.connect(self._path) as conn:
@@ -351,7 +352,7 @@ class Authentication:
         """
         admin_token, admin_salt = self._get_admin_token()
         if admin_token is None or admin_salt is None:
-            print("Admin account not found.")
+            self._logger.info("Admin account not found.")
             return False
 
         role = 'admin'
@@ -363,10 +364,10 @@ class Authentication:
             given_admin_passwd_token = hashlib.sha256((combined_data + admin_salt).encode()).hexdigest()
 
             if admin_token != given_admin_passwd_token:
-                print("Incorrect admin password.")
+                self._logger.info("Incorrect admin password.")
                 time_to_try -= 1
                 if time_to_try == 0:
-                    print("Too many attempts.")
+                    self._logger.info("Too many attempts.")
                     return False
             else:
                 break
@@ -374,7 +375,7 @@ class Authentication:
         group_input = input("Enter group name (press Enter for 'DEFAULT_GROUP'): ").strip()
         group_name = group_input if group_input else "DEFAULT_GROUP"
         if not self._validate_group_name(group_name):
-            print("Invalid group name. Only uppercase letters and '_' and numbers are allowed.")
+            self._logger.info("Invalid group name. Only uppercase letters and '_' and numbers are allowed.")
             return False
 
         username = input("Enter username: ").strip()
@@ -398,7 +399,7 @@ class Authentication:
         """
         admin_token, admin_salt = self._get_admin_token()
         if admin_token is None or admin_salt is None:
-            print("Admin account not found.")
+            self._logger.info("Admin account not found.")
             return False
 
         role = 'admin'
@@ -410,10 +411,10 @@ class Authentication:
             given_admin_passwd_token = hashlib.sha256((combined_data + admin_salt).encode()).hexdigest()
 
             if admin_token != given_admin_passwd_token:
-                print("Incorrect admin password.")
+                self._logger.info("Incorrect admin password.")
                 time_to_try -= 1
                 if time_to_try == 0:
-                    print("Too many attempts.")
+                    self._logger.info("Too many attempts.")
                     return False
             else:
                 break
@@ -474,7 +475,7 @@ class Authentication:
         """
         admin_token, admin_salt = self._get_admin_token()
         if admin_token is None or admin_salt is None:
-            print("Admin account not found.")
+            self._logger.info("Admin account not found.")
             return []
 
         role = 'admin'
@@ -486,10 +487,10 @@ class Authentication:
             given_admin_passwd_token = hashlib.sha256((combined_data + admin_salt).encode()).hexdigest()
 
             if admin_token != given_admin_passwd_token:
-                print("Incorrect admin password.")
+                self._logger.info("Incorrect admin password.")
                 time_to_try -= 1
                 if time_to_try == 0:
-                    print("Too many attempts.")
+                    self._logger.info("Too many attempts.")
                     return []
             else:
                 break
@@ -500,7 +501,7 @@ class Authentication:
             result = c.fetchall()
 
             if not result:
-                print("No users found.")
+                self._logger.info("No users found.")
                 return []
 
             return [{
@@ -516,12 +517,12 @@ class Authentication:
         Get users from a specified group. Defaults to 'DEFAULT_GROUP'.
         """
         if not self._validate_group_name(group_name):
-            print("Invalid group name. Only uppercase letters and '_' and numbers are allowed.")
+            self._logger.info("Invalid group name. Only uppercase letters and '_' and numbers are allowed.")
             return []
 
         admin_token, admin_salt = self._get_admin_token()
         if admin_token is None or admin_salt is None:
-            print("Admin account not found.")
+            self._logger.info("Admin account not found.")
             return []
 
         role = 'admin'
@@ -533,10 +534,10 @@ class Authentication:
             given_admin_passwd_token = hashlib.sha256((combined_data + admin_salt).encode()).hexdigest()
 
             if admin_token != given_admin_passwd_token:
-                print("Incorrect admin password.")
+                self._logger.info("Incorrect admin password.")
                 time_to_try -= 1
                 if time_to_try == 0:
-                    print("Too many attempts.")
+                    self._logger.info("Too many attempts.")
                     return []
             else:
                 break
@@ -547,7 +548,7 @@ class Authentication:
             result = c.fetchall()
 
             if not result:
-                print(f"No users found in group '{group_name}'.")
+                self._logger.info(f"No users found in group '{group_name}'.")
                 return []
 
             return [{
