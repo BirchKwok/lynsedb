@@ -316,10 +316,6 @@ class Authentication:
             combined_data = f"admin{valid_admin_passwd}{role}{'null'}ALL_GROUPS"
             given_admin_passwd_token = hashlib.sha256((combined_data + admin_salt).encode()).hexdigest()
 
-            print(f"Debug: combined_data = {combined_data}")
-            print(f"Debug: admin_token = {admin_token}")
-            print(f"Debug: given_admin_passwd_token = {given_admin_passwd_token}")
-
             if admin_token != given_admin_passwd_token:
                 print("Incorrect admin password.")
                 time_to_try -= 1
@@ -365,10 +361,6 @@ class Authentication:
             valid_admin_passwd = getpass("Enter admin password: ")
             combined_data = f"admin{valid_admin_passwd}{role}{'null'}ALL_GROUPS"
             given_admin_passwd_token = hashlib.sha256((combined_data + admin_salt).encode()).hexdigest()
-
-            print(f"Debug: combined_data = {combined_data}")
-            print(f"Debug: admin_token = {admin_token}")
-            print(f"Debug: given_admin_passwd_token = {given_admin_passwd_token}")
 
             if admin_token != given_admin_passwd_token:
                 print("Incorrect admin password.")
@@ -416,10 +408,6 @@ class Authentication:
             valid_admin_passwd = getpass("Enter admin password: ")
             combined_data = f"admin{valid_admin_passwd}{role}{'null'}ALL_GROUPS"
             given_admin_passwd_token = hashlib.sha256((combined_data + admin_salt).encode()).hexdigest()
-
-            print(f"Debug: combined_data = {combined_data}")
-            print(f"Debug: admin_token = {admin_token}")
-            print(f"Debug: given_admin_passwd_token = {given_admin_passwd_token}")
 
             if admin_token != given_admin_passwd_token:
                 print("Incorrect admin password.")
@@ -497,10 +485,6 @@ class Authentication:
             combined_data = f"admin{valid_admin_passwd}{role}{'null'}ALL_GROUPS"
             given_admin_passwd_token = hashlib.sha256((combined_data + admin_salt).encode()).hexdigest()
 
-            print(f"Debug: combined_data = {combined_data}")
-            print(f"Debug: admin_token = {admin_token}")
-            print(f"Debug: given_admin_passwd_token = {given_admin_passwd_token}")
-
             if admin_token != given_admin_passwd_token:
                 print("Incorrect admin password.")
                 time_to_try -= 1
@@ -547,10 +531,6 @@ class Authentication:
             valid_admin_passwd = getpass("Enter admin password: ")
             combined_data = f"admin{valid_admin_passwd}{role}{'null'}ALL_GROUPS"
             given_admin_passwd_token = hashlib.sha256((combined_data + admin_salt).encode()).hexdigest()
-
-            print(f"Debug: combined_data = {combined_data}")
-            print(f"Debug: admin_token = {admin_token}")
-            print(f"Debug: given_admin_passwd_token = {given_admin_passwd_token}")
 
             if admin_token != given_admin_passwd_token:
                 print("Incorrect admin password.")
