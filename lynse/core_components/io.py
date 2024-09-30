@@ -33,7 +33,7 @@ def load_nnp_header(filename):
     load the header of the nnp file
 
     Parameters:
-        filename (str): the path to the nnp file
+        filename (str or PathLike): the path to the nnp file
 
     Returns:
         (np.dtype, tuple): the data type and the shape of the data
@@ -61,7 +61,7 @@ def save_nnp(filename, data, append=False):
         and the number of rows in the file cannot exceed 10^7, the column number cannot exceed 10^4.
 
     Parameters:
-        filename (str): the path to the nnp file
+        filename (str or PathLike): the path to the nnp file
         data (np.ndarray): the data to be saved
         append (bool): if True, append the data to the existing file
 
@@ -136,7 +136,7 @@ def load_nnp(filename, mmap_mode=False):
     load data from nnp file
 
     Parameters:
-        filename (str): the path to the nnp file
+        filename (str or PathLike): the path to the nnp file
         mmap_mode (bool): if True, use numpy.memmap to load the data
 
     Returns:
