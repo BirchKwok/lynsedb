@@ -4,6 +4,13 @@ import msgpack
 from spinesUtils.asserts import raise_if
 
 
+def _check_field_name(field_name):
+    if not (field_name.startswith(":") and field_name.endswith(":")):
+        raise ValueError("Field name must start and end with ':'.")
+
+    return field_name[1:-1]
+
+
 class MatchRange:
     name: str = 'MatchRange'
 
@@ -124,9 +131,9 @@ class FieldCondition:
         """
         self.matcher = matcher
         if matcher is not None:
-            self.key = ':id:' if isinstance(matcher, MatchID) else key
+            self.key = ':id:' if isinstance(matcher, MatchID) else _check_field_name(key)
         else:
-            self.key = key
+            self.key = _check_field_name(key)
 
         raise_if(TypeError, not isinstance(self.matcher, (MatchField, MatchID, MatchRange)), "Invalid matcher type.")
 

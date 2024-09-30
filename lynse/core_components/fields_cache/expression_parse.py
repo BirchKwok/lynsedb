@@ -89,8 +89,7 @@ class ConditionNode(ASTNode):
         Returns:
             Filter: A filter based on the condition.
         """
-        field = self.field.replace(':', '')
-        field = ':id:' if field == 'id' else field
+        field = ':id:' if self.field == 'id' else self.field
 
         if field == ':id:':
             value = [int(v.strip()) for v in self.value.strip('[]').split(',')]

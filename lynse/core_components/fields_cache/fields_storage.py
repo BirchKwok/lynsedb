@@ -1,93 +1,38 @@
-import os
+import sqlite3
 import msgpack
-import tempfile
-import mmap
-from typing import Dict
+from typing import Dict, List, Any, Union, Tuple
 from pathlib import Path
-
-from ...core_components.fields_cache.index import Index
-from ...core_components.id_checker import IDChecker
 
 
 class FieldsStorage:
-    RECORD_HEADER_SIZE = 4
+    def __init__(self, filepath=None):
+        if filepath is None:
+            raise ValueError("You must provide a file path.")
 
-    def __init__(self, filepath=None, as_temp_file=False):
-        if filepath is None and not as_temp_file:
-            raise ValueError("You must provide a filepath or set as_temp_file to True.")
-        if as_temp_file:
-            self.filepath = Path(tempfile.mkstemp()[1])
-        else:
-            self.filepath = Path(filepath)
+        self.filepath = Path(filepath)
 
-        self.memory_store = {}
-        self.id_mapping = {}
-        self.external_to_internal = {}
-        self.current_internal_id = 0
+        self.conn = sqlite3.connect(str(self.filepath))
+        self.cursor = self.conn.cursor()
+        self._initialize_database()
 
-        self.filter_path = self.filepath.with_suffix('.filter')
-        self.index_path = self.filepath.with_suffix('.index')
-        self._initialize_id_checker()
+    def _initialize_database(self):
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS records (
+                internal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                external_id INTEGER UNIQUE,
+                data BLOB
+            )
+        """)
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_external_id ON records (external_id)")
+        self.conn.commit()
 
-        self._load_mappings()
-
-        self.index = Index()
-        self._load_index()
-
-        self.max_entries = 100000
-        self.use_index = False
-
-        self.all_fields = {}
-        self._load_all_fields()
-
-    def _initialize_id_checker(self):
-        self.id_filter = IDChecker()
-
-        if self.filter_path.exists():
-            self.id_filter.from_file(self.filter_path)
-        else:
-            if self.filepath.exists() and self.filepath.stat().st_size > 0:
-                for external_id, _ in self.retrieve_all():
-                    self.id_filter.add(external_id)
-                self.id_filter.to_file(self.filter_path)
-
-    def _load_mappings(self):
-        id_mapping_path = self.filepath.with_suffix('.idmap')
-        external_to_internal_path = self.filepath.with_suffix('.ext2int')
-        if id_mapping_path.exists():
-            with open(id_mapping_path, 'rb') as f:
-                unpacked = msgpack.unpackb(f.read(), raw=False, strict_map_key=False)
-                self.id_mapping.update(unpacked)
-            if self.id_mapping:
-                self.current_internal_id = max(self.id_mapping.keys()) + 1
-        if external_to_internal_path.exists():
-            with open(external_to_internal_path, 'rb') as f:
-                unpacked = msgpack.unpackb(f.read(), raw=False, strict_map_key=False)
-                self.external_to_internal.update(unpacked)
-
-    def _load_index(self):
-        if self.index_path.exists():
-            self.index.load(self.index_path)
-            self.use_index = True
-
-    def _load_all_fields(self):
-        if self.filepath.exists() and self.filepath.stat().st_size > 0:
-            for _, data in self.retrieve_all():
-                for field, value in data.items():
-                    if field not in self.all_fields:
-                        self.all_fields[field] = type(value).__name__
-
-    def auto_commit(self):
-        if self.memory_store:
-            self.commit()
-
-    def store(self, data: dict, external_id: int):
+    def store(self, data: dict, external_id: int) -> int:
         """
         Store a record in the cache.
 
         Parameters:
             data: dict
-                The record to store.
+                The record to be stored.
             external_id: int
                 The external ID of the record.
 
@@ -95,176 +40,231 @@ class FieldsStorage:
             int: The internal ID of the record.
         """
         if not isinstance(data, dict):
-            raise ValueError("Only dictionaries are allowed as data.")
+            raise ValueError("Only dictionary type data is allowed.")
 
-        if external_id in self.id_filter:
+        try:
+            packed_data = msgpack.packb(data)
+            self.cursor.execute(
+                "INSERT INTO records (external_id, data) VALUES (?, ?)",
+                (external_id, packed_data)
+            )
+            self.conn.commit()
+            return self.cursor.lastrowid
+        except sqlite3.IntegrityError:
             raise ValueError(f"external_id {external_id} already exists.")
-        self.id_filter.add(external_id)
 
-        data = {":id:": external_id, **data}
-        internal_id = self.current_internal_id
-        self.memory_store[internal_id] = data
-        self.external_to_internal[external_id] = internal_id
-        self.current_internal_id += 1
-
-        for field, value in data.items():
-            self.all_fields[field] = type(value).__name__
-
-        if self.use_index:
-            self.index.insert(data, internal_id)
-
-        if len(self.memory_store) >= self.max_entries:
-            self._flush_to_disk()
-
-        return internal_id
-
-    def _flush_to_disk(self):
-        if not self.memory_store:
-            return
-
-        with open(self.filepath, 'ab') as f:
-            for internal_id, data in self.memory_store.items():
-                packed_data = msgpack.packb({internal_id: data})
-                record_size = len(packed_data)
-                offset = f.tell()
-                f.write(record_size.to_bytes(self.RECORD_HEADER_SIZE, 'big'))
-                f.write(packed_data)
-                self.id_mapping[internal_id] = offset
-        self.memory_store = {}
-
-        id_mapping_path = self.filepath.with_suffix('.idmap')
-        with open(id_mapping_path, 'wb') as f:
-            packed_mapping = msgpack.packb(self.id_mapping)
-            f.write(packed_mapping)
-
-        external_to_internal_path = self.filepath.with_suffix('.ext2int')
-        with open(external_to_internal_path, 'wb') as f:
-            packed_mapping = msgpack.packb(self.external_to_internal)
-            f.write(packed_mapping)
-
-        self.id_filter.to_file(self.filter_path)
-
-        # save field list
-        fields_path = self.filepath.with_suffix('.fields')
-        with open(fields_path, 'wb') as f:
-            packed_fields = msgpack.packb(list(self.all_fields))
-            f.write(packed_fields)
-
-        if self.use_index:
-            self.index.save(self.index_path)
-
-    def retrieve_all(self, include_external_id=True):
-        self.auto_commit()
-
-        if not os.path.exists(self.filepath):
-            return
-
-        with open(self.filepath, 'rb') as f:
-            while True:
-                record_size_bytes = f.read(self.RECORD_HEADER_SIZE)
-                if not record_size_bytes:
-                    break
-                record_size = int.from_bytes(record_size_bytes, 'big')
-                chunk = f.read(record_size)
-                unpacked = msgpack.unpackb(chunk, raw=False, strict_map_key=False)
-                for internal_id, data in unpacked.items():
-                    external_id = data.get(':id:')
-                    if not include_external_id:
-                        del data[':id:']
-                    yield external_id, data
-
-    def retrieve_by_external_id(self, external_ids, include_external_id=True):
-        self.auto_commit()
-
+    def retrieve_by_external_id(self, external_ids: Union[int, List[int]], include_external_id=True) -> List[dict]:
         if isinstance(external_ids, int):
             external_ids = [external_ids]
 
+        placeholders = ','.join('?' for _ in external_ids)
+        query = f"SELECT external_id, data FROM records WHERE external_id IN ({placeholders})"
+        self.cursor.execute(query, external_ids)
         results = []
-        with open(self.filepath, 'rb') as f:
-            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                for external_id in external_ids:
-                    if external_id in self.external_to_internal:
-                        internal_id = self.external_to_internal[external_id]
-                        offset = self.id_mapping[internal_id]
-                        mm.seek(offset)
-                        record_size = int.from_bytes(mm.read(self.RECORD_HEADER_SIZE), 'big')
-                        chunk = mm.read(record_size)
-                        unpacked = msgpack.unpackb(chunk, raw=False, strict_map_key=False)
-                        if internal_id in unpacked:
-                            if not include_external_id:
-                                del unpacked[internal_id][':id:']
-                            results.append(unpacked[internal_id])
+        for row in self.cursor.fetchall():
+            data = msgpack.unpackb(row[1])
+            if include_external_id:
+                data[':id:'] = row[0]
+            results.append(data)
         return results
 
-    def delete(self):
-        if self.filepath and self.filepath.exists():
-            self.filepath.unlink()
-        id_mapping_path = self.filepath.with_suffix('.idmap')
-        if id_mapping_path.exists():
-            id_mapping_path.unlink()
-        external_to_internal_path = self.filepath.with_suffix('.ext2int')
-        if external_to_internal_path.exists():
-            external_to_internal_path.unlink()
-        if self.filter_path.exists():
-            self.filter_path.unlink()
-        if self.index_path.exists():
-            self.index_path.unlink()
+    def retrieve_all(self, include_external_id=True):
+        self.cursor.execute("SELECT external_id, data FROM records")
+        for row in self.cursor.fetchall():
+            data = msgpack.unpackb(row[1])
+            if include_external_id:
+                data[':id:'] = row[0]
+            yield row[0], data
 
-        fields_path = self.filepath.with_suffix('.fields')
-        if fields_path.exists():
-            fields_path.unlink()
+    def field_exists(self, field: str) -> bool:
+        field = field.strip(':')
+        self.cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='index_{field}'")
+        return self.cursor.fetchone() is not None
 
-        self.memory_store.clear()
-        self.id_mapping.clear()
-        self.external_to_internal.clear()
-        self.filepath = None
-        self.memory_store = None
-        self.id_mapping = None
-        self.current_internal_id = None
-        self.max_entries = None
-        self.use_index = False
-        self.index = None
-        self.all_fields = set()
+    def build_index(self, schema: Dict[str, type]):
+        for field, field_type in schema.items():
+            field = field.strip(':')
+            if self.field_exists(field):
+                continue  # Skip if the index already exists and does not need to be rebuilt
 
-    def build_index(self, schema: Dict[str, type], rebuild_if_exists=False):
-        self.auto_commit()
+            sqlite_type = {int: 'INTEGER', float: 'REAL', str: 'TEXT'}[field_type]
+            self.cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS index_{field} (
+                    internal_id INTEGER,
+                    value {sqlite_type},
+                    FOREIGN KEY (internal_id) REFERENCES records (internal_id)
+                )
+            """)
+            self.cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{field} ON index_{field} (value)")
 
-        # pre-select data to check the schema
-        _, pre_select_data = next(self.retrieve_all())
+            # build index for all existing records
+            self.cursor.execute("SELECT internal_id, data FROM records")
+            for internal_id, packed_data in self.cursor.fetchall():
+                data = msgpack.unpackb(packed_data)
+                if field in data:
+                    self.cursor.execute(f"INSERT INTO index_{field} (internal_id, value) VALUES (?, ?)",
+                                        (internal_id, data[field]))
 
-        for index_name, index_type in schema.items():
-            # dtype check
-            if not isinstance(pre_select_data.get(index_name), index_type):
-                raise TypeError(f"Field {index_name} is not of type {index_type}")
-
-            self.index.add_index(index_name, index_type, rebuild_if_exists)
-        for external_id, data in self.retrieve_all():
-            self.index.insert(data, external_id)
-        self.use_index = True
-        self.index.save(self.index_path)
+        self.conn.commit()
 
     def remove_index(self, field_name: str):
-        self.index.remove_index(field_name)
-        if not self.index.indices:
-            if os.path.exists(self.index_path):
-                os.remove(self.index_path)
+        self.cursor.execute(f"DROP TABLE IF EXISTS index_{field_name}")
+        self.conn.commit()
 
-            self.index = Index()
-            self.use_index = False
-        else:
-            self.index.save(self.index_path)
-
-    def commit(self):
-        self._flush_to_disk()
-
-    def list_fields(self):
+    def search(self, field: str, value: Any) -> List[int]:
         """
-        Return all field names and their types.
+        Search for records by field and value.
+
+        Parameters:
+            field: str
+                The field to search.
+            value: Any
+                The value to search for.
 
         Returns:
-            dict: A dictionary with field names as keys and field types as values.
+            List[int]: The external IDs of the records.
         """
-        def _warp_field_name(field):
-            return f":{field}:" if field not in [':id:', ''] else field
+        # Check if the index exists
+        self.cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='index_{field}'")
+        if self.cursor.fetchone() is None:
+            # If index doesn't exist, fall back to full table scan
+            self.cursor.execute("SELECT external_id, data FROM records")
+            results = []
+            for row in self.cursor.fetchall():
+                data = msgpack.unpackb(row[1])
+                if field in data and data[field] == value:
+                    results.append(row[0])  # Append external_id
+            return results
+        else:
+            # If index exists, use it
+            self.cursor.execute(f"""
+                SELECT r.external_id
+                FROM records r
+                JOIN index_{field} i ON r.internal_id = i.internal_id
+                WHERE i.value = ?
+            """, (value,))
+            return [row[0] for row in self.cursor.fetchall()]
 
-        return {_warp_field_name(field): dtype for field, dtype in self.all_fields.copy().items()}
+    def range_search(self, field: str, start_value: Any, end_value: Any) -> List[int]:
+        self.cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='index_{field}'")
+        if self.cursor.fetchone() is None:
+            # If index doesn't exist, fall back to full table scan
+            self.cursor.execute("SELECT external_id, data FROM records")
+            results = []
+            for row in self.cursor.fetchall():
+                data = msgpack.unpackb(row[1])
+                if field in data and start_value <= data[field] <= end_value:
+                    results.append(row[0])  # Append external_id
+            return results
+        else:
+            # If index exists, use it
+            self.cursor.execute(f"""
+                SELECT r.external_id
+                FROM records r
+                JOIN index_{field} i ON r.internal_id = i.internal_id
+                WHERE i.value BETWEEN ? AND ?
+            """, (start_value, end_value))
+            return [row[0] for row in self.cursor.fetchall()]
+
+    def starts_with(self, field: str, prefix: str) -> List[int]:
+        self.cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='index_{field}'")
+        if self.cursor.fetchone() is None:
+            # If index doesn't exist, fall back to full table scan
+            self.cursor.execute("SELECT external_id, data FROM records")
+            results = []
+            for row in self.cursor.fetchall():
+                data = msgpack.unpackb(row[1])
+                if field in data and isinstance(data[field], str) and data[field].startswith(prefix):
+                    results.append(row[0])  # Append external_id
+            return results
+        else:
+            # If index exists, use it
+            self.cursor.execute(f"""
+                SELECT r.external_id
+                FROM records r
+                JOIN index_{field} i ON r.internal_id = i.internal_id
+                WHERE i.value LIKE ?
+            """, (prefix + '%',))
+            return [row[0] for row in self.cursor.fetchall()]
+
+    def delete(self):
+        self.conn.close()
+        if self.filepath.exists():
+            self.filepath.unlink()
+
+    def list_fields(self) -> Dict[str, str]:
+        """
+        List all fields in the cache, including those without indexes.
+
+        Returns:
+            Dict[str, str]: The fields of the cache with their types.
+        """
+        fields = {}
+
+        # First, get all fields that have been indexed
+        self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'index_%'")
+        for (table_name,) in self.cursor.fetchall():
+            field = table_name[6:]  # Remove 'index_' prefix
+            self.cursor.execute(f"PRAGMA table_info({table_name})")
+            for column in self.cursor.fetchall():
+                if column[1] == 'value':
+                    sqlite_type = column[2]
+                    python_type = {'INTEGER': 'int', 'REAL': 'float', 'TEXT': 'str'}[sqlite_type]
+                    fields[f":{field}:"] = python_type
+                    break
+
+        # Then, check all records to find fields without indexes
+        self.cursor.execute("SELECT data FROM records LIMIT 1000")  # Limit the number of records checked for performance
+        for (packed_data,) in self.cursor.fetchall():
+            data = msgpack.unpackb(packed_data)
+            for field, value in data.items():
+                if f":{field}:" not in fields:
+                    if isinstance(value, int):
+                        fields[f":{field}:"] = 'int'
+                    elif isinstance(value, float):
+                        fields[f":{field}:"] = 'float'
+                    elif isinstance(value, str):
+                        fields[f":{field}:"] = 'str'
+
+        return fields
+
+    def __del__(self):
+        if hasattr(self, 'conn'):
+            self.conn.close()
+
+    def batch_store(self, data_list: List[Tuple[dict, int]]) -> List[int]:
+        """
+        Batch store multiple records in the cache.
+
+        Parameters:
+            data_list: List[Tuple[dict, int]]
+                List of records to be stored. Each element is a tuple containing a data dictionary and its corresponding external ID.
+
+        Returns:
+            List[int]: List of internal IDs of the stored records.
+        """
+        try:
+            self.cursor.execute("BEGIN TRANSACTION")
+
+            # Prepare bulk insert data
+            bulk_data = [(external_id, msgpack.packb(data)) for data, external_id in data_list]
+
+            # Execute bulk insert
+            self.cursor.executemany(
+                "INSERT INTO records (external_id, data) VALUES (?, ?)",
+                bulk_data
+            )
+
+            # Get inserted internal IDs
+            self.cursor.execute("SELECT last_insert_rowid()")
+            last_id = self.cursor.fetchone()[0]
+            internal_ids = list(range(last_id - len(data_list) + 1, last_id + 1))
+
+            self.conn.commit()
+            return internal_ids
+        except sqlite3.IntegrityError as e:
+            self.conn.rollback()
+            raise ValueError(f"Batch storage failed: {str(e)}")
+        except Exception as e:
+            self.conn.rollback()
+            raise e
