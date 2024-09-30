@@ -1,9 +1,13 @@
+from collections import OrderedDict
 import re
+from threading import Lock
 import time
 from functools import wraps
 from pathlib import Path
 
 import numpy as np
+
+from lynse.core_components.io import load_nnp
 from lynse.core_components.locks import ThreadLock
 
 
@@ -183,47 +187,58 @@ def collection_repr(collection):
             f'\n)')
 
 
+
+class FileHandlePool:
+    def __init__(self, max_open_files=100):
+        self.max_open_files = max_open_files
+        self.open_files = OrderedDict()
+        self.lock = Lock()
+
+    def get_file_handle(self, file_path):
+        with self.lock:
+            if file_path in self.open_files:
+                # 如果文件已经打开，将其移到OrderedDict的末尾（最近使用）
+                self.open_files.move_to_end(file_path)
+                return self.open_files[file_path]
+
+            # 如果达到最大打开文件数，关闭最早打开的文件
+            if len(self.open_files) >= self.max_open_files:
+                oldest_file, oldest_handle = self.open_files.popitem(last=False)
+                oldest_handle._mmap.close()
+
+            # 打开新文件
+            file_handle = load_nnp(file_path, mmap_mode=True)
+            self.open_files[file_path] = file_handle
+            return file_handle
+
+    def close_all(self):
+        with self.lock:
+            for handle in self.open_files.values():
+                handle._mmap.close()
+            self.open_files.clear()
+
+    def __del__(self):
+        self.close_all()
+
+
 class SafeMmapReader:
-    """
-    A class for reading files in memory-mapped mode and automatically closing them.
-    """
-    def __init__(self):
-        self.opened_handles = []
+    def __init__(self, max_open_files=100):
+        self.file_pool = FileHandlePool(max_open_files)
         self.lock = ThreadLock()
 
     def safe_mmap_reader(self, path, ids=None):
-        """
-        Open a file in memory-mapped mode.
-
-        Parameters:
-            path (str or Pathlike): The path to the file.
-            ids (list): The slices to read from the file.
-
-        Returns:
-            np.ndarray: If the system is Windows, the file will be directly loaded into memory.
-                Otherwise, the file will be memory-mapped.
-        """
         try:
-            mmap_handle = np.load(path, mmap_mode="r")
+            with self.lock:
+                mmap_handle = self.file_pool.get_file_handle(path)
+
+            if ids is None:
+                return mmap_handle
+            return mmap_handle[ids]
         except Exception as e:
             raise IOError(f"Failed to load file {path}: {e}")
 
-        with self.lock:
-            self.opened_handles.append(mmap_handle)
-
-        if ids is None:
-            return mmap_handle
-
-        return mmap_handle[ids]
-
     def close(self):
-        with self.lock:
-            for handle in self.opened_handles:
-                try:
-                    handle._mmap.close()
-                except Exception:
-                    continue  # Handle closing errors silently
-            self.opened_handles.clear()
+        self.file_pool.close_all()
 
     def __del__(self):
         self.close()

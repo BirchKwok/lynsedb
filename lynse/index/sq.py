@@ -4,6 +4,7 @@ from spinesUtils.asserts import raise_if
 
 from .base import BaseIndex
 from ..computational_layer.engines import inner_product as ip, l2sq, cosine
+from ..core_components.io import save_nnp
 
 
 class _IndexSQ(BaseIndex):
@@ -172,10 +173,8 @@ class _IndexSQ(BaseIndex):
         if self.data is None:
             return
         try:
-            with open(filepath1, 'wb') as file:
-                np.save(file, self.data)
-            with open(filepath2, 'wb') as file:
-                np.save(file, self.ids)
+            save_nnp(filepath1, self.data)
+            save_nnp(filepath2, self.ids)
         except IOError as e:
             print(f"Error saving data: {e}")
 

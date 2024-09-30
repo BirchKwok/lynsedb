@@ -3,6 +3,7 @@ import numpy as np
 
 from .base import BaseIndex
 from ..computational_layer.engines import jaccard, hamming, inner_product
+from ..core_components.io import save_nnp
 
 
 class _IndexBinary(BaseIndex):
@@ -151,10 +152,8 @@ class _IndexBinary(BaseIndex):
         if self.data is None:
             return
 
-        with open(filepath1, 'wb') as f:
-            np.save(f, self.data)
-        with open(filepath2, 'wb') as f:
-            np.save(f, self.ids)
+        save_nnp(filepath1, self.data)
+        save_nnp(filepath2, self.ids)
 
     def load(self, filepath):
         """
