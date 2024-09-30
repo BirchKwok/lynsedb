@@ -161,8 +161,10 @@ class MatrixSerializer:
                                       total=self.wal_worker.file_number, unit='chunk', disable=self.logger.level > 20):
             self.storage_worker.write(data, ids)
             # store fields index
-            for _id, _field in zip(ids, fields):
-                self.field_index.store(_field, int(_id))
+            bulk_data = [
+                (_field, int(_id)) for _id, _field in zip(ids, fields)
+            ]
+            self.field_index.batch_store(bulk_data)
 
             # insert data to indexer
             if hasattr(self, "indexer"):
@@ -175,7 +177,6 @@ class MatrixSerializer:
             self.indexer.update_filenames()
 
         self.logger.info(end_msg)
-        self.field_index.commit()
         self.wal_worker.reincarnate()
 
     def commit(self):
@@ -367,14 +368,11 @@ class MatrixSerializer:
             for attempt in range(retries):
                 try:
                     shutil.rmtree(self.collections_path_parent)
-                    self.logger.info(f"Successfully deleted directory {self.collections_path_parent}")
                     break
                 except PermissionError as e:
                     if attempt < retries - 1:
-                        self.logger.warning(f"Failed to delete directory, attempting {attempt + 1}...")
                         time.sleep(delay)
                     else:
-                        self.logger.error(f"Failed to delete directory {self.collections_path_parent}, file may be locked.")
                         raise e
                 except Exception as e:
                     self.logger.error(f"Error deleting: {e}")
