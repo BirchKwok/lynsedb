@@ -70,6 +70,9 @@ def save_nnp(filename, data, append=False):
     """
     lock = filelock.FileLock(f"{filename}.lock")
     with lock:
+        if data.ndim == 1:
+            data = data.reshape(-1, 1)
+
         # preset header size
         header_size = 100
         dtype_str = str(data.dtype)
@@ -144,9 +147,14 @@ def load_nnp(filename, mmap_mode=False):
     # read file header information
     dtype, (current_rows, data_shape) = load_nnp_header(filename)
 
+    if data_shape == 1:
+        shape = (current_rows, )
+    else:
+        shape = (current_rows, data_shape)
+
     if mmap_mode:
         return np.memmap(filename, mode='r', dtype=dtype,
-                         shape=(current_rows, data_shape), offset=data_offset)
+                         shape=shape, offset=data_offset)
     else:
         return np.fromfile(filename, dtype=dtype, count=current_rows * data_shape,
-                           offset=data_offset).reshape(-1, data_shape)
+                           offset=data_offset).reshape(shape)
