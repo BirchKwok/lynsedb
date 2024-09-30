@@ -17,8 +17,17 @@ class AuthenticationError(Exception):
 class Authentication:
     """
     Authentication class for the LynseDB project
+
+    The authentication is stored in a SQLite database file.
     """
     def __init__(self, path: str, logger: Logger):
+        """
+        Initialize the Authentication class.
+
+        Parameters:
+            path (str): The path to the database file.
+            logger (Logger): The logger to use.
+        """
         self._logger = logger
         self._path = Path(path).absolute() / "authentication.db"
         self._generate_table()
@@ -454,7 +463,7 @@ class Authentication:
         """
         Check if a token is valid.
         """
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("SELECT valid_until FROM tokens WHERE token = ?", (token,))
             result = c.fetchone()
