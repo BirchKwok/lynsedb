@@ -1,8 +1,15 @@
-import os
-from typing import List
+
+__all__ = ['FieldsCache', 'IndexSchema', 'FieldsStorage',
+           'FieldsQuery', 'Filter', 'MatchField', 'MatchID',
+           'FieldCondition', 'MatchRange', 'ExpressionParser']
+
+
+from typing import List, Tuple, Union
 
 from .filter import MatchField, MatchID, FieldCondition, Filter, MatchRange
 from .expression_parse import ExpressionParser
+from .fields_storage import FieldsStorage
+from .fields_query import FieldsQuery
 
 
 class IndexSchema:
@@ -34,20 +41,15 @@ class IndexSchema:
 
 
 class FieldsCache:
-    def __init__(self, filepath=None, as_temp_file=False):
+    def __init__(self, filepath=None):
         """
         Create a FieldsCache instance.
 
         Parameters:
             filepath: str
-                The path to the file where the cache will be stored.
-            as_temp_file: bool
-                If True, the cache will be stored in a temporary file.
+                The storage path for the cache file.
         """
-        from ...core_components.fields_cache.fields_query import FieldsQuery
-        from ...core_components.fields_cache.fields_storage import FieldsStorage
-
-        self.storage = FieldsStorage(filepath, as_temp_file=as_temp_file)
+        self.storage = FieldsStorage(filepath)
         self.query_handler = FieldsQuery(self.storage)
         self.filepath = filepath
 
@@ -57,7 +59,7 @@ class FieldsCache:
 
         Parameters:
             data: dict
-                The record to store.
+                The record to be stored.
             external_id: int
                 The external ID of the record.
 
@@ -66,26 +68,35 @@ class FieldsCache:
         """
         return self.storage.store(data, external_id)
 
+    def batch_store(self, data_list: List[Tuple[dict, int]]):
+        """
+        Batch store multiple records in the cache.
+
+        Parameters:
+            data_list: List[Tuple[dict, int]]
+                List of records to be stored. Each element is a tuple containing a data dictionary and its corresponding external ID.
+
+        Returns:
+            List[int]: List of internal IDs of the stored records.
+        """
+        return self.storage.batch_store(data_list)
+
     def query(self, query_filter, filter_ids=None, return_ids_only=True):
         """
         Query the fields cache.
 
         Parameters:
             query_filter: Filter or dict or FieldExpression (string)
-                The filter object or the specify data to filter.
+                Filter object or specified filter data.
             filter_ids: List[int]
-                The list of external IDs to filter.
+                List of external IDs to filter.
             return_ids_only: bool
-                If True, only the external IDs will be returned.
+                If True, only return external IDs.
 
         Returns:
-            List[dict]: The records. If not return_ids_only, the records will be returned.
-            List[int]: The external IDs. If return_ids_only, the external IDs will be returned.
+            List[dict]: Records. If not return_ids_only, returns records.
+            List[int]: External IDs. If return_ids_only, returns external IDs.
         """
-        if (not isinstance(query_filter, Filter) and not isinstance(query_filter, dict)
-                and not isinstance(query_filter, str)):
-            raise ValueError("The filter_instance must be an instance of Filter or a dict or a FieldExpression string.")
-
         return self.query_handler.query(query_filter, filter_ids, return_ids_only)
 
     def retrieve(self, external_id, include_external_id=False):
@@ -96,7 +107,7 @@ class FieldsCache:
             external_id: int
                 The external ID of the record.
             include_external_id: bool
-                If True, the external ID will be included in the record.
+                If True, include the external ID in the record.
 
         Returns:
             dict: The record.
@@ -109,12 +120,12 @@ class FieldsCache:
 
         Parameters:
             external_ids: List[int]
-                The external IDs of the records.
+                List of external IDs of the records.
             include_external_id: bool
-                If True, the external IDs will be included in the records.
+                If True, include the external ID in the records.
 
         Returns:
-            List[dict]: The records.
+            List[dict]: List of records.
         """
         return self.query_handler.retrieve_ids(external_ids, include_external_id=include_external_id)
 
@@ -124,7 +135,7 @@ class FieldsCache:
 
         Parameters:
             other: FieldsCache
-                The other cache to concatenate.
+                Another cache to concatenate.
 
         Returns:
             FieldsCache: The concatenated cache.
@@ -144,30 +155,20 @@ class FieldsCache:
         if hasattr(self, 'query_handler'):
             del self.query_handler
 
-    def commit(self):
-        """
-        Commit the cache.
-
-        This method is used to save the cache to disk.
-        """
-        self.storage.commit()
-
-    def build_index(self, schema: IndexSchema, rebuild_if_exists=False):
+    def build_index(self, schema: Union[IndexSchema, str]):
         """
         Build an index for the cache.
 
         Parameters:
-            schema (IndexSchema or Field name string): The index schema or the field name string.
-                When passing the field name string, the field name must be wrapped with ':',
-                like ':vector:', ':timestamp:'.
-            rebuild_if_exists: bool
-                If True, the index will be rebuilt if it already exists.
+            schema (IndexSchema or field name string): Index schema or field name string.
+                When passing a field name string, the field name must be wrapped in ':',
+                such as ':vector:', ':timestamp:'.
 
         Returns:
             None
 
         Note:
-            The :id: is a reserved field name and cannot be used.
+            ':id:' is a reserved field name and cannot be used.
         """
         if isinstance(schema, str):
             if schema == ':id:':
@@ -183,7 +184,7 @@ class FieldsCache:
 
             if schema_type == 'str':
                 schema_cls.add_string_index(schema)
-            elif schema_type == 'int':
+            elif schema_type in ['int', 'float']:
                 schema_cls.add_int_index(schema)
             else:
                 raise ValueError(f"Unsupported field type: {schema_type}")
@@ -192,8 +193,10 @@ class FieldsCache:
 
         if not schema.indices:
             raise ValueError("The index schema is empty.")
-        self.storage.build_index(schema.indices, rebuild_if_exists)
-        self.storage.index.save(self.storage.index_path)
+
+        # Build index for all fields in the schema
+        for field, field_type in schema.indices.items():
+            self.storage.build_index({field: field_type})
 
     def remove_index(self, field_name: str):
         """
@@ -201,21 +204,16 @@ class FieldsCache:
 
         Parameters:
             field_name: str
-                The name of the field.
+                The field name.
 
         Returns:
             None
         """
         self.storage.remove_index(field_name)
-        if not self.storage.index.indices:
-            if os.path.exists(self.storage.index_path):
-                os.remove(self.storage.index_path)
-        else:
-            self.storage.index.save(self.storage.index_path)
 
     def remove_all_field_indices(self):
         """
-        Remove all the field indices from the cache.
+        Remove all field indices from the cache.
 
         Returns:
             None
@@ -229,7 +227,7 @@ class FieldsCache:
         List the indices in the cache.
 
         Returns:
-            List[str]: The list of indices.
+            List[str]: List of indices.
         """
         return [":" + i + ":" if i not in [':id:', ''] else i
-                for i in list(self.storage.index.indices.keys())]
+                for i in list(self.storage.list_fields().keys())]
