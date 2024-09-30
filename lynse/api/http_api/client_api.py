@@ -1059,13 +1059,12 @@ class Collection:
         else:
             raise_error_response(response)
 
-    def build_field_index(self, schema, rebuild_if_exists=False):
+    def build_field_index(self, schema):
         """
         Build the field index of the collection.
 
         Parameters:
             schema (IndexSchema): The schema of the field index.
-            rebuild_if_exists (bool): Whether to rebuild the field index if it exists.
 
         Returns:
             dict: The response from the server.
@@ -1080,8 +1079,7 @@ class Collection:
         data = {
             "database_name": self._database_name,
             "collection_name": self._collection_name,
-            "schema": schema.to_dict(),
-            "rebuild_if_exists": rebuild_if_exists
+            "schema": schema.to_dict()
         }
 
         response = self._session.post(uri, json=data)

@@ -528,14 +528,13 @@ class ExclusiveDB:
 
     @unavailable_if_deleted
     @unavailable_if_empty
-    def build_field_index(self, schema, rebuild_if_exists=False):
+    def build_field_index(self, schema):
         """
         Build an index for the field.
 
         Parameters:
             schema (IndexSchema or Field name string): The schema of the field or the field name string.
                 When passing the field name string, the field name must be wrapped with ':', like ':vector:', ':timestamp:'.
-            rebuild_if_exists (bool): Whether to rebuild the index if it already exists.
 
         Returns:
             None
@@ -545,7 +544,7 @@ class ExclusiveDB:
         """
         if not isinstance(schema, (IndexSchema, str)):
             raise TypeError("schema must be an instance of IndexSchema or a field string.")
-        self._matrix_serializer.field_index.build_index(schema, rebuild_if_exists=rebuild_if_exists)
+        self._matrix_serializer.field_index.build_index(schema)
 
     @unavailable_if_deleted
     @unavailable_if_empty

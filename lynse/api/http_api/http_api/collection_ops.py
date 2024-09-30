@@ -818,8 +818,7 @@ def build_field_index():
 
         schema = IndexSchema().load_from_dict(data['schema'])
 
-        collection.build_field_index(schema=schema,
-                                     rebuild_if_exists=data['rebuild_if_exists'])
+        collection.build_field_index(schema=schema)
 
         return Response(json.dumps({'status': 'success', 'params': {
             'database_name': data['database_name'],
