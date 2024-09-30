@@ -6,16 +6,12 @@ import filelock
 import os
 
 
-class NnpFileSavingError(Exception):
-    pass
-
-
-class NnpFileLoadingError(Exception):
-    pass
-
-
 _HEADER_STRUCT = struct.Struct('<I30sI')
 _HEADER_STRUCT_SIZE = _HEADER_STRUCT.size
+
+
+class NnpFileSavingError(Exception):
+    pass
 
 
 @lru_cache(maxsize=None)
@@ -47,8 +43,6 @@ def load_nnp_header(filename):
     fd = os.open(filename, os.O_RDONLY)
     try:
         header_bytes = os.read(fd, _HEADER_STRUCT_SIZE)
-    except Exception as e:
-        raise NnpFileLoadingError(f"Error reading file: {e}")
     finally:
         os.close(fd)
 
