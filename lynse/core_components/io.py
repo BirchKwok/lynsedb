@@ -6,6 +6,14 @@ import filelock
 import os
 
 
+class NnpFileSavingError(Exception):
+    pass
+
+
+class NnpFileLoadingError(Exception):
+    pass
+
+
 _HEADER_STRUCT = struct.Struct('<I30sI')
 _HEADER_STRUCT_SIZE = _HEADER_STRUCT.size
 
@@ -39,6 +47,8 @@ def load_nnp_header(filename):
     fd = os.open(filename, os.O_RDONLY)
     try:
         header_bytes = os.read(fd, _HEADER_STRUCT_SIZE)
+    except Exception as e:
+        raise NnpFileLoadingError(f"Error reading file: {e}")
     finally:
         os.close(fd)
 
@@ -51,7 +61,10 @@ def load_nnp_header(filename):
 
 def save_nnp(filename, data, append=False):
     """
-    save data to nnp file
+    save data to nnp file.
+
+    The nnp file is a binary file can only accept two-dimensional data,
+        and the number of rows in the file cannot exceed 10^7, the column number cannot exceed 10^4.
 
     Parameters:
         filename (str): the path to the nnp file
@@ -79,13 +92,13 @@ def save_nnp(filename, data, append=False):
 
                 # Check if data type and shape match
                 if dtype_str != stored_dtype_str or data_shape != stored_data_shape:
-                    raise TypeError(
+                    raise NnpFileSavingError(
                         "The appended data does not match the data type or shape of the existing data in the file."
                     )
 
                 # check if the number of rows exceeds the limit
                 if current_rows + data.shape[0] > 10000000:
-                    raise Exception("Exceeds the maximum number of rows limit.")
+                    raise NnpFileSavingError("Exceeds the maximum number of rows limit.")
 
                 # update the number of rows in the file header
                 new_rows = current_rows + data.shape[0]
@@ -103,7 +116,7 @@ def save_nnp(filename, data, append=False):
 
                 # check if the number of rows exceeds the limit
                 if current_rows > 10000000:
-                    raise Exception("Exceeds the maximum number of rows limit.")
+                    raise NnpFileSavingError("Exceeds the maximum number of rows limit.")
 
                 # build file header
                 header = bytearray(header_size)
