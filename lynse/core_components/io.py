@@ -12,10 +12,28 @@ _HEADER_STRUCT_SIZE = _HEADER_STRUCT.size
 
 @lru_cache(maxsize=None)
 def get_dtype(dtype_str):
+    """
+    get the numpy dtype from the string
+
+    Parameters:
+        dtype_str (str): the string representation of the dtype
+
+    Returns:
+        np.dtype: the numpy dtype
+    """
     return np.dtype(dtype_str)
 
 
 def load_nnp_header(filename):
+    """
+    load the header of the nnp file
+
+    Parameters:
+        filename (str): the path to the nnp file
+
+    Returns:
+        (np.dtype, tuple): the data type and the shape of the data
+    """
     global _HEADER_STRUCT, _HEADER_STRUCT_SIZE
 
     fd = os.open(filename, os.O_RDONLY)
