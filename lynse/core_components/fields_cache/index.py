@@ -30,6 +30,16 @@ class Trie:
         else:
             return self._search_single(str(key))
 
+    def _search_single(self, key):
+        node = self.root
+        for char in key:
+            if char not in node.children:
+                return set()
+            node = node.children[char]
+        if node.is_end_of_word:
+            return node.ids
+        return set()
+
     def _batch_search(self, keys):
         results = set()
         current_nodes = {self.root: set(keys)}
