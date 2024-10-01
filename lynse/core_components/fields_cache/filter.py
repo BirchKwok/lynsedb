@@ -24,6 +24,13 @@ class MatchRange:
             inclusive (bool or str): Whether the range is inclusive of the start and end values.
                                      Can be True, False, "left", or "right".
         """
+        if start > end:
+            start, end = end, start
+            if inclusive == 'left':
+                inclusive = 'right'
+            elif inclusive == 'right':
+                inclusive = 'left'
+
         self.start = start
         self.end = end
         self.inclusive = inclusive
@@ -44,7 +51,7 @@ class MatchRange:
             return self.start <= data_value < self.end
         elif self.inclusive == "right":
             return self.start < data_value <= self.end
-        else:
+        else:  # inclusive == False
             return self.start < data_value < self.end
 
 
@@ -206,70 +213,35 @@ class Filter:
         self.must_not_fields = self._to_unique_list(self.must_not_fields)
 
     def to_dict(self):
-        """
-        Convert the filter to a dictionary.
+        def condition_to_dict(condition):
+            if isinstance(condition.matcher, MatchID):
+                return {'ids': condition.matcher.indices}
+            elif isinstance(condition.matcher, MatchField):
+                return {
+                    'key': condition.key,
+                    'matcher': {
+                        'value': condition.matcher.value,
+                        'comparator': condition.matcher.comparator.__name__,
+                        'all_comparators': condition.matcher.all_comparators,
+                        'not_in': condition.matcher.not_in
+                    }
+                }
+            elif isinstance(condition.matcher, MatchRange):
+                return {
+                    'key': condition.key,
+                    'matcher': {
+                        'start': condition.matcher.start,
+                        'end': condition.matcher.end,
+                        'inclusive': condition.matcher.inclusive
+                    }
+                }
+            else:
+                raise ValueError("Unknown matcher type")
 
-        Returns:
-            dict: A dictionary representation of the filter.
-        """
         return {
-            'must_fields': [
-                {
-                    'ids': condition.matcher.indices
-                } if isinstance(condition.matcher, MatchID) else {
-                    'key': condition.key,
-                    'matcher': {
-                        'value': condition.matcher.value,
-                        'comparator': condition.matcher.comparator.__name__,
-                        'all_comparators': condition.matcher.all_comparators,
-                        'not_in': condition.matcher.not_in
-                    }
-                } if isinstance(condition.matcher, MatchField) else {
-                    'key': condition.key,
-                    'matcher': {
-                        'start': condition.matcher.start,
-                        'end': condition.matcher.end,
-                        'inclusive': condition.matcher.inclusive
-                    }
-                } for condition in self.must_fields] if self.must_fields else [],
-            'any_fields': [
-                {
-                    'ids': condition.matcher.indices
-                } if isinstance(condition.matcher, MatchID) else {
-                    'key': condition.key,
-                    'matcher': {
-                        'value': condition.matcher.value,
-                        'comparator': condition.matcher.comparator.__name__,
-                        'all_comparators': condition.matcher.all_comparators,
-                        'not_in': condition.matcher.not_in
-                    }
-                } if isinstance(condition.matcher, MatchField) else {
-                    'key': condition.key,
-                    'matcher': {
-                        'start': condition.matcher.start,
-                        'end': condition.matcher.end,
-                        'inclusive': condition.matcher.inclusive
-                    }
-                } for condition in self.any_fields] if self.any_fields else [],
-            'must_not_fields': [
-                {
-                    'ids': condition.matcher.indices
-                } if isinstance(condition.matcher, MatchID) else {
-                    'key': condition.key,
-                    'matcher': {
-                        'value': condition.matcher.value,
-                        'comparator': condition.matcher.comparator.__name__,
-                        'all_comparators': condition.matcher.all_comparators,
-                        'not_in': condition.matcher.not_in
-                    }
-                } if isinstance(condition.matcher, MatchField) else {
-                    'key': condition.key,
-                    'matcher': {
-                        'start': condition.matcher.start,
-                        'end': condition.matcher.end,
-                        'inclusive': condition.matcher.inclusive
-                    }
-                } for condition in self.must_not_fields] if self.must_not_fields else []
+            'must_fields': [condition_to_dict(cond) for cond in self.must_fields] if self.must_fields else [],
+            'any_fields': [condition_to_dict(cond) for cond in self.any_fields] if self.any_fields else [],
+            'must_not_fields': [condition_to_dict(cond) for cond in self.must_not_fields] if self.must_not_fields else []
         }
 
     def load_dict(self, data):

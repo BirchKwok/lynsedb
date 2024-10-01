@@ -44,11 +44,15 @@ class BinaryOpNode(ASTNode):
         left_val = self.left.evaluate()
         right_val = self.right.evaluate()
         if self.op == 'and':
-            return Filter(must=left_val.must_fields + right_val.must_fields,
-                          any=left_val.any_fields + right_val.any_fields,
-                          must_not=left_val.must_not_fields + right_val.must_not_fields)
+            return Filter(
+                must=left_val.must_fields + right_val.must_fields,
+                any=left_val.any_fields + right_val.any_fields,
+                must_not=left_val.must_not_fields + right_val.must_not_fields
+            )
         elif self.op == 'or':
-            return Filter(any=left_val.must_fields + right_val.must_fields + left_val.any_fields + right_val.any_fields)
+            return Filter(
+                any=left_val.must_fields + right_val.must_fields + left_val.any_fields + right_val.any_fields
+            )
         else:
             raise ValueError(f"Unknown operator: {self.op}")
 
@@ -76,6 +80,22 @@ class UnaryOpNode(ASTNode):
             raise ValueError(f"Unknown unary operator: {self.op}")
 
 
+class AnyNode(ASTNode):
+    def __init__(self, expr):
+        self.expr = expr
+
+    def evaluate(self):
+        """
+        Evaluates the AnyNode.
+
+        Returns:
+            Filter: A filter with conditions added to the 'any_fields' list.
+        """
+        expr_filter = self.expr.evaluate()
+        # Merge 'must_fields' and 'any_fields' from the expression into 'any_fields' of the current filter
+        return Filter(any=expr_filter.must_fields + expr_filter.any_fields)
+
+
 class ConditionNode(ASTNode):
     def __init__(self, field, op, value):
         self.field = field
@@ -89,7 +109,8 @@ class ConditionNode(ASTNode):
         Returns:
             Filter: A filter based on the condition.
         """
-        field = ':id:' if self.field == 'id' else self.field
+        self.validate_field_format(self.field)
+        field = self.field
 
         if field == ':id:':
             value = [int(v.strip()) for v in self.value.strip('[]').split(',')]
@@ -100,28 +121,58 @@ class ConditionNode(ASTNode):
 
         if self.op in ['in', 'not in']:
             value = [v.strip() for v in self.value.strip('[]').split(',')]
-            value = [self.parse_number(v) for v in value]
+            value = [self.parse_value(v) for v in value]
+            all_comparators = False  # For 'in' and 'not in' operators, all_comparators does not need to be set
         else:
-            value = self.parse_number(self.value)
+            if self.value.startswith('[') and self.value.endswith(']'):
+                # if the value is a list, set all_comparators=True
+                value = [v.strip() for v in self.value.strip('[]').split(',')]
+                value = [self.parse_value(v) for v in value]
+                all_comparators = True
+            else:
+                value = self.parse_value(self.value)
+                all_comparators = False
+
         comparator = operator_map[self.op]
-        condition = FieldCondition(field,
-                                   MatchField(value, comparator, all_comparators=False, not_in=self.op == 'not in'))
+        condition = FieldCondition(
+            field,
+            MatchField(value, comparator, all_comparators=all_comparators, not_in=self.op == 'not in')
+        )
         if self.op.startswith('not') and self.op != 'not in':
             return Filter(must_not=[condition])
         else:
             return Filter(must=[condition])
 
     @staticmethod
-    def parse_number(value):
+    def validate_field_format(field_name):
         """
-        Parses a string into a number (int or float) if possible.
+        Validates that the field name is surrounded by ':'.
+
+        Parameters:
+            field_name (str): The field name to validate.
+
+        Raises:
+            ValueError: If the field name does not start and end with ':'.
+        """
+        if not (field_name.startswith(':') and field_name.endswith(':')):
+            raise ValueError(
+                "Field name is not correctly formatted. The field name must start and end with ':', for example, ':age:'.")
+
+    @staticmethod
+    def parse_value(value):
+        """
+        Parses a string into a number (int or float), boolean, or string if possible.
 
         Parameters:
             value (str): The string to be parsed.
 
         Returns:
-            int, float, or str: The parsed value.
+            int, float, bool, or str: The parsed value.
         """
+        if value == 'True':
+            return True
+        elif value == 'False':
+            return False
         try:
             if '.' in value:
                 return float(value)
@@ -131,12 +182,12 @@ class ConditionNode(ASTNode):
 
 
 class RangeNode(ASTNode):
-    def __init__(self, field, start, end, start_op, end_op):
+    def __init__(self, field, left_value, right_value, left_op, right_op):
         self.field = field
-        self.start = start
-        self.end = end
-        self.start_op = start_op
-        self.end_op = end_op
+        self.left_value = left_value
+        self.right_value = right_value
+        self.left_op = left_op
+        self.right_op = right_op
 
     def evaluate(self):
         """
@@ -145,51 +196,79 @@ class RangeNode(ASTNode):
         Returns:
             Filter: A filter based on the range condition.
         """
-        field = self.field.replace(':', '')
-        field = ':id:' if field == 'id' else field
+        self.validate_field_format(self.field)
+        field = self.field
 
-        start = self.parse_number(self.start)
-        end = self.parse_number(self.end)
+        # Parse values
+        left_value = self.parse_value(self.left_value)
+        right_value = self.parse_value(self.right_value)
 
-        # Determine actual start and end values
-        if self.start_op in ['>', '>='] and self.end_op in ['>', '>=']:
-            start, end = end, start
+        # Determine start and end values and their inclusiveness
+        # Adjust operators to standard form
+        ops = {'>': ('>', False), '>=': ('>=', True), '<': ('<', False), '<=': ('<=', True)}
+        left_op_sym, left_inclusive = ops[self.left_op]
+        right_op_sym, right_inclusive = ops[self.right_op]
 
-        if start > end:
-            raise ValueError(f"Invalid range expression: Start value {start} is greater than end value {end}.")
-
-        start_inclusive = self.end_op in ['>=', '<=']
-        end_inclusive = self.start_op in ['<=', '>=']
-
-        if start == end:
-            if not (start_inclusive and end_inclusive):
-                raise ValueError(f"Invalid range expression: When the start value equals the end value, "
-                                 f"both must use one of ['==', '!=', '>=', '<='].")
-            inclusive = True
-        else:
-            if start_inclusive and end_inclusive:
-                inclusive = True
-            elif not start_inclusive and not end_inclusive:
-                inclusive = False
-            elif start_inclusive:
-                inclusive = 'left'
+        # Determine start, end, and inclusiveness based on operator direction
+        if ':' in self.field:
+            # Variable in the middle, e.g., "16 > :age: <= 18"
+            if left_op_sym in ['<', '<=']:
+                start = left_value
+                start_inclusive = left_inclusive
+                end = right_value
+                end_inclusive = right_inclusive
             else:
-                inclusive = 'right'
+                start = right_value
+                start_inclusive = right_inclusive
+                end = left_value
+                end_inclusive = left_inclusive
+        else:
+            # Should not reach here in this context
+            raise ValueError("Invalid range expression")
+
+        # Determine inclusive parameter for MatchRange
+        if start_inclusive and end_inclusive:
+            inclusive = True
+        elif start_inclusive:
+            inclusive = 'left'
+        elif end_inclusive:
+            inclusive = 'right'
+        else:
+            inclusive = False
 
         condition = FieldCondition(field, MatchRange(start, end, inclusive=inclusive))
         return Filter(must=[condition])
 
     @staticmethod
-    def parse_number(value):
+    def validate_field_format(field_name):
         """
-        Parses a string into a number (int or float) if possible.
+        Validates that the field name is surrounded by ':'.
+
+        Parameters:
+            field_name (str): The field name to validate.
+
+        Raises:
+            ValueError: If the field name does not start and end with ':'.
+        """
+        if not (field_name.startswith(':') and field_name.endswith(':')):
+            raise ValueError(
+                "Field name is not correctly formatted. The field name must start and end with ':', for example, ':age:'.")
+
+    @staticmethod
+    def parse_value(value):
+        """
+        Parses a string into a number (int or float), boolean, or string if possible.
 
         Parameters:
             value (str): The string to be parsed.
 
         Returns:
-            int, float, or str: The parsed value.
+            int, float, bool, or str: The parsed value.
         """
+        if value == 'True':
+            return True
+        elif value == 'False':
+            return False
         try:
             if '.' in value:
                 return float(value)
@@ -199,71 +278,8 @@ class RangeNode(ASTNode):
 
 
 class ExpressionParser:
-    r"""
-    FieldExpression is a string parser used to parse field expressions.
-
-    It can reassemble the parsing result into a Filter object of LynseDB, which can filter the query result.
-    Its main implementation idea is to efficiently create Filters
-        without requiring users to learn the use of complex filtering components such as MatchRange and FieldCondition.
-
-    It is an important component of LynseDB and can effectively improve the user-friendliness of LynseDB.
-
-    Supported syntax:
-        - :field: represents a field, e.g., :order:, :name:, etc.
-        - :id: special reserved word for matching IDs
-
-    Supported comparison operators:
-        - ==
-        - !=
-        - \>=
-        - <=
-        - \>
-        - <
-
-    Supported logical operators:
-        - and
-        - or
-        - not
-        - in
-
-    Supported parentheses:
-        - ()
-
-    Examples:
-        - :order: > 1
-        - :order: >= 1
-        - :order: >= 1 and :name: >= 1.3
-        - not (:order: == 2)
-        - :order: >= 1 and :name: != 1.3 and (:order: == 2 or :name: == 3) and not (:tt: == 2)
-        - :id: in [1, 2]
-        - :id: not in [1, 2]
-        - :id: in [1, 2] and :order: >= 1 and :name: >= 1.3 and (:order: == 2 or :name: == 3) and not (:tt: == 2)
-
-    Usage:
-        >>> expression = ":order: > 1 and :name: >= 1.3 and (:order: == 2 or :name: == 3) and not (:tt: == 2)"
-        >>> parser = ExpressionParser(expression)
-        >>> pfilter = parser.to_filter()
-        >>> print(pfilter.to_dict())
-        {'must_fields': [
-                {'key': 'order', 'matcher': {'value': 1, 'comparator': 'gt'}},
-                {'key': 'name', 'matcher': {'value': 1.3, 'comparator': 'ge'}}
-            ],
-        'any_fields': [
-                {'key': 'order', 'matcher': {'value': 2, 'comparator': 'eq'}},
-                {'key': 'name', 'matcher': {'value': 3, 'comparator': 'eq'}}
-            ],
-        'must_not_fields': [
-                {'key': 'tt', 'matcher': {'value': 2, 'comparator': 'eq'}}
-            ]
-        }
-
-    Efficient syntax:
-        - Use () to group expressions for better readability and maintainability.
-        Specially when using `not` operator.
-        - Use `not in` instead of `not :field: in [value]` when possible.
-        - Use `not (:field: in [value])` or `not (:field: in [value])`, it can be more efficient.
-
-
+    """
+    Parse the expression and generate the corresponding filter.
     """
 
     def __init__(self, expression):
@@ -293,9 +309,23 @@ class ExpressionParser:
         Returns:
             list: A list of tokens.
         """
+        # use lookahead to ensure '||(' has no spaces
         token_pattern = re.compile(
-            r"(:\w+:|==|!=|>=|<=|>|<|in|not in|and|or|not|\(|\)|\[.*?\]|\d+\.\d+|\d+|'[^']*'|\"[^\"]*\")")
-        return token_pattern.findall(expression)
+            r"(:\w+:|==|!=|>=|<=|>|<|in|not in|and|or|not|\|\|\((?=\S)|\|\||\(|\)|\[.*?\]|\d+\.\d+|\d+|'[^']*'|\"[^\"]*\"|\w+)"
+        )
+        tokens = token_pattern.findall(expression)
+
+        # check illegal usage of '||' (followed by '(' with a space)
+        for idx in range(len(tokens) - 1):
+            if tokens[idx] == '||' and tokens[idx + 1] == '(':
+                raise ValueError("When using '||', it must be immediately followed by '(', without any spaces.")
+
+        # check illegal usage of '||' (not followed by '(')
+        for idx in range(len(tokens)):
+            if tokens[idx] == '||':
+                raise ValueError("When using '||', it must be immediately followed by '(', without any spaces.")
+
+        return tokens
 
     def parse(self):
         """
@@ -304,6 +334,7 @@ class ExpressionParser:
         Returns:
             ASTNode: The root node of the abstract syntax tree.
         """
+        self.current = 0
         return self.parse_or()
 
     def parse_or(self):
@@ -350,12 +381,19 @@ class ExpressionParser:
 
     def parse_primary(self):
         """
-        Parse the basic expression (parentheses and conditions).
+        Parse the basic expression (prefix operators, parentheses, and conditions).
 
         Returns:
             ASTNode: The parsed node.
         """
-        if self.tokens[self.current] == '(':
+        if self.current < len(self.tokens) and self.tokens[self.current] == '||(':
+            self.current += 1
+            expr = self.parse_and_only()
+            if self.current >= len(self.tokens) or self.tokens[self.current] != ')':
+                raise ValueError("Missing right parenthesis")
+            self.current += 1
+            return AnyNode(expr)
+        elif self.current < len(self.tokens) and self.tokens[self.current] == '(':
             self.current += 1
             node = self.parse_or()
             if self.current >= len(self.tokens) or self.tokens[self.current] != ')':
@@ -365,21 +403,48 @@ class ExpressionParser:
         else:
             return self.parse_condition()
 
-    @staticmethod
-    def parse_number(value):
+    def parse_and_only(self):
         """
-        Parse a string into a number (int or float) if possible.
+        Parse expressions that only allow 'and' as a logical connector.
+
+        Returns:
+            ASTNode: The parsed node.
+        """
+        node = self.parse_not()
+        while self.current < len(self.tokens):
+            if self.tokens[self.current] == 'and':
+                self.current += 1
+                right = self.parse_not()
+                node = BinaryOpNode(node, 'and', right)
+            elif self.tokens[self.current] == 'or':
+                raise ValueError("After '||(', only 'and' is allowed as a logical connector, 'or' is not allowed.")
+            elif self.tokens[self.current] == ')':
+                break
+            else:
+                break
+        return node
+
+    @staticmethod
+    def parse_value(value):
+        """
+        Parses a string into a number (int or float), boolean, or string if possible.
 
         Parameters:
             value (str): The string to be parsed.
 
         Returns:
-            int, float, or str: The parsed value.
+            int, float, bool, or str: The parsed value.
         """
+        if value == 'True':
+            return True
+        elif value == 'False':
+            return False
         try:
-            return int(value) if value.isdigit() else float(value)
+            if '.' in value:
+                return float(value)
+            return int(value)
         except ValueError:
-            return value
+            return value.strip("'\"")
 
     def compare_values(self, op1, val1, op2, val2):
         """
@@ -391,8 +456,8 @@ class ExpressionParser:
             op2 (str): The operator of the second value.
             val2 (str): The second value.
         """
-        num1 = self.parse_number(val1)
-        num2 = self.parse_number(val2)
+        num1 = self.parse_value(val1)
+        num2 = self.parse_value(val2)
 
         if op1 in ['>', '>='] and op2 in ['<', '<=']:
             if num1 > num2:
@@ -418,38 +483,59 @@ class ExpressionParser:
         Returns:
             ASTNode: The parsed node (ConditionNode or RangeNode).
         """
-        if self.current < len(self.tokens) - 2 and self.tokens[self.current + 1] in ['>', '<', '>=', '<=']:
-            # Detect range expressions, e.g., "1 < :field: < 10"
-            left = self.tokens[self.current]
-            op1 = self.tokens[self.current + 1]
-            middle = self.tokens[self.current + 2]
-            if self.current + 3 < len(self.tokens) and self.tokens[self.current + 3] in ['>', '<', '>=', '<=']:
-                op2 = self.tokens[self.current + 3]
-                right = self.tokens[self.current + 4]
+        if (self.current + 4) < len(self.tokens):
+            token_sequence = self.tokens[self.current:self.current + 5]
+            if (token_sequence[1] in ['>', '<', '>=', '<='] and
+                    ':' in token_sequence[2] and
+                    token_sequence[3] in ['>', '<', '>=', '<=']):
+                left_value = token_sequence[0]
+                left_op = token_sequence[1]
+                field = token_sequence[2]
+                right_op = token_sequence[3]
+                right_value = token_sequence[4]
                 self.current += 5
-                return RangeNode(middle, left, right, op1, op2)
+                return RangeNode(field, left_value, right_value, left_op, right_op)
         # Standard condition parsing
         left = self.tokens[self.current]
         self.current += 1
         if self.current >= len(self.tokens):
-            raise ValueError("Expression is incomplete, missing operator and value.")
+            raise ValueError("Expression is incomplete, lacks operator and value.")
         op = self.tokens[self.current]
         if op == 'not' and self.current + 1 < len(self.tokens):
             op = 'not ' + self.tokens[self.current + 1]
             self.current += 1
         self.current += 1
         if self.current >= len(self.tokens):
-            raise ValueError("Expression is incomplete, missing value.")
+            raise ValueError("Expression is incomplete, lacks value.")
         right = self.tokens[self.current]
         self.current += 1
 
         # Check if the field is on the left side
         if ':' in left:
-            return ConditionNode(left, op, right)
+            self.validate_field_format(left)
+            field = left
+            return ConditionNode(field, op, right)
         else:
             # Field on the right side, reverse the operator
             op = self.reverse_op(op)
-            return ConditionNode(right, op, left)
+            self.validate_field_format(right)
+            field = right
+            return ConditionNode(field, op, left)
+
+    @staticmethod
+    def validate_field_format(field_name):
+        """
+        Validates that the field name is surrounded by ':'.
+
+        Parameters:
+            field_name (str): The field name to validate.
+
+        Raises:
+            ValueError: If the field name does not start and end with ':'.
+        """
+        if not (field_name.startswith(':') and field_name.endswith(':')):
+            raise ValueError(
+                "Field name is not correctly formatted. The field name must start and end with ':', for example, ':age:'.")
 
     @staticmethod
     def reverse_op(op):
@@ -474,3 +560,12 @@ class ExpressionParser:
         """
         ast = self.parse()
         return ast.evaluate()
+
+    def to_dict(self):
+        """
+        Convert the parsed expression into a dictionary.
+
+        Returns:
+            dict: The dictionary representation of the parsed expression.
+        """
+        return self.to_filter().to_dict()
