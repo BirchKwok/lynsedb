@@ -6,38 +6,109 @@ from ...core_components.fields_cache.expression_parse import ExpressionParser
 
 
 class FieldsQuery:
+    """
+    The FieldsQuery class is used to query data in the fields_cache.
+    """
     def __init__(self, storage):
+        """
+        Initialize the FieldsQuery class.
+
+        Parameters:
+            storage: Storage
+                The storage object.
+        """
         self.storage = storage
 
     def filter_non_id_conditions(self, condition_list):
+        """
+        Filter out non-id conditions.
+
+        Parameters:
+            condition_list: List[FieldCondition]
+                The list of conditions.
+
+        Returns:
+            List[FieldCondition]: The filtered list of conditions.
+        """
         return [condition for condition in condition_list
                 if condition.matcher.name != "MatchID" and condition.key != ":id:"]
 
     def filter_range_conditions(self, condition_list):
+        """
+        Filter out range conditions.
+
+        Parameters:
+            condition_list: List[FieldCondition]
+                The list of conditions.
+
+        Returns:
+            List[FieldCondition]: The filtered list of conditions.
+        """
         return [condition for condition in condition_list
                 if condition.matcher.name == "MatchRange" or
                 (condition.matcher.name == "MatchField" and condition.matcher.comparator in [operator.le, operator.lt,
                                                                                              operator.ge, operator.gt])]
 
     def filter_equal_conditions(self, condition_list):
+        """
+        Filter out equal conditions.
+
+        Parameters:
+            condition_list: List[FieldCondition]
+                The list of conditions.
+
+        Returns:
+            List[FieldCondition]: The filtered list of conditions.
+        """
         return [condition for condition in condition_list
                 if
                 condition.matcher.name == "MatchField" and condition.matcher.comparator in [operator.eq, operator.ne]]
 
     def retrieve_all_ids(self):
+        """
+        Retrieve all IDs from the storage.
+
+        Returns:
+            List[int]: The list of IDs.
+        """
         return [row[0] for row in self.storage.cursor.execute("SELECT external_id FROM records")]
 
     def is_filter_empty(self, filter_instance):
+        """
+        Check if the filter is empty.
+
+        Parameters:
+            filter_instance: Filter
+                The filter object.
+
+        Returns:
+            bool: True if the filter is empty, False otherwise.
+        """
         return not filter_instance.must_fields and \
             not filter_instance.must_not_fields and \
             not filter_instance.any_fields
 
     def _process_conditions(self, range_conditions=None, equal_conditions=None, is_any_fields=False):
+        """
+        Process the conditions.
+
+        Parameters:
+            range_conditions: List[FieldCondition]
+                The list of range conditions.
+            equal_conditions: List[FieldCondition]
+                The list of equal conditions.
+            is_any_fields: bool
+                If True, process any fields.
+
+        Returns:
+            set[int]: The set of IDs.
+        """
         if not range_conditions and not equal_conditions:
             return set()
 
         match_ids = set()
 
+        # handle range conditions
         for condition in range_conditions:
             if condition.matcher.name == 'MatchRange':
                 start = condition.matcher.start
@@ -51,32 +122,92 @@ class FieldsQuery:
             elif condition.matcher.name == 'MatchField':
                 comparator = getattr(condition.matcher, 'comparator', None)
                 if comparator is None:
-                    raise ValueError("MatchField condition must provide a comparator")
+                    raise ValueError("MatchField condition must provide comparator")
 
-                start_value = None
-                end_value = None
-                if comparator == operator.lt:
-                    end_value = condition.matcher.value - 1
-                elif comparator == operator.le:
-                    end_value = condition.matcher.value
-                elif comparator == operator.gt:
-                    start_value = condition.matcher.value + 1
+                values = condition.matcher.value
+                if not isinstance(values, list):
+                    values = [values]
+
+                if condition.matcher.all_comparators:
+                    # all conditions must be satisfied, take intersection
+                    temp_ids = None
+                    for value in values:
+                        start_value = None
+                        end_value = None
+                        if comparator == operator.lt:
+                            end_value = value - 1
+                        elif comparator == operator.le:
+                            end_value = value
+                        elif comparator == operator.gt:
+                            start_value = value + 1
+                        else:
+                            start_value = value
+
+                        current_ids = set(self.storage.range_search(condition.key, start_value, end_value))
+                        if temp_ids is None:
+                            temp_ids = current_ids
+                        else:
+                            temp_ids &= current_ids  # take intersection
+
+                    if temp_ids:
+                        match_ids |= temp_ids
                 else:
-                    start_value = condition.matcher.value
+                    # any condition satisfied, take union
+                    for value in values:
+                        start_value = None
+                        end_value = None
+                        if comparator == operator.lt:
+                            end_value = value - 1
+                        elif comparator == operator.le:
+                            end_value = value
+                        elif comparator == operator.gt:
+                            start_value = value + 1
+                        else:
+                            start_value = value
 
-                match_ids |= set(self.storage.range_search(condition.key, start_value, end_value))
+                        match_ids |= set(self.storage.range_search(condition.key, start_value, end_value))
 
+        # handle equal conditions
         for condition in equal_conditions:
             if condition.matcher.name == 'MatchField':
                 comparator = getattr(condition.matcher, 'comparator', None)
                 if comparator is None:
-                    raise ValueError("MatchField condition must provide a comparator")
+                    raise ValueError("MatchField condition must provide comparator")
 
-                match_ids |= set(self.storage.search(condition.key, condition.matcher.value))
+                values = condition.matcher.value
+                if not isinstance(values, list):
+                    values = [values]
+
+                if condition.matcher.all_comparators:
+                    temp_ids = None
+                    for value in values:
+                        current_ids = set(self.storage.search(condition.key, value))
+                        if temp_ids is None:
+                            temp_ids = current_ids
+                        else:
+                            temp_ids &= current_ids  # take intersection
+
+                    if temp_ids:
+                        match_ids |= temp_ids
+                else:
+                    for value in values:
+                        match_ids |= set(self.storage.search(condition.key, value))
 
         return match_ids
 
     def _match_filter(self, conditions, is_any_fields=False):
+        """
+        Match the filter.
+
+        Parameters:
+            conditions: List[FieldCondition]
+                The list of conditions.
+            is_any_fields: bool
+                If True, match any fields.
+
+        Returns:
+            set[int]: The set of IDs.
+        """
         match_ids = set()
         compare_op = all if not is_any_fields else any
         for external_id, data in self.storage.retrieve_all():
@@ -86,6 +217,18 @@ class FieldsQuery:
         return match_ids
 
     def _pre_match_ids(self, condition_list, is_any_fields=False):
+        """
+        Pre-match the IDs.
+
+        Parameters:
+            condition_list: List[FieldCondition]
+                The list of conditions.
+            is_any_fields: bool
+                If True, match any fields.
+
+        Returns:
+            set[int]: The set of IDs.
+        """
         pre_match_ids = set()
         for condition in condition_list:
             if condition.matcher.name == "MatchID":
@@ -103,6 +246,21 @@ class FieldsQuery:
         return pre_match_ids
 
     def _query(self, filter_instance, filter_ids=None, return_ids_only=True):
+        """
+        Query the fields cache.
+
+        Parameters:
+            filter_instance: Filter
+                The filter object.
+            filter_ids: List[int]
+                List of external IDs to filter.
+            return_ids_only: bool
+                If True, only return external IDs.
+
+        Returns:
+            List[dict]: Records. If not return_ids_only, returns records.
+            List[int]: External IDs. If return_ids_only, returns external IDs.
+        """
         if self.is_filter_empty(filter_instance):
             match_ids = set(self.retrieve_all_ids())
         else:
@@ -114,6 +272,7 @@ class FieldsQuery:
             must_not_fields = filter_instance.must_not_fields
             any_fields = filter_instance.any_fields
 
+            # handle must_fields and must_not_fields
             if must_fields:
                 match_ids.update(self._pre_match_ids(must_fields))
             else:
@@ -122,12 +281,9 @@ class FieldsQuery:
             if must_not_fields:
                 not_match_ids.update(self._pre_match_ids(must_not_fields))
 
-            if any_fields:
-                any_match_ids.update(self._pre_match_ids(any_fields, is_any_fields=True))
-
+            # filter must_fields and must_not_fields
             must_fields = self.filter_non_id_conditions(must_fields)
             must_not_fields = self.filter_non_id_conditions(must_not_fields)
-            any_fields = self.filter_non_id_conditions(any_fields)
 
             if must_fields:
                 match_ids |= self._process_conditions(
@@ -139,18 +295,19 @@ class FieldsQuery:
                     self.filter_range_conditions(must_not_fields),
                     self.filter_equal_conditions(must_not_fields)
                 )
+
+            match_ids -= not_match_ids  # apply must_not_fields filter
+
+            # handle any_fields
             if any_fields:
+                any_match_ids.update(self._pre_match_ids(any_fields, is_any_fields=True))
+                any_fields = self.filter_non_id_conditions(any_fields)
                 any_match_ids |= self._process_conditions(
                     self.filter_range_conditions(any_fields),
                     self.filter_equal_conditions(any_fields),
                     is_any_fields=True
                 )
-
-            if not_match_ids:
-                match_ids -= not_match_ids
-
-            if any_match_ids:
-                match_ids &= any_match_ids
+                match_ids &= any_match_ids  # take intersection with any_fields
 
             if not match_ids:
                 return []

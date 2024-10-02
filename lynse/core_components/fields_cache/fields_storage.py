@@ -5,17 +5,31 @@ from pathlib import Path
 
 
 class FieldsStorage:
+    """
+    Fields storage class.
+    """
     def __init__(self, filepath=None):
+        """
+        Initialize the fields storage.
+
+        Parameters:
+            filepath: str
+                The file path to the storage.
+        """
         if filepath is None:
             raise ValueError("You must provide a file path.")
 
         self.filepath = Path(filepath)
+        self.filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        self.conn = sqlite3.connect(str(self.filepath))
+        self.conn = sqlite3.connect(str(self.filepath), check_same_thread=False)
         self.cursor = self.conn.cursor()
         self._initialize_database()
 
     def _initialize_database(self):
+        """
+        Initialize the database.
+        """
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS records (
                 internal_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,7 +54,7 @@ class FieldsStorage:
             int: The internal ID of the record.
         """
         if not isinstance(data, dict):
-            raise ValueError("Only dictionary type data is allowed.")
+            raise ValueError("Only dict-type data is allowed.")
 
         try:
             packed_data = msgpack.packb(data)
@@ -54,6 +68,18 @@ class FieldsStorage:
             raise ValueError(f"external_id {external_id} already exists.")
 
     def retrieve_by_external_id(self, external_ids: Union[int, List[int]], include_external_id=True) -> List[dict]:
+        """
+        Retrieve records by external ID.
+
+        Parameters:
+            external_ids: Union[int, List[int]]
+                The external ID or list of external IDs.
+            include_external_id: bool
+                If True, include the external ID in the records.
+
+        Returns:
+            List[dict]: List of records.
+        """
         if isinstance(external_ids, int):
             external_ids = [external_ids]
 
@@ -69,6 +95,16 @@ class FieldsStorage:
         return results
 
     def retrieve_all(self, include_external_id=True):
+        """
+        Retrieve all records.
+
+        Parameters:
+            include_external_id: bool
+                If True, include the external ID in the records.
+
+        Returns:
+            List[dict]: List of records.
+        """
         self.cursor.execute("SELECT external_id, data FROM records")
         for row in self.cursor.fetchall():
             data = msgpack.unpackb(row[1])
@@ -77,11 +113,28 @@ class FieldsStorage:
             yield row[0], data
 
     def field_exists(self, field: str) -> bool:
+        """
+        Check if a field exists.
+
+        Parameters:
+            field: str
+                The field to check.
+
+        Returns:
+            bool: True if the field exists, False otherwise.
+        """
         field = field.strip(':')
         self.cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='index_{field}'")
         return self.cursor.fetchone() is not None
 
     def build_index(self, schema: Dict[str, type]):
+        """
+        Build an index for a field.
+
+        Parameters:
+            schema: Dict[str, type]
+                The schema of the fields.
+        """
         for field, field_type in schema.items():
             field = field.strip(':')
             if self.field_exists(field):
@@ -108,6 +161,13 @@ class FieldsStorage:
         self.conn.commit()
 
     def remove_index(self, field_name: str):
+        """
+        Remove an index for a field.
+
+        Parameters:
+            field_name: str
+                The name of the field.
+        """
         self.cursor.execute(f"DROP TABLE IF EXISTS index_{field_name}")
         self.conn.commit()
 
@@ -146,6 +206,20 @@ class FieldsStorage:
             return [row[0] for row in self.cursor.fetchall()]
 
     def range_search(self, field: str, start_value: Any, end_value: Any) -> List[int]:
+        """
+        Range search for records by field and value range.
+
+        Parameters:
+            field: str
+                The field to search.
+            start_value: Any
+                The start value of the range.
+            end_value: Any
+                The end value of the range.
+
+        Returns:
+            List[int]: The external IDs of the records.
+        """
         self.cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='index_{field}'")
         if self.cursor.fetchone() is None:
             # If index doesn't exist, fall back to full table scan
@@ -167,6 +241,18 @@ class FieldsStorage:
             return [row[0] for row in self.cursor.fetchall()]
 
     def starts_with(self, field: str, prefix: str) -> List[int]:
+        """
+        Search for records by field and prefix.
+
+        Parameters:
+            field: str
+                The field to search.
+            prefix: str
+                The prefix to search for.
+
+        Returns:
+            List[int]: The external IDs of the records.
+        """
         self.cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='index_{field}'")
         if self.cursor.fetchone() is None:
             # If index doesn't exist, fall back to full table scan
@@ -188,6 +274,9 @@ class FieldsStorage:
             return [row[0] for row in self.cursor.fetchall()]
 
     def delete(self):
+        """
+        Delete the storage.
+        """
         self.conn.close()
         if self.filepath.exists():
             self.filepath.unlink()
@@ -229,6 +318,9 @@ class FieldsStorage:
         return fields
 
     def __del__(self):
+        """
+        Delete the storage.
+        """
         if hasattr(self, 'conn'):
             self.conn.close()
 
