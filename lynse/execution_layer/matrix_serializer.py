@@ -92,12 +92,8 @@ class MatrixSerializer:
 
         self.collections_path_parent.mkdir(parents=True, exist_ok=True)
 
-        # sq_model path
-        self.sq_model_path = self.collections_path_parent / 'sq_model'
         # field_index path
-        self.field_index_path = self.collections_path_parent / 'fields_index'
-        # scaled_status path
-        self.scaled_status_path = self.collections_path_parent / 'scaled_status.json'
+        self.field_index_path = self.collections_path_parent / 'fields_index.db'
         # set filter path
         self.filter_path = self.collections_path_parent / 'id_filter'
 
