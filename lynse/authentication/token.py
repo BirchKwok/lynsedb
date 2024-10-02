@@ -40,7 +40,7 @@ class Authentication:
         """
         try:
             os.makedirs(self._path.parent, exist_ok=True)
-            with sqlite3.connect(str(self._path)) as conn:
+            with sqlite3.connect(str(self._path), check_same_thread=False) as conn:
                 c = conn.cursor()
                 c.execute("""CREATE TABLE IF NOT EXISTS tokens
                              (username TEXT,
@@ -62,7 +62,7 @@ class Authentication:
         """
         Add the group_name column to the tokens table if it doesn't exist.
         """
-        with sqlite3.connect(str(self._path)) as conn:
+        with sqlite3.connect(str(self._path), check_same_thread=False) as conn:
             c = conn.cursor()
             # Check if the group_name column already exists
             c.execute("PRAGMA table_info(tokens)")
@@ -75,7 +75,7 @@ class Authentication:
         """
         Clean duplicate admin records, keeping the latest one.
         """
-        with sqlite3.connect(str(self._path)) as conn:
+        with sqlite3.connect(str(self._path), check_same_thread=False) as conn:
             c = conn.cursor()
             # Find duplicate admin records
             c.execute("""
@@ -189,7 +189,7 @@ class Authentication:
         Create or reset an admin token and save it to the db table.
         """
         # Fetch the latest token and salt from the database before any operations
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("SELECT * FROM tokens WHERE username = 'admin'")
             result = c.fetchone()
@@ -218,7 +218,7 @@ class Authentication:
         # Generate new token and salt
         token, salt = self._generate_token('admin', new_passwd, 'admin', valid_until, 'ALL_GROUPS')
 
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("""INSERT OR REPLACE INTO tokens
                          (username, token, role, valid_until, salt, group_name)
@@ -236,7 +236,7 @@ class Authentication:
         The user valid time is 30 days.
         """
         # Check if admin exists
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("SELECT COUNT(*) FROM tokens WHERE username = 'admin'")
             admin_exists = c.fetchone()[0] > 0
@@ -264,7 +264,7 @@ class Authentication:
             username = input("Enter username: ").strip()
 
         # # Check if username exists in the group
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("SELECT * FROM tokens WHERE username = ? AND group_name = ?", (username, group_name))
             result = c.fetchone()
@@ -299,7 +299,7 @@ class Authentication:
 
         token, salt = self._generate_token(username, new_passwd, 'user', valid_until, group_name)
 
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("""INSERT OR REPLACE INTO tokens
                          (username, token, role, valid_until, salt, group_name)
@@ -345,7 +345,7 @@ class Authentication:
             self._logger.info("Cannot delete the admin account.")
             return False
 
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("DELETE FROM tokens WHERE username = ? AND group_name = ? AND username != 'admin'", (username, group_name))
             if c.rowcount == 0:
@@ -391,7 +391,7 @@ class Authentication:
 
         new_valid_until = datetime.datetime.now() + datetime.timedelta(days=30)
 
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("UPDATE tokens SET valid_until = ? WHERE username = ? AND group_name = ? AND role = 'user'",
                       (new_valid_until.isoformat(), username, group_name))
@@ -428,7 +428,7 @@ class Authentication:
             else:
                 break
 
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("UPDATE tokens SET valid_until = ? WHERE username = ? AND group_name = ? AND role = 'user'",
                       (valid_until.isoformat(), username, group_name))
@@ -443,7 +443,7 @@ class Authentication:
         """
         Get the admin token and salt from the database.
         """
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("SELECT token, salt FROM tokens WHERE username = 'admin'")
             result = c.fetchone()
@@ -453,7 +453,7 @@ class Authentication:
         """
         Get the admin salt from the database.
         """
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("SELECT salt FROM tokens WHERE username = 'admin'")
             result = c.fetchone()
@@ -504,7 +504,7 @@ class Authentication:
             else:
                 break
 
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("SELECT username, role, valid_until, group_name, token FROM tokens WHERE role = 'user'")
             result = c.fetchall()
@@ -551,7 +551,7 @@ class Authentication:
             else:
                 break
 
-        with sqlite3.connect(self._path) as conn:
+        with sqlite3.connect(self._path, check_same_thread=False) as conn:
             c = conn.cursor()
             c.execute("SELECT username, role, valid_until, group_name, token FROM tokens WHERE role = 'user' AND group_name = ?", (group_name,))
             result = c.fetchall()
