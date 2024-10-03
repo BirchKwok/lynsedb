@@ -1,15 +1,14 @@
-from datetime import datetime
 from pathlib import Path
 import shutil
 import time
 from typing import Union
 
 import numpy as np
+from filelock import FileLock
 from spinesUtils.asserts import raise_if
 from spinesUtils.logging import Logger
 from tqdm import tqdm
 
-from ..core_components.locks import ThreadLock
 from ..core_components.id_checker import IDChecker
 from ..core_components.fields_cache import FieldsCache
 from ..storage_layer.storage import PersistentFileStorage
@@ -47,18 +46,16 @@ class MatrixSerializer:
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
         """
-        self.last_commit_time = None
         # set commit flag, if the flag is True, the collection will not be saved
         self.COMMIT_FLAG = True
         self.IS_DELETED = False
 
         self.logger = logger
 
-        self.threadlock = ThreadLock()
-
         # set parent path
         self._initialize_components_path(collection_path)
 
+        self.global_lock = FileLock(self.collections_path_parent / "global.lock", thread_local=True)
         self._dtypes_map = {'float16': np.float16, 'float32': np.float32, 'float64': np.float64}
 
         # set dtypes
@@ -73,7 +70,8 @@ class MatrixSerializer:
                                                     self.chunk_size,
                                                     warm_up=warm_up, cache_chunks=cache_chunks)
         self.wal_worker = WALStorage(collection_name=self.collections_path_parent.name,
-                                     chunk_size=self.chunk_size, storage_path=self.collections_path_parent,
+                                     chunk_size=self.chunk_size,
+                                     storage_path=self.collections_path_parent,
                                      flush_interval=1)
 
         self._initialize_fields_index()
@@ -103,18 +101,14 @@ class MatrixSerializer:
 
     def _initialize_id_checker(self):
         """initialize id checker and shape"""
-        self.id_filter = IDChecker()
+        self.id_filter = IDChecker(self.filter_path)
 
-        if self.filter_path.exists():
-            self.id_filter.from_file(self.filter_path)
-        else:
-            if self.collections_path_parent.exists():
+        if self.shape[0] > 0 and self.id_filter.is_empty():
+            with self.global_lock:
                 filenames = self.storage_worker.get_all_files()
                 for filename in filenames:
-                    database, indices = self.storage_worker.read(filename=filename)
+                    _, indices = self.storage_worker.read(filename=filename)
                     self.id_filter.add(indices)
-
-        self.last_id = self.id_filter.find_max_value()
 
     def dataloader(self, filename):
         """
@@ -179,7 +173,7 @@ class MatrixSerializer:
         """
         Save the collection, ensuring that all data is written to disk.
         """
-        with self.threadlock:
+        with self.global_lock:
             if not self.COMMIT_FLAG:
                 self.logger.info('Saving data...')
                 if hasattr(self, 'buffer'):
@@ -190,16 +184,16 @@ class MatrixSerializer:
 
                 # save id filter
                 self.logger.debug('Saving id filter...')
-                self.id_filter.to_file(self.filter_path)
+                self.id_filter.save()
 
                 # remove buffer
                 self._remove_buffer()
 
                 self.COMMIT_FLAG = True
 
-                self.last_commit_time = datetime.now()
-
     def _process_vector_item(self, vector, index, field):
+        self.id_filter.sync_load()
+
         if index in self.id_filter:
             raise ValueError(f'id {index} already exists.')
 
@@ -230,46 +224,47 @@ class MatrixSerializer:
         raise_if(ValueError, not isinstance(vectors, (tuple, list)),
                  f'vectors must be tuple or list, got {type(vectors)}')
 
-        data = []
-        indices = []
-        fields = []
+        with self.global_lock:
+            data = []
+            indices = []
+            fields = []
 
-        for i in range(0, len(vectors), self.chunk_size):
-            batch = vectors[i:i + self.chunk_size]
+            for i in range(0, len(vectors), self.chunk_size):
+                batch = vectors[i:i + self.chunk_size]
 
-            for sample in batch:
-                sample_len = len(sample)
+                for sample in batch:
+                    sample_len = len(sample)
 
-                if sample_len == 3:
-                    vector, id, field = sample
-                elif sample_len == 2:
-                    vector, id = sample
-                    field = {}
-                else:
-                    raise ValueError('Each sample must be a tuple of (vector, id, field[optional]).')
+                    if sample_len == 3:
+                        vector, id, field = sample
+                    elif sample_len == 2:
+                        vector, id = sample
+                        field = {}
+                    else:
+                        raise ValueError('Each sample must be a tuple of (vector, id, field[optional]).')
 
-                raise_if(TypeError, not (isinstance(field, dict) or field is None),
-                         f'field must be dict or None, got {type(field)}')
+                    raise_if(TypeError, not (isinstance(field, dict) or field is None),
+                             f'field must be dict or None, got {type(field)}')
 
-                if isinstance(vector, list):
-                    vector = np.array(vector)
+                    if isinstance(vector, list):
+                        vector = np.array(vector)
 
-                raise_if(ValueError, (not isinstance(id, int)) or id < 0,
-                         f'id must be integer and greater than 0, got {id}')
+                    raise_if(ValueError, (not isinstance(id, int)) or id < 0,
+                             f'id must be integer and greater than 0, got {id}')
 
-                field = {} if field is None else field
-                vector, id, field = self._process_vector_item(vector, id, field)
+                    field = {} if field is None else field
+                    vector, id, field = self._process_vector_item(vector, id, field)
 
-                data.append(vector)
-                indices.append(id)
-                fields.append(field)
+                    data.append(vector)
+                    indices.append(id)
+                    fields.append(field)
 
-                self.id_filter.add(id)
+                    self.id_filter.add(id)
 
-        self.wal_worker.write_log_data(data, indices, fields)
-        self.COMMIT_FLAG = False
+            self.wal_worker.write_log_data(data, indices, fields)
+            self.COMMIT_FLAG = False
 
-        return indices
+            return indices
 
     def _define_buffer(self, buffer_size: int):
         self.buffer = []
@@ -330,24 +325,25 @@ class MatrixSerializer:
         raise_if(ValueError, (not isinstance(id, int)) or id < 0,
                  f'id must be integer and greater than 0, got {id}')
 
-        vector, id, field = self._process_vector_item(vector, id, field)
+        with self.global_lock:
+            vector, id, field = self._process_vector_item(vector, id, field)
 
-        if buffer_size is not None and buffer_size is not False:
-            if buffer_size is True:
-                buffer_size = self.chunk_size
+            if buffer_size is not None and buffer_size is not False:
+                if buffer_size is True:
+                    buffer_size = self.chunk_size
 
-            self._insert_buffer(vector, id, field, buffer_size)
-        else:
-            self.wal_worker.write_log_data(vector,
-                                           id.reshape(1) if isinstance(id, np.ndarray) else np.array([id]), [field])
+                self._insert_buffer(vector, id, field, buffer_size)
+            else:
+                self.wal_worker.write_log_data(vector,
+                                               id.reshape(1) if isinstance(id, np.ndarray) else np.array([id]), [field])
 
-        self.COMMIT_FLAG = False
+            self.COMMIT_FLAG = False
 
-        return id
+            return id
 
     def delete(self):
         """Delete collection."""
-        with self.threadlock:
+        with self.global_lock:
             if not self.collections_path_parent.exists():
                 return None
 
@@ -386,5 +382,4 @@ class MatrixSerializer:
         """
         Get the shape of the collection.
         """
-        with self.threadlock:
-            return tuple(self.storage_worker.get_shape(read_type='all'))
+        return tuple(self.storage_worker.get_shape(read_type='all'))
