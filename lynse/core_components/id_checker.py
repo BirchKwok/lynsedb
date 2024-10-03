@@ -2,22 +2,59 @@ from pyroaring import BitMap
 
 
 class IDChecker:
-    def __init__(self):
+    def __init__(self, filepath):
+        """
+        Initialize the IDChecker class.
+
+        Parameters:
+            filepath: str
+                The file path to the storage.
+        """
         self.ids = BitMap()
+        self.filepath = filepath
+        self.load(filepath)
+
+    def sync_load(self):
+        """
+        Synchronously load the IDChecker from a file.
+        """
+        try:
+            with open(self.filepath, 'rb') as file:
+                self.ids = BitMap.deserialize(file.read())
+        except FileNotFoundError:
+            pass
+
+    def is_empty(self):
+        """
+        Check if the IDChecker is empty.
+
+        Returns:
+            bool
+                True if the IDChecker is empty, False otherwise.
+        """
+        return len(self.ids) == 0
 
     def add(self, items):
+        """
+        Add items to the IDChecker.
+
+        Parameters:
+            items: int or list
+                The items to add to the IDChecker.
+        """
         if isinstance(items, int):
             self.ids.add(items)
         else:
             self.ids.update(items)
 
-    def concat(self, another_id_checker):
-        if not isinstance(another_id_checker, IDChecker):
-            raise ValueError("Expected another_id_checker to be an instance of IDChecker")
-
-        self.ids.update(another_id_checker.ids)
-
     def drop(self, items):
+        """
+        Drop items from the IDChecker.
+
+        Parameters:
+            items: int or list
+                The items to drop from the IDChecker.
+        """
         if isinstance(items, int):
             if items in self.ids:
                 self.ids.discard(items)
@@ -27,13 +64,35 @@ class IDChecker:
                     self.ids.discard(item)
 
     def __contains__(self, item):
+        """
+        Check if an item is in the IDChecker.
+
+        Parameters:
+            item: int
+                The item to check.
+
+        Returns:
+            bool
+                True if the item is in the IDChecker, False otherwise.
+        """
         return item in self.ids
 
-    def to_file(self, filepath):
-        with open(filepath, 'wb') as file:
+    def save(self):
+        """
+        Write the IDChecker to a file.
+
+        """
+        with open(self.filepath, 'wb') as file:
             file.write(self.ids.serialize())
 
-    def from_file(self, filepath):
+    def load(self, filepath):
+        """
+        Read the IDChecker from a file.
+
+        Parameters:
+            filepath: str
+                The file path to the storage.
+        """
         try:
             with open(filepath, 'rb') as file:
                 self.ids = BitMap.deserialize(file.read())
@@ -41,47 +100,22 @@ class IDChecker:
             self.ids = BitMap()
 
     def find_max_value(self):
-        return max(self.ids) if self.ids else -1
-
-    def filter_ids(self, matcher):
         """
-        Filter the IDs based on the matcher.
-
-        Parameters:
-            matcher: Matcher
-                The matcher to use for filtering.
+        Find the maximum value in the IDChecker.
 
         Returns:
-            List[int]: The filtered IDs.
+            int
+                The maximum value in the IDChecker, or -1 if the IDChecker is empty.
         """
-        if matcher.matcher.name == "MatchField":
-            comparator_name = matcher.matcher.comparator.__name__
-            value = matcher.matcher.value
+        return max(self.ids) if self.ids else -1
 
-            if comparator_name == 'eq':
-                return [value] if value in self.ids else []
-            elif comparator_name == 'ne':
-                return list(self.ids - BitMap([value]))
-            elif comparator_name == 'le':
-                return [id for id in self.ids if id <= value]
-            elif comparator_name == 'ge':
-                return [id for id in self.ids if id >= value]
-            elif comparator_name == 'lt':
-                return [id for id in self.ids if id < value]
-            elif comparator_name == 'gt':
-                return [id for id in self.ids if id > value]
-        elif matcher.matcher.name == "MatchRange":
-            start, end, inclusive = matcher.matcher.start, matcher.matcher.end, matcher.matcher.inclusive
-            if inclusive is True:
-                return [id for id in self.ids if start <= id <= end]
-            elif inclusive is False:
-                return [id for id in self.ids if start < id < end]
-            elif inclusive == "left":
-                return [id for id in self.ids if start <= id < end]
-            elif inclusive == "right":
-                return [id for id in self.ids if start < id <= end]
+    def find_last_value(self):
+        """
+        Find the last value in the IDChecker.
 
-        return [id for id in self.ids if matcher.evaluate(data=None, external_id=id)]
-
-    def retrieve_all_ids(self, return_set=False):
-        return list(self.ids) if not return_set else set(self.ids)
+        Returns:
+            int
+                The last value in the IDChecker, or -1 if the IDChecker is empty.
+        """
+        # find the last added value
+        return self.ids[-1] if self.ids else -1
