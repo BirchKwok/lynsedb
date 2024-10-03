@@ -338,42 +338,6 @@ def collection_shape():
         return jsonify({'error': str(e)}), 500
 
 
-@collection_ops.route('/get_collection_status_report', methods=['POST'])
-def get_collection_status_report():
-    """Get the status report of a collection.
-
-    Returns:
-        dict: The status of the operation.
-    """
-    from ....api.native_api.high_level import LocalClient
-
-    data = request.json
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-
-    try:
-        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
-        collection = my_vec_db.get_collection(data['collection_name'])
-
-        db_report = {'DATABASE STATUS REPORT': {
-            'Database shape': (
-                0, collection._matrix_serializer.dim) if collection._matrix_serializer.IS_DELETED else collection.shape,
-            'Database last_commit_time': collection._matrix_serializer.last_commit_time,
-            'Database commit status': collection._matrix_serializer.COMMIT_FLAG,
-            'Database use_cache': collection._use_cache,
-            'Database status': 'DELETED' if collection._matrix_serializer.IS_DELETED else 'ACTIVE'
-        }}
-
-        return Response(json.dumps({'status': 'success', 'params': {
-            'database_name': data['database_name'],
-            'collection_name': data['collection_name'], 'status_report': db_report
-        }}, sort_keys=False), mimetype='application/json')
-    except KeyError as e:
-        return jsonify({'error': f'Missing required parameter {e}'}), 400
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
 @collection_ops.route('/is_collection_exists', methods=['POST'])
 def is_collection_exists():
     """Check if a collection exists.
@@ -420,67 +384,6 @@ def get_collection_config():
         return Response(json.dumps({'status': 'success', 'params': {
             'database_name': data['database_name'],
             'collection_name': data['collection_name'], 'config': collection_config
-        }}, sort_keys=False), mimetype='application/json')
-    except KeyError as e:
-        return jsonify({'error': f'Missing required parameter {e}'}), 400
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@collection_ops.route('/update_commit_msg', methods=['POST'])
-def update_commit_msg():
-    """Save the commit message of a collection.
-
-    Returns:
-        dict: The status of the operation.
-    """
-    data = request.json
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-
-    try:
-        if (root_path / data['database_name'] / 'commit_msg.json').exists():
-            with open(root_path / data['database_name'] / 'commit_msg.json', 'r') as file:
-                commit_msg = json.load(file)
-                commit_msg[data['collection_name']] = data
-        else:
-            commit_msg = {data['collection_name']: data}
-
-        with open(root_path / data['database_name'] / 'commit_msg.json', 'w') as file:
-            json.dump(commit_msg, file)
-
-        return Response(json.dumps({'status': 'success', 'params': {
-            'database_name': data['database_name'],
-            'collection_name': data['collection_name']
-        }}, sort_keys=False), mimetype='application/json')
-    except KeyError as e:
-        return jsonify({'error': f'Missing required parameter {e}'}), 400
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@collection_ops.route('/get_commit_msg', methods=['POST'])
-def get_commit_msg():
-    """Get the commit message of a collection.
-
-    Returns:
-        dict: The status of the operation.
-    """
-    data = request.json
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-
-    try:
-        if (root_path / data['database_name'] / 'commit_msg.json').exists():
-            with open(root_path / data['database_name'] / 'commit_msg.json', 'r') as file:
-                commit_msg = json.load(file)
-                commit_msg = commit_msg.get(data['collection_name'], None)
-        else:
-            commit_msg = 'No commit message found for this collection'
-
-        return Response(json.dumps({'status': 'success', 'params': {
-            'database_name': data['database_name'],
-            'collection_name': data['collection_name'], 'commit_msg': commit_msg
         }}, sort_keys=False), mimetype='application/json')
     except KeyError as e:
         return jsonify({'error': f'Missing required parameter {e}'}), 400
