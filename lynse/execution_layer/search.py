@@ -46,7 +46,9 @@ class Search:
         Returns:
             np.ndarray: The narrowed down indices.
         """
-        return None if search_filter is None else self.matrix_serializer.field_index.query(search_filter)
+        return None if search_filter is None else self.matrix_serializer.field_index.query(
+            search_filter, return_ids_only=True
+        )
 
     def _search_chunk(self, vector, subset_indices, filename, limited_sorted, distance_func, ivf_subset_indices=None,
                       topk=10):
