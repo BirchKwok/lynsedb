@@ -561,7 +561,6 @@ class ExclusiveDB:
         if not field_name.startswith(':') or not field_name.endswith(':'):
             raise ValueError("The field name must be wrapped with ':'.")
 
-        field_name = field_name.strip(':')
         self._matrix_serializer.field_index.remove_index(field_name)
 
     @unavailable_if_deleted
