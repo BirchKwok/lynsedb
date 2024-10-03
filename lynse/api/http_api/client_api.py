@@ -417,62 +417,6 @@ class Collection:
         self._mesosphere_list = queue.Queue()
         self._lock = ThreadLock()
 
-    def _get_commit_msg(self):
-        """
-        Get the commit message.
-
-        Returns:
-            str: The last commit time.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        uri = f'{self._uri}/get_commit_msg'
-        data = {"database_name": self._database_name, "collection_name": self._collection_name}
-
-        response = self._session.post(uri, json=data)
-
-        rj = response.json()
-        if response.status_code == 200:
-            if (rj['params']['commit_msg'] is None or
-                    rj['params']['commit_msg'] == 'No commit message found for this collection'):
-                return None
-            return rj['params']['commit_msg']['last_commit_time']
-        else:
-            raise ExecutionError(rj)
-
-    def _update_commit_msg(self, last_commit_time):
-        """
-        Update the commit message.
-
-        Parameters:
-            last_commit_time (str): The last commit time.
-
-        Returns:
-            dict: The response from the server.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        uri = f'{self._uri}/update_commit_msg'
-        data = {
-            "database_name": self._database_name,
-            "collection_name": self._collection_name,
-            "last_commit_time": last_commit_time,
-        }
-
-        response = self._session.post(uri, json=data)
-
-        if response.status_code == 200:
-            return response.json()
-        else:
-            try:
-                rj = response.json()
-                raise ExecutionError(rj)
-            except Exception as e:
-                print(e)
-                raise ExecutionError(response.text)
-
     def exists(self):
         """
         Check if the collection exists.
@@ -707,12 +651,9 @@ class Collection:
 
                 if status_response.status_code == 200:
                     logger.info(f'Task status: {status_data}', rewrite_print=True)
-                    if status_data['status'] in ['Success', 'Error']:
-                        if status_data['status'] == 'Success':
-                            self._update_commit_msg(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-                        else:
-                            raise_error_response(status_response)
-                        return status_data
+                    if status_data['status'] == 'Error':
+                        raise_error_response(status_response)
+                    return status_data
                 else:
                     raise_error_response(status_response)
 
