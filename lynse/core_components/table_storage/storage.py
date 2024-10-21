@@ -285,7 +285,6 @@ class LyStorage:
         if not self._lifecycle_path.exists():
             self._lifecycle_path.mkdir(parents=True, exist_ok=True)
 
-
         self.region_meta_file = self.data_path / "regions_meta.lymp"
         if not self.region_meta_file.exists() or overwrite:
             self.regions_meta = {
