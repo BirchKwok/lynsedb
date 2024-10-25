@@ -13,6 +13,8 @@ import concurrent.futures
 from fsst import FSST
 import queue
 
+from lynse.computational_layer.engines import cosine
+
 
 class MMapReader:
     """LyFile的内存映射读取器"""
@@ -133,6 +135,60 @@ class MMapReader:
         # 解压和解析数据
         raw_data = compressor.decompress(compressed)
         return LyFile._parse_block_data(type_id, raw_data)
+
+    def execute_along_column(self, column: str, func: callable) -> np.ndarray:
+        """对指定列的所有数据执行函数"""
+        if column not in self._column_info:
+            raise KeyError(f"列 {column} 不存在")
+
+        # 并行读取数据块
+        futures = []
+        for i, (type_id, length, offset, _) in enumerate(self._column_info[column]):
+            future = self._executor.submit(self._process_block,
+                                        type_id, offset, length, func)
+            futures.append((i, future))
+
+        # 收集并合并结果
+        try:
+            sorted_futures = sorted(futures, key=lambda x: x[0])
+            results = []
+            for _, future in sorted_futures:
+                result = future.result()
+                # 确保标量结果被正确处理
+                if isinstance(result, np.ndarray):
+                    if result.size == 1:  # 如果是单个元素的数组
+                        result = result.item()  # 转换为标量
+                    results.append(result)
+                else:
+                    results.append(result)
+
+            # 根据结果类型选择合适的合并方式
+            if len(results) == 1:
+                return results[0]
+            elif all(isinstance(r, (int, float, bool)) for r in results):
+                # 如果所有结果都是标量，返回它们的平均值
+                return np.mean(results)
+            elif isinstance(results[0], np.ndarray):
+                # 如果结果是数组，使用concatenate合并
+                return np.concatenate(results)
+            else:
+                # 其他情况返回数组
+                return np.array(results)
+
+        except Exception as e:
+            print(f"执行函数时出错: {e}")
+            raise
+
+    def _process_block(self, type_id: int, offset: int, length: int,
+                      func: callable) -> Union[np.ndarray, float, int]:
+        """读取并处理单个数据块"""
+        block_data = self._read_block(type_id, offset, length)
+        result = func(block_data)
+
+        # 确保标量结果被正确处理
+        if isinstance(result, np.ndarray) and result.size == 1:
+            return result.item()
+        return result
 
 
 class LyFile:
@@ -695,6 +751,83 @@ if __name__ == '__main__':
             print(f"\n最新数据块读取性能:")
             print(f"耗时: {latest_time:.2f}秒")
             print(f"速度: {len(df_latest)/latest_time:,.0f} 行/秒")
+
+            # 测试列处理性能
+        print("\n=== 测试列处理性能 ===")
+        with file.mmap_reader() as reader:
+            # 测试1: 数值计算
+            print("\n1. 数值列处理:")
+            start_time = time.time()
+            mean = float(reader.execute_along_column('value', np.mean))
+            max_val = float(reader.execute_along_column('value', np.max))
+            min_val = float(reader.execute_along_column('value', np.min))
+            calc_time = time.time() - start_time
+
+            print(f"数值统计耗时: {calc_time:.3f}秒")
+            print(f"平均值: {mean:.3f}")
+            print(f"最大值: {max_val:.3f}")
+            print(f"最小值: {min_val:.3f}")
+
+            # 验证结果
+            np.testing.assert_almost_equal(
+                mean,
+                test_data['value'].mean(),
+                decimal=3
+            )
+
+            # 测试2: 字符串处理
+            print("\n2. 字符串列处理:")
+            start_time = time.time()
+            # 计算字符串平均长度
+            avg_len = float(reader.execute_along_column(
+                'text',
+                lambda x: np.mean([len(s) for s in x])
+            ))
+            str_time = time.time() - start_time
+
+            print(f"字符串处理耗时: {str_time:.3f}秒")
+            print(f"文本平均长度: {avg_len:.1f}")
+
+            # 测试3: 向量处理
+            print("\n3. 向量处理:")
+            start_time = time.time()
+
+            # 计算向量余弦相似度
+            query = np.random.random((1, 128))
+            def calc_cosine_similarity(vectors):
+                nonlocal query
+                vectors_array = np.vstack(vectors).squeeze()
+                return cosine(vectors_array, query, 1)[1]
+
+            norms = reader.execute_along_column('vector', calc_cosine_similarity)
+            vector_time = time.time() - start_time
+
+            print(f"向量处理耗时: {vector_time:.3f}秒")
+            print(f"向量范数示例 (前5个):")
+            for i in range(min(5, len(norms))):
+                print(f"  向量 {i}: {norms[i]:.3f}")
+
+            # 测试4: 复杂计算
+            print("\n4. 复杂计算:")
+            start_time = time.time()
+
+            # 计算数值列的移动平均
+            def moving_average(data, window=5):
+                return np.convolve(data, np.ones(window)/window, mode='valid')
+
+            ma = reader.execute_along_column('value',
+                                        lambda x: moving_average(x))
+            complex_time = time.time() - start_time
+
+            print(f"复杂计算耗时: {complex_time:.3f}秒")
+            print(f"移动平均示例 (前5个): {ma[:5]}")
+
+            # 性能总结
+            print("\n列处理性能总结:")
+            print(f"数值计算速度: {rows/calc_time:,.0f} 行/秒")
+            print(f"字符串处理速度: {rows/str_time:,.0f} 行/秒")
+            print(f"向量处理速度: {rows/vector_time:,.0f} 行/秒")
+            print(f"复杂计算速度: {rows/complex_time:,.0f} 行/秒")
 
         # 测试追加性能
         append_data = test_data.copy()
