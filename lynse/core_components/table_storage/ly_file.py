@@ -1,23 +1,27 @@
 from io import BytesIO
 import mmap
 import struct
+import threading
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-from typing import BinaryIO, Dict, List, Optional, Tuple, Union, Any
+from typing import Dict, List, Optional, Tuple, Union
 from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
-from .fsst import FSST
+import concurrent.futures
+from fsst import FSST
+import queue
 
 
 class MMapReader:
     """LyFile的内存映射读取器"""
     def __init__(self, filepath: Union[str, Path], thread_count: int = 4):
         self.filepath = Path(filepath)
-        self.compressor = FSST(thread_count=thread_count)
+        self.thread_count = thread_count
         self._mmap: Optional[mmap.mmap] = None
-        self._column_info: Dict[str, List[Tuple[int, int, int, int]]] = {}  # 列名 -> [(类型ID, 长度, 偏移量, 行数)]
+        self._column_info: Dict[str, List[Tuple[int, int, int, int]]] = {}
+        self._executor = ThreadPoolExecutor(max_workers=thread_count)
         self.n_rows = 0
 
     def __enter__(self):
@@ -28,6 +32,7 @@ class MMapReader:
         if self._mmap is not None:
             self._mmap.close()
             self._mmap = None
+        self._executor.shutdown(wait=True)
 
     def _init_mmap(self) -> None:
         """初始化内存映射"""
@@ -64,19 +69,36 @@ class MMapReader:
                     self._column_info[name] = blocks
 
     def read(self, columns: Optional[List[str]] = None) -> pd.DataFrame:
-        """读取指定列的数据"""
+        """并行读取指定列的数据"""
         if not columns:
             columns = list(self._column_info.keys())
 
-        data = {}
+        futures = {}
         for col in columns:
             if col not in self._column_info:
                 raise KeyError(f"Column {col} not found")
 
-            # 转换块信息格式以匹配 LyFile._read_column_blocks 的参数
-            blocks = [(offset, length, block_rows)
-                     for _, length, offset, block_rows in self._column_info[col]]
-            data[col] = LyFile._read_column_blocks(self._mmap, blocks)  # 修改这里
+            # 并行读取每个列的数据块
+            col_futures = []
+            for i, (type_id, length, offset, _) in enumerate(self._column_info[col]):
+                # 每个数据块一个任务，包含块的序号
+                col_futures.append((i, self._executor.submit(
+                    self._read_block, type_id, offset, length)))
+            futures[col] = col_futures
+
+        # 收集结果
+        data = {}
+        for col in columns:  # 保持列的顺序
+            # 按块的序号排序
+            sorted_futures = sorted(futures[col], key=lambda x: x[0])
+            column_data = []
+            for _, future in sorted_futures:
+                try:
+                    column_data.append(future.result())
+                except Exception as e:
+                    print(f"Error reading column {col}: {e}")
+                    raise
+            data[col] = np.concatenate(column_data)
 
         return pd.DataFrame(data)
 
@@ -86,18 +108,31 @@ class MMapReader:
             columns = list(self._column_info.keys())
 
         data = {}
-        for col in columns:
+        for col in columns:  # 保持列的顺序
             if col not in self._column_info:
                 raise KeyError(f"Column {col} not found")
 
             # 获取最后一个数据块的信息
-            type_id, length, offset, block_rows = self._column_info[col][-1]
+            type_id, length, offset, _ = self._column_info[col][-1]
 
             # 读取数据块
-            block_data = LyFile._read_block(self._mmap, type_id, offset, length)  # 修改这里
+            block_data = self._read_block(type_id, offset, length)
             data[col] = block_data
 
         return pd.DataFrame(data)
+
+    def _read_block(self, type_id: int, offset: int, length: int) -> np.ndarray:
+        """读取单个数据块（线程安全）"""
+        compressor = FSST()  # 每个线程创建自己的压缩器实例
+
+        # 读取压缩数据
+        with threading.Lock():  # 保护 mmap 读取
+            self._mmap.seek(offset)
+            compressed = self._mmap.read(length)
+
+        # 解压和解析数据
+        raw_data = compressor.decompress(compressed)
+        return LyFile._parse_block_data(type_id, raw_data)
 
 
 class LyFile:
@@ -116,112 +151,91 @@ class LyFile:
     TYPE_STRING = 5
     TYPE_BLOB = 6
     TYPE_NUMPY = 7
+    TYPE_VECTOR = 8
 
     def __init__(self, filepath: Union[str, Path], thread_count: int = 4):
         self.filepath = Path(filepath)
-        self.columns: Dict[str, Any] = {}
-        self.n_rows = 0
-        self.compressor = FSST(thread_count=thread_count)  # 初始化 FSST 压缩器
-        self._block_index: Dict[str, List[Tuple[int, int, int]]] = {}  # 列名 -> [(偏移量, 长度, 行数)]
+        self.thread_count = thread_count
+        self._executor = ThreadPoolExecutor(max_workers=thread_count)
+        self._block_index: Dict[str, List[Tuple[int, int, int]]] = {}
 
-    @staticmethod
-    def _read_block(f: Union[mmap.mmap, BinaryIO], type_id: int, offset: int, length: int) -> np.ndarray:
-        """读取单个数据块"""
-        # 读取压缩数据
-        f.seek(offset)
-        compressed = f.read(length)
-        # 创建一个新的压缩器实例
-        compressor = FSST()
-        raw_data = compressor.decompress(compressed)
-
-        # 根据类型解析数据
-        if type_id in (LyFile.TYPE_INT32, LyFile.TYPE_INT64,
-                      LyFile.TYPE_FLOAT32, LyFile.TYPE_FLOAT64):
-            dtype = {
-                LyFile.TYPE_INT32: np.int32,
-                LyFile.TYPE_INT64: np.int64,
-                LyFile.TYPE_FLOAT32: np.float32,
-                LyFile.TYPE_FLOAT64: np.float64
-            }[type_id]
-            return np.frombuffer(raw_data, dtype=dtype)
-        elif type_id == LyFile.TYPE_STRING:
-            strings = raw_data.decode('utf-8').split('\0')[:-1]
-            return np.array(strings)
-        elif type_id == LyFile.TYPE_BLOB:
-            blobs = raw_data.split(b'\0')[:-1]
-            return np.array(blobs)
-        else:  # TYPE_NUMPY
-            return np.load(BytesIO(raw_data), allow_pickle=False)
-
-    @staticmethod
-    def _read_column_blocks(f: Union[mmap.mmap, BinaryIO], blocks: List[Tuple[int, int, int]]) -> np.ndarray:
-        """读取一列的所有数据块"""
-        column_data = []
-        total_rows = 0
-
-        for offset, length, block_rows in blocks:
-            # 读取类型信息
-            f.seek(offset - 264)
-            type_id, _, _ = struct.unpack(LyFile.COLUMN_HEADER_FORMAT, f.read(264))
-
-            # 读取数据块
-            block_data = LyFile._read_block(f, type_id, offset, length)
-            column_data.append(block_data)
-            total_rows += block_rows
-
-        # 合并所有数据块
-        result = np.concatenate(column_data)
-        assert len(result) == total_rows, f"Column has incorrect number of rows"
-        return result
-
-    def write(self, data: Union[List[Dict], pd.DataFrame, pd.Series, pa.Table]) -> None:
-        """写入数据"""
-        # 转换输入数据为统一格式
+    def _convert_input_data(self, data: Union[List[Dict], pd.DataFrame, pd.Series, pa.Table]) -> Dict[str, np.ndarray]:
+        """转换输入数据为列式存储格式"""
         if isinstance(data, pd.DataFrame):
-            columns = {name: data[name].values for name in data.columns}
+            return {name: self._convert_column(values)
+                   for name, values in data.items()}
         elif isinstance(data, pd.Series):
-            columns = {data.name or 'values': data.values}
+            return {data.name or 'value': self._convert_column(data)}
         elif isinstance(data, pa.Table):
-            columns = {field.name: data[field.name].to_numpy()
-                      for field in data.schema}
+            return {name: self._convert_column(data.column(name).to_numpy())
+                   for name in data.column_names}
         else:  # List[Dict]
             df = pd.DataFrame(data)
-            columns = {name: df[name].values for name in df.columns}
+            return {name: self._convert_column(values)
+                   for name, values in df.items()}
 
-        # 预计算所有列的偏移量和压缩数据
-        current_pos = 28  # 文件头长度
+    def _convert_column(self, values: Union[pd.Series, np.ndarray]) -> np.ndarray:
+        """转换单列数据为numpy数组"""
+        if isinstance(values, pd.Series):
+            values = values.to_numpy()
+
+        # 检查是否为向量列
+        if (values.dtype == 'object' and len(values) > 0 and
+            isinstance(values[0], np.ndarray)):
+            # 确保所有向量维度一致
+            vector_dim = len(values[0])
+            for i, v in enumerate(values):
+                if not isinstance(v, np.ndarray):
+                    raise ValueError(f"第 {i} 个元素不是numpy数组")
+                if len(v) != vector_dim:
+                    raise ValueError(f"向量维度不一致: 位置 {i}, 期望 {vector_dim}, 实际 {len(v)}")
+            return values
+
+        return values
+
+    def write(self, data: Union[List[Dict], pd.DataFrame, pd.Series, pa.Table]) -> None:
+        """并行写入数据"""
+        # 转换输入数据
+        columns = self._convert_input_data(data)
+
+        # 并行压缩所有列
+        futures = {}  # 使用字典保持列的顺序
+        for name, values in columns.items():
+            futures[name] = self._executor.submit(
+                self._compress_column, name, values)
+
+        # 收集压缩结果
         blocks_info = {}
         compressed_data = {}
+        current_pos = 28  # 文件头长度
 
-        for name, values in columns.items():
-            # 准备数据
-            raw_data = self._prepare_column_data(values)
-            compressed = self.compressor.compress(raw_data)
-
-            # 获取类型ID
-            type_id = self._get_type_id(values)
-
-            # 准备列头
+        # 按原始顺序处理结果
+        for name in columns.keys():
+            name, compressed, type_id, n_rows = futures[name].result()
             name_bytes = name.encode('utf-8').ljust(256, b'\0')
-            header = struct.pack(self.COLUMN_HEADER_FORMAT, type_id, len(compressed), name_bytes)
+            header = struct.pack(self.COLUMN_HEADER_FORMAT,
+                               type_id, len(compressed), name_bytes)
 
-            # 记录位置信息
-            blocks_info[name] = [(current_pos + 264, len(compressed), len(values))]
+            blocks_info[name] = [(current_pos + 264, len(compressed), n_rows)]
             compressed_data[name] = (header, compressed)
-
-            # 更新位置
-            current_pos += 264 + len(compressed)  # 列头 + 数据长度
+            current_pos += 264 + len(compressed)
 
         # 写入文件
+        self._write_to_file(blocks_info, compressed_data, len(next(iter(columns.values()))))
+
+    def _write_to_file(self, blocks_info: Dict[str, List[Tuple[int, int, int]]],
+                      compressed_data: Dict[str, Tuple[bytes, bytes]], n_rows: int) -> None:
+        """写入数据到文件"""
         with open(self.filepath, 'wb') as f:
             # 写入文件头
+            index_pos = sum(len(header) + len(data)
+                          for header, data in compressed_data.values()) + 28
             f.write(struct.pack(self.HEADER_FORMAT,
-                              self.MAGIC, 1, len(columns),
-                              len(next(iter(columns.values()))), current_pos))
+                              self.MAGIC, 1, len(compressed_data),
+                              n_rows, index_pos))
 
             # 写入列数据
-            for name in columns:
-                header, data = compressed_data[name]
+            for name, (header, data) in compressed_data.items():
                 f.write(header)
                 f.write(data)
 
@@ -233,24 +247,49 @@ class LyFile:
                 f.write(struct.pack('<I', len(blocks)))
                 # 写入块信息
                 for offset, length, block_rows in blocks:
-                    f.write(struct.pack(self.BLOCK_INDEX_ENTRY, offset, length, block_rows))
+                    f.write(struct.pack(self.BLOCK_INDEX_ENTRY,
+                                      offset, length, block_rows))
 
         # 更新内存中的块索引
         self._block_index = blocks_info
 
+    def _compress_column(self, name: str, values: np.ndarray) -> Tuple[str, bytes, int, int]:
+        """并行压缩单列数据"""
+        compressor = FSST()  # 创建新的压缩器实例
+        raw_data = self._prepare_column_data(values)
+        compressed = compressor.compress(raw_data)
+        type_id = self._get_type_id(values)
+        return name, compressed, type_id, len(values)
+
+    def _prepare_column_data(self, values: np.ndarray) -> bytes:
+        """准备列数据"""
+        type_id = self._get_type_id(values)
+
+        if type_id in (self.TYPE_INT32, self.TYPE_INT64,
+                      self.TYPE_FLOAT32, self.TYPE_FLOAT64):
+            return values.tobytes()
+        elif type_id == self.TYPE_STRING:
+            return '\0'.join(str(v) for v in values).encode('utf-8') + b'\0'
+        elif type_id == self.TYPE_BLOB:
+            return b'\0'.join(v if isinstance(v, bytes) else v.encode()
+                            for v in values) + b'\0'
+        elif type_id == self.TYPE_VECTOR:
+            # 获取向量维度
+            vector_dim = len(values[0])
+            # 将所有向量堆叠成一个大数组
+            stacked_vectors = np.vstack(values)
+            # 保存维度信息和数据
+            header = struct.pack('<II', vector_dim, len(values))
+            return header + stacked_vectors.tobytes()
+        else:  # TYPE_NUMPY
+            buffer = BytesIO()
+            np.save(buffer, values, allow_pickle=False)
+            return buffer.getvalue()
+
     def append(self, data: Union[List[Dict], pd.DataFrame, pd.Series, pa.Table]) -> None:
-        """追加数据到文件末尾"""
-        # 转换输入数据为统一格式
-        if isinstance(data, pd.DataFrame):
-            columns = {name: data[name].values for name in data.columns}
-        elif isinstance(data, pd.Series):
-            columns = {data.name or 'values': data.values}
-        elif isinstance(data, pa.Table):
-            columns = {field.name: data[field.name].to_numpy()
-                      for field in data.schema}
-        else:  # List[Dict]
-            df = pd.DataFrame(data)
-            columns = {name: df[name].values for name in df.columns}
+        """并行追加数据到文件末尾"""
+        # 转换输入数据
+        columns = self._convert_input_data(data)
 
         if not self.filepath.exists():
             return self.write(data)
@@ -259,12 +298,18 @@ class LyFile:
         if not self._block_index:
             self._init_block_index()
 
-        # 预计算新数据块的大小和压缩数据
-        new_blocks: Dict[str, Tuple[int, bytes]] = {}
-        for name, values in columns.items():
-            raw_data = self._prepare_column_data(values)
-            compressed = self.compressor.compress(raw_data)
-            new_blocks[name] = (len(values), compressed)
+        # 并行压缩所有列
+        futures = []
+        with ThreadPoolExecutor(max_workers=self.thread_count) as executor:
+            for name, values in columns.items():
+                futures.append(executor.submit(
+                    self._compress_column, name, values))
+
+            # 收集压缩结果
+            new_blocks: Dict[str, Tuple[int, bytes, int, int]] = {}  # name -> (n_rows, compressed, type_id, length)
+            for future in concurrent.futures.as_completed(futures):
+                name, compressed, type_id, n_rows = future.result()
+                new_blocks[name] = (n_rows, compressed, type_id, len(compressed))
 
         # 追加数据并更新块索引
         with open(self.filepath, 'rb+') as f:
@@ -274,16 +319,14 @@ class LyFile:
 
             # 写入新的数据块
             current_pos = file_size
-            for name, (n_rows, compressed) in new_blocks.items():
+            for name, (n_rows, compressed, type_id, length) in new_blocks.items():
                 if name not in self._block_index:
                     self._block_index[name] = []
 
-                # 获取数据类型ID
-                type_id = self._get_type_id(columns[name])
-
                 # 写入列头（包含类型信息）
                 name_bytes = name.encode('utf-8').ljust(256, b'\0')
-                header = struct.pack(self.COLUMN_HEADER_FORMAT, type_id, len(compressed), name_bytes)
+                header = struct.pack(self.COLUMN_HEADER_FORMAT,
+                                   type_id, length, name_bytes)
 
                 f.seek(current_pos)
                 f.write(header)
@@ -293,8 +336,8 @@ class LyFile:
                 f.write(compressed)
 
                 # 记录新块的位置信息
-                self._block_index[name].append((current_pos, len(compressed), n_rows))
-                current_pos += len(compressed)
+                self._block_index[name].append((current_pos, length, n_rows))
+                current_pos += length
 
             # 写入更新后的块索引
             index_pos = current_pos
@@ -305,33 +348,94 @@ class LyFile:
                 f.write(struct.pack('<I', len(blocks)))
                 # 写入每个块的信息
                 for offset, length, block_rows in blocks:
-                    f.write(struct.pack(self.BLOCK_INDEX_ENTRY, offset, length, block_rows))
+                    f.write(struct.pack(self.BLOCK_INDEX_ENTRY,
+                                      offset, length, block_rows))
 
-            # 更新文件头时计算实际的总行数
+            # 更新文件头
             total_rows = sum(block[2] for blocks in self._block_index.values()
                             for block in blocks)
             f.seek(0)
             f.write(struct.pack(self.HEADER_FORMAT,
-                              self.MAGIC, 1, len(self._block_index), total_rows, index_pos))
+                              self.MAGIC, 1, len(self._block_index),
+                              total_rows, index_pos))
 
     def read(self) -> pd.DataFrame:
-        """读取所有数据"""
+        """并行读取所有数据"""
         if not self.filepath.exists():
             return pd.DataFrame()
 
         if not self._block_index:
             self._init_block_index()
 
-        data = {}
-        with open(self.filepath, 'rb') as f:
-            for name, blocks in self._block_index.items():
-                data[name] = self._read_column_blocks(f, blocks)
+        # 创建文件句柄队列
+        file_queue = queue.Queue()
+        for _ in range(self.thread_count):
+            file_queue.put(open(self.filepath, 'rb'))
 
-        return pd.DataFrame(data)
+        try:
+            # 并行读取所有列
+            futures = {}
+            expected_length = None
+            with ThreadPoolExecutor(max_workers=self.thread_count) as executor:
+                for name, blocks in self._block_index.items():
+                    col_futures = []
+                    total_rows = sum(block_rows for _, _, block_rows in blocks)
+                    if expected_length is None:
+                        expected_length = total_rows
+                    else:
+                        assert expected_length == total_rows, f"列 {name} 的长度与其他列不一致"
+
+                    for i, (offset, length, block_rows) in enumerate(blocks):
+                        # 读取类型信息
+                        with open(self.filepath, 'rb') as f:
+                            f.seek(offset - 264)
+                            type_id, _, _ = struct.unpack(
+                                self.COLUMN_HEADER_FORMAT, f.read(264))
+
+                        # 提交读取任务，包含块的序号
+                        col_futures.append((i, executor.submit(
+                            self._read_block_with_queue, file_queue, type_id, offset, length)))
+                    futures[name] = col_futures
+
+                # 收集结果
+                data = {}
+                for name, col_futures in futures.items():
+                    # 按块的序号排序
+                    sorted_futures = sorted(col_futures, key=lambda x: x[0])
+                    column_data = []
+                    for _, future in sorted_futures:
+                        try:
+                            block_data = future.result()
+                            column_data.append(block_data)
+                        except Exception as e:
+                            print(f"Error reading column {name}: {e}")
+                            raise
+
+                    # 合并数据块
+                    try:
+                        data[name] = np.concatenate(column_data)
+                        if len(data[name]) != expected_length:
+                            raise ValueError(f"列 {name} 的长度 ({len(data[name])}) 与预期长度 ({expected_length}) 不一致")
+                    except Exception as e:
+                        print(f"Error concatenating column {name}: {e}")
+                        print(f"Block lengths: {[len(block) for block in column_data]}")
+                        raise
+
+            # 验证所有列的长度一致
+            lengths = {name: len(arr) for name, arr in data.items()}
+            if len(set(lengths.values())) != 1:
+                raise ValueError(f"列长度不一致: {lengths}")
+
+            return pd.DataFrame(data)
+        finally:
+            # 关闭所有文件句柄
+            while not file_queue.empty():
+                f = file_queue.get()
+                f.close()
 
     def mmap_reader(self) -> 'MMapReader':
         """创建内存映射读取器"""
-        return MMapReader(self.filepath, thread_count=self.compressor.thread_count)
+        return MMapReader(self.filepath, thread_count=self.thread_count)
 
     @property
     def shape(self) -> Tuple[int, int]:
@@ -349,27 +453,23 @@ class LyFile:
         return total_rows, len(self._block_index)
 
     def _get_type_id(self, values: np.ndarray) -> int:
-        """确定数据类型ID"""
-        if np.issubdtype(values.dtype, np.integer):
-            return self.TYPE_INT64 if values.dtype in (np.int64, np.uint64) else self.TYPE_INT32
-        elif np.issubdtype(values.dtype, np.floating):
-            return self.TYPE_FLOAT64 if values.dtype == np.float64 else self.TYPE_FLOAT32
-        elif values.dtype.kind in ('U', 'O'):
-            return self.TYPE_STRING if not isinstance(values[0], bytes) else self.TYPE_BLOB
+        """获取数据类型ID"""
+        if values.dtype == np.int32:
+            return self.TYPE_INT32
+        elif values.dtype == np.int64:
+            return self.TYPE_INT64
+        elif values.dtype == np.float32:
+            return self.TYPE_FLOAT32
+        elif values.dtype == np.float64:
+            return self.TYPE_FLOAT64
+        elif values.dtype.kind == 'O':
+            if isinstance(values[0], (str, np.str_)):
+                return self.TYPE_STRING
+            elif isinstance(values[0], (bytes, np.bytes_)):
+                return self.TYPE_BLOB
+            elif isinstance(values[0], np.ndarray):
+                return self.TYPE_VECTOR
         return self.TYPE_NUMPY
-
-    def _prepare_column_data(self, values: np.ndarray) -> bytes:
-        """准备列数据"""
-        if np.issubdtype(values.dtype, np.integer) or np.issubdtype(values.dtype, np.floating):
-            return values.tobytes()
-        elif values.dtype.kind in ('U', 'O'):
-            if isinstance(values[0], bytes):
-                return b'\0'.join(values) + b'\0'
-            return '\0'.join(str(v) for v in values).encode('utf-8') + b'\0'
-        else:
-            buffer = BytesIO()
-            np.save(buffer, values, allow_pickle=False)
-            return buffer.getvalue()
 
     def _init_block_index(self) -> None:
         """初始化块索引"""
@@ -392,10 +492,60 @@ class LyFile:
                         blocks.append((offset, length, block_rows))
                     self._block_index[name] = blocks
 
+    @staticmethod
+    def _read_block_with_queue(file_queue: queue.Queue, type_id: int, offset: int, length: int) -> np.ndarray:
+        """使用文件句柄队列读取单个数据块"""
+        f = file_queue.get()
+        try:
+            compressor = FSST()  # 创建新的压缩器实例
+            with threading.Lock():  # 保护文件读取
+                f.seek(offset)
+                compressed = f.read(length)
+
+            raw_data = compressor.decompress(compressed)
+            return LyFile._parse_block_data(type_id, raw_data)
+        finally:
+            file_queue.put(f)  # 将文件句柄放回队列
+
+    @staticmethod
+    def _parse_block_data(type_id: int, raw_data: bytes) -> np.ndarray:
+        """解析数据块"""
+        if type_id in (LyFile.TYPE_INT32, LyFile.TYPE_INT64,
+                    LyFile.TYPE_FLOAT32, LyFile.TYPE_FLOAT64):
+            dtype = {
+                LyFile.TYPE_INT32: np.int32,
+                LyFile.TYPE_INT64: np.int64,
+                LyFile.TYPE_FLOAT32: np.float32,
+                LyFile.TYPE_FLOAT64: np.float64
+            }[type_id]
+            return np.frombuffer(raw_data, dtype=dtype)
+        elif type_id == LyFile.TYPE_STRING:
+            strings = raw_data.decode('utf-8').split('\0')[:-1]
+            return np.array(strings)
+        elif type_id == LyFile.TYPE_BLOB:
+            blobs = raw_data.split(b'\0')[:-1]
+            return np.array(blobs)
+        elif type_id == LyFile.TYPE_VECTOR:
+            # 解析向量数据
+            vector_dim, n_vectors = struct.unpack('<II', raw_data[:8])
+            vectors_data = raw_data[8:]
+
+            # 将字节数据转换为numpy数组
+            flat_vectors = np.frombuffer(vectors_data, dtype=np.float64)
+            # 重塑为正确的形状并转换为列表
+            vectors = flat_vectors.reshape(n_vectors, vector_dim)
+            # 创建一维对象数组，每个元素是一个向量
+            result = np.empty(n_vectors, dtype=object)
+            for i in range(n_vectors):
+                result[i] = vectors[i].copy()  # 复制每个向量以确保独立性
+            return result
+        else:  # TYPE_NUMPY
+            return np.load(BytesIO(raw_data), allow_pickle=False)
+
 
 if __name__ == '__main__':
     # 创建文件
-    file = LyFile("data.ly")
+    file = LyFile("data.ly", thread_count=8)
 
     # 写入数据
     data = pd.DataFrame({
@@ -419,6 +569,8 @@ if __name__ == '__main__':
     df = file.read()
     print("全量读取: ")
     print(df)
+    print("\n验证id列是否有序:")
+    print(df['id'].is_monotonic_increasing)
 
     # 使用mmap方式读取特定列
     with file.mmap_reader() as reader:
@@ -426,16 +578,22 @@ if __name__ == '__main__':
         df_id = reader.read(['id'])
         print("\n只读取id列: ")
         print(df_id)
+        print("\n验证id列是否有序:")
+        print(df_id['id'].is_monotonic_increasing)
 
         # 读取多列
         df_partial = reader.read(['id', 'name'])
         print("\n读取id和name列: ")
         print(df_partial)
+        print("\n验证id列是否有序:")
+        print(df_partial['id'].is_monotonic_increasing)
 
         # 读取最新数据
         df_latest = reader.read_latest(['id', 'name'])
         print("\n读取最新数据块: ")
         print(df_latest)
+        print("\n验证id列是否有序:")
+        print(df_latest['id'].is_monotonic_increasing)
 
     # 显示文件信息
     print(f"\n文件形状: {file.shape}")
@@ -443,3 +601,137 @@ if __name__ == '__main__':
     file.append(new_data)
     print("追加数据完成")
     print("文件形状: ", file.shape)
+
+    print("\n=======测试性能=======")
+
+    import time
+    import psutil
+    import os
+
+    def format_size(size):
+        """格式化文件大小"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024:
+                return f"{size:.2f}{unit}"
+            size /= 1024
+        return f"{size:.2f}TB"
+
+    def get_memory_usage():
+        """获取当前进程的内存使用"""
+        process = psutil.Process(os.getpid())
+        return process.memory_info().rss
+
+    def run_benchmark(rows: int, thread_count: int):
+        print(f"\n=== 性能测试: {rows:,} 行, {thread_count} 线程 ===")
+
+        # 准备测试数据
+        test_data = pd.DataFrame({
+            'id': np.arange(rows),
+            'name': [f'name_{i}' for i in range(rows)],
+            'value': np.random.random(rows),
+            'category': np.random.choice(['A', 'B', 'C', 'D', 'E'], rows),
+            'amount': np.random.normal(1000, 100, rows),
+            'flag': np.random.choice([True, False], rows),
+            'score': np.random.randint(0, 100, rows),
+            'text': [f'This is a longer text for testing compression performance {i}' for i in range(rows)],
+            'vector': [np.random.random(128) for _ in range(rows)]
+        })
+
+        file_path = f"benchmark_{rows}_{thread_count}.ly"
+        file = LyFile(file_path, thread_count=thread_count)
+
+        # 测试写入性能
+        start_mem = get_memory_usage()
+        start_time = time.time()
+        file.write(test_data)
+        write_time = time.time() - start_time
+        file_size = os.path.getsize(file_path)
+        mem_used = get_memory_usage() - start_mem
+
+        print(f"\n写入性能:")
+        print(f"耗时: {write_time:.2f}秒")
+        print(f"速度: {rows/write_time:,.0f} 行/秒")
+        print(f"文件大小: {format_size(file_size)}")
+        print(f"压缩比: {file_size/(test_data.memory_usage(deep=True).sum()):.2%}")
+        print(f"内存使用: {format_size(mem_used)}")
+
+        # 测试全量读取性能
+        start_mem = get_memory_usage()
+        start_time = time.time()
+        df = file.read()
+        read_time = time.time() - start_time
+        mem_used = get_memory_usage() - start_mem
+
+        print(f"\n全量读取性能:")
+        print(f"耗时: {read_time:.2f}秒")
+        print(f"速度: {rows/read_time:,.0f} 行/秒")
+        print(f"内存使用: {format_size(mem_used)}")
+
+        # 测试列式读取性能
+        with file.mmap_reader() as reader:
+            # 测试单列读取
+            start_time = time.time()
+            df_single = reader.read(['id'])
+            single_col_time = time.time() - start_time
+
+            print(f"\n单列读取性能:")
+            print(f"耗时: {single_col_time:.2f}秒")
+            print(f"速度: {rows/single_col_time:,.0f} 行/秒")
+
+            # 测试多列读取
+            start_time = time.time()
+            df_multi = reader.read(['id', 'name', 'value'])
+            multi_col_time = time.time() - start_time
+
+            print(f"\n多列读取性能:")
+            print(f"耗时: {multi_col_time:.2f}秒")
+            print(f"速度: {rows/multi_col_time:,.0f} 行/秒")
+
+            # 测试最新数据块读取
+            start_time = time.time()
+            df_latest = reader.read_latest(['id', 'name', 'value'])
+            latest_time = time.time() - start_time
+
+            print(f"\n最新数据块读取性能:")
+            print(f"耗时: {latest_time:.2f}秒")
+            print(f"速度: {len(df_latest)/latest_time:,.0f} 行/秒")
+
+        # 测试追加性能
+        append_data = test_data.copy()
+        append_data['id'] += len(test_data)
+
+        start_time = time.time()
+        file.append(append_data)
+        append_time = time.time() - start_time
+
+        print(f"\n追加性能:")
+        print(f"耗时: {append_time:.2f}秒")
+        print(f"速度: {rows/append_time:,.0f} 行/秒")
+
+        # 清理测试文件
+        os.remove(file_path)
+
+    # 运行不同规模的测试
+    test_configs = [
+        (10_000, 4),    # 小数据量
+        (100_000, 4),   # 中等数据量
+        (1_000_000, 4), # 大数据量
+    ]
+
+    # 测试不同线程数
+    thread_configs = [
+        (100_000, 1),   # 单线程
+        (100_000, 2),   # 2线程
+        (100_000, 4),   # 4线程
+        (100_000, 8),   # 8线程
+    ]
+
+    # 运行数据量测试
+    print("\n=== 测试不同数据量 ===")
+    for rows, threads in test_configs:
+        run_benchmark(rows, threads)
+
+    # 运行线程数测试
+    print("\n=== 测试不同线程数 ===")
+    for rows, threads in thread_configs:
+        run_benchmark(rows, threads)
