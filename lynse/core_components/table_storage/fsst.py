@@ -9,7 +9,7 @@ import lz4.frame  # 用于快速压缩
 
 
 class FSST:
-    def __init__(self, thread_count: int = 4):
+    def __init__(self, thread_count: int = 1):
         self.thread_count = thread_count
 
     def _analyze_data(self, data: bytes, sample_size: int = 1024) -> str:
