@@ -2,9 +2,10 @@
 from typing import Union, List, Tuple
 
 import numpy as np
+from ..utils.utils import thread_local
 
 
-class DataOpsSession:
+class DataInsertionSession:
     def __init__(self, db):
         """
         A class to manage the database insertion operations.
@@ -15,6 +16,8 @@ class DataOpsSession:
         self.db = db
 
     def __enter__(self):
+        thread_local.caller_name = "DataInsertionSession"
+        self.db._matrix_serializer.global_lock.acquire()
         return self.db
 
     def _commit(self):
@@ -23,13 +26,15 @@ class DataOpsSession:
             self.db.commit()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # If an exception occurred, rollback the transaction
         if exc_type:
             self._commit()
+            self.db._matrix_serializer.global_lock.release()
+            del thread_local.caller_name
             raise exc_type(exc_val).with_traceback(exc_tb)
 
         self._commit()
-
+        self.db._matrix_serializer.global_lock.release()
+        del thread_local.caller_name
         return False
 
     def add_item(self, vector: Union[np.ndarray, list], id: int, *,
@@ -77,3 +82,11 @@ class DataOpsSession:
             list: A list of indices where the vectors are stored.
         """
         return self.db.bulk_add_items(vectors, **kwargs)
+
+
+class DummySession:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False

@@ -1,0 +1,1 @@
+{"test_vectors": {"dim": 128, "database_path": "/Users/guobingming/projects/LynseDB/test/comprehensive_test/test_vectors", "chunk_size": 10000, "cache_query": false, "n_threads": 10, "warm_up": false, "description": null, "cache_chunks": 0}}

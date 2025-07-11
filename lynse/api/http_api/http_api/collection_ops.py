@@ -7,7 +7,6 @@ import msgpack
 from flask import request, jsonify, Response, Blueprint
 
 from ....configs.config import config
-from ....core_components.fields_cache import IndexSchema
 from ....core_components.limited_dict import LimitedDict
 from ....core_components.safe_dict import SafeDict
 
@@ -41,10 +40,8 @@ def required_collection():
 
     if 'chunk_size' not in data:
         data['chunk_size'] = 100000
-    if 'dtypes' not in data:
-        data['dtypes'] = 'float32'
-    if 'use_cache' not in data:
-        data['use_cache'] = True
+    if 'cache_query' not in data:
+        data['cache_query'] = True
     if 'n_threads' not in data:
         data['n_threads'] = 10
     if 'warm_up' not in data:
@@ -62,8 +59,7 @@ def required_collection():
             collection=data['collection_name'],
             dim=data['dim'],
             chunk_size=data['chunk_size'],
-            dtypes=data['dtypes'],
-            use_cache=data['use_cache'],
+            cache_query=data['cache_query'],
             n_threads=data['n_threads'],
             warm_up=data['warm_up'],
             drop_if_exists=data['drop_if_exists'],
@@ -591,37 +587,6 @@ def tail():
         return jsonify({'error': str(e)}), 500
 
 
-@collection_ops.route('/read_by_only_id', methods=['POST'])
-def read_by_only_id():
-    """Read the item by only id.
-
-    Returns:
-        dict: The status of the operation.
-    """
-    from ....api.native_api.high_level import LocalClient
-
-    data = request.json
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-
-    try:
-        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
-        collection = my_vec_db.get_collection(data['collection_name'])
-        vector, id, field = collection.read_by_only_id(data['id'])
-        vector = vector.tolist()
-        id = id.tolist()
-
-        item = (vector, id, field)
-        return Response(json.dumps({'status': 'success', 'params': {
-            'database_name': data['database_name'],
-            'collection_name': data['collection_name'], 'item': item
-        }}, sort_keys=False), mimetype='application/json')
-    except KeyError as e:
-        return jsonify({'error': f'Missing required parameter {e}'}), 400
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
 @collection_ops.route('/get_collection_path', methods=['POST'])
 def get_collection_path():
     """Get the path of a database.
@@ -702,37 +667,6 @@ def query_vectors():
         return jsonify({'error': str(e)}), 500
 
 
-@collection_ops.route('/build_field_index', methods=['POST'])
-def build_field_index():
-    """Build the index of a field.
-
-    Returns:
-        dict: The status of the operation.
-    """
-    from ....api.native_api.high_level import LocalClient
-
-    data = request.json
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-
-    try:
-        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
-        collection = my_vec_db.get_collection(data['collection_name'])
-
-        schema = IndexSchema().load_from_dict(data['schema'])
-
-        collection.build_field_index(schema=schema)
-
-        return Response(json.dumps({'status': 'success', 'params': {
-            'database_name': data['database_name'],
-            'collection_name': data['collection_name']
-        }}, sort_keys=False), mimetype='application/json')
-    except KeyError as e:
-        return jsonify({'error': f'Missing required parameter {e}'}), 400
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
 @collection_ops.route('/list_fields', methods=['POST'])
 def list_fields():
     """List all fields of a collection.
@@ -787,34 +721,6 @@ def list_field_index():
         return jsonify({'error': str(e)}), 500
 
 
-@collection_ops.route('/remove_field_index', methods=['POST'])
-def remove_field_index():
-    """Remove the index of a field.
-
-    Returns:
-        dict: The status of the operation.
-    """
-    from ....api.native_api.high_level import LocalClient
-
-    data = request.json
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-
-    try:
-        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
-        collection = my_vec_db.get_collection(data['collection_name'])
-
-        collection.remove_field_index(data['field_name'])
-
-        return Response(json.dumps({'status': 'success', 'params': {
-            'database_name': data['database_name'],
-            'collection_name': data['collection_name'],
-            'field_name': data['field_name']
-        }}, sort_keys=False), mimetype='application/json')
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
 @collection_ops.route('/remove_all_field_indices', methods=['POST'])
 def remove_all_field_indices():
     """Remove all field indices of a collection.
@@ -865,63 +771,6 @@ def index_mode():
             'database_name': data['database_name'],
             'collection_name': data['collection_name'],
             'index_mode': index_mode
-        }}, sort_keys=False), mimetype='application/json')
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@collection_ops.route('/is_id_exists', methods=['POST'])
-def is_id_exists():
-    """Check if an ID exists in the database.
-
-    Returns:
-        dict: The status of the operation.
-    """
-    from ....api.native_api.high_level import LocalClient
-
-    data = request.json
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-
-    try:
-        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
-        collection = my_vec_db.get_collection(data['collection_name'])
-
-        is_id_exists = collection.is_id_exists(data['id'])
-
-        return Response(json.dumps({'status': 'success', 'params': {
-            'database_name': data['database_name'],
-            'collection_name': data['collection_name'],
-            'id': data['id'],
-            'is_id_exists': is_id_exists
-        }}, sort_keys=False), mimetype='application/json')
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@collection_ops.route('/max_id', methods=['POST'])
-def max_id():
-    """Get the maximum ID in the collection.
-
-    Returns:
-        dict: The status of the operation.
-    """
-    from ....api.native_api.high_level import LocalClient
-
-    data = request.json
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-
-    try:
-        my_vec_db = LocalClient(root_path=root_path / data['database_name'])
-        collection = my_vec_db.get_collection(data['collection_name'])
-
-        max_id = int(collection.max_id)
-
-        return Response(json.dumps({'status': 'success', 'params': {
-            'database_name': data['database_name'],
-            'collection_name': data['collection_name'],
-            'max_id': max_id
         }}, sort_keys=False), mimetype='application/json')
     except Exception as e:
         return jsonify({'error': str(e)}), 500

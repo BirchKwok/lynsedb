@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Union
 from getpass import getpass
 
-from spinesUtils.logging import Logger
+from ultralog import UltraLog as Logger
 
 
 class AuthenticationError(Exception):

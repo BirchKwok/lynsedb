@@ -1,13 +1,18 @@
-import operator
-from typing import List, Union
-
-from ...core_components.fields_cache.filter import Filter, MatchField, FieldCondition
-from ...core_components.fields_cache.expression_parse import ExpressionParser
-
+from typing import List, Union, Dict, Any
+import json
 
 class FieldsQuery:
     """
     The FieldsQuery class is used to query data in the fields_cache.
+    Supports direct SQL-like query syntax for filtering records.
+
+    Examples:
+        - Basic comparison: "age > 18"
+        - Range query: "10 < days <= 300"
+        - Text search: "name LIKE '%John%'"
+        - Multiple conditions: "age > 18 AND city = 'New York'"
+        - JSON field access: "json_extract(data, '$.address.city') = 'Beijing'"
+        - Numeric operations: "CAST(json_extract(data, '$.price') AS REAL) * CAST(json_extract(data, '$.quantity') AS REAL) > 1000"
     """
     def __init__(self, storage):
         """
@@ -19,367 +24,310 @@ class FieldsQuery:
         """
         self.storage = storage
 
-    def filter_non_id_conditions(self, condition_list):
+    def _quote_identifier(self, identifier: str) -> str:
         """
-        Filter out non-id conditions.
+        正确转义 SQLite 标识符。
 
         Parameters:
-            condition_list: List[FieldCondition]
-                The list of conditions.
+            identifier: str
+                需要转义的标识符
 
         Returns:
-            List[FieldCondition]: The filtered list of conditions.
+            str: 转义后的标识符
         """
-        return [condition for condition in condition_list
-                if condition.matcher.name != "MatchID" and condition.key != ":id:"]
+        return f'"{identifier}"'
 
-    def filter_range_conditions(self, condition_list):
+    def query(self, query_filter: str = None, return_ids_only: bool = True, limit: int = None, offset: int = None) -> Union[List[int], List[Dict[str, Any]]]:
         """
-        Filter out range conditions.
+        Query records using SQL-like filter syntax.
 
         Parameters:
-            condition_list: List[FieldCondition]
-                The list of conditions.
-
-        Returns:
-            List[FieldCondition]: The filtered list of conditions.
-        """
-        return [condition for condition in condition_list
-                if condition.matcher.name == "MatchRange" or
-                (condition.matcher.name == "MatchField" and condition.matcher.comparator in [operator.le, operator.lt,
-                                                                                             operator.ge, operator.gt])]
-
-    def filter_equal_conditions(self, condition_list):
-        """
-        Filter out equal conditions.
-
-        Parameters:
-            condition_list: List[FieldCondition]
-                The list of conditions.
-
-        Returns:
-            List[FieldCondition]: The filtered list of conditions.
-        """
-        return [condition for condition in condition_list
-                if
-                condition.matcher.name == "MatchField" and condition.matcher.comparator in [operator.eq, operator.ne]]
-
-    def retrieve_all_ids(self):
-        """
-        Retrieve all IDs from the storage.
-
-        Returns:
-            List[int]: The list of IDs.
-        """
-        return [row[0] for row in self.storage.cursor.execute("SELECT external_id FROM records")]
-
-    def is_filter_empty(self, filter_instance):
-        """
-        Check if the filter is empty.
-
-        Parameters:
-            filter_instance: Filter
-                The filter object.
-
-        Returns:
-            bool: True if the filter is empty, False otherwise.
-        """
-        return not filter_instance.must_fields and \
-            not filter_instance.must_not_fields and \
-            not filter_instance.any_fields
-
-    def _process_conditions(self, range_conditions=None, equal_conditions=None, is_any_fields=False):
-        """
-        Process the conditions.
-
-        Parameters:
-            range_conditions: List[FieldCondition]
-                The list of range conditions.
-            equal_conditions: List[FieldCondition]
-                The list of equal conditions.
-            is_any_fields: bool
-                If True, process any fields.
-
-        Returns:
-            set[int]: The set of IDs.
-        """
-        if not range_conditions and not equal_conditions:
-            return set()
-
-        match_ids = set()
-
-        # handle range conditions
-        for condition in range_conditions:
-            if condition.matcher.name == 'MatchRange':
-                start = condition.matcher.start
-                end = condition.matcher.end
-                inclusive = condition.matcher.inclusive
-
-                end = end if inclusive != "left" and inclusive is not False else end - 1
-                start = start if inclusive != "right" and inclusive is not False else start + 1
-
-                match_ids |= set(self.storage.range_search(condition.key, start, end))
-            elif condition.matcher.name == 'MatchField':
-                comparator = getattr(condition.matcher, 'comparator', None)
-                if comparator is None:
-                    raise ValueError("MatchField condition must provide comparator")
-
-                values = condition.matcher.value
-                if not isinstance(values, list):
-                    values = [values]
-
-                if condition.matcher.all_comparators:
-                    # all conditions must be satisfied, take intersection
-                    temp_ids = None
-                    for value in values:
-                        start_value = None
-                        end_value = None
-                        if comparator == operator.lt:
-                            end_value = value - 1
-                        elif comparator == operator.le:
-                            end_value = value
-                        elif comparator == operator.gt:
-                            start_value = value + 1
-                        else:
-                            start_value = value
-
-                        current_ids = set(self.storage.range_search(condition.key, start_value, end_value))
-                        if temp_ids is None:
-                            temp_ids = current_ids
-                        else:
-                            temp_ids &= current_ids  # take intersection
-
-                    if temp_ids:
-                        match_ids |= temp_ids
-                else:
-                    # any condition satisfied, take union
-                    for value in values:
-                        start_value = None
-                        end_value = None
-                        if comparator == operator.lt:
-                            end_value = value - 1
-                        elif comparator == operator.le:
-                            end_value = value
-                        elif comparator == operator.gt:
-                            start_value = value + 1
-                        else:
-                            start_value = value
-
-                        match_ids |= set(self.storage.range_search(condition.key, start_value, end_value))
-
-        # handle equal conditions
-        for condition in equal_conditions:
-            if condition.matcher.name == 'MatchField':
-                comparator = getattr(condition.matcher, 'comparator', None)
-                if comparator is None:
-                    raise ValueError("MatchField condition must provide comparator")
-
-                values = condition.matcher.value
-                if not isinstance(values, list):
-                    values = [values]
-
-                if condition.matcher.all_comparators:
-                    temp_ids = None
-                    for value in values:
-                        current_ids = set(self.storage.search(condition.key, value))
-                        if temp_ids is None:
-                            temp_ids = current_ids
-                        else:
-                            temp_ids &= current_ids  # take intersection
-
-                    if temp_ids:
-                        match_ids |= temp_ids
-                else:
-                    for value in values:
-                        match_ids |= set(self.storage.search(condition.key, value))
-
-        return match_ids
-
-    def _match_filter(self, conditions, is_any_fields=False):
-        """
-        Match the filter.
-
-        Parameters:
-            conditions: List[FieldCondition]
-                The list of conditions.
-            is_any_fields: bool
-                If True, match any fields.
-
-        Returns:
-            set[int]: The set of IDs.
-        """
-        match_ids = set()
-        compare_op = all if not is_any_fields else any
-        for external_id, data in self.storage.retrieve_all():
-            if compare_op(condition.evaluate(data, external_id) for condition in conditions):
-                match_ids.add(external_id)
-
-        return match_ids
-
-    def _pre_match_ids(self, condition_list, is_any_fields=False):
-        """
-        Pre-match the IDs.
-
-        Parameters:
-            condition_list: List[FieldCondition]
-                The list of conditions.
-            is_any_fields: bool
-                If True, match any fields.
-
-        Returns:
-            set[int]: The set of IDs.
-        """
-        pre_match_ids = set()
-        for condition in condition_list:
-            if condition.matcher.name == "MatchID":
-                if pre_match_ids:
-                    pre_match_ids = pre_match_ids & set(condition.matcher.indices) \
-                        if not is_any_fields else pre_match_ids | set(condition.matcher.indices)
-                else:
-                    pre_match_ids = set(condition.matcher.indices)
-            elif condition.key == ":id:":
-                if pre_match_ids:
-                    pre_match_ids = pre_match_ids & set(self.storage.search(":id:", condition.matcher.value)) \
-                        if not is_any_fields else pre_match_ids | set(self.storage.search(":id:", condition.matcher.value))
-                else:
-                    pre_match_ids = set(self.storage.search(":id:", condition.matcher.value))
-        return pre_match_ids
-
-    def _query(self, filter_instance, filter_ids=None, return_ids_only=True):
-        """
-        Query the fields cache.
-
-        Parameters:
-            filter_instance: Filter
-                The filter object.
-            filter_ids: List[int]
-                List of external IDs to filter.
+            query_filter: str
+                SQL-like filter condition. Examples:
+                - "age > 18"
+                - "name LIKE '%John%'"
+                - "age > 18 AND city = 'New York'"
+                If None, returns all records.
             return_ids_only: bool
-                If True, only return external IDs.
+                If True, only return IDs. If False, return complete records.
+            limit: int
+                Maximum number of records to return.
+            offset: int
+                Number of records to skip.
 
         Returns:
-            List[dict]: Records. If not return_ids_only, returns records.
-            List[int]: External IDs. If return_ids_only, returns external IDs.
+            Union[List[int], List[Dict[str, Any]]]: List of IDs or complete records.
         """
-        if self.is_filter_empty(filter_instance):
-            match_ids = set(self.retrieve_all_ids())
-        else:
-            match_ids = set()
-            not_match_ids = set()
-            any_match_ids = set()
-
-            must_fields = filter_instance.must_fields
-            must_not_fields = filter_instance.must_not_fields
-            any_fields = filter_instance.any_fields
-
-            # handle must_fields and must_not_fields
-            if must_fields:
-                match_ids.update(self._pre_match_ids(must_fields))
+        try:
+            # 构建基本查询
+            if return_ids_only:
+                base_query = "SELECT _id FROM records"
             else:
-                match_ids = set(self.retrieve_all_ids())
+                # 获取所有字段名（除了_id）
+                fields = self.list_fields()
+                if not fields:
+                    return []
+                fields_str = ', '.join(f'"{field}"' for field in fields)
+                base_query = f"SELECT {fields_str} FROM records"
 
-            if must_not_fields:
-                not_match_ids.update(self._pre_match_ids(must_not_fields))
+            # 添加过滤条件
+            if query_filter:
+                # 替换查询中的__id__为_id
+                query_filter = query_filter.replace('__id__', '_id')
 
-            # filter must_fields and must_not_fields
-            must_fields = self.filter_non_id_conditions(must_fields)
-            must_not_fields = self.filter_non_id_conditions(must_not_fields)
+                # 检查字段是否存在，如果不存在且不是复杂查询，返回空结果
+                field_name = query_filter.split()[0].strip('"')  # 移除可能存在的引号
+                if field_name != '_id' and not any(op in field_name for op in ['>', '<', '=', '!', 'LIKE', 'IN']):
+                    exists = self.storage.conn.execute(
+                        "SELECT 1 FROM fields_meta WHERE field_name = ?",
+                        [field_name]
+                    ).fetchone()
+                    if not exists:
+                        return [] if return_ids_only else {}
 
-            if must_fields:
-                match_ids |= self._process_conditions(
-                    self.filter_range_conditions(must_fields),
-                    self.filter_equal_conditions(must_fields)
-                )
-            if must_not_fields:
-                not_match_ids |= self._process_conditions(
-                    self.filter_range_conditions(must_not_fields),
-                    self.filter_equal_conditions(must_not_fields)
-                )
+                # 确保字段名被正确引用
+                import re
+                def quote_field_names(match):
+                    field = match.group(1)
+                    if field != '_id' and not field.startswith('"'):
+                        return self._quote_identifier(field)
+                    return field
 
-            match_ids -= not_match_ids  # apply must_not_fields filter
+                # 使用正则表达式替换字段名
+                query_filter = re.sub(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b(?=\s*[<>=!]|\s+LIKE|\s+IN\s*\()', quote_field_names, query_filter)
+                base_query += f" WHERE {query_filter}"
 
-            # handle any_fields
-            if any_fields:
-                any_match_ids.update(self._pre_match_ids(any_fields, is_any_fields=True))
-                any_fields = self.filter_non_id_conditions(any_fields)
-                any_match_ids |= self._process_conditions(
-                    self.filter_range_conditions(any_fields),
-                    self.filter_equal_conditions(any_fields),
-                    is_any_fields=True
-                )
-                match_ids &= any_match_ids  # take intersection with any_fields
+            # 添加分页
+            if limit is not None:
+                base_query += f" LIMIT {limit}"
+                if offset is not None:
+                    base_query += f" OFFSET {offset}"
 
-            if not match_ids:
+            # 执行查询
+            cursor = self.storage.conn.cursor()
+            results = cursor.execute(base_query).fetchall()
+
+            if return_ids_only:
+                return [row[0] for row in results]
+            else:
+                # 构建结果字典，不包含内部ID
+                records = []
+                fields = self.list_fields()
+                for row in results:
+                    record = {}
+                    for i, value in enumerate(row):
+                        if value is not None:
+                            # 尝试解析JSON字符串
+                            if isinstance(value, str):
+                                try:
+                                    import json
+                                    parsed_value = json.loads(value)
+                                    record[fields[i]] = parsed_value
+                                except json.JSONDecodeError:
+                                    record[fields[i]] = value
+                            else:
+                                record[fields[i]] = value
+                    records.append(record)
+                return records
+
+        except Exception as e:
+            raise ValueError(f"Query failed: {str(e)}")
+
+    def list_fields(self) -> List[str]:
+        """
+        获取所有可用字段列表。
+
+        Returns:
+            List[str]: 字段名列表
+        """
+        try:
+            cursor = self.storage.conn.cursor()
+            results = cursor.execute("SELECT field_name FROM fields_meta").fetchall()
+            return [row[0] for row in results]
+        except Exception as e:
+            raise ValueError(f"Failed to list fields: {str(e)}")
+
+    def get_field_type(self, field_name: str) -> str:
+        """
+        获取字段类型。
+
+        Parameters:
+            field_name: str
+                字段名称
+
+        Returns:
+            str: 字段类型
+        """
+        try:
+            cursor = self.storage.conn.cursor()
+            result = cursor.execute(
+                "SELECT field_type FROM fields_meta WHERE field_name = ?",
+                [field_name]
+            ).fetchone()
+            return result[0] if result else None
+        except Exception as e:
+            raise ValueError(f"Failed to get field type: {str(e)}")
+
+    def create_field_index(self, field_name: str):
+        """
+        为指定字段创建索引。
+
+        Parameters:
+            field_name: str
+                字段名称
+        """
+        try:
+            cursor = self.storage.conn.cursor()
+            # 检查字段是否存在
+            field_exists = cursor.execute(
+                "SELECT 1 FROM fields_meta WHERE field_name = ?",
+                [field_name]
+            ).fetchone()
+
+            if field_exists:
+                # 创建索引，使用引号包裹字段名
+                index_name = f"idx_{field_name}"
+                quoted_field_name = self._quote_identifier(field_name)
+                cursor.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {index_name}
+                    ON records({quoted_field_name})
+                """)
+                cursor.execute("ANALYZE")
+            else:
+                raise ValueError(f"Field {field_name} does not exist")
+        except Exception as e:
+            raise ValueError(f"Failed to create index: {str(e)}")
+
+    def retrieve(self, id_: int) -> Dict[str, Any]:
+        """
+        Retrieve a single record by ID.
+
+        Parameters:
+            id_: int
+                The ID of the record to retrieve.
+
+        Returns:
+            Dict[str, Any]: The record if found, None otherwise.
+        """
+        try:
+            # 获取所有字段名（除了_id）
+            fields = self.list_fields()
+            if not fields:
+                return None
+            fields_str = ', '.join(f'"{field}"' for field in fields)
+
+            result = self.storage.conn.execute(
+                f"SELECT {fields_str} FROM records WHERE _id = ?",
+                [id_]
+            ).fetchone()
+
+            if result:
+                # 构建结果字典，不包含内部ID
+                record = {}
+                for i, value in enumerate(result):
+                    if value is not None:
+                        # 尝试解析JSON字符串
+                        if isinstance(value, str):
+                            try:
+                                import json
+                                parsed_value = json.loads(value)
+                                record[fields[i]] = parsed_value
+                            except json.JSONDecodeError:
+                                record[fields[i]] = value
+                        else:
+                            record[fields[i]] = value
+                return record
+            return None
+        except Exception as e:
+            raise ValueError(f"Failed to retrieve record: {str(e)}")
+
+    def retrieve_many(self, ids: List[int]) -> List[Dict[str, Any]]:
+        """
+        Retrieve multiple records by their IDs.
+
+        Parameters:
+            ids: List[int]
+                List of record IDs to retrieve.
+
+        Returns:
+            List[Dict[str, Any]]: List of retrieved records.
+        """
+        if not ids:
+            return []
+
+        try:
+            cursor = self.storage.conn.cursor()
+
+            # 获取所有字段名（除了_id）
+            fields = self.list_fields()
+            if not fields:
                 return []
+            fields_str = ', '.join(f'"{field}"' for field in fields)
 
-        if return_ids_only:
-            return list(match_ids) if not filter_ids else list(match_ids - set(filter_ids))
-        else:
-            return self.storage.retrieve_by_external_id(list(match_ids), include_external_id=True)
+            # 使用UNION ALL来创建ID列表
+            id_queries = [f"SELECT {id_} AS _id" for id_ in ids]
+            id_list_query = " UNION ALL ".join(id_queries)
 
-    def query(self, query_filter: Union[Filter, dict, str], filter_ids: List[int] = None, return_ids_only: bool = True):
+            # 使用LEFT JOIN来获取记录
+            results = cursor.execute(f"""
+                SELECT v._id, {fields_str}
+                FROM ({id_list_query}) AS v
+                LEFT JOIN records r ON r._id = v._id
+                ORDER BY v._id
+            """).fetchall()
+
+            # 构建ID到记录的映射
+            id_to_record = {}
+            for row in results:
+                record_id = row[0]  # 第一列是_id
+                if any(row[1:]):  # 检查是否有任何非空字段
+                    record = {}
+                    for i, value in enumerate(row[1:], 0):  # 跳过_id列
+                        if value is not None:
+                            # 尝试解析JSON字符串
+                            if isinstance(value, str):
+                                try:
+                                    parsed_value = json.loads(value)
+                                    record[fields[i]] = parsed_value
+                                except json.JSONDecodeError:
+                                    record[fields[i]] = value
+                            else:
+                                record[fields[i]] = value
+                    id_to_record[record_id] = record
+
+            # 按照输入ID的顺序返回记录
+            return [id_to_record.get(id_) for id_ in ids]
+
+        except Exception as e:
+            raise ValueError(f"Failed to retrieve records: {str(e)}")
+
+    def _create_temp_indexes(self, query_filter: str):
         """
-        Query the fields cache.
+        根据查询条件创建临时索引。
 
         Parameters:
-            query_filter: Filter or dict or FieldExpression (string)
-                Filter object or specified filter data.
-            filter_ids: List[int]
-                List of external IDs to filter.
-            return_ids_only: bool
-                If True, only return external IDs.
-
-        Returns:
-            List[dict]: Records. If not return_ids_only, returns records.
-            List[int]: External IDs. If return_ids_only, returns external IDs.
+            query_filter: str
+                查询条件
         """
-        if isinstance(query_filter, dict):
-            if ('must_fields' not in query_filter or
-                    'must_not_fields' not in query_filter or
-                    'any_fields' not in query_filter):
-                final_filter = []
-                for key, value in query_filter.items():
-                    final_filter.append(FieldCondition(key=key, matcher=MatchField(value, comparator=operator.eq)))
-                    query_filter = Filter(must=final_filter)
-            else:
-                query_filter = Filter().load_dict(query_filter)
-        elif isinstance(query_filter, str):
-            query_filter = ExpressionParser(query_filter).to_filter()
-        elif not isinstance(query_filter, Filter):
-            raise ValueError("Invalid query filter")
+        import re
 
-        return self._query(query_filter, filter_ids, return_ids_only)
+        # 提取JSON路径
+        json_paths = re.findall(r'json_extract\(data,\s*\'([^\']+)\'\)', query_filter)
 
-    def retrieve(self, external_id: int, include_external_id: bool = True) -> dict:
-        """
-        Retrieve a record from the cache.
+        if json_paths:
+            cursor = self.storage.conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+            try:
+                for path in json_paths:
+                    # 为每个JSON路径创建临时索引
+                    safe_name = path.replace('$', '').replace('.', '_').replace('[', '_').replace(']', '_')
+                    index_name = f"temp_idx_{safe_name.strip('_')}"
 
-        Parameters:
-            external_id: int
-                The external ID of the record.
-            include_external_id: bool
-                If True, include the external ID in the record.
+                    cursor.execute(f"""
+                        CREATE INDEX IF NOT EXISTS {index_name}
+                        ON records(json_extract(data, ?))
+                    """, (path,))
 
-        Returns:
-            dict: The record.
-        """
-        res = self.storage.retrieve_by_external_id(external_id, include_external_id=include_external_id)
-        if res:
-            return res[0]
-        return None
-
-    def retrieve_ids(self, external_ids: List[int], include_external_id: bool = True) -> List[dict]:
-        """
-        Retrieve records from the cache.
-
-        Parameters:
-            external_ids: List[int]
-                List of external IDs of the records.
-            include_external_id: bool
-                If True, include the external ID in the records.
-
-        Returns:
-            List[dict]: List of records.
-        """
-        results = self.storage.retrieve_by_external_id(external_ids, include_external_id=include_external_id)
-        return results if results else None
+                cursor.execute("COMMIT")
+            except Exception:
+                cursor.execute("ROLLBACK")

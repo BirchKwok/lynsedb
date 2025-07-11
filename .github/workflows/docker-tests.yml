@@ -41,7 +41,7 @@ jobs:
       run: docker run -d --name mytestcontainer -p 7637:7637 mytestimage
 
     - name: Run tests
-      run: pytest test/docker_tests/
+      run: pytest tests/docker_tests/
 
     - name: Login to Docker Hub
       if: github.event_name == 'push' && github.ref == 'refs/heads/main'

@@ -186,8 +186,7 @@ class LocalClient:
             collection: str,
             dim: int = None,
             chunk_size: int = 100_000,
-            dtypes: str = 'float32',
-            use_cache: bool = True,
+            cache_query: bool = True,
             n_threads: Union[int, None] = 10,
             warm_up: bool = False,
             drop_if_exists: bool = False,
@@ -202,9 +201,7 @@ class LocalClient:
                 When creating a new collection, the dimension of the vectors must be specified.
                 When loading an existing collection, the dimension of the vectors is automatically loaded.
             chunk_size (int): The size of each data chunk. Default is 100_000.
-            dtypes (str): The data type of the vectors. Default is 'float32'.
-                Options are 'float16', 'float32' or 'float64'.
-            use_cache (bool): Whether to use cache for search. Default is True.
+            cache_query (bool): Whether to use cache for search. Default is True.
             n_threads (int): The number of threads to use for parallel processing. Default is 10.
             warm_up (bool): Whether to warm up the database. Default is False.
             drop_if_exists (bool): Whether to drop the collection if it already exists. Default is False.
@@ -215,6 +212,10 @@ class LocalClient:
         Raises:
             ValueError: If `chunk_size` is less than or equal to 1.
         """
+        # Limit the maximum number of collections that can be created to 10,000
+        if len(self._collections) >= 1000 or len(self._register.get_collections_details()) >= 10000:
+            raise ValueError('Cannot create more than 10,000 collections')
+
         from ...api.native_api.low_level import ExclusiveDB
 
         collection_path = self._root_path / collection
@@ -237,14 +238,14 @@ class LocalClient:
             raise ValueError('chunk_size must be greater than 1')
 
         self._collections[collection] = ExclusiveDB(
-            dim=dim, database_path=collection_path.as_posix(), chunk_size=chunk_size, dtypes=dtypes,
-            use_cache=use_cache, n_threads=n_threads,
+            dim=dim, database_path=collection_path.as_posix(), chunk_size=chunk_size,
+            cache_query=cache_query, n_threads=n_threads,
             warm_up=warm_up, cache_chunks=cache_chunks
         )
 
         self._register.register_collection(
-            collection, dim=dim, database_path=collection_path.as_posix(), chunk_size=chunk_size, dtypes=dtypes,
-            use_cache=use_cache, n_threads=n_threads,
+            collection, dim=dim, database_path=collection_path.as_posix(), chunk_size=chunk_size,
+            cache_query=cache_query, n_threads=n_threads,
             warm_up=warm_up, description=description, cache_chunks=cache_chunks
         )
 

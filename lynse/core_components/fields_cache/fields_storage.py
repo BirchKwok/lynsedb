@@ -1,20 +1,25 @@
 import sqlite3
-import msgpack
-from typing import Dict, List, Any, Union, Tuple
+import orjson
+from typing import Dict, List, Any
 from pathlib import Path
+from ...core_components.limited_dict import LimitedDict
 
 
 class FieldsStorage:
     """
-    Fields storage class.
+    Fields storage class using SQLite as backend storage.
     """
-    def __init__(self, filepath=None):
+    def __init__(self, filepath=None, cache_size: int = 1000, batch_size: int = 1000):
         """
-        Initialize the fields storage.
+        Initialize the FieldsStorage class.
 
         Parameters:
             filepath: str
                 The file path to the storage.
+            cache_size: int
+                Maximum number of query results to cache.
+            batch_size: int
+                Size of batches for bulk operations.
         """
         if filepath is None:
             raise ValueError("You must provide a file path.")
@@ -22,341 +27,457 @@ class FieldsStorage:
         self.filepath = Path(filepath)
         self.filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        self.conn = sqlite3.connect(str(self.filepath), check_same_thread=False)
-        self.cursor = self.conn.cursor()
+        # 配置参数
+        self.batch_size = batch_size
+        self._query_cache = LimitedDict(cache_size)
+        self._field_cache = LimitedDict(100)  # 缓存字段信息
+
+        # SQLite连接
+        self.conn = sqlite3.connect(str(self.filepath),
+                                  isolation_level=None)  # 自动提交模式，手动控制事务
+
+        # 优化SQLite配置
+        cursor = self.conn.cursor()
+        # 使用WAL模式提高写入性能
+        cursor.execute("PRAGMA journal_mode=WAL")
+        # 设置较大的WAL文件大小限制（64MB）
+        cursor.execute("PRAGMA wal_autocheckpoint=1000")
+        # 降低同步级别提高性能
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        # 设置较大的页缓存（约256MB）
+        cursor.execute("PRAGMA cache_size=-262144")
+        # 临时表和临时文件使用内存
+        cursor.execute("PRAGMA temp_store=MEMORY")
+        # 启用内存映射，提高读取性能
+        cursor.execute("PRAGMA mmap_size=1099511627776")  # 1TB
+        # 设置较大的页大小，提高读写效率
+        cursor.execute("PRAGMA page_size=32768")  # 32KB
+        # 启用严格的外键约束
+        cursor.execute("PRAGMA foreign_keys=ON")
+        # 读写锁定超时设置（5分钟）
+        cursor.execute("PRAGMA busy_timeout=300000")
+
         self._initialize_database()
 
     def _initialize_database(self):
         """
-        Initialize the database.
+        Initialize SQLite database with optimized settings.
         """
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS records (
-                internal_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                external_id INTEGER UNIQUE,
-                data BLOB
-            )
-        """)
-        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_external_id ON records (external_id)")
-        self.conn.commit()
+        cursor = self.conn.cursor()
 
-    def store(self, data: dict, external_id: int) -> int:
+        try:
+            cursor.execute("BEGIN TRANSACTION")
+
+            # 删除旧表（如果存在）
+            cursor.execute("DROP TABLE IF EXISTS records")
+            cursor.execute("DROP TABLE IF EXISTS fields_meta")
+
+            # 创建主表，只包含ID
+            cursor.execute("""
+                CREATE TABLE records (
+                    _id INTEGER PRIMARY KEY AUTOINCREMENT
+                )
+            """)
+
+            # 创建字段元数据表
+            cursor.execute("""
+                CREATE TABLE fields_meta (
+                    field_name TEXT PRIMARY KEY,
+                    field_type TEXT NOT NULL
+                )
+            """)
+
+            # 重置序列从0开始
+            cursor.execute("INSERT INTO records (_id) VALUES (0)")
+            cursor.execute("DELETE FROM records WHERE _id = 0")
+            cursor.execute("DELETE FROM sqlite_sequence WHERE name = 'records'")
+
+            cursor.execute("COMMIT")
+        except Exception as e:
+            cursor.execute("ROLLBACK")
+            raise e
+
+    def _quote_identifier(self, identifier: str) -> str:
         """
-        Store a record in the cache.
+        正确转义 SQLite 标识符。
+
+        Parameters:
+            identifier: str
+                需要转义的标识符
+
+        Returns:
+            str: 转义后的标识符
+        """
+        return f'"{identifier}"'
+
+    def _ensure_field_exists(self, field_name: str, field_type: str):
+        """
+        确保字段存在，如不存在则创建。
+
+        Parameters:
+            field_name: str
+                字段名称
+            field_type: str
+                字段类型 (TEXT, INTEGER, REAL, etc.)
+        """
+        try:
+            # 检查字段是否已存在
+            result = self.conn.execute(
+                "SELECT field_type FROM fields_meta WHERE field_name = ?",
+                [field_name]
+            ).fetchone()
+
+            if not result:
+                # 添加字段到主表，使用引号包裹字段名
+                quoted_field_name = self._quote_identifier(field_name)
+                self.conn.execute(f"ALTER TABLE records ADD COLUMN {quoted_field_name} {field_type}")
+                # 记录字段元数据
+                self.conn.execute(
+                    "INSERT INTO fields_meta (field_name, field_type) VALUES (?, ?)",
+                    [field_name, field_type]
+                )
+        except Exception as e:
+            raise ValueError(f"Failed to ensure field exists: {str(e)}")
+
+    def _infer_field_type(self, value: Any) -> str:
+        """
+        根据值推断字段类型。
+
+        Parameters:
+            value: Any
+                字段值
+
+        Returns:
+            str: SQLite字段类型
+        """
+        if isinstance(value, bool):
+            return "INTEGER"  # SQLite没有布尔类型，使用INTEGER
+        elif isinstance(value, int):
+            return "INTEGER"
+        elif isinstance(value, float):
+            return "REAL"
+        elif isinstance(value, (list, dict)):
+            return "TEXT"  # 复杂类型序列化为JSON字符串
+        else:
+            return "TEXT"
+
+    def store(self, data: dict) -> int:
+        """
+        Store a record in the storage.
 
         Parameters:
             data: dict
                 The record to be stored.
-            external_id: int
-                The external ID of the record.
 
         Returns:
-            int: The internal ID of the record.
+            int: The ID of the record.
         """
         if not isinstance(data, dict):
             raise ValueError("Only dict-type data is allowed.")
 
         try:
-            packed_data = msgpack.packb(data)
-            self.cursor.execute(
-                "INSERT INTO records (external_id, data) VALUES (?, ?)",
-                (external_id, packed_data)
-            )
-            self.conn.commit()
-            return self.cursor.lastrowid
-        except sqlite3.IntegrityError:
-            raise ValueError(f"external_id {external_id} already exists.")
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE TRANSACTION")
 
-    def retrieve_by_external_id(self, external_ids: Union[int, List[int]], include_external_id=True) -> List[dict]:
+            try:
+                # 首先确保所有字段存在
+                for field_name, value in data.items():
+                    if field_name != '_id':
+                        field_type = self._infer_field_type(value)
+                        self._ensure_field_exists(field_name, field_type)
+
+                # 创建记录获取ID
+                if 'id' in data:
+                    # 如果提供了id，直接使用它作为_id
+                    cursor.execute("INSERT INTO records (_id) VALUES (?)", (data['id'],))
+                    record_id = data['id']
+                else:
+                    cursor.execute("INSERT INTO records DEFAULT VALUES")
+                    record_id = cursor.lastrowid
+
+                # 处理每个字段
+                field_updates = []
+                params = []
+
+                for field_name, value in data.items():
+                    if field_name != '_id':
+                        quoted_field_name = self._quote_identifier(field_name)
+                        field_updates.append(f"{quoted_field_name} = ?")
+                        # 如果是复杂类型，序列化为JSON
+                        if isinstance(value, (list, dict)):
+                            import json
+                            params.append(json.dumps(value))
+                        else:
+                            params.append(value)
+
+                # 如果有字段需要更新
+                if field_updates:
+                    update_sql = f"UPDATE records SET {', '.join(field_updates)} WHERE _id = ?"
+                    params.append(record_id)
+                    cursor.execute(update_sql, params)
+
+                cursor.execute("COMMIT")
+                self._invalidate_cache()
+                return record_id
+
+            except Exception as e:
+                cursor.execute("ROLLBACK")
+                raise e
+
+        except Exception as e:
+            raise ValueError(f"Failed to store data: {str(e)}")
+
+    def batch_store(self, data_list: List[dict]) -> List[int]:
         """
-        Retrieve records by external ID.
+        Optimized batch store with automatic batching.
 
         Parameters:
-            external_ids: Union[int, List[int]]
-                The external ID or list of external IDs.
-            include_external_id: bool
-                If True, include the external ID in the records.
+            data_list: List[dict]
+                List of records to be stored.
 
         Returns:
-            List[dict]: List of records.
+            List[int]: List of IDs of the stored records.
         """
-        if isinstance(external_ids, int):
-            external_ids = [external_ids]
+        if not data_list:
+            return []
 
-        placeholders = ','.join('?' for _ in external_ids)
-        query = f"SELECT external_id, data FROM records WHERE external_id IN ({placeholders})"
-        self.cursor.execute(query, external_ids)
-        results = []
-        for row in self.cursor.fetchall():
-            data = msgpack.unpackb(row[1])
-            if include_external_id:
-                data[':id:'] = row[0]
-            results.append(data)
-        return results
+        all_ids = []
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE TRANSACTION")
 
-    def retrieve_all(self, include_external_id=True):
+            try:
+                # 首先收集所有唯一字段并确保它们存在
+                all_fields = set()
+                for data in data_list:
+                    for field_name, value in data.items():
+                        if field_name != '_id':
+                            all_fields.add((field_name, self._infer_field_type(value)))
+
+                # 批量创建所有需要的字段
+                for field_name, field_type in all_fields:
+                    self._ensure_field_exists(field_name, field_type)
+
+                # 然后批量插入数据
+                for i in range(0, len(data_list), self.batch_size):
+                    batch = data_list[i:i + self.batch_size]
+
+                    for data in batch:
+                        # 创建记录获取ID
+                        if 'id' in data:
+                            # 如果提供了id，直接使用它作为_id
+                            cursor.execute("INSERT INTO records (_id) VALUES (?)", (data['id'],))
+                            record_id = data['id']
+                        else:
+                            cursor.execute("INSERT INTO records DEFAULT VALUES")
+                            record_id = cursor.lastrowid
+
+                        all_ids.append(record_id)
+
+                        # 处理每个字段
+                        field_updates = []
+                        params = []
+
+                        for field_name, value in data.items():
+                            if field_name != '_id':
+                                quoted_field_name = self._quote_identifier(field_name)
+                                field_updates.append(f"{quoted_field_name} = ?")
+                                # 如果是复杂类型，序列化为JSON
+                                if isinstance(value, (list, dict)):
+                                    import json
+                                    params.append(json.dumps(value))
+                                else:
+                                    params.append(value)
+
+                        # 如果有字段需要更新
+                        if field_updates:
+                            update_sql = f"UPDATE records SET {', '.join(field_updates)} WHERE _id = ?"
+                            params.append(record_id)
+                            cursor.execute(update_sql, params)
+
+                cursor.execute("COMMIT")
+                self._invalidate_cache()
+                return all_ids
+
+            except Exception as e:
+                cursor.execute("ROLLBACK")
+                raise e
+
+        except Exception as e:
+            raise ValueError(f"Batch storage failed: {str(e)}")
+
+    def _parse_record(self, row: tuple) -> Dict[str, Any]:
         """
-        Retrieve all records.
+        Parse a database record into a dictionary.
 
         Parameters:
-            include_external_id: bool
-                If True, include the external ID in the records.
+            row: tuple
+                Database record containing all fields
 
         Returns:
-            List[dict]: List of records.
+            Dict[str, Any]: Parsed record
         """
-        self.cursor.execute("SELECT external_id, data FROM records")
-        for row in self.cursor.fetchall():
-            data = msgpack.unpackb(row[1])
-            if include_external_id:
-                data[':id:'] = row[0]
-            yield row[0], data
+        # 获取当前表的所有列名
+        cursor = self.conn.cursor()
+        columns = [description[0] for description in cursor.execute("SELECT * FROM records WHERE 1=0").description]
 
-    def field_exists(self, field: str) -> bool:
+        data = {}
+        for i, value in enumerate(row):
+            if value is not None:
+                column_name = columns[i]
+                if column_name != '_id':  # 跳过内部ID字段
+                    # 尝试解析JSON字符串
+                    if isinstance(value, str):
+                        try:
+                            import json
+                            parsed_value = json.loads(value)
+                            data[column_name] = parsed_value
+                        except json.JSONDecodeError:
+                            data[column_name] = value
+                    else:
+                        data[column_name] = value
+
+        return data
+
+    def create_json_index(self, field_path: str):
         """
-        Check if a field exists.
+        为指定的JSON字段���径创建索引。
+
+        Parameters:
+            field_path: str
+                JSON字段路径，例如 "$.name" 或 "$.address.city"
+        """
+        try:
+            # 生成安全的索引名
+            safe_name = field_path.replace('$', '').replace('.', '_').replace('[', '_').replace(']', '_')
+            index_name = f"idx_json_{safe_name.strip('_')}"
+
+            self.conn.execute(f"""
+                CREATE INDEX IF NOT EXISTS {index_name}
+                ON records(json_extract(data, ?))
+            """, (field_path,))
+
+            # 分析新创建的索引
+            self.conn.execute("ANALYZE")
+        except Exception as e:
+            raise ValueError(f"Failed to create JSON index: {str(e)}")
+
+    def field_exists(self, field: str, use_cache: bool = True) -> bool:
+        """
+        Check if a field exists with caching.
 
         Parameters:
             field: str
                 The field to check.
+            use_cache: bool
+                Whether to use cache.
 
         Returns:
             bool: True if the field exists, False otherwise.
         """
         field = field.strip(':')
-        self.cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='index_{field}'")
-        return self.cursor.fetchone() is not None
 
-    def build_index(self, schema: Dict[str, type]):
+        if use_cache:
+            cache_key = self._get_cache_key("field_exists", field=field)
+            cached_result = self._field_cache.get(cache_key)
+            if cached_result is not None:
+                return cached_result
+
+        try:
+            result = self.conn.execute(f"""
+                SELECT COUNT(*)
+                FROM records
+                WHERE json_extract(data, '$.{field}') IS NOT NULL
+                LIMIT 1
+            """).fetchone()
+            exists = result[0] > 0
+
+            if use_cache:
+                self._field_cache[cache_key] = exists
+            return exists
+        except Exception:
+            return False
+
+    def list_fields(self, use_cache: bool = True) -> Dict[str, str]:
         """
-        Build an index for a field.
+        List all fields with caching.
 
-        Parameters:
-            schema: Dict[str, type]
-                The schema of the fields.
+        Returns:
+            Dict[str, str]: The fields of the storage with their types.
         """
-        for field, field_type in schema.items():
-            field = field.strip(':')
-            if self.field_exists(field):
-                continue  # Skip if the index already exists and does not need to be rebuilt
+        if use_cache:
+            cache_key = self._get_cache_key("list_fields")
+            cached_result = self._field_cache.get(cache_key)
+            if cached_result is not None:
+                return cached_result
 
-            sqlite_type = {int: 'INTEGER', float: 'REAL', str: 'TEXT'}[field_type]
-            self.cursor.execute(f"""
-                CREATE TABLE IF NOT EXISTS index_{field} (
-                    internal_id INTEGER,
-                    value {sqlite_type},
-                    FOREIGN KEY (internal_id) REFERENCES records (internal_id)
+        try:
+            results = self.conn.execute("""
+                WITH RECURSIVE
+                json_tree(key, type) AS (
+                    SELECT
+                        json_each.key,
+                        CASE
+                            WHEN json_each.type = 'integer' THEN 'int'
+                            WHEN json_each.type = 'real' THEN 'float'
+                            WHEN json_each.type = 'text' THEN 'str'
+                            ELSE json_each.type
+                        END
+                    FROM records, json_each(records.data)
+                    GROUP BY json_each.key
                 )
-            """)
-            self.cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{field} ON index_{field} (value)")
+                SELECT key, type FROM json_tree
+            """).fetchall()
 
-            # build index for all existing records
-            self.cursor.execute("SELECT internal_id, data FROM records")
-            for internal_id, packed_data in self.cursor.fetchall():
-                data = msgpack.unpackb(packed_data)
-                if field in data:
-                    self.cursor.execute(f"INSERT INTO index_{field} (internal_id, value) VALUES (?, ?)",
-                                        (internal_id, data[field]))
+            fields = {f":{field_name}:": field_type
+                     for field_name, field_type in results}
 
-        self.conn.commit()
+            if use_cache:
+                self._field_cache[cache_key] = fields
+            return fields
+        except Exception as e:
+            raise ValueError(f"Failed to list fields: {str(e)}")
 
-    def remove_index(self, field_name: str):
+    def optimize(self):
         """
-        Remove an index for a field.
-
-        Parameters:
-            field_name: str
-                The name of the field.
+        优化数据库性能
         """
-        self.cursor.execute(f"DROP TABLE IF EXISTS index_{field_name}")
-        self.conn.commit()
+        try:
+            cursor = self.conn.cursor()
 
-    def search(self, field: str, value: Any) -> List[int]:
-        """
-        Search for records by field and value.
+            cursor.execute("BEGIN IMMEDIATE TRANSACTION")
+            try:
+                # 更新统计信息
+                cursor.execute("ANALYZE")
 
-        Parameters:
-            field: str
-                The field to search.
-            value: Any
-                The value to search for.
+                # 整理索引和表数据
+                cursor.execute("REINDEX")
 
-        Returns:
-            List[int]: The external IDs of the records.
-        """
-        # Check if the index exists
-        self.cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='index_{field}'")
-        if self.cursor.fetchone() is None:
-            # If index doesn't exist, fall back to full table scan
-            self.cursor.execute("SELECT external_id, data FROM records")
-            results = []
-            for row in self.cursor.fetchall():
-                data = msgpack.unpackb(row[1])
-                if field in data and data[field] == value:
-                    results.append(row[0])  # Append external_id
-            return results
-        else:
-            # If index exists, use it
-            self.cursor.execute(f"""
-                SELECT r.external_id
-                FROM records r
-                JOIN index_{field} i ON r.internal_id = i.internal_id
-                WHERE i.value = ?
-            """, (value,))
-            return [row[0] for row in self.cursor.fetchall()]
+                # 整数据库文件
+                cursor.execute("VACUUM")
 
-    def range_search(self, field: str, start_value: Any, end_value: Any) -> List[int]:
-        """
-        Range search for records by field and value range.
+                cursor.execute("COMMIT")
 
-        Parameters:
-            field: str
-                The field to search.
-            start_value: Any
-                The start value of the range.
-            end_value: Any
-                The end value of the range.
+                # 清除缓存
+                self._invalidate_cache()
+            except Exception as e:
+                cursor.execute("ROLLBACK")
+                raise e
+        except Exception as e:
+            print(f"Failed to optimize database: {str(e)}")
 
-        Returns:
-            List[int]: The external IDs of the records.
-        """
-        self.cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='index_{field}'")
-        if self.cursor.fetchone() is None:
-            # If index doesn't exist, fall back to full table scan
-            self.cursor.execute("SELECT external_id, data FROM records")
-            results = []
-            for row in self.cursor.fetchall():
-                data = msgpack.unpackb(row[1])
-                if field in data and start_value <= data[field] <= end_value:
-                    results.append(row[0])  # Append external_id
-            return results
-        else:
-            # If index exists, use it
-            self.cursor.execute(f"""
-                SELECT r.external_id
-                FROM records r
-                JOIN index_{field} i ON r.internal_id = i.internal_id
-                WHERE i.value BETWEEN ? AND ?
-            """, (start_value, end_value))
-            return [row[0] for row in self.cursor.fetchall()]
+    def _get_cache_key(self, operation: str, **kwargs) -> str:
+        """生成缓存键"""
+        return f"{operation}:{orjson.dumps(kwargs).decode('utf-8')}"
 
-    def starts_with(self, field: str, prefix: str) -> List[int]:
-        """
-        Search for records by field and prefix.
-
-        Parameters:
-            field: str
-                The field to search.
-            prefix: str
-                The prefix to search for.
-
-        Returns:
-            List[int]: The external IDs of the records.
-        """
-        self.cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='index_{field}'")
-        if self.cursor.fetchone() is None:
-            # If index doesn't exist, fall back to full table scan
-            self.cursor.execute("SELECT external_id, data FROM records")
-            results = []
-            for row in self.cursor.fetchall():
-                data = msgpack.unpackb(row[1])
-                if field in data and isinstance(data[field], str) and data[field].startswith(prefix):
-                    results.append(row[0])  # Append external_id
-            return results
-        else:
-            # If index exists, use it
-            self.cursor.execute(f"""
-                SELECT r.external_id
-                FROM records r
-                JOIN index_{field} i ON r.internal_id = i.internal_id
-                WHERE i.value LIKE ?
-            """, (prefix + '%',))
-            return [row[0] for row in self.cursor.fetchall()]
-
-    def delete(self):
-        """
-        Delete the storage.
-        """
-        self.conn.close()
-        if self.filepath.exists():
-            self.filepath.unlink()
-
-    def list_fields(self) -> Dict[str, str]:
-        """
-        List all fields in the cache, including those without indexes.
-
-        Returns:
-            Dict[str, str]: The fields of the cache with their types.
-        """
-        fields = {}
-
-        # First, get all fields that have been indexed
-        self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'index_%'")
-        for (table_name,) in self.cursor.fetchall():
-            field = table_name[6:]  # Remove 'index_' prefix
-            self.cursor.execute(f"PRAGMA table_info({table_name})")
-            for column in self.cursor.fetchall():
-                if column[1] == 'value':
-                    sqlite_type = column[2]
-                    python_type = {'INTEGER': 'int', 'REAL': 'float', 'TEXT': 'str'}[sqlite_type]
-                    fields[f":{field}:"] = python_type
-                    break
-
-        # Then, check all records to find fields without indexes
-        self.cursor.execute("SELECT data FROM records LIMIT 1000")  # Limit the number of records checked for performance
-        for (packed_data,) in self.cursor.fetchall():
-            data = msgpack.unpackb(packed_data)
-            for field, value in data.items():
-                if f":{field}:" not in fields:
-                    if isinstance(value, int):
-                        fields[f":{field}:"] = 'int'
-                    elif isinstance(value, float):
-                        fields[f":{field}:"] = 'float'
-                    elif isinstance(value, str):
-                        fields[f":{field}:"] = 'str'
-
-        return fields
+    def _invalidate_cache(self):
+        """清除所有缓存"""
+        self._query_cache.clear()
+        self._field_cache.clear()
 
     def __del__(self):
         """
-        Delete the storage.
+        Close all connections when the object is deleted.
         """
         if hasattr(self, 'conn'):
             self.conn.close()
-
-    def batch_store(self, data_list: List[Tuple[dict, int]]) -> List[int]:
-        """
-        Batch store multiple records in the cache.
-
-        Parameters:
-            data_list: List[Tuple[dict, int]]
-                List of records to be stored. Each element is a tuple containing a data dictionary and its corresponding external ID.
-
-        Returns:
-            List[int]: List of internal IDs of the stored records.
-        """
-        try:
-            self.cursor.execute("BEGIN TRANSACTION")
-
-            # Prepare bulk insert data
-            bulk_data = [(external_id, msgpack.packb(data)) for data, external_id in data_list]
-
-            # Execute bulk insert
-            self.cursor.executemany(
-                "INSERT INTO records (external_id, data) VALUES (?, ?)",
-                bulk_data
-            )
-
-            # Get inserted internal IDs
-            self.cursor.execute("SELECT last_insert_rowid()")
-            last_id = self.cursor.fetchone()[0]
-            internal_ids = list(range(last_id - len(data_list) + 1, last_id + 1))
-
-            self.conn.commit()
-            return internal_ids
-        except sqlite3.IntegrityError as e:
-            self.conn.rollback()
-            raise ValueError(f"Batch storage failed: {str(e)}")
-        except Exception as e:
-            self.conn.rollback()
-            raise e

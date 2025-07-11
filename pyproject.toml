@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "LynseDB"
+version = "0.2.0"
+description = "A pure Python-implemented, lightweight, server-optional, multi-end compatible, vector database deployable locally or remotely."
+readme = "README.md"
+keywords = ["vector", "database"]
+license = {text = "Apache-2.0"}
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12"
+]
+requires-python = ">=3.9"
+
+authors = [
+    {name = "Birch Kwok", email = "birchkwok@gmail.com"}
+]
+
+dependencies = [
+    "numpy>=1.17.0",
+    "spinesUtils>=0.4.1",
+    "msgpack>=1.0.2",
+    "scikit-learn>=1.0.0",
+    "cloudpickle>=2.0.0",
+    "pyroaring>=0.4.5",
+    "flask>=2.0.1",
+    "waitress>=2.0.0",
+    "tqdm>=4.65.0",
+    "setuptools>=68.0.0",
+    "httpx[socks]>=0.19.0",
+    "ruamel.yaml>=0.18.6",
+    "simsimd>=4.4.0",
+    "usearch>=2.12.0",
+    "filelock>=3.16.0",
+    "orjson>=3.8.0",
+    "bitarray>=2.9.2",
+    "pandas>=1.5.2",
+    "pyarrow>=10.0.0",
+    "portalocker>=2.6.0",
+    "ultralog>=0.0.6",
+]
+
+[project.urls]
+homepage = "https://github.com/BirchKwok/LynseDB"
+
+
+[tool.setuptools.packages.find]
+include = ["lynse", "tutorials"]
+exclude = ["logo"]
+
+[project.scripts]
+lynse = "lynse.api.http_api.http_api.app:main"

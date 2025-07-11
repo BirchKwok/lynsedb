@@ -1,12 +1,15 @@
-
-__version__ = '0.2.0'
-
 from pathlib import Path
 from typing import Union
 
 from .api.http_api.http_api.app import launch_in_jupyter
 from .core_components import fields_cache as field_models
 from .configs.config import generate_config_file, load_config_file
+
+
+FILE_PATH = Path(__file__).parent.parent
+
+__version__ = '0.2.0'
+
 
 generate_config_file(), load_config_file()
 
@@ -110,6 +113,10 @@ class VectorDBClient:
         from .api.http_api.client_api import raise_error_response
         from .configs.config import config
         import httpx
+
+        # Limit the maximum number of databases created to 64
+        if len(self.list_databases()) >= 64:
+            raise ValueError('The maximum number of databases created is 64.')
 
         if not self._is_remote:
             from .api.native_api.database_manager import DatabaseManager

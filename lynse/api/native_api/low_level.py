@@ -3,13 +3,18 @@ from pathlib import Path
 from typing import Union, List, Tuple
 
 import numpy as np
+import pandas as pd
+import polars as pl
+import pyarrow as pa
+
 from spinesUtils.asserts import raise_if, ParameterTypeAssert
 from spinesUtils.timer import Timer
 
+from lynse.execution_layer.query_view import QueryView
+
 from ...configs.parameters_validator import ParametersValidator
-from ...core_components.fields_cache import IndexSchema
 from ...core_components.locks import ThreadLock
-from ...execution_layer.indexer import Indexer
+from lynse.index.indexer import Indexer
 from ...execution_layer.search import Search
 from ...execution_layer.matrix_serializer import MatrixSerializer
 from ...utils.utils import unavailable_if_deleted, unavailable_if_empty, collection_repr
@@ -30,15 +35,14 @@ class ExclusiveDB:
     name = "Local"
 
     @ParametersValidator(
-        immutable_param=['dim', 'chunk_size', 'dtypes'],
+        immutable_param=['dim', 'chunk_size'],
         logger=logger
     )
     @ParameterTypeAssert({
         'dim': int,
         'database_path': str,
         'chunk_size': int,
-        'dtypes': str,
-        'use_cache': bool,
+        'cache_query': bool,
         'n_threads': (None, int),
         'warm_up': bool,
         'cache_chunks': int
@@ -48,8 +52,7 @@ class ExclusiveDB:
             dim: int,
             database_path: Union[str, Path],
             chunk_size: int = 100_000,
-            dtypes: str = 'float32',
-            use_cache: bool = True,
+            cache_query: bool = True,
             n_threads: Union[int, None] = 10,
             warm_up: bool = False,
             cache_chunks: int = 20
@@ -62,9 +65,7 @@ class ExclusiveDB:
             database_path (str or Path): The path to the database file.
             chunk_size (int): The size of each data chunk. Default is 100,000.
                 It's recommended to be between 10,000 and 500,000.
-            dtypes (str): The data type of the vectors. Default is 'float32'.
-                Options are 'float16', 'float32' or 'float64'.
-            use_cache (bool): Whether to use cache for search. Default is True.
+            cache_query (bool): Whether to use cache for search. Default is True.
             n_threads (int): The number of threads to use for parallel processing. Default is 10.
             warm_up (bool): Whether to warm up the database. Default is False.
             cache_chunks (int): The number of chunks to cache in memory. Default is 20.
@@ -73,14 +74,12 @@ class ExclusiveDB:
             ValueError: If `chunk_size` is less than or equal to 1.
         """
         raise_if(ValueError, chunk_size <= 1, 'chunk_size must greater than 1')
-        raise_if(ValueError, dtypes not in ('float16', 'float32', 'float64'),
-                 'dtypes must be "float16", "float32" or "float64')
 
         if chunk_size <= 1:
             raise ValueError('chunk_size must be greater than 1')
 
-        if not 10000 <= chunk_size <= 500000:
-            logger.warning('The recommended chunk size is between 10,000 and 500,000.')
+        if not 1_0000 <= chunk_size <= 100_0000:
+            logger.warning('The recommended chunk size is between 10,000 and 1,000,000.')
 
         # In order to have enough data to index the segment
         raise_if(ValueError, chunk_size < 1000, 'chunk_size must greater than or equal to 1000.')
@@ -94,15 +93,13 @@ class ExclusiveDB:
             collection_path=self._database_path,
             chunk_size=chunk_size,
             logger=logger,
-            dtypes=dtypes,
             warm_up=warm_up,
             cache_chunks=cache_chunks
         )
         self._data_loader = self._matrix_serializer.dataloader
-        self._id_filter = self._matrix_serializer.id_filter
 
         self._timer = Timer()
-        self._use_cache = use_cache
+        self._cache_query = cache_query
 
         raise_if(TypeError, n_threads is not None and not isinstance(n_threads, int), "n_threads must be an integer.")
         raise_if(ValueError, n_threads is not None and n_threads <= 0, "n_threads must be greater than 0.")
@@ -115,11 +112,13 @@ class ExclusiveDB:
         )
 
         self._search = Search(
-            matrix_serializer=self._matrix_serializer,
+            logger=logger,
+            storage_worker=self._matrix_serializer.storage_worker,
+            indexer=self._indexer,
+            field_index=self._matrix_serializer.field_index,
             n_threads=n_threads if n_threads else min(32, os.cpu_count() + 4),
+            dtypes=self._matrix_serializer.dtypes
         )
-
-        self._search.single_search.clear_cache()
 
         # initial lock
         self._lock = ThreadLock()
@@ -129,16 +128,13 @@ class ExclusiveDB:
             self._pre_build_index()
 
     @unavailable_if_deleted
-    def add_item(self, vector: Union[np.ndarray, list], id: int, *, field: dict = None,
-                 buffer_size: Union[int, None, bool] = True):
+    def add_item(self, vector: Union[np.ndarray, list], *, field: dict = None,
+                 buffer_size: Union[int, None, bool] = True) -> int:
         """
         Add a single vector to the collection.
 
-        It is recommended to use incremental ids for best performance.
-
         Parameters:
             vector (np.ndarray): The vector to be added.
-            id (int): The ID of the vector.
             field (dict, optional, keyword-only): The field of the vector. Default is None.
                 If None, the field will be set to an empty string.
             buffer_size (int or bool or None): The buffer size for the storage worker. Default is True.
@@ -155,27 +151,62 @@ class ExclusiveDB:
         Raises:
             ValueError: If the vector dimensions don't match or the ID already exists.
         """
-        return self._matrix_serializer.add_item(vector, id=id, field=field,
+        return self._matrix_serializer.add_item(vector, field=field,
                                                 buffer_size=buffer_size)
 
     @unavailable_if_deleted
     def bulk_add_items(
             self, vectors: Union[List[Tuple[np.ndarray, int, dict]], List[Tuple[np.ndarray, int]]],
             **kwargs
-    ):
+    ) -> List[int]:
         """
         Bulk add vectors to the collection in batches.
 
-        It is recommended to use incremental ids for best performance.
 
         Parameters:
             vectors (list or tuple): A list or tuple of vectors to be saved.
-                Each vector can be a tuple of (vector, id, field).
+                Each vector can be a tuple of (vector, field).
 
         Returns:
             List[int]: A list of indices where the vectors are stored.
         """
         return self._matrix_serializer.bulk_add_items(vectors)
+
+    def from_pandas(self, df: pd.DataFrame):
+        """
+        Add vectors from a pandas DataFrame.
+        """
+        return self._matrix_serializer.from_pandas(df)
+
+    def from_arrow(self, table: pa.Table):
+        """
+        Add vectors from a pyarrow Table.
+        """
+        return self._matrix_serializer.from_arrow(table)
+
+    def from_polars(self, df: pl.DataFrame):
+        """
+        Add vectors from a polars DataFrame.
+        """
+        return self._matrix_serializer.from_polars(df)
+
+    def from_parquet(self, path: str):
+        """
+        Add vectors from a parquet file.
+        """
+        return self._matrix_serializer.from_parquet(path)
+
+    def from_csv(self, path: str):
+        """
+        Add vectors from a csv file.
+        """
+        return self._matrix_serializer.from_csv(path)
+
+    def from_dict(self, data: dict):
+        """
+        Add vectors from a dictionary.
+        """
+        return self._matrix_serializer.from_dict(data)
 
     @unavailable_if_deleted
     def commit(self):
@@ -190,37 +221,33 @@ class ExclusiveDB:
     def _pre_build_index(self):
         if not hasattr(self._matrix_serializer, "indexer"):
             logger.info("Pre-building the index...")
-            self.build_index(index_mode="Flat-IP")  # Default index mode
+            self.build_index(index_mode="FLAT")  # 使用正确的索引类型别名
 
     @unavailable_if_deleted
     @unavailable_if_empty
-    def build_index(self, index_mode, rebuild=False, **kwargs):
+    def build_index(self, index_mode, **kwargs):
         """
         Build the index for clustering.
 
         Parameters:
             index_mode (str): The index mode, must be one of the following:
 
+                - 'FLAT': Flat index with inner product. (Default)
+                - 'FLAT-L2': Flat index with squared L2 distance.
+                - 'FLAT-COS': Flat index with cosine similarity.
+                - 'FLAT-IP-SQ8': Flat index with inner product and scalar quantizer with 8 bits.
+                - 'FLAT-L2-SQ8': Flat index with squared L2 distance and scalar quantizer with 8 bits.
+                - 'FLAT-COS-SQ8': Flat index with cosine similarity and scalar quantizer with 8 bits.
+                - 'FLAT-JACCARD-BINARY': Flat index with binary quantizer. The distance is Jaccard distance.
+                - 'FLAT-HAMMING-BINARY': Flat index with binary quantizer. The distance is Hamming distance.
+                - 'IVF': IVF index with inner product.
+                - 'IVF-L2': IVF index with squared L2 distance.
+                - 'IVF-COS': IVF index with cosine similarity.
                 - 'IVF-IP-SQ8': IVF index with inner product and scalar quantizer with 8 bits.
-                    The distance is inner product.
-                - 'IVF-IP': IVF index with inner product. (Alias: 'IVF')
-                - 'IVF-L2sq-SQ8': IVF index with squared L2 distance and scalar quantizer with 8 bits.
-                    The distance is squared L2 distance.
-                - 'IVF-L2sq': IVF index with squared L2 distance.
-                - 'IVF-Cos-SQ8': IVF index with cosine similarity and scalar quantizer with 8 bits.
-                    The distance is cosine similarity.
-                - 'IVF-Cos': IVF index with cosine similarity.
-                - 'IVF-Jaccard-Binary': IVF index with binary quantizer. The distance is Jaccard distance.
-                - 'IVF-Hamming-Binary': IVF index with binary quantizer. The distance is Hamming distance.
-                - 'Flat-IP-SQ8': Flat index with inner product and scalar quantizer with 8 bits.
-                - 'Flat-IP': Flat index with inner product. (Alias: 'FLAT')
-                - 'Flat-L2sq-SQ8': Flat index with squared L2 distance and scalar quantizer with 8 bits.
-                - 'Flat-L2sq': Flat index with squared L2 distance.
-                - 'Flat-Cos-SQ8': Flat index with cosine similarity and scalar quantizer with 8 bits.
-                - 'Flat-Cos': Flat index with cosine similarity.
-                - 'Flat-Jaccard-Binary': Flat index with binary quantizer. The distance is Jaccard distance.
-                - 'Flat-Hamming-Binary': Flat index with binary quantizer. The distance is Hamming distance.
-            rebuild (bool): Whether to rebuild the index.
+                - 'IVF-L2-SQ8': IVF index with squared L2 distance and scalar quantizer with 8 bits.
+                - 'IVF-COS-SQ8': IVF index with cosine similarity and scalar quantizer with 8 bits.
+                - 'IVF-JACCARD-BINARY': IVF index with binary quantizer. The distance is Jaccard distance.
+                - 'IVF-HAMMING-BINARY': IVF index with binary quantizer. The distance is Hamming distance.
             kwargs: Additional keyword arguments. The following are available:
 
                 - 'n_clusters' (int): The number of clusters. It is only available when the index_mode including 'IVF'.
@@ -229,7 +256,7 @@ class ExclusiveDB:
             None
         """
         with self._lock:
-            self._indexer.build_index(index_mode, rebuild=rebuild, **kwargs)
+            self._indexer.build_index(index_mode, **kwargs)
             self._matrix_serializer.indexer = self._indexer
 
     @unavailable_if_deleted
@@ -248,7 +275,7 @@ class ExclusiveDB:
     @unavailable_if_deleted
     @unavailable_if_empty
     def search(self, vector: Union[np.ndarray, list], k: int = 10, *,
-               search_filter: Filter = None, return_fields=False, **kwargs):
+               search_filter: Filter = None, **kwargs):
         """
         Search the database for the vectors most similar to the given vector.
 
@@ -258,7 +285,6 @@ class ExclusiveDB:
                 and the type of vector can be a list or a numpy array.
             k (int): The number of nearest vectors to return.
             search_filter (Filter or FilterExpression string, optional): The filter to apply to the search.
-            return_fields (bool): Whether to return the fields of the search results.
             kwargs: Additional keyword arguments. The following are valid:
 
                 - rescore (bool): Whether to rescore the results of binary or scaler quantization searches.
@@ -266,12 +292,12 @@ class ExclusiveDB:
                 - rescore_multiplier (int): The multiplier for the rescore operation.
                     It is only available when rescore is True.
                     If 'Binary' is in the index mode, the default is 10. Otherwise, the default is 2.
+                - nprobe (int): The number of clusters to search. It is only available when the index mode is 'IVF'.
+                    Default is 8.
 
         Returns:
-            (Tuple[List[int], List[float], List[Dict]] or Tuple[List[int], List[float], None]):
-                If return_fields is True, the indices, similarity scores,
-                and fields of the nearest vectors in the database.
-                Otherwise, the indices and similarity scores of the nearest vectors in the database.
+            Result: 搜索结果对象，可通过 ``indices, distances, fields = res`` 解包，
+            或使用 ``res.to_*`` 系列方法进行格式化。
 
         Raises:
             ValueError: If the database is empty.
@@ -302,79 +328,39 @@ class ExclusiveDB:
         if k > self._matrix_serializer.shape[0]:
             k = self._matrix_serializer.shape[0]
 
-        if not self._use_cache:
-            self._search.single_search.clear_cache()
+        res = self._search.search(vector=vector, k=k, search_filter=search_filter, **kwargs)
 
-        res = self._search.search(vector=vector, k=k, search_filter=search_filter,
-                                  return_fields=return_fields, **kwargs)
-
+        # 直接返回 Result 对象，保留向后兼容的解包能力
         return res
 
     @unavailable_if_deleted
-    def is_id_exists(self, id):
-        """
-        Check if the ID exists in the database.
-
-        Parameters:
-            id (int): The ID to check.
-
-        Returns:
-            Bool: True if the ID exists, False otherwise.
-        """
-        return id in self._matrix_serializer.id_filter
-
-    @property
-    @unavailable_if_deleted
     @unavailable_if_empty
-    def max_id(self):
-        """
-        Return the maximum ID in the database.
-
-        Returns:
-            (int): The maximum ID in the database.
-        """
-        return self._matrix_serializer.id_filter.find_max_value()
-
-    @unavailable_if_deleted
-    @unavailable_if_empty
-    def query(self, query_filter, filter_ids=None, return_ids_only=False):
+    def query(self, query_filter):
         """
         Query the fields cache.
 
         Parameters:
             query_filter (str): Filter or dict or FieldExpression string
                 The filter object or the specify data to filter.
-            filter_ids (List[int]):
-                The list of external IDs to filter.
-            return_ids_only (bool):
-                If True, only the external IDs will be returned.
 
         Returns:
-            (List[Dict]): The records. If not return_ids_only, the records will be returned.
-            (List[int]): The external IDs. If return_ids_only, the external IDs will be returned.
+            (QueryView): The records.
         """
-        return self._matrix_serializer.field_index.query(query_filter, filter_ids, return_ids_only)
+        return self._matrix_serializer.field_index.query(query_filter)
 
     @unavailable_if_deleted
     @unavailable_if_empty
-    def query_vectors(self, query_filter, filter_ids=None):
+    def query_vectors(self, query_filter):
         """
         Query the vector data by the filter.
 
         Parameters:
             query_filter (Filter or dict or FieldExpression str or None):
                 The filter object or the specify data to filter.
-            filter_ids (list[int]):
-                The list of external IDs to filter. Default is None.
-
         Returns:
-            (Tuple[List[np.ndarray], List[int], List[Dict]]): The vectors, IDs, and fields of the items.
+            (QueryView): The vectors, IDs, and fields of the items.
         """
-        ids = self._matrix_serializer.field_index.query(query_filter, filter_ids, return_ids_only=True)
-        if not ids:
-            return np.array([]), np.array([]), []
-
-        return self.read_by_only_id(ids)
+        return self._matrix_serializer.field_index.query(query_filter)
 
     @property
     def shape(self):
@@ -394,9 +380,9 @@ class ExclusiveDB:
         Returns:
             DataOpsSession (DataOpsSession): The session object.
         """
-        from ...execution_layer.session import DataOpsSession
+        from ...execution_layer.session import DataInsertionSession
 
-        return DataOpsSession(self)
+        return DataInsertionSession(self)
 
     @unavailable_if_deleted
     @unavailable_if_empty
@@ -408,30 +394,43 @@ class ExclusiveDB:
             n (int): The number of vectors to return. Default is 5.
 
         Returns:
-            (Tuple[List[np.ndarray], List[int], List[Dict]]): The vectors, IDs, and fields of the items.
+            (QueryView): The vectors, IDs, and fields of the items.
         """
         filenames = self._matrix_serializer.storage_worker.get_all_files()
         filenames = sorted(filenames, key=lambda x: int(x.split('_')[-1].split('.')[0]))
 
-        data, indices = [], []
+        data = []
 
         count = 0
         dtypes = self._matrix_serializer.dtypes
 
+        indices = []
         for filename in filenames:
-            data_chunk, index_chunk = self._matrix_serializer.dataloader(filename)
+            data_dict = self._matrix_serializer.dataloader(filename)
+
+            # 从字典中提取实际的数组数据
+            if isinstance(data_dict, dict):
+                if "data" in data_dict:
+                    data_chunk = data_dict["data"]
+                else:
+                    # 如果没有 "data" 键，使用第一个数组
+                    data_chunk = list(data_dict.values())[0]
+            else:
+                # 向后兼容：如果直接返回数组
+                data_chunk = data_dict
+
             dtypes = data_chunk.dtype
             data.extend(data_chunk)
-            indices.extend(index_chunk)
-            count += len(index_chunk)
+
+            indices.extend(self._matrix_serializer.storage_worker.id_mapper[filename].generate_ids(as_range=True))
+            count += len(data_chunk)
             if count >= n:
                 break
 
         if data:
-            return (np.asarray(indices)[:n], np.vstack(data, dtype=dtypes)[:n],
-                    self._matrix_serializer.field_index.retrieve_ids(indices[:n],
-                                                                     include_external_id=True))
-        return np.asarray(indices), np.array(data, dtype=dtypes), []
+            return QueryView((np.vstack(data, dtype=dtypes)[:n],
+                              self._matrix_serializer.field_index.retrieve_many(indices[:n])))
+        return QueryView((np.array(data, dtype=dtypes), []))
 
     @unavailable_if_deleted
     @unavailable_if_empty
@@ -443,77 +442,44 @@ class ExclusiveDB:
             n (int): The number of vectors to return. Default is 5.
 
         Returns:
-            (Tuple[List[np.ndarray], List[int], List[Dict]]): The vectors, IDs, and fields of the items.
+            (QueryView): The vectors, IDs, and fields of the items.
         """
         filenames = self._matrix_serializer.storage_worker.get_all_files()
         filenames = sorted(filenames, key=lambda x: int(x.split('_')[-1].split('.')[0]))
 
-        data, indices = [], []
+        data = []
 
         count = 0
         dtypes = self._matrix_serializer.dtypes
 
+        indices = []
         for filename in filenames[::-1]:
-            data_chunk, index_chunk = self._matrix_serializer.dataloader(filename)
+            data_dict = self._matrix_serializer.dataloader(filename)
+
+            # 从字典中提取实际的数组数据
+            if isinstance(data_dict, dict):
+                if "data" in data_dict:
+                    data_chunk = data_dict["data"]
+                else:
+                    # 如果没有 "data" 键，使用第一个数组
+                    data_chunk = list(data_dict.values())[0]
+            else:
+                # 向后兼容：如果直接返回数组
+                data_chunk = data_dict
+
             dtypes = data_chunk.dtype
-            data.insert(0, data_chunk)
-            indices = index_chunk.tolist() + indices
-            count += len(index_chunk)
+            data.append(data_chunk)
+
+            indices.extend(self._matrix_serializer.storage_worker.id_mapper[filename].generate_ids(as_range=True))
+            count += len(data_chunk)
             if count >= n:
                 break
 
         if data:
-            return (np.asarray(indices)[-n:], np.vstack(data, dtype=dtypes)[-n:],
-                    self._matrix_serializer.field_index.retrieve_ids(indices[-n:],
-                                                                     include_external_id=True))
-        return np.asarray(indices), np.array(data, dtype=dtypes), []
+            return QueryView((np.vstack(data[::-1], dtype=dtypes)[-n:],
+                              self._matrix_serializer.field_index.retrieve_many(indices[-n:])))
 
-    @unavailable_if_deleted
-    @unavailable_if_empty
-    def yield_every_single_element(self, limit=None):
-        """
-        Yield every single element in the database.
-
-        Parameters:
-            limit (int): The maximum number of elements to yield. Default is None.
-
-        Returns:
-            (Tuple[np.ndarray, int, Dict]): The vectors, IDs, and fields of the items
-
-        """
-        raise_if(TypeError, limit is not None and not isinstance(limit, int), "limit must be an integer.")
-        filenames = self._matrix_serializer.storage_worker.get_all_files()
-        filenames = sorted(filenames, key=lambda x: int(x.split('_')[-1].split('.')[0]))
-
-        count = 0
-        for filename in filenames:
-            data_chunk, index_chunk = self._matrix_serializer.dataloader(filename)
-            for i in range(len(index_chunk)):
-                yield int(index_chunk[i]), np.asarray(data_chunk[i]), \
-                    self._matrix_serializer.field_index.retrieve([index_chunk[i]], include_external_id=True)
-                count += 1
-                if limit and count >= limit:
-                    return
-
-    @unavailable_if_deleted
-    @unavailable_if_empty
-    def read_by_only_id(self, id: Union[int, list]):
-        """
-        Read the vector data by the external ID.
-
-        Parameters:
-            id (int or list): The external ID or list of external IDs.
-
-        Returns:
-            (Tuple[np.ndarray, List[int], List[Dict]], Tuple[np.ndarray, int, Dict]):
-                The vectors, IDs, and fields of the items.
-        """
-        data, ids = self._matrix_serializer.storage_worker.read_by_only_id(id)
-
-        if data.shape[0] > 0:
-            return np.asarray(ids), np.asarray(data), \
-                self._matrix_serializer.field_index.retrieve_ids(ids, include_external_id=True)
-        return np.asarray(ids), np.asarray(data), []
+        return QueryView((np.array(data, dtype=dtypes), []))
 
     @unavailable_if_deleted
     @unavailable_if_empty
@@ -528,43 +494,6 @@ class ExclusiveDB:
 
     @unavailable_if_deleted
     @unavailable_if_empty
-    def build_field_index(self, schema):
-        """
-        Build an index for the field.
-
-        Parameters:
-            schema (IndexSchema or Field name string): The schema of the field or the field name string.
-                When passing the field name string, the field name must be wrapped with ':', like ':vector:', ':timestamp:'.
-
-        Returns:
-            None
-
-        Note:
-            The :id: is a reserved field name and cannot be used.
-        """
-        if not isinstance(schema, (IndexSchema, str)):
-            raise TypeError("schema must be an instance of IndexSchema or a field string.")
-        self._matrix_serializer.field_index.build_index(schema)
-
-    @unavailable_if_deleted
-    @unavailable_if_empty
-    def remove_field_index(self, field_name):
-        """
-        Remove the index for the field.
-
-        Parameters:
-            field_name (str): The name of the field.
-
-        Returns:
-            None
-        """
-        if not field_name.startswith(':') or not field_name.endswith(':'):
-            raise ValueError("The field name must be wrapped with ':'.")
-
-        self._matrix_serializer.field_index.remove_index(field_name)
-
-    @unavailable_if_deleted
-    @unavailable_if_empty
     def remove_all_field_indices(self):
         """
         Remove all the field indices.
@@ -573,17 +502,6 @@ class ExclusiveDB:
             None
         """
         self._matrix_serializer.field_index.remove_all_field_indices()
-
-    @unavailable_if_deleted
-    @unavailable_if_empty
-    def list_field_index(self):
-        """
-        List the field index.
-
-        Returns:
-            List: The list of field indices.
-        """
-        return self._matrix_serializer.field_index.list_indices()
 
     def delete(self):
         """
@@ -601,8 +519,7 @@ class ExclusiveDB:
         import gc
 
         with self._lock:
-            self._search.single_search.clear_cache()
-            self._search.delete()
+            self._search.close()
             self._matrix_serializer.delete()
 
         gc.collect()

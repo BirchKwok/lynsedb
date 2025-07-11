@@ -1,0 +1,1138 @@
+{
+  "results": [
+    {
+      "method": "simsimd",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 100,
+      "time_mean": 3.207499976269901e-05,
+      "time_std": 1.76002926641311e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 100,
+      "time_mean": 4.443341167643666e-05,
+      "time_std": 1.0709914626137645e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 500,
+      "time_mean": 8.190841181203723e-05,
+      "time_std": 1.7740135578463037e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 500,
+      "time_mean": 0.00010342479799874127,
+      "time_std": 9.100496744644138e-06,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 1000,
+      "time_mean": 0.00016006700461730362,
+      "time_std": 3.3649032838102994e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 1000,
+      "time_mean": 0.00032607519533485175,
+      "time_std": 3.153680929009318e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 2000,
+      "time_mean": 0.00028525819652713835,
+      "time_std": 5.392150221449716e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 2000,
+      "time_mean": 0.0007332581968512386,
+      "time_std": 0.00010195075310083721,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 100,
+      "time_mean": 3.2782991183921695e-05,
+      "time_std": 2.1238371354303023e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 100,
+      "time_mean": 0.0006340162013657391,
+      "time_std": 8.688068489730264e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 500,
+      "time_mean": 9.77999996393919e-05,
+      "time_std": 1.968957624019301e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 500,
+      "time_mean": 0.0030743666051421315,
+      "time_std": 0.0001371664027603555,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 1000,
+      "time_mean": 0.0001577331975568086,
+      "time_std": 1.8459733386887556e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 1000,
+      "time_mean": 0.005770866596139968,
+      "time_std": 5.108715186784271e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 2000,
+      "time_mean": 0.00031474140123464165,
+      "time_std": 1.8944611031109818e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 2000,
+      "time_mean": 0.011593641608487814,
+      "time_std": 0.00010541460753114092,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 100,
+      "time_mean": 1.8216198077425362e-05,
+      "time_std": 1.0379883111167115e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 100,
+      "time_mean": 9.400819544680417e-05,
+      "time_std": 4.074499276533281e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 500,
+      "time_mean": 3.9208406815305355e-05,
+      "time_std": 1.2431058504395146e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 500,
+      "time_mean": 0.0006371415976900608,
+      "time_std": 0.00015453264309676557,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 1000,
+      "time_mean": 5.839199875481427e-05,
+      "time_std": 5.639663135253422e-06,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 1000,
+      "time_mean": 0.0015751583967357873,
+      "time_std": 0.0003597783299826755,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 2000,
+      "time_mean": 0.000154916598694399,
+      "time_std": 4.3615054841958755e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 2000,
+      "time_mean": 0.0033568748040124774,
+      "time_std": 0.0004094181746043404,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "cosine",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 100,
+      "time_mean": 2.4066795594990255e-05,
+      "time_std": 1.0937838253712893e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 100,
+      "time_mean": 3.579159965738654e-05,
+      "time_std": 4.761301650243207e-06,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 500,
+      "time_mean": 7.447479874826968e-05,
+      "time_std": 2.0260348019115597e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 500,
+      "time_mean": 0.0001914001943077892,
+      "time_std": 4.748656997516853e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 1000,
+      "time_mean": 0.0001218999968841672,
+      "time_std": 1.298605791736757e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 1000,
+      "time_mean": 0.0005034913832787424,
+      "time_std": 3.677152849156244e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 2000,
+      "time_mean": 0.00026550859911367297,
+      "time_std": 3.6777331822342e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 2000,
+      "time_mean": 0.0015044251980725677,
+      "time_std": 0.0003864779350692638,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 100,
+      "time_mean": 2.2324995370581746e-05,
+      "time_std": 6.776694283804167e-06,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 100,
+      "time_mean": 0.000621241400949657,
+      "time_std": 7.731017357099335e-06,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 500,
+      "time_mean": 7.61000090278685e-05,
+      "time_std": 1.709519261809695e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 500,
+      "time_mean": 0.0032827498042024674,
+      "time_std": 0.00010111994547081364,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 1000,
+      "time_mean": 0.00014575860695913433,
+      "time_std": 1.85053000645681e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 1000,
+      "time_mean": 0.006285008200211451,
+      "time_std": 7.834414738245087e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 2000,
+      "time_mean": 0.00026051659951917825,
+      "time_std": 2.2722714507847806e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 2000,
+      "time_mean": 0.012894316797610373,
+      "time_std": 0.00033959604211304483,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 100,
+      "time_mean": 1.4358392218127846e-05,
+      "time_std": 9.979390001026034e-06,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 100,
+      "time_mean": 3.710000310093164e-05,
+      "time_std": 2.588356317635398e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 500,
+      "time_mean": 1.8783396808430552e-05,
+      "time_std": 3.2180783093886286e-06,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 500,
+      "time_mean": 0.00011438339715823531,
+      "time_std": 4.192333797928037e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 1000,
+      "time_mean": 2.6842002989724277e-05,
+      "time_std": 2.1738123959578867e-06,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 1000,
+      "time_mean": 0.0001627338002435863,
+      "time_std": 3.5457186892992425e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 2000,
+      "time_mean": 5.259159952402115e-05,
+      "time_std": 6.58081438572379e-06,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 2000,
+      "time_mean": 0.0003523999999742955,
+      "time_std": 7.955104401666135e-05,
+      "success": true,
+      "error": ""
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "l2sq",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "bad operand type for unary -: 'simsimd.DistancesTensor'"
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "tuple index out of range"
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "bad operand type for unary -: 'simsimd.DistancesTensor'"
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "tuple index out of range"
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "bad operand type for unary -: 'simsimd.DistancesTensor'"
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "tuple index out of range"
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "bad operand type for unary -: 'simsimd.DistancesTensor'"
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "tuple index out of range"
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float32'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "bad operand type for unary -: 'simsimd.DistancesTensor'"
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "tuple index out of range"
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "bad operand type for unary -: 'simsimd.DistancesTensor'"
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "tuple index out of range"
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "bad operand type for unary -: 'simsimd.DistancesTensor'"
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "tuple index out of range"
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "bad operand type for unary -: 'simsimd.DistancesTensor'"
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "tuple index out of range"
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.float16'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "bad operand type for unary -: 'simsimd.DistancesTensor'"
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "tuple index out of range"
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 100,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "bad operand type for unary -: 'simsimd.DistancesTensor'"
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "tuple index out of range"
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 500,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "bad operand type for unary -: 'simsimd.DistancesTensor'"
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "tuple index out of range"
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 1000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    },
+    {
+      "method": "simsimd",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "bad operand type for unary -: 'simsimd.DistancesTensor'"
+    },
+    {
+      "method": "numpy",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "tuple index out of range"
+    },
+    {
+      "method": "usearch",
+      "distance_metric": "inner",
+      "data_type": "<class 'numpy.int8'>",
+      "vector_size": 2000,
+      "time_mean": 0.0,
+      "time_std": 0.0,
+      "success": false,
+      "error": "too many values to unpack (expected 3)"
+    }
+  ],
+  "optimal_choices": {
+    "cosine": {
+      "<class 'numpy.float32'>": {
+        "fastest_method": "simsimd",
+        "avg_time": 0.00013982715317979456,
+        "all_methods": {
+          "simsimd": 0.00013982715317979456,
+          "numpy": 0.0003017979004653171
+        }
+      },
+      "<class 'numpy.float16'>": {
+        "fastest_method": "simsimd",
+        "avg_time": 0.00015076439740369096,
+        "all_methods": {
+          "simsimd": 0.00015076439740369096,
+          "numpy": 0.005268222752783913
+        }
+      },
+      "<class 'numpy.int8'>": {
+        "fastest_method": "simsimd",
+        "avg_time": 6.7683300585486e-05,
+        "all_methods": {
+          "simsimd": 6.7683300585486e-05,
+          "numpy": 0.0014157957484712824
+        }
+      }
+    },
+    "l2sq": {
+      "<class 'numpy.float32'>": {
+        "fastest_method": "simsimd",
+        "avg_time": 0.00012148754758527503,
+        "all_methods": {
+          "simsimd": 0.00012148754758527503,
+          "numpy": 0.0005587770938291214
+        }
+      },
+      "<class 'numpy.float16'>": {
+        "fastest_method": "simsimd",
+        "avg_time": 0.0001261750527191907,
+        "all_methods": {
+          "simsimd": 0.0001261750527191907,
+          "numpy": 0.005770829050743487
+        }
+      },
+      "<class 'numpy.int8'>": {
+        "fastest_method": "simsimd",
+        "avg_time": 2.8143847885075957e-05,
+        "all_methods": {
+          "simsimd": 2.8143847885075957e-05,
+          "numpy": 0.0001666543001192622
+        }
+      }
+    }
+  }
+}

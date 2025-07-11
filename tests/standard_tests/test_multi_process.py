@@ -22,7 +22,7 @@ def bulk_add_items(items):
         with collection.insert_session() as session:
             session.bulk_add_items(items)
 
-        print(collection.max_id, collection.shape)
+        print(collection.shape)
     except Exception as e:
         print(e)
 

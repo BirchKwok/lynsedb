@@ -14,7 +14,7 @@ class FastSort:
             partitioned_indices = np.argpartition(self.data, k-1, axis=axis)
             topk_indices = partitioned_indices[:k]
         else:
-            partitioned_indices = np.argpartition(self.data, self.data.shape[1] - k, axis=axis)
+            partitioned_indices = np.argpartition(self.data, self.data.shape[axis] - k, axis=axis)
             topk_indices = partitioned_indices[-k:]
 
         topk_values = np.take_along_axis(self.data, topk_indices, axis=axis)

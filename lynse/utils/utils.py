@@ -1,14 +1,12 @@
 from collections import OrderedDict
+import os
 import re
+import threading
+from contextlib import contextmanager
 from threading import Lock
 import time
 from functools import wraps
 from pathlib import Path
-
-import numpy as np
-
-from lynse.core_components.io import load_nnp
-from lynse.core_components.locks import ThreadLock
 
 
 class OpsError(Exception):
@@ -187,7 +185,6 @@ def collection_repr(collection):
             f'\n)')
 
 
-
 class FileHandlePool:
     def __init__(self, max_open_files=100):
         self.max_open_files = max_open_files
@@ -195,38 +192,64 @@ class FileHandlePool:
         self.lock = Lock()
 
     def get_file_handle(self, file_path):
+        from ..core_components.io import load_nnp
         with self.lock:
             if file_path in self.open_files:
-                # 如果文件已经打开，将其移到OrderedDict的末尾（最近使用）
+                # If the file has already been opened, move it to the end of the OrderedDict
                 self.open_files.move_to_end(file_path)
                 return self.open_files[file_path]
 
-            # 如果达到最大打开文件数，关闭最早打开的文件
+            # If the maximum number of open files has been reached, close the oldest file
             if len(self.open_files) >= self.max_open_files:
                 oldest_file, oldest_handle = self.open_files.popitem(last=False)
-                oldest_handle._mmap.close()
+                self._close_handle(oldest_handle)
 
-            # 打开新文件
+            # open new file
             file_handle = load_nnp(file_path, mmap_mode=True)
             self.open_files[file_path] = file_handle
             return file_handle
 
+    def _close_handle(self, handle):
+        """安全地关闭文件句柄"""
+        if isinstance(handle, dict):
+            # 如果是字典（load_nnp 的返回值），关闭字典中的每个 memmap 对象
+            for array_name, array in handle.items():
+                if hasattr(array, '_mmap') and array._mmap is not None:
+                    try:
+                        array._mmap.close()
+                    except (AttributeError, OSError):
+                        # 如果关闭失败，静默忽略
+                        pass
+        elif hasattr(handle, '_mmap') and handle._mmap is not None:
+            # 如果是单个 memmap 对象
+            try:
+                handle._mmap.close()
+            except (AttributeError, OSError):
+                # 如果关闭失败，静默忽略
+                pass
+
     def close_all(self):
         with self.lock:
             for handle in self.open_files.values():
-                handle._mmap.close()
+                self._close_handle(handle)
             self.open_files.clear()
 
     def __del__(self):
-        self.close_all()
+        try:
+            self.close_all()
+        except:
+            # 在析构函数中，忽略所有错误
+            pass
 
 
 class SafeMmapReader:
     def __init__(self, max_open_files=100):
+        from ..core_components.locks import ThreadLock
+
         self.file_pool = FileHandlePool(max_open_files)
         self.lock = ThreadLock()
 
-    def safe_mmap_reader(self, path, ids=None):
+    def load_nnp(self, path, ids=None):
         try:
             with self.lock:
                 mmap_handle = self.file_pool.get_file_handle(path)
@@ -241,10 +264,67 @@ class SafeMmapReader:
         self.file_pool.close_all()
 
     def __del__(self):
-        self.close()
+        try:
+            self.close()
+        except:
+            # 在析构函数中，忽略所有错误
+            pass
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+
+# Use threading.local to create thread-local storage
+thread_local = threading.local()
+
+
+def inject_caller_info(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        caller_name = getattr(thread_local, 'caller_name', None)
+
+        if caller_name is None:
+            # If caller_name is not set, it means that the method is called directly
+            with self.global_lock:
+                return method(self, *args, **kwargs)
+        else:
+            # Otherwise, it means that the method is called by insert_session
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+@contextmanager
+def get_cursor(conn):
+    """
+    Get a cursor from a connection.
+
+    Parameters:
+        conn: sqlite3.Connection
+
+    Yields:
+        cursor: sqlite3.Cursor
+    """
+    cursor = conn.cursor()
+    try:
+        yield cursor
+    finally:
+        cursor.close()
+
+
+def clean_file_when_finished(filename):
+    """
+    A decorator that cleans up the file when the function is finished.
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            finally:
+                os.remove(filename)
+        return wrapper
+    return decorator

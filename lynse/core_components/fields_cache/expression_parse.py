@@ -112,13 +112,6 @@ class ConditionNode(ASTNode):
         self.validate_field_format(self.field)
         field = self.field
 
-        if field == ':id:':
-            value = [int(v.strip()) for v in self.value.strip('[]').split(',')]
-            if self.op == 'not in':
-                return Filter(must_not=[FieldCondition(field, MatchID(value))])
-            elif self.op == 'in':
-                return Filter(must=[FieldCondition(field, MatchID(value))])
-
         if self.op in ['in', 'not in']:
             value = [v.strip() for v in self.value.strip('[]').split(',')]
             value = [self.parse_value(v) for v in value]

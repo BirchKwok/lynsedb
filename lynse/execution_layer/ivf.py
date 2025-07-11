@@ -1,12 +1,12 @@
 from pathlib import Path
 from typing import Callable, Union
-
+import logging
 import numpy as np
 from spinesUtils.asserts import raise_if
 
 from ..configs.config import config
 from ..storage_layer.storage import PersistentFileStorage
-from ..core_components.kmeans import BatchKMeans
+from ..core_components.kmeans import EnhancedBatchKMeans
 from ..core_components.ivf_index import IVFIndex
 from ..core_components.locks import ThreadLock
 
@@ -17,27 +17,38 @@ class IVFCreator:
             dataloader: Callable,
             storage_worker: PersistentFileStorage,
             collections_path_parent: Union[str, Path],
+            drift_threshold: float = 0.3,
+            quality_threshold: float = 0.5
     ):
         self.dataloader = dataloader
         self.ann_model = None
         self.storage_worker = storage_worker
-        self.ivf_index = IVFIndex()
+        self.ivf_index_path = collections_path_parent
+        self.ivf_index = IVFIndex(filepath=self.ivf_index_path)
+        self.drift_threshold = drift_threshold
+        self.quality_threshold = quality_threshold
 
-        self.index_path = Path(collections_path_parent) / 'index'
+        self.index_path = Path(self.ivf_index_path) / 'index'
         self.index_path.mkdir(parents=True, exist_ok=True)
 
-        if (self.index_path / 'ivf_ann_model').exists():
-            self.ann_model = BatchKMeans(n_clusters=1, batch_size=10240, epochs=100).load(
-                self.index_path / 'ivf_ann_model')
-
-        if (self.index_path / 'ivf_index').exists():
-            self.ivf_index = IVFIndex().load(self.index_path / 'ivf_index')
+        # 设置日志
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            filename=str(self.index_path / 'ivf.log')
+        )
+        self.logger = logging.getLogger('IVFCreator')
 
     def _kmeans_clustering(self, data, rebuild=False):
-        """kmeans clustering"""
+        """kmeans clustering with quality monitoring"""
         if rebuild:
             self.ann_model = self.ann_model.partial_fit(data)
             labels = self.ann_model.labels_
+
+            # 记录聚类质量
+            quality_scores = self.ann_model.get_quality_trend()
+            if quality_scores:
+                self.logger.info(f"Current clustering quality score: {quality_scores[-1]:.4f}")
         else:
             raise_if(ValueError, not self.ann_model.fitted, "The model has not been fitted yet.")
             labels = self.ann_model.predict(data)
@@ -49,13 +60,26 @@ class IVFCreator:
         Build the IVF index more efficiently.
         """
         if rebuild:
-            self.ivf_index = IVFIndex()
+            self.ivf_index = IVFIndex(self.ivf_index_path)
 
         filenames = self.storage_worker.get_all_files()
         already_indexed = self.ivf_index.all_external_ids()
 
         for filename in filenames:
-            data, indices = self.dataloader(filename)
+            data_dict = self.dataloader(filename)
+
+            # 从字典中提取实际的数组数据
+            if isinstance(data_dict, dict):
+                if "data" in data_dict:
+                    data = data_dict["data"]
+                else:
+                    # 如果没有 "data" 键，使用第一个数组
+                    data = list(data_dict.values())[0]
+            else:
+                # 向后兼容：如果直接返回数组
+                data = data_dict
+
+            indices = self.storage_worker.id_mapper[filename].generate_ids(as_range=False)
 
             isin = np.isin(indices, already_indexed)
 
@@ -72,21 +96,34 @@ class IVFCreator:
 
     def _check_if_refit(self, n_clusters, always_refit=False):
         if self.ann_model is None or always_refit:
-            self.ann_model = BatchKMeans(n_clusters=n_clusters, batch_size=10240, epochs=config.LYNSE_KMEANS_EPOCHS)
+            self.ann_model = EnhancedBatchKMeans(
+                n_clusters=n_clusters,
+                batch_size=10240,
+                epochs=config.LYNSE_KMEANS_EPOCHS,
+                drift_threshold=self.drift_threshold,
+                quality_threshold=self.quality_threshold
+            )
+            return True
 
         REFIT = False
 
         if (self.ann_model.n_clusters != n_clusters or
                 self.ann_model.epochs != config.LYNSE_KMEANS_EPOCHS or
                 self.ann_model.batch_size != 10240):
-            self.ann_model = BatchKMeans(n_clusters=n_clusters, batch_size=10240, epochs=config.LYNSE_KMEANS_EPOCHS)
+            self.ann_model = EnhancedBatchKMeans(
+                n_clusters=n_clusters,
+                batch_size=10240,
+                epochs=config.LYNSE_KMEANS_EPOCHS,
+                drift_threshold=self.drift_threshold,
+                quality_threshold=self.quality_threshold
+            )
             REFIT = True
 
         return REFIT
 
     def build_index(self, n_clusters=32, rebuild=False):
         """
-        Build the index for clustering.
+        Build the index for clustering with quality monitoring.
 
         Parameters:
             n_clusters (int): The number of clusters.
@@ -103,13 +140,12 @@ class IVFCreator:
         if all_partition_size < 100000:
             return
 
-        with ThreadLock():
+        with (ThreadLock()):
             REBUILD = self._check_if_refit(n_clusters, always_refit=rebuild) or rebuild
 
             if REBUILD:
-                # delete the old index
+                self.logger.info("Rebuilding index from scratch...")
                 self.remove_index()
-                self.ann_model = BatchKMeans(n_clusters=n_clusters, batch_size=10240, epochs=config.LYNSE_KMEANS_EPOCHS)
                 self._build_index(rebuild=True)
             else:
                 already_clustered_rows = len(self.ivf_index)
@@ -117,6 +153,11 @@ class IVFCreator:
                 if already_clustered_rows == 0:
                     self._build_index(rebuild=True)
                 elif already_clustered_rows == all_partition_size:
+                    # 检查聚类质量
+                    if self.ann_model.quality_scores_history and \
+                            self.ann_model.quality_scores_history[-1] < self.quality_threshold:
+                        self.logger.warning("Low clustering quality detected. Triggering rebuild...")
+                        self._build_index(rebuild=True)
                     return
                 else:
                     if all_partition_size - already_clustered_rows >= 100000:
@@ -124,46 +165,13 @@ class IVFCreator:
                     else:
                         self._build_index(rebuild=False)
 
-            # save ivf index and k-means model
+            # 保存模型和索引
             self.ann_model.save(self.index_path / 'ivf_ann_model')
-
             self.ivf_index.save(self.index_path / 'ivf_index')
 
-    def fast_insert(self, start_filename):
-        """
-        Insert the data into the index.
-
-        Parameters:
-            start_filename (str): The filename to start with.
-
-        Returns:
-            None
-        """
-        filenames = self.storage_worker.get_all_files()
-        filenames = [filename for filename in filenames if int(filename.split('_')[-1]) >=
-                     int(start_filename.split('_')[-1])]
-
-        already_indexed = self.ivf_index.all_external_ids()
-
-        only_run_once = False
-        for filename in filenames:
-            data, indices = self.dataloader(filename)
-
-            if not only_run_once:
-                isin = np.isin(indices, already_indexed)
-
-                if isin.all():
-                    continue
-                else:
-                    data = data[~isin]
-                    indices = indices[~isin]
-
-                only_run_once = True
-
-            labels = self._kmeans_clustering(data, rebuild=True)
-
-            for idx, label in zip(indices, labels):
-                self.ivf_index.add_entry(label, filename, idx)
+            # 记录最终的聚类质量
+            if self.ann_model.quality_scores_history:
+                self.logger.info(f"Final clustering quality score: {self.ann_model.quality_scores_history[-1]:.4f}")
 
     def remove_index(self):
         """
@@ -175,7 +183,7 @@ class IVFCreator:
             None
         """
         self.ann_model = None
-        self.ivf_index.clear_all()
+        self.ivf_index.clear()
         if (self.index_path / 'ivf_ann_model').exists():
             (self.index_path / 'ivf_ann_model').unlink()
         if (self.index_path / 'ivf_index').exists():

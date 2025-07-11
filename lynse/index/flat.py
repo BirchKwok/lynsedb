@@ -1,140 +1,105 @@
+import numpy as np
+import cloudpickle
+from typing import Optional, Tuple, Dict, Any
+
 from .base import BaseIndex
-from ..computational_layer.engines import inner_product as ip, l2sq, cosine as cos
+from .factory import IndexFactory
 
 
-class _IndexFlat(BaseIndex):
-    def __init__(self):
+@IndexFactory.register('flat')
+class FlatIndex(BaseIndex):
+    """Base class for flat index implementations."""
+
+    def __init__(self, distance_metric: str = 'l2', quantizer: str = 'none', **kwargs):
+        super().__init__(distance_metric, quantizer, **kwargs)
+
+    def fit_transform(self, vectors: np.ndarray, ids: Optional[np.ndarray] = None) -> np.ndarray:
+        """Build the flat index."""
+        # Call parent's fit_transform to handle quantization
+        encoded_data = super().fit_transform(vectors, ids)
+        return encoded_data
+
+    def search(self, query: np.ndarray, k: int = 10, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
+        """Search for k nearest neighbors."""
+        if query.ndim == 1:
+            query = query.reshape(1, -1)
+
+        # Encode query using the same quantizer
+        encoded_query = self.encode(query)
+
+        # Compute distances
+        distances = self._distance_batch(encoded_query.squeeze(), self.encoded_data)
+
+        # Get top k
+        if k > len(distances):
+            k = len(distances)
+
+        indices = np.argpartition(distances, k-1)[:k]
+        distances = distances[indices]
+
+        # Sort results
+        sorted_idx = np.argsort(distances)
+        indices = indices[sorted_idx]
+        distances = distances[sorted_idx]
+
+        return self.ids[indices], distances
+
+    def _get_state(self) -> Dict[str, Any]:
+        """获取索引特定的状态。"""
+        return {
+            'data': self.data,
+            'encoded_data': self.encoded_data,
+            'ids': self.ids
+        }
+
+    def _set_state(self, state: Dict[str, Any]) -> None:
+        """从状态恢复索引。"""
+        self.data = state.get('data')
+        self.encoded_data = state.get('encoded_data')
+        self.ids = state.get('ids')
+
+    def _delete_impl(self, ids: np.ndarray) -> None:
         """
-        Initialize the flat index.
+        实现基类要求的删除操作。对于Flat索引，基类的delete方法已经完成了所有必要的操作，
+        这里不需要额外的实现。
+
+        参数:
+            ids: 要删除的向量ID
         """
-        super().__init__()
-
-    def encode(self, vectors):
-        """
-        Encode the input data.
-
-        Parameters:
-            vectors (np.ndarray): The input data.
-
-        Returns:
-            np.ndarray: The encoded data.
-        """
-        return vectors
-
-    def fit_transform(self, vectors, ids):
-        """
-        Fit the model and transform the data.
-
-        Parameters:
-            vectors (np.ndarray): The input data.
-            ids (np.ndarray): The input ids.
-
-        Returns:
-            np.ndarray: The encoded data.
-        """
-        return self.encode(vectors)
-
-    def save(self, filepath):
-        """
-        Save the model to a file.
-
-        Parameters:
-            filepath (str or Pathlike): The name of the file to save the model to.
-        """
-        ...
-
-    def load(self, filepath):
-        """
-        Load the model from a file.
-
-        Parameters:
-            filepath (str or Pathlike): The name of the file to load the model from.
-
-        Returns:
-            _IndexSQ: The loaded model.
-        """
-        return self
+        pass  # 基类的delete方法已经处理了所有必要的操作
 
 
-class IndexFlatL2sq(_IndexFlat):
-    name = 'IndexFlatL2'
-
-    def __init__(self):
-        super().__init__()
-        self._register_distance("L2")
-
-    def search(self, original_vec=None, encoded_vec=None, original_data=None,
-               encoded_data=None, top_k=10):
-        """
-        Search for the nearest neighbors of the input data.
-
-        Parameters:
-            original_vec (np.ndarray): The original vector.
-            encoded_vec (np.ndarray): The encoded vector.
-            original_data (np.ndarray): The original data.
-            encoded_data (np.ndarray): The encoded data.
-            top_k (int): The number of nearest neighbors to return.
-
-        Returns:
-            np.ndarray: The indices of the nearest neighbors.
-        """
-        encoded_vec, encoded_data = super().check_and_encode(original_vec=original_vec, encoded_vec=encoded_vec,
-                                                             original_data=original_data, encoded_data=encoded_data)
-
-        return l2sq(encoded_vec, encoded_data, top_k, use_simd=False)
+# Register specialized versions with different distance metrics
+@IndexFactory.register('flat-l2')
+class FlatL2(FlatIndex):
+    """Flat index with L2 distance."""
+    def __init__(self, quantizer: str = 'none', **kwargs):
+        super().__init__(distance_metric='l2', quantizer=quantizer, **kwargs)
 
 
-class IndexFlatIP(_IndexFlat):
-    name = 'IndexFlatIP'
-
-    def __init__(self):
-        super().__init__()
-        self._register_distance("IP")
-
-    def search(self, original_vec=None, encoded_vec=None, original_data=None,
-               encoded_data=None, top_k=10):
-        """
-        Search for the nearest neighbors of the input data.
-
-        Parameters:
-            original_vec (np.ndarray): The original vector.
-            encoded_vec (np.ndarray): The encoded vector.
-            original_data (np.ndarray): The original data.
-            encoded_data (np.ndarray): The encoded data.
-            top_k (int): The number of nearest neighbors to return.
-
-        Returns:
-            np.ndarray: The indices of the nearest neighbors.
-        """
-        encoded_vec, encoded_data = super().check_and_encode(original_vec=original_vec, encoded_vec=encoded_vec,
-                                                             original_data=original_data, encoded_data=encoded_data)
-
-        return ip(encoded_vec, encoded_data, top_k, use_simd=False)
+@IndexFactory.register('flat-ip')
+class FlatIP(FlatIndex):
+    """Flat index with Inner Product distance."""
+    def __init__(self, quantizer: str = 'none', **kwargs):
+        super().__init__(distance_metric='ip', quantizer=quantizer, **kwargs)
 
 
-class IndexFlatCos(_IndexFlat):
-    name = 'IndexFlatCos'
+@IndexFactory.register('flat-cosine')
+class FlatCosine(FlatIndex):
+    """Flat index with Cosine distance."""
+    def __init__(self, quantizer: str = 'none', **kwargs):
+        super().__init__(distance_metric='cosine', quantizer=quantizer, **kwargs)
 
-    def __init__(self):
-        super().__init__()
-        self._register_distance("Cos")
 
-    def search(self, original_vec=None, encoded_vec=None, original_data=None,
-               encoded_data=None, top_k=10):
-        """
-        Search for the nearest neighbors of the input data.
+@IndexFactory.register('flat-jaccard')
+class FlatJaccard(FlatIndex):
+    """Flat index with Jaccard distance."""
+    def __init__(self, quantizer: str = 'binary', **kwargs):
+        super().__init__(distance_metric='jaccard', quantizer=quantizer, **kwargs)
 
-        Parameters:
-            original_vec (np.ndarray): The original vector.
-            encoded_vec (np.ndarray): The encoded vector.
-            original_data (np.ndarray): The original data.
-            encoded_data (np.ndarray): The encoded data.
-            top_k (int): The number of nearest neighbors to return.
 
-        Returns:
-            np.ndarray: The indices of the nearest neighbors.
-        """
-        encoded_vec, encoded_data = super().check_and_encode(original_vec=original_vec, encoded_vec=encoded_vec,
-                                                             original_data=original_data, encoded_data=encoded_data)
-
-        return cos(encoded_vec, encoded_data, top_k, use_simd=False)
+@IndexFactory.register('flat-hamming')
+class FlatHamming(FlatIndex):
+    """Flat index with Hamming distance."""
+    def __init__(self, quantizer: str = 'binary', **kwargs):
+        super().__init__(distance_metric='hamming', quantizer=quantizer, **kwargs)

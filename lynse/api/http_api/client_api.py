@@ -1,6 +1,5 @@
 import queue
 import time
-from datetime import datetime
 from typing import Union, List, Tuple
 
 import msgpack
@@ -9,7 +8,7 @@ import httpx
 from spinesUtils.asserts import raise_if
 from tqdm import trange
 
-from ...core_components.fields_cache import IndexSchema, ExpressionParser
+from ...core_components.fields_cache import ExpressionParser
 from ...core_components.fields_cache.filter import Filter
 from ...api import logger
 from ...core_components.locks import ThreadLock
@@ -88,8 +87,7 @@ class HTTPClient:
             collection: str,
             dim: int = None,
             chunk_size: int = 100_000,
-            dtypes: str = 'float32',
-            use_cache: bool = True,
+            cache_query: bool = True,
             n_threads: Union[int, None] = 10,
             warm_up: bool = False,
             drop_if_exists: bool = False,
@@ -105,8 +103,7 @@ class HTTPClient:
                 When creating a new collection, the dimension of the vectors must be specified.
                 When loading an existing collection, the dimension of the vectors is automatically loaded.
             chunk_size (int): The chunk size. Default is 100,000.
-            dtypes (str): The data types. Default is 'float32'.
-            use_cache (bool): Whether to use cache for search. Default is True.
+            cache_query (bool): Whether to use cache for search. Default is True.
             n_threads (int): The number of threads. Default is 10.
             warm_up (bool): Whether to warm up. Default is False.
             drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
@@ -127,8 +124,7 @@ class HTTPClient:
             "collection_name": collection,
             "dim": dim,
             "chunk_size": chunk_size,
-            "dtypes": dtypes,
-            "use_cache": use_cache,
+            "cache_query": cache_query,
             "n_threads": n_threads,
             "warm_up": warm_up,
             "drop_if_exists": drop_if_exists,
@@ -397,8 +393,7 @@ class Collection:
             **params: The collection parameters.
                 - dim (int): The dimension of the vectors.
                 - chunk_size (int): The chunk size.
-                - dtypes (str): The data types.
-                - use_cache (bool): Whether to use cache.
+                - cache_query (bool): Whether to use cache.
                 - n_threads (int): The number of threads.
                 - warm_up (bool): Whether to warm up.
                 - drop_if_exists (bool): Whether to drop the collection if it exists.
@@ -438,7 +433,8 @@ class Collection:
         else:
             raise_error_response(response)
 
-    def add_item(self, vector: Union[list[float], np.ndarray], id: int, *, field: Union[dict, None] = None,
+    def add_item(self, vector: Union[list[float], np.ndarray], id: int, *,
+                 field: Union[dict, None] = None,
                  buffer_size: int = True):
         """
         Add an item to the collection.
@@ -750,9 +746,9 @@ class Collection:
         """
         Start an insert session.
         """
-        from ...execution_layer.session import DataOpsSession
+        from ...execution_layer.session import DataInsertionSession
 
-        return DataOpsSession(self)
+        return DataInsertionSession(self)
 
     def _search(self, vector, k, search_filter, return_fields=False, **kwargs):
         """
@@ -997,101 +993,6 @@ class Collection:
         if response.status_code == 200:
             result = response.json()['params']['result']
             return np.asarray(result[0]), np.array(result[1]), result[2]
-        else:
-            raise_error_response(response)
-
-    def build_field_index(self, schema):
-        """
-        Build the field index of the collection.
-
-        Parameters:
-            schema (IndexSchema): The schema of the field index.
-
-        Returns:
-            dict: The response from the server.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        if not isinstance(schema, IndexSchema):
-            raise TypeError("schema must be an instance of IndexSchema.")
-
-        uri = f'{self._uri}/build_field_index'
-        data = {
-            "database_name": self._database_name,
-            "collection_name": self._collection_name,
-            "schema": schema.to_dict()
-        }
-
-        response = self._session.post(uri, json=data)
-
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise_error_response(response)
-
-    def list_field_index(self):
-        """
-        List the field index of the collection.
-
-        Returns:
-            dict: The field index of the collection.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        uri = f'{self._uri}/list_field_index'
-        data = {"database_name": self._database_name, "collection_name": self._collection_name}
-        response = self._session.post(uri, json=data)
-
-        if response.status_code == 200:
-            return response.json()['params']['field_indices']
-        else:
-            raise_error_response(response)
-
-    def remove_field_index(self, field_name):
-        """
-        Remove the field index of the collection.
-
-        Parameters:
-            field_name (str): The name of the field.
-
-        Returns:
-            dict: The response from the server.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        uri = f'{self._uri}/remove_field_index'
-        data = {
-            "database_name": self._database_name,
-            "collection_name": self._collection_name,
-            "field_name": field_name
-        }
-
-        response = self._session.post(uri, json=data)
-
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise_error_response(response)
-
-    def remove_all_field_indices(self):
-        """
-        Remove all the field indices of the collection.
-
-        Returns:
-            dict: The response from the server.
-
-        Raises:
-            ExecutionError: If the server returns an error.
-        """
-        uri = f'{self._uri}/remove_all_field_indices'
-        data = {"database_name": self._database_name, "collection_name": self._collection_name}
-        response = self._session.post(uri, json=data)
-
-        if response.status_code == 200:
-            return response.json()
         else:
             raise_error_response(response)
 

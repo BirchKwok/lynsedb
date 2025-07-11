@@ -3,7 +3,7 @@ from functools import wraps
 from pathlib import Path
 
 from spinesUtils.asserts import raise_if, generate_function_kwargs
-from spinesUtils.logging import Logger
+from ultralog import UltraLog as Logger
 
 
 class ParametersValidator:

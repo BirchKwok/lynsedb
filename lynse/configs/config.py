@@ -23,6 +23,11 @@ class Config:
         self._LYNSE_SEARCH_CACHE_EXPIRE_SECONDS = self.get_env_variable('LYNSE_SEARCH_CACHE_EXPIRE_SECONDS',
                                                                         3600, int, [int])
 
+        # SimSIMD configuration options
+        self._LYNSE_USE_SIMSIMD = self.get_env_variable('LYNSE_USE_SIMSIMD', True, bool, [bool])
+        self._LYNSE_SIMSIMD_AUTO_FALLBACK = self.get_env_variable('LYNSE_SIMSIMD_AUTO_FALLBACK', True, bool, [bool])
+        self._LYNSE_SIMSIMD_LOG_FALLBACK = self.get_env_variable('LYNSE_SIMSIMD_LOG_FALLBACK', False, bool, [bool])
+
     @staticmethod
     def get_env_variable(name, default=None, default_type=str, type_allow_list=None):
         def type_cast(value):
@@ -121,6 +126,33 @@ class Config:
     def LYNSE_DEFAULT_ROOT_PATH(self, value):
         self._LYNSE_DEFAULT_ROOT_PATH = value
 
+    @property
+    def LYNSE_USE_SIMSIMD(self):
+        """Whether to use SimSIMD for accelerated distance calculations"""
+        return self._LYNSE_USE_SIMSIMD
+
+    @LYNSE_USE_SIMSIMD.setter
+    def LYNSE_USE_SIMSIMD(self, value):
+        self._LYNSE_USE_SIMSIMD = value
+
+    @property
+    def LYNSE_SIMSIMD_AUTO_FALLBACK(self):
+        """Whether to automatically fallback to non-SIMD when SimSIMD fails"""
+        return self._LYNSE_SIMSIMD_AUTO_FALLBACK
+
+    @LYNSE_SIMSIMD_AUTO_FALLBACK.setter
+    def LYNSE_SIMSIMD_AUTO_FALLBACK(self, value):
+        self._LYNSE_SIMSIMD_AUTO_FALLBACK = value
+
+    @property
+    def LYNSE_SIMSIMD_LOG_FALLBACK(self):
+        """Whether to log when SimSIMD fallback occurs"""
+        return self._LYNSE_SIMSIMD_LOG_FALLBACK
+
+    @LYNSE_SIMSIMD_LOG_FALLBACK.setter
+    def LYNSE_SIMSIMD_LOG_FALLBACK(self, value):
+        self._LYNSE_SIMSIMD_LOG_FALLBACK = value
+
     def get_all_configs(self):
         return {
             'LYNSE_LOG_LEVEL': self.LYNSE_LOG_LEVEL,
@@ -130,7 +162,10 @@ class Config:
             'LYNSE_KMEANS_EPOCHS': self.LYNSE_KMEANS_EPOCHS,
             'LYNSE_SEARCH_CACHE_SIZE': self.LYNSE_SEARCH_CACHE_SIZE,
             'LYNSE_DEFAULT_ROOT_PATH': str(self.LYNSE_DEFAULT_ROOT_PATH),
-            'LYNSE_SEARCH_CACHE_EXPIRE_SECONDS': self.LYNSE_SEARCH_CACHE_EXPIRE_SECONDS
+            'LYNSE_SEARCH_CACHE_EXPIRE_SECONDS': self.LYNSE_SEARCH_CACHE_EXPIRE_SECONDS,
+            'LYNSE_USE_SIMSIMD': self.LYNSE_USE_SIMSIMD,
+            'LYNSE_SIMSIMD_AUTO_FALLBACK': self.LYNSE_SIMSIMD_AUTO_FALLBACK,
+            'LYNSE_SIMSIMD_LOG_FALLBACK': self.LYNSE_SIMSIMD_LOG_FALLBACK
         }
 
 

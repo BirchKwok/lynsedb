@@ -152,6 +152,15 @@ cython_debug/
 
 .idea/
 
+*.npy
+*.npz
+*.npkd
+*.npk
+*.npkm
+*.wal
+*.index
+*.npk.lock
+
 readme.ipynb
 speed_test.ipynb
 Benchmarks.ipynb
