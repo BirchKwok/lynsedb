@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "lynse-core"
+version = "0.2.0"
+description = "High-performance Rust core for LynseDB vector database"
+requires-python = ">=3.9"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "lynse_core"
+manifest-path = "Cargo.toml"

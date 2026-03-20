@@ -1,13 +1,15 @@
-import sqlite3
-import orjson
-from typing import Dict, List, Any
+import apexbase
+from apexbase import ApexStorage
+from typing import Dict, List, Any, Union
 from pathlib import Path
-from ...core_components.limited_dict import LimitedDict
+import json
+import pandas as pd
 
 
 class FieldsStorage:
     """
-    Fields storage class using SQLite as backend storage.
+    Fields storage class using ApexBase as backend storage.
+    ApexBase is a high-performance HTAP embedded database with Rust core.
     """
     def __init__(self, filepath=None, cache_size: int = 1000, batch_size: int = 1000):
         """
@@ -29,77 +31,40 @@ class FieldsStorage:
 
         # 配置参数
         self.batch_size = batch_size
-        self._query_cache = LimitedDict(cache_size)
-        self._field_cache = LimitedDict(100)  # 缓存字段信息
+        self._field_cache = {}  # 缓存字段信息
+        self._schema_cache = {}  # 缓存表结构
+        self._field_order = []  # 固定的字段顺序
 
-        # SQLite连接
-        self.conn = sqlite3.connect(str(self.filepath),
-                                  isolation_level=None)  # 自动提交模式，手动控制事务
+        # 使用 ApexBase 作为后端存储
+        # drop_if_exists=False 保留现有数据
+        # durability='fast' 提高写入性能
+        self.storage = ApexStorage(str(self.filepath), drop_if_exists=False, durability='fast')
 
-        # 优化SQLite配置
-        cursor = self.conn.cursor()
-        # 使用WAL模式提高写入性能
-        cursor.execute("PRAGMA journal_mode=WAL")
-        # 设置较大的WAL文件大小限制（64MB）
-        cursor.execute("PRAGMA wal_autocheckpoint=1000")
-        # 降低同步级别提高性能
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        # 设置较大的页缓存（约256MB）
-        cursor.execute("PRAGMA cache_size=-262144")
-        # 临时表和临时文件使用内存
-        cursor.execute("PRAGMA temp_store=MEMORY")
-        # 启用内存映射，提高读取性能
-        cursor.execute("PRAGMA mmap_size=1099511627776")  # 1TB
-        # 设置较大的页大小，提高读写效率
-        cursor.execute("PRAGMA page_size=32768")  # 32KB
-        # 启用严格的外键约束
-        cursor.execute("PRAGMA foreign_keys=ON")
-        # 读写锁定超时设置（5分钟）
-        cursor.execute("PRAGMA busy_timeout=300000")
-
+        # 创建默认表
         self._initialize_database()
 
     def _initialize_database(self):
         """
-        Initialize SQLite database with optimized settings.
+        Initialize ApexBase database with default table.
         """
-        cursor = self.conn.cursor()
+        # 创建表（如果不存在）
+        tables = self.storage.list_tables()
+        if "records" not in tables:
+            self.storage.create_table("records")
 
-        try:
-            cursor.execute("BEGIN TRANSACTION")
+        # 使用默认表
+        self.storage.use_table("records")
 
-            # 删除旧表（如果存在）
-            cursor.execute("DROP TABLE IF EXISTS records")
-            cursor.execute("DROP TABLE IF EXISTS fields_meta")
-
-            # 创建主表，只包含ID
-            cursor.execute("""
-                CREATE TABLE records (
-                    _id INTEGER PRIMARY KEY AUTOINCREMENT
-                )
-            """)
-
-            # 创建字段元数据表
-            cursor.execute("""
-                CREATE TABLE fields_meta (
-                    field_name TEXT PRIMARY KEY,
-                    field_type TEXT NOT NULL
-                )
-            """)
-
-            # 重置序列从0开始
-            cursor.execute("INSERT INTO records (_id) VALUES (0)")
-            cursor.execute("DELETE FROM records WHERE _id = 0")
-            cursor.execute("DELETE FROM sqlite_sequence WHERE name = 'records'")
-
-            cursor.execute("COMMIT")
-        except Exception as e:
-            cursor.execute("ROLLBACK")
-            raise e
+        # 初始化字段顺序（如果表中有数据）
+        if self.storage.row_count() > 0:
+            # 获取一条记录来确定字段顺序
+            first_record = self.storage.retrieve(0)
+            if first_record:
+                self._field_order = list(first_record.keys())
 
     def _quote_identifier(self, identifier: str) -> str:
         """
-        正确转义 SQLite 标识符。
+        正确转义标识符。
 
         Parameters:
             identifier: str
@@ -110,35 +75,6 @@ class FieldsStorage:
         """
         return f'"{identifier}"'
 
-    def _ensure_field_exists(self, field_name: str, field_type: str):
-        """
-        确保字段存在，如不存在则创建。
-
-        Parameters:
-            field_name: str
-                字段名称
-            field_type: str
-                字段类型 (TEXT, INTEGER, REAL, etc.)
-        """
-        try:
-            # 检查字段是否已存在
-            result = self.conn.execute(
-                "SELECT field_type FROM fields_meta WHERE field_name = ?",
-                [field_name]
-            ).fetchone()
-
-            if not result:
-                # 添加字段到主表，使用引号包裹字段名
-                quoted_field_name = self._quote_identifier(field_name)
-                self.conn.execute(f"ALTER TABLE records ADD COLUMN {quoted_field_name} {field_type}")
-                # 记录字段元数据
-                self.conn.execute(
-                    "INSERT INTO fields_meta (field_name, field_type) VALUES (?, ?)",
-                    [field_name, field_type]
-                )
-        except Exception as e:
-            raise ValueError(f"Failed to ensure field exists: {str(e)}")
-
     def _infer_field_type(self, value: Any) -> str:
         """
         根据值推断字段类型。
@@ -148,18 +84,38 @@ class FieldsStorage:
                 字段值
 
         Returns:
-            str: SQLite字段类型
+            str: ApexBase 字段类型
         """
         if isinstance(value, bool):
-            return "INTEGER"  # SQLite没有布尔类型，使用INTEGER
+            return "bool"
         elif isinstance(value, int):
-            return "INTEGER"
+            return "i64"
         elif isinstance(value, float):
-            return "REAL"
+            return "f64"
+        elif isinstance(value, str):
+            return "str"
         elif isinstance(value, (list, dict)):
-            return "TEXT"  # 复杂类型序列化为JSON字符串
+            return "json"  # 复杂类型序列化为JSON字符串
         else:
-            return "TEXT"
+            return "str"
+
+    def _convert_to_apex_type(self, value: Any) -> Any:
+        """
+        将 Python 值转换为 ApexBase 兼容的类型。
+
+        Parameters:
+            value: Any
+                Python 值
+
+        Returns:
+            Any: ApexBase 兼容的值
+        """
+        if isinstance(value, (list, dict)):
+            return json.dumps(value)
+        elif isinstance(value, bool):
+            return int(value)  # ApexBase 使用整数表示布尔值
+        else:
+            return value
 
     def store(self, data: dict) -> int:
         """
@@ -176,56 +132,36 @@ class FieldsStorage:
             raise ValueError("Only dict-type data is allowed.")
 
         try:
-            cursor = self.conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE TRANSACTION")
+            # 确保表存在
+            self.storage.use_table("records")
 
-            try:
-                # 首先确保所有字段存在
-                for field_name, value in data.items():
-                    if field_name != '_id':
-                        field_type = self._infer_field_type(value)
-                        self._ensure_field_exists(field_name, field_type)
+            # 过滤掉 _id 字段（如果存在）
+            record_data = {k: v for k, v in data.items() if k != '_id'}
 
-                # 创建记录获取ID
-                if 'id' in data:
-                    # 如果提供了id，直接使用它作为_id
-                    cursor.execute("INSERT INTO records (_id) VALUES (?)", (data['id'],))
-                    record_id = data['id']
-                else:
-                    cursor.execute("INSERT INTO records DEFAULT VALUES")
-                    record_id = cursor.lastrowid
+            # 更新字段顺序
+            self._update_field_order(record_data.keys())
 
-                # 处理每个字段
-                field_updates = []
-                params = []
+            # 转换数据类型
+            record_data = {k: self._convert_to_apex_type(v) for k, v in record_data.items()}
 
-                for field_name, value in data.items():
-                    if field_name != '_id':
-                        quoted_field_name = self._quote_identifier(field_name)
-                        field_updates.append(f"{quoted_field_name} = ?")
-                        # 如果是复杂类型，序列化为JSON
-                        if isinstance(value, (list, dict)):
-                            import json
-                            params.append(json.dumps(value))
-                        else:
-                            params.append(value)
+            # 存储记录
+            record_id = self.storage.store(record_data)
 
-                # 如果有字段需要更新
-                if field_updates:
-                    update_sql = f"UPDATE records SET {', '.join(field_updates)} WHERE _id = ?"
-                    params.append(record_id)
-                    cursor.execute(update_sql, params)
+            # 清除字段缓存
+            self._field_cache.clear()
 
-                cursor.execute("COMMIT")
-                self._invalidate_cache()
-                return record_id
-
-            except Exception as e:
-                cursor.execute("ROLLBACK")
-                raise e
+            return record_id
 
         except Exception as e:
             raise ValueError(f"Failed to store data: {str(e)}")
+
+    def _update_field_order(self, new_keys):
+        """更新字段顺序，添加新字段到末尾"""
+        seen = set(self._field_order)
+        for key in new_keys:
+            if key not in seen:
+                self._field_order.append(key)
+                seen.add(key)
 
     def batch_store(self, data_list: List[dict]) -> List[int]:
         """
@@ -243,128 +179,45 @@ class FieldsStorage:
 
         all_ids = []
         try:
-            cursor = self.conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE TRANSACTION")
+            # 确保表存在
+            self.storage.use_table("records")
 
-            try:
-                # 首先收集所有唯一字段并确保它们存在
-                all_fields = set()
-                for data in data_list:
-                    for field_name, value in data.items():
-                        if field_name != '_id':
-                            all_fields.add((field_name, self._infer_field_type(value)))
+            # 收集所有字段以更新顺序
+            all_fields = set()
+            for data in data_list:
+                all_fields.update(data.keys())
 
-                # 批量创建所有需要的字段
-                for field_name, field_type in all_fields:
-                    self._ensure_field_exists(field_name, field_type)
+            # 更新字段顺序
+            self._update_field_order(all_fields)
 
-                # 然后批量插入数据
-                for i in range(0, len(data_list), self.batch_size):
-                    batch = data_list[i:i + self.batch_size]
+            # 批量处理
+            for i in range(0, len(data_list), self.batch_size):
+                batch = data_list[i:i + self.batch_size]
 
-                    for data in batch:
-                        # 创建记录获取ID
-                        if 'id' in data:
-                            # 如果提供了id，直接使用它作为_id
-                            cursor.execute("INSERT INTO records (_id) VALUES (?)", (data['id'],))
-                            record_id = data['id']
-                        else:
-                            cursor.execute("INSERT INTO records DEFAULT VALUES")
-                            record_id = cursor.lastrowid
+                # 准备批量数据
+                batch_data = []
+                for data in batch:
+                    # 过滤掉 _id 字段
+                    record_data = {k: v for k, v in data.items() if k != '_id'}
+                    # 转换数据类型
+                    record_data = {k: self._convert_to_apex_type(v) for k, v in record_data.items()}
+                    batch_data.append(record_data)
 
-                        all_ids.append(record_id)
+                # 批量存储
+                ids = self.storage.store_batch(batch_data)
+                all_ids.extend(ids)
 
-                        # 处理每个字段
-                        field_updates = []
-                        params = []
+            # 清除字段缓存
+            self._field_cache.clear()
 
-                        for field_name, value in data.items():
-                            if field_name != '_id':
-                                quoted_field_name = self._quote_identifier(field_name)
-                                field_updates.append(f"{quoted_field_name} = ?")
-                                # 如果是复杂类型，序列化为JSON
-                                if isinstance(value, (list, dict)):
-                                    import json
-                                    params.append(json.dumps(value))
-                                else:
-                                    params.append(value)
-
-                        # 如果有字段需要更新
-                        if field_updates:
-                            update_sql = f"UPDATE records SET {', '.join(field_updates)} WHERE _id = ?"
-                            params.append(record_id)
-                            cursor.execute(update_sql, params)
-
-                cursor.execute("COMMIT")
-                self._invalidate_cache()
-                return all_ids
-
-            except Exception as e:
-                cursor.execute("ROLLBACK")
-                raise e
+            return all_ids
 
         except Exception as e:
             raise ValueError(f"Batch storage failed: {str(e)}")
 
-    def _parse_record(self, row: tuple) -> Dict[str, Any]:
-        """
-        Parse a database record into a dictionary.
-
-        Parameters:
-            row: tuple
-                Database record containing all fields
-
-        Returns:
-            Dict[str, Any]: Parsed record
-        """
-        # 获取当前表的所有列名
-        cursor = self.conn.cursor()
-        columns = [description[0] for description in cursor.execute("SELECT * FROM records WHERE 1=0").description]
-
-        data = {}
-        for i, value in enumerate(row):
-            if value is not None:
-                column_name = columns[i]
-                if column_name != '_id':  # 跳过内部ID字段
-                    # 尝试解析JSON字符串
-                    if isinstance(value, str):
-                        try:
-                            import json
-                            parsed_value = json.loads(value)
-                            data[column_name] = parsed_value
-                        except json.JSONDecodeError:
-                            data[column_name] = value
-                    else:
-                        data[column_name] = value
-
-        return data
-
-    def create_json_index(self, field_path: str):
-        """
-        为指定的JSON字段���径创建索引。
-
-        Parameters:
-            field_path: str
-                JSON字段路径，例如 "$.name" 或 "$.address.city"
-        """
-        try:
-            # 生成安全的索引名
-            safe_name = field_path.replace('$', '').replace('.', '_').replace('[', '_').replace(']', '_')
-            index_name = f"idx_json_{safe_name.strip('_')}"
-
-            self.conn.execute(f"""
-                CREATE INDEX IF NOT EXISTS {index_name}
-                ON records(json_extract(data, ?))
-            """, (field_path,))
-
-            # 分析新创建的索引
-            self.conn.execute("ANALYZE")
-        except Exception as e:
-            raise ValueError(f"Failed to create JSON index: {str(e)}")
-
     def field_exists(self, field: str, use_cache: bool = True) -> bool:
         """
-        Check if a field exists with caching.
+        Check if a field exists.
 
         Parameters:
             field: str
@@ -378,22 +231,16 @@ class FieldsStorage:
         field = field.strip(':')
 
         if use_cache:
-            cache_key = self._get_cache_key("field_exists", field=field)
-            cached_result = self._field_cache.get(cache_key)
-            if cached_result is not None:
-                return cached_result
+            if field in self._field_cache:
+                return True
 
         try:
-            result = self.conn.execute(f"""
-                SELECT COUNT(*)
-                FROM records
-                WHERE json_extract(data, '$.{field}') IS NOT NULL
-                LIMIT 1
-            """).fetchone()
-            exists = result[0] > 0
+            fields = self.list_fields(use_cache=use_cache)
+            exists = field in fields
 
             if use_cache:
-                self._field_cache[cache_key] = exists
+                self._field_cache[field] = exists
+
             return exists
         except Exception:
             return False
@@ -405,79 +252,252 @@ class FieldsStorage:
         Returns:
             Dict[str, str]: The fields of the storage with their types.
         """
-        if use_cache:
-            cache_key = self._get_cache_key("list_fields")
-            cached_result = self._field_cache.get(cache_key)
-            if cached_result is not None:
-                return cached_result
+        if use_cache and self._field_cache:
+            return self._field_cache
 
         try:
-            results = self.conn.execute("""
-                WITH RECURSIVE
-                json_tree(key, type) AS (
-                    SELECT
-                        json_each.key,
-                        CASE
-                            WHEN json_each.type = 'integer' THEN 'int'
-                            WHEN json_each.type = 'real' THEN 'float'
-                            WHEN json_each.type = 'text' THEN 'str'
-                            ELSE json_each.type
-                        END
-                    FROM records, json_each(records.data)
-                    GROUP BY json_each.key
-                )
-                SELECT key, type FROM json_tree
-            """).fetchall()
+            self.storage.use_table("records")
+            fields = self.storage.list_fields()
 
-            fields = {f":{field_name}:": field_type
-                     for field_name, field_type in results}
+            # ApexBase 返回字段名列表，需要获取类型
+            fields_with_prefix = {}
+            for name in fields:
+                dtype = self.storage.get_column_dtype(name) if hasattr(self.storage, 'get_column_dtype') else 'unknown'
+                fields_with_prefix[f":{name}:"] = dtype
 
             if use_cache:
-                self._field_cache[cache_key] = fields
-            return fields
+                self._field_cache = fields_with_prefix
+
+            return fields_with_prefix
         except Exception as e:
             raise ValueError(f"Failed to list fields: {str(e)}")
 
-    def optimize(self):
+    def execute_query(self, sql: str):
         """
-        优化数据库性能
+        Execute raw SQL query.
+
+        Parameters:
+            sql: str
+                SQL query string
+
+        Returns:
+            Query results as list of dicts
+        """
+        result = self.storage.execute(sql)
+        columns = result.get('columns', [])
+        rows = result.get('rows', [])
+
+        # 转换为字典列表
+        return [dict(zip(columns, row)) for row in rows]
+
+    def query(self, where_clause: str = None, limit: int = None) -> List[int]:
+        """
+        Query records by WHERE clause.
+
+        Parameters:
+            where_clause: str
+                WHERE clause
+            limit: int
+                Maximum number of records
+
+        Returns:
+            List[int]: List of record IDs
         """
         try:
-            cursor = self.conn.cursor()
+            self.storage.use_table("records")
+            # 使用 execute 来获取 ID
+            if where_clause:
+                result = self.storage.execute(f"SELECT _id FROM records WHERE {where_clause}")
+            else:
+                result = self.storage.execute("SELECT _id FROM records")
 
-            cursor.execute("BEGIN IMMEDIATE TRANSACTION")
-            try:
-                # 更新统计信息
-                cursor.execute("ANALYZE")
+            rows = result.get('rows', [])
+            ids = [row[0] for row in rows]
 
-                # 整理索引和表数据
-                cursor.execute("REINDEX")
+            if limit:
+                ids = ids[:limit]
 
-                # 整数据库文件
-                cursor.execute("VACUUM")
+            return ids
+        except Exception as e:
+            raise ValueError(f"Query failed: {str(e)}")
 
-                cursor.execute("COMMIT")
+    def _get_ordered_fields(self) -> List[str]:
+        """
+        获取固定的字段顺序。
 
-                # 清除缓存
-                self._invalidate_cache()
-            except Exception as e:
-                cursor.execute("ROLLBACK")
-                raise e
+        Returns:
+            List[str]: 字段名列表，按固定顺序排列
+        """
+        if not self._field_order:
+            # 从存储中获取字段列表
+            fields = self.storage.list_fields()
+            # 按照 list_fields 返回的顺序，保持一致性
+            self._field_order = list(fields)
+        return self._field_order
+
+    def _order_dict(self, d: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        按照固定顺序重新排列字典键。
+
+        Parameters:
+            d: Dict[str, Any]
+
+        Returns:
+            Dict[str, Any]: 按固定顺序排列的字典
+        """
+        ordered_fields = self._get_ordered_fields()
+        # 先按照固定顺序，再添加新字段（保持插入顺序）
+        seen = set(ordered_fields)
+        result = {}
+        for key in ordered_fields:
+            if key in d:
+                result[key] = d[key]
+        # 添加不在固定列表中的字段
+        for key in d.keys():
+            if key not in seen:
+                result[key] = d[key]
+                seen.add(key)
+        return result
+
+    def retrieve(self, id_: int) -> Dict[str, Any]:
+        """
+        Retrieve a single record by ID.
+
+        Parameters:
+            id_: int
+                The ID of the record
+
+        Returns:
+            Dict[str, Any]: The record
+        """
+        try:
+            self.storage.use_table("records")
+            result = self.storage.retrieve(id_)
+            if result:
+                result = self._order_dict(result)
+            return result if result else None
+        except Exception as e:
+            raise ValueError(f"Failed to retrieve record: {str(e)}")
+
+    def retrieve_many(self, ids: List[int]) -> List[Dict[str, Any]]:
+        """
+        Retrieve multiple records by IDs.
+
+        Parameters:
+            ids: List[int]
+                List of record IDs
+
+        Returns:
+            List[Dict[str, Any]]: List of records
+        """
+        if not ids:
+            return []
+
+        try:
+            self.storage.use_table("records")
+            results = self.storage.retrieve_many(ids)
+
+            # 必须返回 ResultView 类型
+            if not hasattr(results, 'to_pandas'):
+                raise ValueError(f"retrieve_many must return ResultView, got {type(results)}")
+
+            # 处理 ResultView 类型
+            df = results.to_pandas()
+            results = df.to_dict('records')
+            # 按照固定顺序排列每个记录的字段
+            return [self._order_dict(r) if r else None for r in results]
+        except Exception as e:
+            raise ValueError(f"Failed to retrieve records: {str(e)}")
+
+    def retrieve_all(self) -> List[Dict[str, Any]]:
+        """
+        Retrieve all records.
+
+        Returns:
+            List[Dict[str, Any]]: List of all records
+        """
+        try:
+            self.storage.use_table("records")
+            results = self.storage.retrieve_all()
+            # 按照固定顺序排列每个记录的字段
+            return [self._order_dict(r) if r else None for r in results]
+            return self.storage.retrieve_all()
+        except Exception as e:
+            raise ValueError(f"Failed to retrieve all records: {str(e)}")
+
+    def delete(self, id_: int):
+        """
+        Delete a record by ID.
+
+        Parameters:
+            id_: int
+                The ID of the record to delete
+        """
+        try:
+            self.storage.use_table("records")
+            self.storage.delete(id_)
+        except Exception as e:
+            raise ValueError(f"Failed to delete record: {str(e)}")
+
+    def delete_where(self, where_clause: str) -> int:
+        """
+        Delete records matching WHERE clause.
+
+        Parameters:
+            where_clause: str
+                WHERE clause
+
+        Returns:
+            int: Number of deleted records
+        """
+        try:
+            self.storage.use_table("records")
+            return self.storage.delete_where(where_clause)
+        except Exception as e:
+            raise ValueError(f"Failed to delete records: {str(e)}")
+
+    def row_count(self) -> int:
+        """
+        Get row count.
+
+        Returns:
+            int: Number of rows
+        """
+        try:
+            self.storage.use_table("records")
+            return self.storage.row_count()
+        except Exception as e:
+            raise ValueError(f"Failed to get row count: {str(e)}")
+
+    def create_index(self, field_name: str):
+        """
+        Create index for a field.
+
+        Parameters:
+            field_name: str
+                Field name to create index on
+        """
+        # ApexBase 自动处理索引，无需手动创建
+        pass
+
+    def optimize(self):
+        """
+        Optimize database performance.
+        """
+        try:
+            self.storage.flush()
         except Exception as e:
             print(f"Failed to optimize database: {str(e)}")
 
-    def _get_cache_key(self, operation: str, **kwargs) -> str:
-        """生成缓存键"""
-        return f"{operation}:{orjson.dumps(kwargs).decode('utf-8')}"
-
-    def _invalidate_cache(self):
-        """清除所有缓存"""
-        self._query_cache.clear()
-        self._field_cache.clear()
+    def close(self):
+        """
+        Close storage.
+        """
+        if hasattr(self, 'storage'):
+            self.storage.close()
 
     def __del__(self):
         """
         Close all connections when the object is deleted.
         """
-        if hasattr(self, 'conn'):
-            self.conn.close()
+        self.close()

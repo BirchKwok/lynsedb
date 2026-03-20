@@ -1,5 +1,7 @@
 from typing import List, Union, Dict, Any
 import json
+import pandas as pd
+
 
 class FieldsQuery:
     """
@@ -11,8 +13,6 @@ class FieldsQuery:
         - Range query: "10 < days <= 300"
         - Text search: "name LIKE '%John%'"
         - Multiple conditions: "age > 18 AND city = 'New York'"
-        - JSON field access: "json_extract(data, '$.address.city') = 'Beijing'"
-        - Numeric operations: "CAST(json_extract(data, '$.price') AS REAL) * CAST(json_extract(data, '$.quantity') AS REAL) > 1000"
     """
     def __init__(self, storage):
         """
@@ -26,7 +26,7 @@ class FieldsQuery:
 
     def _quote_identifier(self, identifier: str) -> str:
         """
-        正确转义 SQLite 标识符。
+        正确转义标识符。
 
         Parameters:
             identifier: str
@@ -59,75 +59,65 @@ class FieldsQuery:
             Union[List[int], List[Dict[str, Any]]]: List of IDs or complete records.
         """
         try:
-            # 构建基本查询
+            # 使用 ApexBase 的查询接口
             if return_ids_only:
-                base_query = "SELECT _id FROM records"
+                # 如果只需要ID，直接使用query方法
+                if query_filter:
+                    # ApexBase 使用 SQL WHERE 子句
+                    results = self.storage.query(query_filter, limit=limit)
+                else:
+                    # 没有过滤条件，获取所有ID
+                    results = self.storage.query(limit=limit)
+
+                # 处理偏移量
+                if offset:
+                    results = results[offset:]
+
+                return results
             else:
-                # 获取所有字段名（除了_id）
-                fields = self.list_fields()
-                if not fields:
-                    return []
-                fields_str = ', '.join(f'"{field}"' for field in fields)
-                base_query = f"SELECT {fields_str} FROM records"
+                # 需要返回完整记录
+                if query_filter:
+                    # 使用 SQL 查询
+                    results = self.storage.execute_query(
+                        f"SELECT * FROM records WHERE {query_filter}"
+                    )
+                else:
+                    results = self.storage.execute_query("SELECT * FROM records")
 
-            # 添加过滤条件
-            if query_filter:
-                # 替换查询中的__id__为_id
-                query_filter = query_filter.replace('__id__', '_id')
+                # 处理偏移量和限制
+                if offset:
+                    results = results[offset:]
+                if limit:
+                    results = results[:limit]
 
-                # 检查字段是否存在，如果不存在且不是复杂查询，返回空结果
-                field_name = query_filter.split()[0].strip('"')  # 移除可能存在的引号
-                if field_name != '_id' and not any(op in field_name for op in ['>', '<', '=', '!', 'LIKE', 'IN']):
-                    exists = self.storage.conn.execute(
-                        "SELECT 1 FROM fields_meta WHERE field_name = ?",
-                        [field_name]
-                    ).fetchone()
-                    if not exists:
-                        return [] if return_ids_only else {}
-
-                # 确保字段名被正确引用
-                import re
-                def quote_field_names(match):
-                    field = match.group(1)
-                    if field != '_id' and not field.startswith('"'):
-                        return self._quote_identifier(field)
-                    return field
-
-                # 使用正则表达式替换字段名
-                query_filter = re.sub(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b(?=\s*[<>=!]|\s+LIKE|\s+IN\s*\()', quote_field_names, query_filter)
-                base_query += f" WHERE {query_filter}"
-
-            # 添加分页
-            if limit is not None:
-                base_query += f" LIMIT {limit}"
-                if offset is not None:
-                    base_query += f" OFFSET {offset}"
-
-            # 执行查询
-            cursor = self.storage.conn.cursor()
-            results = cursor.execute(base_query).fetchall()
-
-            if return_ids_only:
-                return [row[0] for row in results]
-            else:
-                # 构建结果字典，不包含内部ID
+                # 解析结果
                 records = []
-                fields = self.list_fields()
                 for row in results:
                     record = {}
-                    for i, value in enumerate(row):
-                        if value is not None:
-                            # 尝试解析JSON字符串
-                            if isinstance(value, str):
-                                try:
-                                    import json
-                                    parsed_value = json.loads(value)
-                                    record[fields[i]] = parsed_value
-                                except json.JSONDecodeError:
-                                    record[fields[i]] = value
-                            else:
-                                record[fields[i]] = value
+                    # ApexBase 返回的结果需要解析
+                    # 假设返回的是列表或类似的结构
+                    if hasattr(row, '_asdict'):
+                        record = row._asdict()
+                    elif hasattr(row, 'keys'):
+                        record = dict(row)
+                    else:
+                        # 如果是元组，尝试获取字段名
+                        fields = self.list_fields()
+                        if isinstance(row, (list, tuple)):
+                            for i, field in enumerate(fields):
+                                if i < len(row):
+                                    value = row[i]
+                                    if value is not None:
+                                        # 尝试解析JSON
+                                        if isinstance(value, str):
+                                            try:
+                                                record[field] = json.loads(value)
+                                            except json.JSONDecodeError:
+                                                record[field] = value
+                                        else:
+                                            record[field] = value
                     records.append(record)
+
                 return records
 
         except Exception as e:
@@ -141,9 +131,9 @@ class FieldsQuery:
             List[str]: 字段名列表
         """
         try:
-            cursor = self.storage.conn.cursor()
-            results = cursor.execute("SELECT field_name FROM fields_meta").fetchall()
-            return [row[0] for row in results]
+            fields = self.storage.list_fields()
+            # 移除冒号前缀
+            return [field.strip(':') for field in fields.keys()]
         except Exception as e:
             raise ValueError(f"Failed to list fields: {str(e)}")
 
@@ -159,12 +149,12 @@ class FieldsQuery:
             str: 字段类型
         """
         try:
-            cursor = self.storage.conn.cursor()
-            result = cursor.execute(
-                "SELECT field_type FROM fields_meta WHERE field_name = ?",
-                [field_name]
-            ).fetchone()
-            return result[0] if result else None
+            fields = self.storage.list_fields()
+            # 添加冒号前缀来匹配
+            key = f":{field_name}:"
+            if key in fields:
+                return fields[key]
+            return None
         except Exception as e:
             raise ValueError(f"Failed to get field type: {str(e)}")
 
@@ -176,27 +166,8 @@ class FieldsQuery:
             field_name: str
                 字段名称
         """
-        try:
-            cursor = self.storage.conn.cursor()
-            # 检查字段是否存在
-            field_exists = cursor.execute(
-                "SELECT 1 FROM fields_meta WHERE field_name = ?",
-                [field_name]
-            ).fetchone()
-
-            if field_exists:
-                # 创建索引，使用引号包裹字段名
-                index_name = f"idx_{field_name}"
-                quoted_field_name = self._quote_identifier(field_name)
-                cursor.execute(f"""
-                    CREATE INDEX IF NOT EXISTS {index_name}
-                    ON records({quoted_field_name})
-                """)
-                cursor.execute("ANALYZE")
-            else:
-                raise ValueError(f"Field {field_name} does not exist")
-        except Exception as e:
-            raise ValueError(f"Failed to create index: {str(e)}")
+        # ApexBase 自动处理索引
+        pass
 
     def retrieve(self, id_: int) -> Dict[str, Any]:
         """
@@ -206,36 +177,25 @@ class FieldsQuery:
             id_: int
                 The ID of the record to retrieve.
 
-        Returns:
-            Dict[str, Any]: The record if found, None otherwise.
+       [str, Any]: Returns:
+            Dict The record if found, None otherwise.
         """
         try:
-            # 获取所有字段名（除了_id）
-            fields = self.list_fields()
-            if not fields:
-                return None
-            fields_str = ', '.join(f'"{field}"' for field in fields)
-
-            result = self.storage.conn.execute(
-                f"SELECT {fields_str} FROM records WHERE _id = ?",
-                [id_]
-            ).fetchone()
+            result = self.storage.retrieve(id_)
 
             if result:
-                # 构建结果字典，不包含内部ID
+                # 解析 JSON 字段
                 record = {}
-                for i, value in enumerate(result):
+                for key, value in result.items():
                     if value is not None:
-                        # 尝试解析JSON字符串
+                        # 尝试解析JSON
                         if isinstance(value, str):
                             try:
-                                import json
-                                parsed_value = json.loads(value)
-                                record[fields[i]] = parsed_value
+                                record[key] = json.loads(value)
                             except json.JSONDecodeError:
-                                record[fields[i]] = value
+                                record[key] = value
                         else:
-                            record[fields[i]] = value
+                            record[key] = value
                 return record
             return None
         except Exception as e:
@@ -256,78 +216,49 @@ class FieldsQuery:
             return []
 
         try:
-            cursor = self.storage.conn.cursor()
+            results = self.storage.retrieve_many(ids)
 
-            # 获取所有字段名（除了_id）
-            fields = self.list_fields()
-            if not fields:
-                return []
-            fields_str = ', '.join(f'"{field}"' for field in fields)
+            # 必须返回 ResultView 类型
+            if not hasattr(results, 'to_pandas'):
+                raise ValueError(f"retrieve_many must return ResultView, got {type(results)}")
 
-            # 使用UNION ALL来创建ID列表
-            id_queries = [f"SELECT {id_} AS _id" for id_ in ids]
-            id_list_query = " UNION ALL ".join(id_queries)
-
-            # 使用LEFT JOIN来获取记录
-            results = cursor.execute(f"""
-                SELECT v._id, {fields_str}
-                FROM ({id_list_query}) AS v
-                LEFT JOIN records r ON r._id = v._id
-                ORDER BY v._id
-            """).fetchall()
-
-            # 构建ID到记录的映射
-            id_to_record = {}
-            for row in results:
-                record_id = row[0]  # 第一列是_id
-                if any(row[1:]):  # 检查是否有任何非空字段
-                    record = {}
-                    for i, value in enumerate(row[1:], 0):  # 跳过_id列
-                        if value is not None:
-                            # 尝试解析JSON字符串
-                            if isinstance(value, str):
-                                try:
-                                    parsed_value = json.loads(value)
-                                    record[fields[i]] = parsed_value
-                                except json.JSONDecodeError:
-                                    record[fields[i]] = value
-                            else:
-                                record[fields[i]] = value
-                    id_to_record[record_id] = record
-
-            # 按照输入ID的顺序返回记录
-            return [id_to_record.get(id_) for id_ in ids]
+            # 处理 ResultView 类型
+            df = results.to_pandas()
+            # 转换为 dict 列表
+            records = df.to_dict('records')
+            return records
 
         except Exception as e:
             raise ValueError(f"Failed to retrieve records: {str(e)}")
 
-    def _create_temp_indexes(self, query_filter: str):
+    def retrieve_all(self) -> List[Dict[str, Any]]:
         """
-        根据查询条件创建临时索引。
+        Retrieve all records.
 
-        Parameters:
-            query_filter: str
-                查询条件
+        Returns:
+            List[Dict[str, Any]]: List of all records
         """
-        import re
+        try:
+            results = self.storage.retrieve_all()
 
-        # 提取JSON路径
-        json_paths = re.findall(r'json_extract\(data,\s*\'([^\']+)\'\)', query_filter)
+            # 解析 JSON 字段
+            records = []
+            for result in results:
+                if result:
+                    record = {}
+                    for key, value in result.items():
+                        if value is not None:
+                            # 尝试解析JSON
+                            if isinstance(value, str):
+                                try:
+                                    record[key] = json.loads(value)
+                                except json.JSONDecodeError:
+                                    record[key] = value
+                            else:
+                                record[key] = value
+                    records.append(record)
 
-        if json_paths:
-            cursor = self.storage.conn.cursor()
-            cursor.execute("BEGIN TRANSACTION")
-            try:
-                for path in json_paths:
-                    # 为每个JSON路径创建临时索引
-                    safe_name = path.replace('$', '').replace('.', '_').replace('[', '_').replace(']', '_')
-                    index_name = f"temp_idx_{safe_name.strip('_')}"
+            return records
 
-                    cursor.execute(f"""
-                        CREATE INDEX IF NOT EXISTS {index_name}
-                        ON records(json_extract(data, ?))
-                    """, (path,))
-
-                cursor.execute("COMMIT")
-            except Exception:
-                cursor.execute("ROLLBACK")
+        except Exception as e:
+            raise ValueError(f"Failed to retrieve all records: {str(e)}")

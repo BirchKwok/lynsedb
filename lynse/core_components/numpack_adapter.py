@@ -157,17 +157,21 @@ def replace_arrays(filename: Union[str, Path], arrays: Union[Dict[str, np.ndarra
     lock = filelock.FileLock(f"{filename}.lock")
     with lock:
         try:
-            # 创建NumPack实例
-            np_instance = numpack.NumPack(str(filename))
+            # 使用context manager创建NumPack实例
+            with numpack.NumPack(str(filename)) as np_instance:
+                # 转换indexes为列表
+                indices_list = indexes.tolist() if isinstance(indexes, np.ndarray) else list(indexes)
 
-            # 替换指定索引的数据
-            for name, new_data in arrays.items():
-                # 转换为2D数组
-                if new_data.ndim == 1:
-                    new_data = new_data.reshape(-1, 1)
+                # 转换数组数据
+                arrays_dict = {}
+                for name, new_data in arrays.items():
+                    # 转换为2D数组
+                    if new_data.ndim == 1:
+                        new_data = new_data.reshape(-1, 1)
+                    arrays_dict[name] = new_data
 
-                # 使用NumPack的replace方法
-                np_instance.replace(name, indexes, new_data)
+                # 使用新API: replace({'name': data}, indices=[...])
+                np_instance.replace(arrays_dict, indices=indices_list)
 
         except Exception as e:
             raise NnpFileSavingError(f"Error replacing arrays: {str(e)}")
@@ -197,17 +201,20 @@ def drop_arrays(filename: Union[str, Path], indexes: np.ndarray,
     lock = filelock.FileLock(f"{filename}.lock")
     with lock:
         try:
-            # 创建NumPack实例
-            np_instance = numpack.NumPack(str(filename))
+            # 使用context manager创建NumPack实例
+            with numpack.NumPack(str(filename)) as np_instance:
+                # 转换indexes为列表
+                indices_list = indexes.tolist() if isinstance(indexes, np.ndarray) else list(indexes)
 
-            # 确定要操作的数组
-            if array_names is None:
-                array_names = np_instance.get_member_list()
+                # 确定要操作的数组
+                if array_names is None:
+                    # 获取所有成员名称
+                    array_names = list(np_instance.get_member_list())
 
-            # 删除指定索引的数据
-            for name in array_names:
-                # 使用NumPack的drop方法
-                np_instance.drop(name, indexes)
+                # 删除指定索引的数据
+                for name in array_names:
+                    # 使用新API: drop('name', [indices])
+                    np_instance.drop(name, indices_list)
 
         except Exception as e:
             raise NnpFileSavingError(f"Error dropping array data: {str(e)}")
@@ -275,11 +282,10 @@ def _save_numpack_arrays(filename: Union[str, Path], arrays: Dict[str, np.ndarra
     filename = Path(filename)
 
     try:
-        # 创建NumPack实例
-        np_instance = numpack.NumPack(str(filename))
-
-        # 保存所有数组
-        np_instance.save(arrays)
+        # 使用context manager创建NumPack实例
+        with numpack.NumPack(str(filename)) as np_instance:
+            # 保存所有数组
+            np_instance.save(arrays)
 
     except Exception as e:
         raise NnpFileSavingError(f"Failed to save using NumPack: {str(e)}")
@@ -294,22 +300,18 @@ def _load_numpack_arrays(filename: Union[str, Path], mmap_mode: bool = False) ->
     filename = Path(filename)
 
     try:
-        # 创建NumPack实例
-        np_instance = numpack.NumPack(str(filename))
+        # 使用context manager创建NumPack实例
+        with numpack.NumPack(str(filename)) as np_instance:
+            # 获取所有数组名称
+            array_names = np_instance.get_member_list()
 
-        # 设置内存映射模式
-        if mmap_mode:
-            np_instance.mmap_mode = True
+            # 加载所有数组
+            arrays = {}
+            for name in array_names:
+                # 使用lazy参数实现mmap模式
+                arrays[name] = np_instance.load(name, lazy=mmap_mode)
 
-        # 获取所有数组名称
-        array_names = np_instance.get_member_list()
-
-        # 加载所有数组
-        arrays = {}
-        for name in array_names:
-            arrays[name] = np_instance.load(name)
-
-        return arrays
+            return arrays
 
     except Exception as e:
         raise NnpFileSavingError(f"Failed to load using NumPack: {str(e)}")

@@ -56,7 +56,7 @@ class FieldsCache:
         """
         return self.storage.batch_store(data_list)
 
-    def query(self, query_filter, return_ids_only=True):
+    def query(self, query_filter, return_ids_only=True, limit=None):
         """
         Query the fields cache.
 
@@ -67,12 +67,14 @@ class FieldsCache:
                 List of external IDs to filter.
             return_ids_only: bool
                 If True, only return external IDs.
+            limit: int
+                Maximum number of records to return.
 
         Returns:
             List[dict]: Records. If not return_ids_only, returns records.
             List[int]: External IDs. If return_ids_only, returns external IDs.
         """
-        return self.query_handler.query(query_filter, return_ids_only)
+        return self.query_handler.query(query_filter, return_ids_only, limit=limit)
 
     def retrieve(self, id_):
         """

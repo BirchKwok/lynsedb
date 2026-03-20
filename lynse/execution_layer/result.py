@@ -121,12 +121,59 @@ class Result:
         return json.dumps(self.to_list(), **kwargs)
 
     def to_pandas(self):  # type: ignore[valid-type]
-        """转换为 **pandas** ``DataFrame``。若未安装 pandas 则抛出 ``ImportError``。"""
+        """转换为 **pandas** ``DataFrame``。若未安装 pandas 则抛出 ``ImportError``。
+
+        返回的 DataFrame 格式:
+        - id: 向量 ID
+        - distance: 距离
+        - 其他字段列（按照字段首次出现的顺序）
+
+        列顺序: id, distance, 第一个字段, 第二个字段, ...
+        """
         try:
             import pandas as pd  # type: ignore
         except ModuleNotFoundError as exc:  # pragma: no cover
             raise ImportError("`pandas` is required for `to_pandas()`") from exc
-        return pd.DataFrame(self.to_list())
+
+        # 直接构建 DataFrame 列，避免先转换为字典列表的开销
+        ids, dists = self._flatten()
+
+        if self.fields is None or not self.fields:
+            # 没有 fields 数据，直接创建简单 DataFrame
+            return pd.DataFrame({
+                'id': ids,
+                'distance': dists
+            })
+
+        # 处理 fields - 可能是嵌套 list
+        if isinstance(self.fields[0], list):
+            flat_fields = [f for sub in self.fields for f in sub]
+        else:
+            flat_fields = self.fields
+
+        # 首先创建 id 和 distance 列
+        data = {
+            'id': ids,
+            'distance': dists
+        }
+
+        # 如果有 fields，将每个字段展开为独立的列
+        if flat_fields and len(flat_fields) == len(ids):
+            # 获取字段键的有序列表（从第一个非空记录获取顺序）
+            all_keys = []
+            seen = set()
+            for fld in flat_fields:
+                if fld:
+                    for key in fld.keys():
+                        if key not in seen:
+                            all_keys.append(key)
+                            seen.add(key)
+
+            # 为每个字段键创建一列
+            for key in all_keys:
+                data[key] = [fld.get(key) if fld else None for fld in flat_fields]
+
+        return pd.DataFrame(data)
 
     # ------------------------------------------------------------------
     # 与 QueryView 对齐的其它格式化方法
@@ -137,20 +184,90 @@ class Result:
         return self.to_pandas()
 
     def to_polars(self):  # type: ignore[valid-type]
-        """转换为 **polars** DataFrame。若未安装则抛出 ``ImportError``。"""
+        """转换为 **polars** DataFrame。若未安装则抛出 ``ImportError``。
+
+        列顺序: id, distance, 第一个字段, 第二个字段, ...
+        """
         try:
             import polars as pl  # type: ignore
         except ModuleNotFoundError as exc:  # pragma: no cover
             raise ImportError("`polars` is required for `to_polars()`") from exc
-        return pl.from_pandas(self.to_pandas())
+
+        # 直接从原始数据构建 Polars DataFrame，避免先转换为 pandas
+        ids, dists = self._flatten()
+
+        if self.fields is None or not self.fields:
+            return pl.DataFrame({
+                'id': ids,
+                'distance': dists
+            })
+
+        # 处理 fields
+        if isinstance(self.fields[0], list):
+            flat_fields = [f for sub in self.fields for f in sub]
+        else:
+            flat_fields = self.fields
+
+        data = {
+            'id': ids,
+            'distance': dists
+        }
+
+        if flat_fields and len(flat_fields) == len(ids):
+            # 获取字段键的有序列表
+            all_keys = []
+            seen = set()
+            for fld in flat_fields:
+                if fld:
+                    for key in fld.keys():
+                        if key not in seen:
+                            all_keys.append(key)
+                            seen.add(key)
+
+            for key in all_keys:
+                data[key] = [fld.get(key) if fld else None for fld in flat_fields]
+
+        return pl.DataFrame(data)
 
     def to_arrow(self):  # type: ignore[valid-type]
-        """转换为 **pyarrow** Table。若未安装则抛出 ``ImportError``。"""
+        """转换为 **pyarrow** Table。若未安装则抛出 ``ImportError``。
+
+        列顺序: id, distance, 第一个字段, 第二个字段, ...
+        """
         try:
             import pyarrow as pa  # type: ignore
         except ModuleNotFoundError as exc:  # pragma: no cover
             raise ImportError("`pyarrow` is required for `to_arrow()`") from exc
-        return pa.Table.from_pandas(self.to_pandas())
+
+        # 直接从原始数据构建 PyArrow Table，避免先转换为 pandas
+        ids, dists = self._flatten()
+
+        arrays = [pa.array(ids), pa.array(dists)]
+        field_names = ['id', 'distance']
+
+        if self.fields and len(self.fields) > 0:
+            # 处理 fields
+            if isinstance(self.fields[0], list):
+                flat_fields = [f for sub in self.fields for f in sub]
+            else:
+                flat_fields = self.fields
+
+            if flat_fields and len(flat_fields) == len(ids):
+                # 获取字段键的有序列表
+                all_keys = []
+                seen = set()
+                for fld in flat_fields:
+                    if fld:
+                        for key in fld.keys():
+                            if key not in seen:
+                                all_keys.append(key)
+                                seen.add(key)
+
+                for key in all_keys:
+                    arrays.append(pa.array([fld.get(key) if fld else None for fld in flat_fields]))
+                    field_names.append(key)
+
+        return pa.table(arrays, names=field_names)
 
     # tuple / values ------------------------------------------------------
     def to_tuple(self):

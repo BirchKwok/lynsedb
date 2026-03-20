@@ -33,25 +33,49 @@ class QueryView:
             embeddings, metadata = self.results
             if pd is None:
                 raise ImportError("`pandas` is required for `to_df()` / `to_pandas()`")
-            df = pd.DataFrame(metadata)
-            # 创建一个新的 DataFrame，首先放置 vectors 列，然后是其他列
+
+            # 首先创建包含 vectors 列
             result_df = pd.DataFrame()
             result_df['vectors'] = embeddings.tolist()
-            # 将原有列按顺序添加到结果中
-            for col in df.columns:
-                result_df[col] = df[col]
+
+            # 获取字段键的有序列表（从第一个非空记录获取顺序）
+            if metadata:
+                field_keys = []
+                seen = set()
+                for record in metadata:
+                    if record:
+                        for key in record.keys():
+                            if key not in seen:
+                                field_keys.append(key)
+                                seen.add(key)
+                # 按顺序添加元数据列
+                for key in field_keys:
+                    result_df[key] = [d.get(key) if d else None for d in metadata]
+
             return result_df
         else:  # search case
             indices, distances, metadata = self.results
             if pd is None:
                 raise ImportError("`pandas` is required for `to_df()` / `to_pandas()`")
-            # 首先创建包含 vectors 的 DataFrame
+            # 首先创建包含 index 和 distance 的列
             result_df = pd.DataFrame()
             result_df['index'] = indices
             result_df['distance'] = distances
-            # 按顺序添加元数据列
-            for k in metadata[0].keys():
-                result_df[k] = [d[k] for d in metadata]
+
+            # 获取字段键的有序列表
+            if metadata:
+                field_keys = []
+                seen = set()
+                for record in metadata:
+                    if record:
+                        for key in record.keys():
+                            if key not in seen:
+                                field_keys.append(key)
+                                seen.add(key)
+                # 按顺序添加元数据列
+                for key in field_keys:
+                    result_df[key] = [d.get(key) if d else None for d in metadata]
+
             return result_df
 
     def to_pandas(self):
@@ -59,14 +83,91 @@ class QueryView:
         return self.to_df()
 
     def to_polars(self):
+        """转换为 polars DataFrame。"""
         if pl is None:
             raise ImportError("`polars` is required for `to_polars()`")
-        return pl.from_pandas(self.to_df())
+
+        if len(self.results) == 2:  # head/tail/query case
+            embeddings, metadata = self.results
+            data = {'vectors': embeddings.tolist()}
+
+            if metadata:
+                field_keys = []
+                seen = set()
+                for record in metadata:
+                    if record:
+                        for key in record.keys():
+                            if key not in seen:
+                                field_keys.append(key)
+                                seen.add(key)
+                for key in field_keys:
+                    data[key] = [d.get(key) if d else None for d in metadata]
+
+            return pl.DataFrame(data)
+        else:  # search case
+            indices, distances, metadata = self.results
+            data = {
+                'index': indices,
+                'distance': distances
+            }
+
+            if metadata:
+                field_keys = []
+                seen = set()
+                for record in metadata:
+                    if record:
+                        for key in record.keys():
+                            if key not in seen:
+                                field_keys.append(key)
+                                seen.add(key)
+                for key in field_keys:
+                    data[key] = [d.get(key) if d else None for d in metadata]
+
+            return pl.DataFrame(data)
 
     def to_arrow(self):
+        """转换为 pyarrow Table。"""
         if pa is None:
             raise ImportError("`pyarrow` is required for `to_arrow()`")
-        return pa.Table.from_pandas(self.to_df())
+
+        if len(self.results) == 2:  # head/tail/query case
+            embeddings, metadata = self.results
+            arrays = [pa.array(embeddings.tolist())]
+            field_names = ['vectors']
+
+            if metadata:
+                field_keys = []
+                seen = set()
+                for record in metadata:
+                    if record:
+                        for key in record.keys():
+                            if key not in seen:
+                                field_keys.append(key)
+                                seen.add(key)
+                for key in field_keys:
+                    arrays.append(pa.array([d.get(key) if d else None for d in metadata]))
+                    field_names.append(key)
+
+            return pa.table(arrays, names=field_names)
+        else:  # search case
+            indices, distances, metadata = self.results
+            arrays = [pa.array(indices), pa.array(distances)]
+            field_names = ['index', 'distance']
+
+            if metadata:
+                field_keys = []
+                seen = set()
+                for record in metadata:
+                    if record:
+                        for key in record.keys():
+                            if key not in seen:
+                                field_keys.append(key)
+                                seen.add(key)
+                for key in field_keys:
+                    arrays.append(pa.array([d.get(key) if d else None for d in metadata]))
+                    field_names.append(key)
+
+            return pa.table(arrays, names=field_names)
 
     def to_list(self) -> List[Tuple[float, Dict[str, Any]]]:
         if len(self.results) == 2:  # head/tail/query case

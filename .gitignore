@@ -164,3 +164,16 @@ cython_debug/
 readme.ipynb
 speed_test.ipynb
 Benchmarks.ipynb
+
+
+*.json
+fingerprint
+*.fingerprint
+*.db
+*.db-shm
+*.db-wal
+*.lock
+*.bin
+
+*.apex
+*.stats
