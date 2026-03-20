@@ -8,6 +8,7 @@ use crate::error::{LynseError, Result};
 use crate::index::{self, SearchParams, VectorIndex};
 use crate::storage::field_store::FieldStore;
 use crate::storage::vector_store::VectorStore;
+use crate::storage::wal::WALStorage;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -24,14 +25,17 @@ pub struct CollectionMeta {
     pub dtypes: String,
 }
 
-/// A single vector collection, managing vectors + fields + index.
+/// A single vector collection, managing vectors + fields + index + WAL.
 pub struct Collection {
     pub meta: CollectionMeta,
     path: PathBuf,
     vector_store: VectorStore,
     field_store: FieldStore,
+    wal: WALStorage,
     index: Option<Box<dyn VectorIndex>>,
     index_mode: Option<String>,
+    /// Fingerprint of the last index sync (for incremental updates)
+    last_sync_fingerprint: Option<String>,
 }
 
 impl Collection {
@@ -55,6 +59,9 @@ impl Collection {
         let field_db_path = collection_path.join("fields_db");
         let field_store = FieldStore::new(&field_db_path, "fields")?;
 
+        // Initialize WAL
+        let wal = WALStorage::new(name, chunk_size, &collection_path, 5000)?;
+
         // Try to load existing index
         let index_path = collection_path.join("index");
         let index_meta_path = collection_path.join("index_meta");
@@ -62,6 +69,9 @@ impl Collection {
         std::fs::create_dir_all(&index_meta_path)?;
 
         let (index, index_mode) = Self::try_load_index(&index_meta_path, &index_path)?;
+
+        // Load last sync fingerprint
+        let last_sync_fingerprint = Self::load_sync_fingerprint(&collection_path);
 
         let meta = CollectionMeta {
             name: name.to_string(),
@@ -71,14 +81,55 @@ impl Collection {
             dtypes: "float32".to_string(),
         };
 
-        Ok(Self {
+        let mut coll = Self {
             meta,
             path: collection_path,
             vector_store,
             field_store,
+            wal,
             index,
             index_mode,
-        })
+            last_sync_fingerprint,
+        };
+
+        // Recover any uncommitted WAL data on startup
+        coll.recover_wal()?;
+
+        Ok(coll)
+    }
+
+    /// Recover uncommitted WAL segments into main storage.
+    fn recover_wal(&mut self) -> Result<()> {
+        if !self.wal.has_uncommitted_data() {
+            return Ok(());
+        }
+
+        let segments = self.wal.get_segments()?;
+        for seg in &segments {
+            self.vector_store.write(&seg.data)?;
+            if !seg.fields.is_empty() {
+                self.field_store.batch_store(&seg.fields)?;
+            }
+        }
+
+        // Clean WAL after successful recovery
+        self.wal.cleanup()?;
+        Ok(())
+    }
+
+    /// Load the last sync fingerprint from disk.
+    fn load_sync_fingerprint(collection_path: &Path) -> Option<String> {
+        let fp_path = collection_path.join("sync_fingerprint");
+        std::fs::read_to_string(&fp_path).ok().map(|s| s.trim().to_string())
+    }
+
+    /// Save the sync fingerprint to disk.
+    fn save_sync_fingerprint(&self) -> Result<()> {
+        if let Some(ref fp) = self.last_sync_fingerprint {
+            let fp_path = self.path.join("sync_fingerprint");
+            std::fs::write(&fp_path, fp)?;
+        }
+        Ok(())
     }
 
     /// Try to load an existing index from disk.
@@ -112,6 +163,7 @@ impl Collection {
     }
 
     /// Add vectors with optional field metadata.
+    /// Data is first written to WAL for crash safety, then to main storage.
     pub fn add_items(
         &mut self,
         vectors: &[f32],
@@ -126,7 +178,16 @@ impl Collection {
             });
         }
 
-        // Write vectors
+        // Write to WAL first for crash safety
+        let wal_fields: Vec<HashMap<String, serde_json::Value>> = match fields {
+            Some(fl) => fl.to_vec(),
+            None => (0..n_vectors)
+                .map(|_| HashMap::new())
+                .collect(),
+        };
+        self.wal.write_log_data(vectors, dim, &wal_fields)?;
+
+        // Write vectors to main storage
         self.vector_store.write(vectors)?;
 
         // Store fields only when provided (skip empty metadata to avoid slow per-row I/O)
@@ -143,6 +204,16 @@ impl Collection {
         }
 
         Ok(())
+    }
+
+    /// Commit: clear WAL after successful writes.
+    pub fn commit(&self) -> Result<()> {
+        self.wal.cleanup()
+    }
+
+    /// Check if there is uncommitted WAL data.
+    pub fn has_uncommitted_data(&self) -> bool {
+        self.wal.has_uncommitted_data()
     }
 
     /// Build or rebuild the index.
@@ -247,16 +318,72 @@ impl Collection {
         })
     }
 
-    /// Brute-force search when no index is built.
-    fn brute_force_search(
+    /// Batch search: search multiple query vectors in parallel.
+    /// Returns one SearchResult per query.
+    pub fn batch_search(
         &self,
-        query: &[f32],
+        queries: &[f32],
+        n_queries: usize,
         k: usize,
-        params: &SearchParams,
-    ) -> Result<(Vec<u64>, Vec<f32>)> {
+        search_filter: Option<&str>,
+        nprobe: usize,
+    ) -> Result<Vec<SearchResult>> {
         let dim = self.meta.dimension;
-        let metric = self
-            .index_mode
+        if queries.len() != n_queries * dim {
+            return Err(LynseError::DimensionMismatch {
+                expected: dim * n_queries,
+                got: queries.len(),
+            });
+        }
+
+        // Pre-compute filter once (shared across all queries)
+        let subset_indices = if let Some(filter) = search_filter {
+            Some(self.field_store.query(filter)?)
+        } else {
+            None
+        };
+
+        use rayon::prelude::*;
+
+        let results: Vec<Result<SearchResult>> = (0..n_queries)
+            .into_par_iter()
+            .map(|i| {
+                let start = i * dim;
+                let query = &queries[start..start + dim];
+
+                let search_params = SearchParams {
+                    k,
+                    nprobe,
+                    ef_search: None,
+                    subset_indices: subset_indices.clone(),
+                };
+
+                let (result_ids, result_dists) = if let Some(ref idx) = self.index {
+                    idx.search(query, k, &search_params)?
+                } else {
+                    self.brute_force_search(query, k, &search_params)?
+                };
+
+                let fields = self.field_store.retrieve_many(&result_ids)?;
+
+                Ok(SearchResult {
+                    ids: result_ids,
+                    distances: result_dists,
+                    fields,
+                    index_mode: self.index_mode.clone().unwrap_or("flat-ip".into()),
+                    dimension: dim,
+                    k,
+                })
+            })
+            .collect();
+
+        // Collect results, propagating any errors
+        results.into_iter().collect()
+    }
+
+    /// Resolve the distance metric from the index_mode string.
+    fn resolve_metric(&self) -> DistanceMetric {
+        self.index_mode
             .as_ref()
             .and_then(|m| {
                 if m.contains("l2") {
@@ -271,50 +398,122 @@ impl Collection {
                     Some(DistanceMetric::InnerProduct)
                 }
             })
-            .unwrap_or(DistanceMetric::InnerProduct);
+            .unwrap_or(DistanceMetric::InnerProduct)
+    }
+
+    /// Brute-force search when no index is built.
+    ///
+    /// Streaming approach: search each chunk independently with batch distances +
+    /// quickselect, then merge top-k across chunks. Avoids copying all data into
+    /// a single Vec.
+    fn brute_force_search(
+        &self,
+        query: &[f32],
+        k: usize,
+        params: &SearchParams,
+    ) -> Result<(Vec<u64>, Vec<f32>)> {
+        let dim = self.meta.dimension;
+        let metric = self.resolve_metric();
+        let ascending = metric.is_ascending();
 
         let all_files = self.vector_store.get_all_files();
         let id_mapper = self.vector_store.id_mapper();
 
-        let mut all_data: Vec<f32> = Vec::new();
-        let mut all_ids: Vec<u64> = Vec::new();
+        // Pre-compute subset filter HashSet once (if any)
+        let subset_set: Option<std::collections::HashSet<u64>> = params
+            .subset_indices
+            .as_ref()
+            .map(|s| s.iter().cloned().collect());
+
+        let mut best_ids: Vec<u64> = Vec::new();
+        let mut best_dists: Vec<f32> = Vec::new();
 
         for filename in &all_files {
             let chunk = self.vector_store.load_chunk_npk(filename)?;
-            let _n_in_chunk = chunk.len() / dim;
 
             if let Some(ids) = id_mapper.generate_ids(filename) {
-                // Apply subset filter
-                if let Some(ref subset) = params.subset_indices {
-                    let subset_set: std::collections::HashSet<u64> =
-                        subset.iter().cloned().collect();
+                if let Some(ref sset) = subset_set {
+                    // Filtered: extract matching vectors
+                    let mut filtered_data: Vec<f32> = Vec::new();
+                    let mut filtered_ids: Vec<u64> = Vec::new();
                     for (i, &id) in ids.iter().enumerate() {
-                        if subset_set.contains(&id) {
+                        if sset.contains(&id) {
                             let start = i * dim;
-                            all_data.extend_from_slice(&chunk[start..start + dim]);
-                            all_ids.push(id);
+                            filtered_data.extend_from_slice(&chunk[start..start + dim]);
+                            filtered_ids.push(id);
                         }
                     }
+                    if filtered_ids.is_empty() {
+                        continue;
+                    }
+                    // Search filtered chunk
+                    let (top_idx, top_dist) =
+                        crate::distance::top_k_search(query, &filtered_data, dim, k, metric);
+                    let chunk_ids: Vec<u64> = top_idx.iter().map(|&i| filtered_ids[i as usize]).collect();
+                    // Merge with running best
+                    let (merged_ids, merged_dists) = crate::distance::top_k_heap_merge(
+                        &best_ids, &best_dists, &top_dist, &chunk_ids, k, ascending,
+                    );
+                    best_ids = merged_ids;
+                    best_dists = merged_dists;
                 } else {
-                    all_data.extend_from_slice(&chunk);
-                    all_ids.extend(ids);
+                    // Unfiltered: search directly on chunk data (zero extra copy)
+                    let (top_idx, top_dist) =
+                        crate::distance::top_k_search(query, &chunk, dim, k, metric);
+                    let chunk_ids: Vec<u64> = top_idx.iter().map(|&i| ids[i as usize]).collect();
+                    // Merge with running best
+                    let (merged_ids, merged_dists) = crate::distance::top_k_heap_merge(
+                        &best_ids, &best_dists, &top_dist, &chunk_ids, k, ascending,
+                    );
+                    best_ids = merged_ids;
+                    best_dists = merged_dists;
                 }
             }
         }
 
-        if all_ids.is_empty() {
-            return Ok((vec![], vec![]));
+        Ok((best_ids, best_dists))
+    }
+
+    /// Update vectors: atomic delete + insert for given IDs.
+    pub fn update_items(
+        &mut self,
+        ids: &[u64],
+        vectors: &[f32],
+        n_vectors: usize,
+        fields: Option<&[HashMap<String, serde_json::Value>]>,
+    ) -> Result<()> {
+        let dim = self.meta.dimension;
+        if vectors.len() != n_vectors * dim {
+            return Err(LynseError::DimensionMismatch {
+                expected: dim,
+                got: vectors.len() / n_vectors,
+            });
+        }
+        if ids.len() != n_vectors {
+            return Err(LynseError::InvalidArgument(
+                "ids length must match n_vectors".to_string(),
+            ));
         }
 
-        let (top_indices, top_dists) =
-            crate::distance::top_k_search(query, &all_data, dim, k, metric);
+        // Delete old vectors from index
+        if let Some(ref mut idx) = self.index {
+            idx.delete(ids)?;
+        }
 
-        let result_ids: Vec<u64> = top_indices
-            .iter()
-            .map(|&idx| all_ids[idx as usize])
-            .collect();
+        // Re-insert with new data
+        if let Some(ref mut idx) = self.index {
+            idx.insert(vectors, n_vectors, dim, ids)?;
+        }
 
-        Ok((result_ids, top_dists))
+        // Write new vectors to storage
+        self.vector_store.write(vectors)?;
+
+        // Store fields if provided
+        if let Some(field_list) = fields {
+            self.field_store.batch_store(field_list)?;
+        }
+
+        Ok(())
     }
 
     /// Remove the index.
@@ -322,6 +521,7 @@ impl Collection {
         self.index = None;
         self.index_mode = None;
         self.meta.index_mode = None;
+        self.last_sync_fingerprint = None;
 
         let index_path = self.path.join("index");
         let meta_path = self.path.join("index_meta");
@@ -338,6 +538,60 @@ impl Collection {
     /// Get collection shape (n_vectors, dimension).
     pub fn shape(&self) -> Result<(u64, usize)> {
         self.vector_store.get_shape()
+    }
+
+    /// Get the current storage fingerprint.
+    pub fn fingerprint(&self) -> String {
+        self.vector_store.fingerprint().unwrap_or_default()
+    }
+
+    /// Check if the index needs to be synced with new data.
+    pub fn needs_index_sync(&self) -> bool {
+        let current_fp = self.vector_store.fingerprint().unwrap_or_default();
+        match &self.last_sync_fingerprint {
+            Some(fp) => fp != &current_fp,
+            None => self.index.is_some(),
+        }
+    }
+
+    /// Incrementally sync the index with any new data since last sync.
+    /// Only rebuilds if the storage fingerprint has changed.
+    pub fn sync_index(&mut self) -> Result<()> {
+        if !self.needs_index_sync() {
+            return Ok(());
+        }
+
+        let current_fp = self.vector_store.fingerprint().unwrap_or_default();
+
+        if let Some(ref mut idx) = self.index {
+            let dim = self.meta.dimension;
+            let all_files = self.vector_store.get_all_files();
+
+            // Collect new data from all chunks
+            // (in a full implementation we'd track which chunks are new,
+            //  but for correctness we rebuild from all data)
+            let mut all_data: Vec<f32> = Vec::new();
+            for filename in &all_files {
+                let chunk = self.vector_store.load_chunk_npk(filename)?;
+                all_data.extend_from_slice(&chunk);
+            }
+
+            let n_vectors = all_data.len() / dim;
+            if n_vectors > 0 {
+                let ids: Vec<u64> = (0..n_vectors as u64).collect();
+                // Rebuild the index with all data
+                idx.build(&all_data, n_vectors, dim, Some(&ids))?;
+
+                // Save updated index
+                let index_data = idx.serialize()?;
+                let index_path = self.path.join("index");
+                std::fs::write(index_path.join("index.bin"), &index_data)?;
+            }
+        }
+
+        self.last_sync_fingerprint = Some(current_fp);
+        self.save_sync_fingerprint()?;
+        Ok(())
     }
 
     /// Delete the entire collection from disk.

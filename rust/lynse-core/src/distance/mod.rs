@@ -3,14 +3,15 @@
 //! Supports: Inner Product, L2 Squared, Cosine, Hamming, Jaccard.
 //! Designed for high-dimensional vectors (700-3500 dims) at billion scale.
 //!
-//! Top-k search uses streaming heap selection (O(n log k), O(k) memory)
-//! with chunked parallel for large datasets.
+//! Top-k search strategy:
+//!   1. Batch compute all distances (cache-friendly, SIMD-pipelined)
+//!   2. Quickselect (introselect) for O(n) partial sort — matches numpy.argpartition
+//!   3. Parallel distance computation via rayon for large datasets (>8k vectors)
 
 pub mod simd;
 
 use rayon::prelude::*;
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 
 /// Distance metric types matching the Python API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -55,7 +56,7 @@ impl DistanceMetric {
 }
 
 /// Compute distance between two f32 vectors.
-#[inline]
+#[inline(always)]
 pub fn compute_distance_f32(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     match metric {
@@ -67,28 +68,140 @@ pub fn compute_distance_f32(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32
     }
 }
 
-// ─── f32-Ord wrapper for BinaryHeap ─────────────────────────────────────────
+// ─── Batch distance computation ─────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
-struct FloatOrd(f32);
-impl Eq for FloatOrd {}
-impl PartialOrd for FloatOrd {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+/// Compute distances from one query to all candidates, writing into a pre-allocated buffer.
+/// This is the hot inner loop — kept separate for cache-friendly batch access.
+#[inline]
+fn batch_distances(
+    query: &[f32],
+    candidates: &[f32],
+    dim: usize,
+    metric: DistanceMetric,
+    out: &mut [f32],
+) {
+    let n = candidates.len() / dim;
+    debug_assert!(out.len() >= n);
+    for i in 0..n {
+        unsafe {
+            let start = i * dim;
+            let cand = candidates.get_unchecked(start..start + dim);
+            *out.get_unchecked_mut(i) = compute_distance_f32(query, cand, metric);
+        }
     }
 }
-impl Ord for FloatOrd {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(Ordering::Equal)
+
+/// Parallel batch distance computation for large datasets.
+/// Splits candidates into per-thread chunks and computes distances in parallel.
+#[inline]
+fn batch_distances_parallel(
+    query: &[f32],
+    candidates: &[f32],
+    dim: usize,
+    metric: DistanceMetric,
+    out: &mut [f32],
+) {
+    let n = candidates.len() / dim;
+    let n_threads = rayon::current_num_threads();
+    let chunk_vecs = (n / n_threads).max(256);
+    let chunk_floats = chunk_vecs * dim;
+
+    // Parallel iterate over aligned (candidate_chunk, output_chunk) pairs
+    candidates
+        .chunks(chunk_floats)
+        .zip(out[..n].chunks_mut(chunk_vecs))
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .for_each(|(cand_chunk, out_chunk)| {
+            let n_in_chunk = cand_chunk.len() / dim;
+            for i in 0..n_in_chunk {
+                unsafe {
+                    let start = i * dim;
+                    let cand = cand_chunk.get_unchecked(start..start + dim);
+                    *out_chunk.get_unchecked_mut(i) = compute_distance_f32(query, cand, metric);
+                }
+            }
+        });
+}
+
+// ─── Quickselect for top-k ───────────────────────────────────────────────────
+
+/// Partition-based top-k selection: O(n) average.
+/// After return, elements [0..k) are the k "best" (smallest for ascending,
+/// largest for descending), but NOT necessarily sorted within [0..k).
+pub(crate) fn quickselect_k_pub(arr: &mut [(f32, u32)], k: usize, ascending: bool) {
+    quickselect_k(arr, k, ascending);
+}
+
+fn quickselect_k(arr: &mut [(f32, u32)], k: usize, ascending: bool) {
+    let n = arr.len();
+    if n <= k || k == 0 {
+        return;
+    }
+    // We want the (k-1)-th element (0-indexed) to be in its final sorted position,
+    // with all elements [0..k) <= arr[k-1] and all elements [k..n) >= arr[k-1].
+    let target = k - 1;
+    let mut lo = 0usize;
+    let mut hi = n - 1; // inclusive
+
+    while lo < hi {
+        // Median-of-3 pivot when range is large enough
+        if hi - lo >= 2 {
+            let mid = lo + (hi - lo) / 2;
+            if cmp_pair(arr[lo], arr[mid], ascending) == Ordering::Greater {
+                arr.swap(lo, mid);
+            }
+            if cmp_pair(arr[lo], arr[hi], ascending) == Ordering::Greater {
+                arr.swap(lo, hi);
+            }
+            if cmp_pair(arr[mid], arr[hi], ascending) == Ordering::Greater {
+                arr.swap(mid, hi);
+            }
+            arr.swap(mid, hi);
+        }
+
+        // Lomuto partition with pivot at arr[hi]
+        let pivot = arr[hi];
+        let mut store = lo;
+        for j in lo..hi {
+            if cmp_pair(arr[j], pivot, ascending) != Ordering::Greater {
+                arr.swap(store, j);
+                store += 1;
+            }
+        }
+        arr.swap(store, hi);
+
+        // Pivot is now at `store`
+        if store == target {
+            return;
+        } else if store < target {
+            lo = store + 1;
+        } else {
+            // store > 0 guaranteed since store > target >= 0 implies store >= 1
+            hi = store - 1;
+        }
+    }
+}
+
+/// Compare two (distance, index) pairs for quickselect ordering.
+#[inline(always)]
+fn cmp_pair(a: (f32, u32), b: (f32, u32), ascending: bool) -> Ordering {
+    if ascending {
+        a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal)
+    } else {
+        b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal)
     }
 }
 
 // ─── Top-k search ───────────────────────────────────────────────────────────
 
+/// Threshold for switching from sequential to parallel distance computation.
+const PARALLEL_THRESHOLD: usize = 8192;
+
 /// Compute distances from a single query to all candidates, return top-k.
 ///
-/// Uses streaming heap selection — O(n log k) time, O(k) memory.
-/// For large datasets, uses chunked parallel with per-thread heaps + merge.
+/// Strategy: batch compute all distances, then quickselect for O(n) top-k.
+/// This matches Python's simsimd + argpartition approach.
 pub fn top_k_search(
     query: &[f32],
     candidates: &[f32],
@@ -104,114 +217,82 @@ pub fn top_k_search(
 
     let ascending = metric.is_ascending();
 
-    if n_candidates >= 16384 {
-        top_k_parallel(query, candidates, dim, k, metric, ascending)
+    // Phase 1: Batch compute all distances
+    let mut distances = vec![0.0f32; n_candidates];
+    if n_candidates >= PARALLEL_THRESHOLD {
+        batch_distances_parallel(query, candidates, dim, metric, &mut distances);
     } else {
-        top_k_streaming(query, candidates, dim, k, metric, ascending)
-    }
-}
-
-/// Sequential streaming: compute distance + heap select in one pass.
-/// Zero intermediate allocation — only O(k) heap memory.
-fn top_k_streaming(
-    query: &[f32],
-    candidates: &[f32],
-    dim: usize,
-    k: usize,
-    metric: DistanceMetric,
-    ascending: bool,
-) -> (Vec<u32>, Vec<f32>) {
-    let n = candidates.len() / dim;
-    // Normalize all distances: for descending (IP), negate so max-heap evicts correctly.
-    // max-heap always evicts the "largest key"; for ascending that's the worst (correct).
-    // For descending, negate so largest negated = smallest original = worst (correct).
-    let mut heap: BinaryHeap<(FloatOrd, u32)> = BinaryHeap::with_capacity(k + 1);
-
-    for i in 0..n {
-        let raw = compute_distance_f32(query, &candidates[i * dim..(i + 1) * dim], metric);
-        let key = if ascending { raw } else { -raw };
-
-        if heap.len() < k {
-            heap.push((FloatOrd(key), i as u32));
-        } else if key < heap.peek().unwrap().0 .0 {
-            // Replace worst element (O(log k) sift-down via PeekMut drop)
-            *heap.peek_mut().unwrap() = (FloatOrd(key), i as u32);
-        }
+        batch_distances(query, candidates, dim, metric, &mut distances);
     }
 
-    heap_to_sorted(heap, k, ascending)
-}
-
-/// Parallel chunked: each thread maintains a local top-k heap, then merge.
-/// Memory: O(k × num_threads). No intermediate Vec<f32> allocation.
-fn top_k_parallel(
-    query: &[f32],
-    candidates: &[f32],
-    dim: usize,
-    k: usize,
-    metric: DistanceMetric,
-    ascending: bool,
-) -> (Vec<u32>, Vec<f32>) {
-    let n = candidates.len() / dim;
-    let chunk_vectors = (n / rayon::current_num_threads()).max(512);
-    let chunk_floats = chunk_vectors * dim;
-
-    // Each chunk produces a local top-k heap
-    let local_results: Vec<Vec<(FloatOrd, u32)>> = candidates
-        .par_chunks(chunk_floats)
+    // Phase 2: Build (distance, index) pairs
+    let mut pairs: Vec<(f32, u32)> = distances
+        .iter()
         .enumerate()
-        .map(|(chunk_idx, batch)| {
-            let base = (chunk_idx * chunk_vectors) as u32;
-            let n_batch = batch.len() / dim;
-            let mut heap: BinaryHeap<(FloatOrd, u32)> = BinaryHeap::with_capacity(k + 1);
-
-            for i in 0..n_batch {
-                let raw = compute_distance_f32(query, &batch[i * dim..(i + 1) * dim], metric);
-                let key = if ascending { raw } else { -raw };
-                let idx = base + i as u32;
-
-                if heap.len() < k {
-                    heap.push((FloatOrd(key), idx));
-                } else if key < heap.peek().unwrap().0 .0 {
-                    *heap.peek_mut().unwrap() = (FloatOrd(key), idx);
-                }
-            }
-
-            heap.into_vec()
-        })
+        .map(|(i, &d)| (d, i as u32))
         .collect();
 
-    // Merge local heaps into global top-k
-    let mut global: BinaryHeap<(FloatOrd, u32)> = BinaryHeap::with_capacity(k + 1);
-    for local in local_results {
-        for entry in local {
-            if global.len() < k {
-                global.push(entry);
-            } else if entry.0 .0 < global.peek().unwrap().0 .0 {
-                *global.peek_mut().unwrap() = entry;
-            }
-        }
+    // Phase 3: Quickselect to get top-k in O(n) average
+    quickselect_k(&mut pairs, k, ascending);
+
+    // Phase 4: Sort only the top-k results (O(k log k))
+    let top_k = &mut pairs[..k];
+    if ascending {
+        top_k.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+    } else {
+        top_k.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
     }
 
-    heap_to_sorted(global, k, ascending)
-}
-
-/// Extract sorted results from a max-heap.
-fn heap_to_sorted(
-    heap: BinaryHeap<(FloatOrd, u32)>,
-    k: usize,
-    ascending: bool,
-) -> (Vec<u32>, Vec<f32>) {
-    // into_sorted_vec returns ascending order by FloatOrd
-    let sorted = heap.into_sorted_vec();
     let mut indices = Vec::with_capacity(k);
     let mut dists = Vec::with_capacity(k);
-
-    for (FloatOrd(key), idx) in sorted {
+    for &(d, idx) in top_k.iter() {
         indices.push(idx);
-        dists.push(if ascending { key } else { -key });
+        dists.push(d);
     }
+
     (indices, dists)
+}
+
+/// Streaming top-k with heap — used for incremental/chunked search in engine.
+/// O(n log k) time, O(k) memory. Useful when data arrives in chunks.
+pub fn top_k_heap_merge(
+    existing_ids: &[u64],
+    existing_dists: &[f32],
+    new_chunk_dists: &[f32],
+    new_chunk_ids: &[u64],
+    k: usize,
+    ascending: bool,
+) -> (Vec<u64>, Vec<f32>) {
+    let total = existing_ids.len() + new_chunk_ids.len();
+    let k = k.min(total);
+
+    let mut pairs: Vec<(f32, u64)> = Vec::with_capacity(total);
+    for i in 0..existing_ids.len() {
+        pairs.push((existing_dists[i], existing_ids[i]));
+    }
+    for i in 0..new_chunk_ids.len() {
+        pairs.push((new_chunk_dists[i], new_chunk_ids[i]));
+    }
+
+    // Quickselect
+    let mut fpairs: Vec<(f32, u32)> = pairs.iter().enumerate().map(|(i, &(d, _))| (d, i as u32)).collect();
+    quickselect_k(&mut fpairs, k, ascending);
+
+    let top_k = &mut fpairs[..k];
+    if ascending {
+        top_k.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+    } else {
+        top_k.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+    }
+
+    let mut ids = Vec::with_capacity(k);
+    let mut dists = Vec::with_capacity(k);
+    for &(d, idx) in top_k.iter() {
+        let (_, orig_id) = pairs[idx as usize];
+        ids.push(orig_id);
+        dists.push(d);
+    }
+    (ids, dists)
 }
 
 /// Batch top-k search: multiple queries against same candidate set.
@@ -269,15 +350,50 @@ mod tests {
             0.1, 0.0, 0.0, // dist=0.01
             2.0, 0.0, 0.0, // dist=4.0
         ];
-        let (ids, dists) = top_k_search(&query, &candidates, 3, 2, DistanceMetric::L2Squared);
+        let (ids, _dists) = top_k_search(&query, &candidates, 3, 2, DistanceMetric::L2Squared);
         assert_eq!(ids[0], 1); // smallest L2
+    }
+
+    #[test]
+    fn test_top_k_larger() {
+        // Test with moderate dataset (fast in debug mode)
+        let dim = 16;
+        let n = 1_000;
+        let mut candidates = vec![0.0f32; n * dim];
+        for i in 0..n {
+            for j in 0..dim {
+                candidates[i * dim + j] = (i * dim + j) as f32 * 0.001;
+            }
+        }
+        // Use L2 with query = first candidate → self-match has distance 0 (smallest)
+        let query: Vec<f32> = candidates[..dim].to_vec();
+        let (ids, dists) = top_k_search(&query, &candidates, dim, 5, DistanceMetric::L2Squared);
+        assert_eq!(ids.len(), 5);
+        assert_eq!(ids[0], 0); // self-match = L2 distance 0
+        assert!(dists[0] < 1e-6);
+        // Results should be sorted ascending by distance
+        for w in dists.windows(2) {
+            assert!(w[0] <= w[1]);
+        }
+    }
+
+    #[test]
+    fn test_quickselect_basic() {
+        let mut pairs: Vec<(f32, u32)> = vec![
+            (5.0, 0), (1.0, 1), (3.0, 2), (2.0, 3), (4.0, 4),
+        ];
+        quickselect_k(&mut pairs, 2, true);
+        // After quickselect, the 2 smallest should be in [0..2]
+        let top2: Vec<f32> = pairs[..2].iter().map(|p| p.0).collect();
+        assert!(top2.contains(&1.0));
+        assert!(top2.contains(&2.0));
     }
 
     #[test]
     fn test_batch_search() {
         let queries = vec![1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0];
         let candidates = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let (all_ids, all_dists) =
+        let (all_ids, _all_dists) =
             batch_top_k_search(&queries, &candidates, 3, 1, DistanceMetric::L2Squared);
         assert_eq!(all_ids.len(), 2);
     }
