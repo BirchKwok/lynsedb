@@ -1,4 +1,4 @@
-import os
+import threading
 from pathlib import Path
 from typing import Union, List, Tuple
 
@@ -8,18 +8,96 @@ import polars as pl
 import pyarrow as pa
 
 from spinesUtils.asserts import raise_if, ParameterTypeAssert
-from spinesUtils.timer import Timer
 
 from lynse.execution_layer.query_view import QueryView
 
 from ...configs.parameters_validator import ParametersValidator
-from ...core_components.locks import ThreadLock
-from lynse.index.indexer import Indexer
-from ...execution_layer.search import Search
-from ...execution_layer.matrix_serializer import MatrixSerializer
 from ...utils.utils import unavailable_if_deleted, unavailable_if_empty, collection_repr
 from ...api import logger
 from ...core_components.fields_cache.filter import Filter
+from ..._rust_backend import rust_available, RustEngine
+from ...execution_layer.result import Result
+
+import operator as _op
+import re as _re
+
+
+def _filter_to_sql(search_filter):
+    """Convert a Filter object or field expression string to SQL WHERE clause for Rust ApexBase."""
+    if search_filter is None:
+        return None
+
+    if isinstance(search_filter, str):
+        # Field expression string like ":name: == 'John Doe' and :age: > 30"
+        sql = search_filter
+        # :id: maps to external_id in Rust ApexBase
+        sql = sql.replace(':id:', 'external_id')
+        sql = _re.sub(r':(\w+):', r'\1', sql)
+        sql = sql.replace(' == ', ' = ')
+        # Convert double-quoted strings to single-quoted for SQL
+        sql = _re.sub(r'"([^"]*)"', r"'\1'", sql)
+        sql = _re.sub(r'\bnot\s+in\s*\[([^\]]*)\]', r'NOT IN (\1)', sql, flags=_re.IGNORECASE)
+        sql = _re.sub(r'\bin\s*\[([^\]]*)\]', r'IN (\1)', sql)
+        sql = _re.sub(r'\band\b', 'AND', sql)
+        sql = _re.sub(r'\bor\b', 'OR', sql)
+        return sql
+
+    if isinstance(search_filter, Filter):
+        parts = []
+        for cond in search_filter.must_fields:
+            parts.append(_condition_to_sql(cond))
+        if search_filter.any_fields:
+            or_parts = [_condition_to_sql(c) for c in search_filter.any_fields]
+            parts.append('(' + ' OR '.join(or_parts) + ')')
+        for cond in search_filter.must_not_fields:
+            parts.append('NOT (' + _condition_to_sql(cond) + ')')
+        return ' AND '.join(parts) if parts else None
+
+    return None
+
+
+_OP_MAP = {
+    _op.eq: '=', _op.ne: '!=', _op.gt: '>', _op.lt: '<',
+    _op.ge: '>=', _op.le: '<=',
+}
+
+
+def _condition_to_sql(cond):
+    """Convert a single FieldCondition to SQL clause."""
+    from ...core_components.fields_cache.filter import MatchID, MatchField, MatchRange
+
+    m = cond.matcher
+    if isinstance(m, MatchID):
+        ids_str = ', '.join(str(i) for i in m.indices)
+        return f'external_id IN ({ids_str})'
+    elif isinstance(m, MatchRange):
+        key = cond.key
+        if m.inclusive is True:
+            return f'{key} >= {_sql_val(m.start)} AND {key} <= {_sql_val(m.end)}'
+        elif m.inclusive == 'left':
+            return f'{key} >= {_sql_val(m.start)} AND {key} < {_sql_val(m.end)}'
+        elif m.inclusive == 'right':
+            return f'{key} > {_sql_val(m.start)} AND {key} <= {_sql_val(m.end)}'
+        else:
+            return f'{key} > {_sql_val(m.start)} AND {key} < {_sql_val(m.end)}'
+    elif isinstance(m, MatchField):
+        key = cond.key
+        val = m.value
+        if isinstance(val, (list, tuple)):
+            vals = ', '.join(_sql_val(v) for v in val)
+            if m.not_in:
+                return f'{key} NOT IN ({vals})'
+            return f'{key} IN ({vals})'
+        op = _OP_MAP.get(m.comparator, '=')
+        return f'{key} {op} {_sql_val(val)}'
+    return '1=1'
+
+
+def _sql_val(v):
+    """Format a Python value for SQL."""
+    if isinstance(v, str):
+        return f"'{v}'"
+    return str(v)
 
 
 class ExclusiveDB:
@@ -42,6 +120,7 @@ class ExclusiveDB:
         'dim': int,
         'database_path': str,
         'chunk_size': int,
+        'dtypes': (None, str),
         'cache_query': bool,
         'n_threads': (None, int),
         'warm_up': bool,
@@ -52,6 +131,7 @@ class ExclusiveDB:
             dim: int,
             database_path: Union[str, Path],
             chunk_size: int = 100_000,
+            dtypes: str = 'float32',
             cache_query: bool = True,
             n_threads: Union[int, None] = 10,
             warm_up: bool = False,
@@ -84,57 +164,56 @@ class ExclusiveDB:
         # In order to have enough data to index the segment
         raise_if(ValueError, chunk_size < 1000, 'chunk_size must greater than or equal to 1000.')
 
-        self._database_path = database_path
+        self._database_path = str(database_path)
         self._database_name = Path(database_path).parent.name
         self._collection_name = Path(database_path).name
+        self._dim = dim
+        self._chunk_size = chunk_size
+        self._IS_DELETED = False
 
-        self._matrix_serializer = MatrixSerializer(
-            dim=dim,
-            collection_path=self._database_path,
-            chunk_size=chunk_size,
-            logger=logger,
-            warm_up=warm_up,
-            cache_chunks=cache_chunks
-        )
-        self._data_loader = self._matrix_serializer.dataloader
+        # ── Rust backend (thread safety handled by parking_lot::RwLock) ──
+        if not rust_available():
+            raise RuntimeError(
+                "Rust backend (lynse_core) is required but not installed. "
+                "Build with: cd rust/lynse-core && maturin develop --release"
+            )
 
-        self._timer = Timer()
-        self._cache_query = cache_query
+        root_path = str(Path(database_path).parent)
+        self._engine = RustEngine(root_path)
 
-        raise_if(TypeError, n_threads is not None and not isinstance(n_threads, int), "n_threads must be an integer.")
-        raise_if(ValueError, n_threads is not None and n_threads <= 0, "n_threads must be greater than 0.")
+        if self._engine.has_collection(self._collection_name):
+            self._rust_coll = self._engine.get_collection(
+                self._collection_name, dim, chunk_size
+            )
+        else:
+            self._rust_coll = self._engine.create_collection(
+                self._collection_name, dim, chunk_size
+            )
 
-        self._indexer = Indexer(
-            logger=logger,
-            dataloader=self._data_loader,
-            storage_worker=self._matrix_serializer.storage_worker,
-            collections_path_parent=self._matrix_serializer.collections_path_parent
-        )
-
-        self._search = Search(
-            logger=logger,
-            storage_worker=self._matrix_serializer.storage_worker,
-            indexer=self._indexer,
-            field_index=self._matrix_serializer.field_index,
-            n_threads=n_threads if n_threads else min(32, os.cpu_count() + 4),
-            dtypes=self._matrix_serializer.dtypes
-        )
-
-        # initial lock
-        self._lock = ThreadLock()
+        # ── Write buffer for add_item (single vector buffering) ──
+        self._buffer_lock = threading.Lock()
+        self._buffer_vectors: List[np.ndarray] = []
+        self._buffer_fields: List[dict] = []
+        self._buffer_size_limit = chunk_size
 
         # pre_build_index if the ExclusiveDB instance is reloaded
         if self.shape[0] > 0:
             self._pre_build_index()
 
+    # ── Single-vector add with buffering ─────────────────────────────────────
+
     @unavailable_if_deleted
-    def add_item(self, vector: Union[np.ndarray, list], *, field: dict = None,
+    def add_item(self, vector: Union[np.ndarray, list], id: int = None, *,
+                 field: dict = None,
                  buffer_size: Union[int, None, bool] = True) -> int:
         """
         Add a single vector to the collection.
 
+        It is recommended to use incremental ids for best performance.
+
         Parameters:
             vector (np.ndarray): The vector to be added.
+            id (int, optional): The ID of the vector. Default is None (auto-assigned).
             field (dict, optional, keyword-only): The field of the vector. Default is None.
                 If None, the field will be set to an empty string.
             buffer_size (int or bool or None): The buffer size for the storage worker. Default is True.
@@ -151,8 +230,29 @@ class ExclusiveDB:
         Raises:
             ValueError: If the vector dimensions don't match or the ID already exists.
         """
-        return self._matrix_serializer.add_item(vector, field=field,
-                                                buffer_size=buffer_size)
+        vector = np.asarray(vector, dtype=np.float32).ravel()
+        raise_if(ValueError, vector.shape[0] != self._dim,
+                 'vector dimension mismatch.')
+
+        # Determine effective buffer limit
+        if buffer_size is None or buffer_size is False:
+            limit = 0
+        elif buffer_size is True:
+            limit = self._buffer_size_limit
+        else:
+            limit = int(buffer_size)
+
+        # Current ID = total existing + buffered
+        current_id = self.shape[0] + len(self._buffer_vectors)
+
+        with self._buffer_lock:
+            self._buffer_vectors.append(vector)
+            self._buffer_fields.append(field if field else {})
+
+            if limit == 0 or len(self._buffer_vectors) >= limit:
+                self._flush_buffer()
+
+        return current_id
 
     @unavailable_if_deleted
     def bulk_add_items(
@@ -170,58 +270,109 @@ class ExclusiveDB:
         Returns:
             List[int]: A list of indices where the vectors are stored.
         """
-        return self._matrix_serializer.bulk_add_items(vectors)
+        # Flush any pending buffer first
+        with self._buffer_lock:
+            self._flush_buffer()
+
+        vecs = []
+        fields = []
+        for item in vectors:
+            if not isinstance(item, (list, tuple)):
+                # bare vector
+                vecs.append(np.asarray(item, dtype=np.float32).ravel())
+                fields.append({})
+            elif len(item) >= 2 and isinstance(item[-1], dict):
+                # (vector, field) or (vector, id, field)
+                vecs.append(np.asarray(item[0], dtype=np.float32).ravel())
+                fields.append(item[-1])
+            elif len(item) >= 1:
+                vecs.append(np.asarray(item[0], dtype=np.float32).ravel())
+                fields.append({})
+
+        start_id = self.shape[0]
+        np_vecs = np.vstack(vecs).astype(np.float32)
+        field_list = fields if any(f for f in fields) else None
+        self._rust_coll.add_items(np_vecs, field_list)
+
+        return list(range(start_id, start_id + len(vecs)))
+
+    def _flush_buffer(self):
+        """Flush the internal write buffer to the Rust backend.
+        
+        Note: caller must hold self._buffer_lock when calling from add_item.
+        For commit() we acquire the lock ourselves.
+        """
+        if not self._buffer_vectors:
+            return
+        np_vecs = np.vstack(self._buffer_vectors).astype(np.float32)
+        field_list = self._buffer_fields if any(f for f in self._buffer_fields) else None
+        self._rust_coll.add_items(np_vecs, field_list)
+        self._buffer_vectors.clear()
+        self._buffer_fields.clear()
 
     def from_pandas(self, df: pd.DataFrame):
         """
         Add vectors from a pandas DataFrame.
         """
-        return self._matrix_serializer.from_pandas(df)
+        self._flush_buffer()
+        # Expect 'vector' column and remaining columns as fields
+        if 'vector' not in df.columns:
+            raise ValueError("DataFrame must contain a 'vector' column.")
+        vectors = np.vstack(df['vector'].values).astype(np.float32)
+        field_cols = [c for c in df.columns if c != 'vector']
+        fields = None
+        if field_cols:
+            fields = df[field_cols].to_dict('records')
+        self._rust_coll.add_items(vectors, fields)
 
     def from_arrow(self, table: pa.Table):
         """
         Add vectors from a pyarrow Table.
         """
-        return self._matrix_serializer.from_arrow(table)
+        self.from_pandas(table.to_pandas())
 
     def from_polars(self, df: pl.DataFrame):
         """
         Add vectors from a polars DataFrame.
         """
-        return self._matrix_serializer.from_polars(df)
+        self.from_pandas(df.to_pandas())
 
     def from_parquet(self, path: str):
         """
         Add vectors from a parquet file.
         """
-        return self._matrix_serializer.from_parquet(path)
+        import pyarrow.parquet as pq
+        table = pq.read_table(path)
+        self.from_arrow(table)
 
     def from_csv(self, path: str):
         """
         Add vectors from a csv file.
         """
-        return self._matrix_serializer.from_csv(path)
+        df = pd.read_csv(path)
+        self.from_pandas(df)
 
     def from_dict(self, data: dict):
         """
         Add vectors from a dictionary.
         """
-        return self._matrix_serializer.from_dict(data)
+        self.from_pandas(pd.DataFrame(data))
 
     @unavailable_if_deleted
     def commit(self):
         """
         Save the database, ensuring that all data is written to disk.
         """
-        with self._lock:
-            self._matrix_serializer.commit()
-            self._pre_build_index()
+        with self._buffer_lock:
+            self._flush_buffer()
+        self._rust_coll.commit()
+        self._pre_build_index()
 
     @unavailable_if_deleted
     def _pre_build_index(self):
-        if not hasattr(self._matrix_serializer, "indexer"):
+        if self._rust_coll.index_mode is None and self.shape[0] > 0:
             logger.info("Pre-building the index...")
-            self.build_index(index_mode="FLAT")  # 使用正确的索引类型别名
+            self.build_index(index_mode="FLAT")
 
     @unavailable_if_deleted
     @unavailable_if_empty
@@ -255,9 +406,28 @@ class ExclusiveDB:
         Returns:
             None
         """
-        with self._lock:
-            self._indexer.build_index(index_mode, **kwargs)
-            self._matrix_serializer.indexer = self._indexer
+        # Normalize index mode: "FLAT" → "Flat-IP", etc.
+        mode = index_mode.strip()
+        alias_map = {
+            'FLAT': 'Flat-IP',
+            'FLAT-L2': 'Flat-L2',
+            'FLAT-COS': 'Flat-Cos',
+            'FLAT-IP-SQ8': 'Flat-IP-SQ8',
+            'FLAT-L2-SQ8': 'Flat-L2-SQ8',
+            'FLAT-COS-SQ8': 'Flat-Cos-SQ8',
+            'FLAT-JACCARD-BINARY': 'Flat-Jaccard-Binary',
+            'FLAT-HAMMING-BINARY': 'Flat-Hamming-Binary',
+            'IVF': 'IVF-IP',
+            'IVF-L2': 'IVF-L2',
+            'IVF-COS': 'IVF-Cos',
+            'IVF-IP-SQ8': 'IVF-IP-SQ8',
+            'IVF-L2-SQ8': 'IVF-L2-SQ8',
+            'IVF-COS-SQ8': 'IVF-Cos-SQ8',
+            'IVF-JACCARD-BINARY': 'IVF-Jaccard-Binary',
+            'IVF-HAMMING-BINARY': 'IVF-Hamming-Binary',
+        }
+        rust_mode = alias_map.get(mode.upper(), mode)
+        self._rust_coll.build_index(rust_mode)
 
     @unavailable_if_deleted
     @unavailable_if_empty
@@ -268,7 +438,7 @@ class ExclusiveDB:
         Returns:
             None
         """
-        self._indexer.remove_index()
+        self._rust_coll.remove_index()
         logger.info("Fallback to default index mode: `Flat-IP`.")
         self.build_index(index_mode='Flat-IP')  # Default index mode
 
@@ -312,9 +482,9 @@ class ExclusiveDB:
                  'search_filter must be Filter or None or FieldExpression string.')
 
         # Convert the vector to np.ndarray
-        vector = np.atleast_2d(np.asarray(vector))
+        vector = np.atleast_2d(np.asarray(vector, dtype=np.float32))
 
-        raise_if(ValueError, vector.shape[1] != self._matrix_serializer.shape[1],
+        raise_if(ValueError, vector.shape[1] != self._dim,
                  'vector must be same dim with database.')
 
         rescore = kwargs.setdefault('rescore', False)
@@ -322,16 +492,32 @@ class ExclusiveDB:
         raise_if(TypeError, not isinstance(rescore, bool), 'rescore must be bool.')
         raise_if(TypeError, not isinstance(rescore_multiplier, int), 'rescore_multiplier must be int.')
 
-        if self._matrix_serializer.shape[0] == 0:
+        n_total = self.shape[0]
+        if n_total == 0:
             raise ValueError('database is empty.')
 
-        if k > self._matrix_serializer.shape[0]:
-            k = self._matrix_serializer.shape[0]
+        if k > n_total:
+            k = n_total
 
-        res = self._search.search(vector=vector, k=k, search_filter=search_filter, **kwargs)
+        nprobe = kwargs.get('nprobe', 8)
 
-        # 直接返回 Result 对象，保留向后兼容的解包能力
-        return res
+        # Convert search_filter to SQL WHERE clause for Rust ApexBase
+        filter_str = _filter_to_sql(search_filter)
+
+        # Single vs batch search
+        if vector.shape[0] == 1:
+            rust_result = self._rust_coll.search(
+                vector[0], k=k, search_filter=filter_str, nprobe=nprobe
+            )
+        else:
+            rust_result = self._rust_coll.batch_search(
+                vector, k=k, search_filter=filter_str, nprobe=nprobe
+            )
+            # For batch, return list of Result objects
+            return [Result(r.ids, r.distances, r.fields) for r in rust_result]
+
+        # Wrap Rust result into the existing Python Result object for API compatibility
+        return Result(rust_result.ids, rust_result.distances, rust_result.fields)
 
     @unavailable_if_deleted
     @unavailable_if_empty
@@ -346,7 +532,11 @@ class ExclusiveDB:
         Returns:
             (QueryView): The records.
         """
-        return self._matrix_serializer.field_index.query(query_filter)
+        filter_str = _filter_to_sql(query_filter)
+
+        ids = self._rust_coll.query_fields(filter_str)
+        fields = self._rust_coll.retrieve_fields(ids)
+        return QueryView((None, fields))
 
     @unavailable_if_deleted
     @unavailable_if_empty
@@ -360,7 +550,7 @@ class ExclusiveDB:
         Returns:
             (QueryView): The vectors, IDs, and fields of the items.
         """
-        return self._matrix_serializer.field_index.query(query_filter)
+        return self.query(query_filter)
 
     @property
     def shape(self):
@@ -370,7 +560,7 @@ class ExclusiveDB:
         Returns:
             (Tuple[int, int]): The number of vectors and the dimension of each vector in the database.
         """
-        return self._matrix_serializer.shape
+        return self._rust_coll.shape
 
     @unavailable_if_deleted
     def insert_session(self):
@@ -396,41 +586,8 @@ class ExclusiveDB:
         Returns:
             (QueryView): The vectors, IDs, and fields of the items.
         """
-        filenames = self._matrix_serializer.storage_worker.get_all_files()
-        filenames = sorted(filenames, key=lambda x: int(x.split('_')[-1].split('.')[0]))
-
-        data = []
-
-        count = 0
-        dtypes = self._matrix_serializer.dtypes
-
-        indices = []
-        for filename in filenames:
-            data_dict = self._matrix_serializer.dataloader(filename)
-
-            # 从字典中提取实际的数组数据
-            if isinstance(data_dict, dict):
-                if "data" in data_dict:
-                    data_chunk = data_dict["data"]
-                else:
-                    # 如果没有 "data" 键，使用第一个数组
-                    data_chunk = list(data_dict.values())[0]
-            else:
-                # 向后兼容：如果直接返回数组
-                data_chunk = data_dict
-
-            dtypes = data_chunk.dtype
-            data.extend(data_chunk)
-
-            indices.extend(self._matrix_serializer.storage_worker.id_mapper[filename].generate_ids(as_range=True))
-            count += len(data_chunk)
-            if count >= n:
-                break
-
-        if data:
-            return QueryView((np.vstack(data, dtype=dtypes)[:n],
-                              self._matrix_serializer.field_index.retrieve_many(indices[:n])))
-        return QueryView((np.array(data, dtype=dtypes), []))
+        vectors, fields = self._rust_coll.head(n)
+        return QueryView((vectors, fields))
 
     @unavailable_if_deleted
     @unavailable_if_empty
@@ -444,42 +601,8 @@ class ExclusiveDB:
         Returns:
             (QueryView): The vectors, IDs, and fields of the items.
         """
-        filenames = self._matrix_serializer.storage_worker.get_all_files()
-        filenames = sorted(filenames, key=lambda x: int(x.split('_')[-1].split('.')[0]))
-
-        data = []
-
-        count = 0
-        dtypes = self._matrix_serializer.dtypes
-
-        indices = []
-        for filename in filenames[::-1]:
-            data_dict = self._matrix_serializer.dataloader(filename)
-
-            # 从字典中提取实际的数组数据
-            if isinstance(data_dict, dict):
-                if "data" in data_dict:
-                    data_chunk = data_dict["data"]
-                else:
-                    # 如果没有 "data" 键，使用第一个数组
-                    data_chunk = list(data_dict.values())[0]
-            else:
-                # 向后兼容：如果直接返回数组
-                data_chunk = data_dict
-
-            dtypes = data_chunk.dtype
-            data.append(data_chunk)
-
-            indices.extend(self._matrix_serializer.storage_worker.id_mapper[filename].generate_ids(as_range=True))
-            count += len(data_chunk)
-            if count >= n:
-                break
-
-        if data:
-            return QueryView((np.vstack(data[::-1], dtype=dtypes)[-n:],
-                              self._matrix_serializer.field_index.retrieve_many(indices[-n:])))
-
-        return QueryView((np.array(data, dtype=dtypes), []))
+        vectors, fields = self._rust_coll.tail(n)
+        return QueryView((vectors, fields))
 
     @unavailable_if_deleted
     @unavailable_if_empty
@@ -490,7 +613,8 @@ class ExclusiveDB:
         Returns:
             Dict: A dictionary with field names as keys and field types as values.
         """
-        return self._matrix_serializer.field_index.storage.list_fields()
+        field_names = self._rust_coll.list_fields()
+        return {name: 'unknown' for name in field_names}
 
     @unavailable_if_deleted
     @unavailable_if_empty
@@ -501,7 +625,9 @@ class ExclusiveDB:
         Returns:
             None
         """
-        self._matrix_serializer.field_index.remove_all_field_indices()
+        # Field indices are managed by ApexBase in the Rust backend;
+        # this is a no-op as the Rust field store handles indexing internally.
+        pass
 
     def delete(self):
         """
@@ -513,14 +639,13 @@ class ExclusiveDB:
         Returns:
             None
         """
-        if self._matrix_serializer.IS_DELETED:
+        if self._IS_DELETED:
             return
 
         import gc
 
-        with self._lock:
-            self._search.close()
-            self._matrix_serializer.delete()
+        self._rust_coll.delete()
+        self._IS_DELETED = True
 
         gc.collect()
 
@@ -533,10 +658,7 @@ class ExclusiveDB:
         Returns:
             (str or None): The index mode of the database.
         """
-        if not hasattr(self._matrix_serializer, "indexer"):
-            return None
-
-        return self._matrix_serializer.indexer.index_mode
+        return self._rust_coll.index_mode
 
     def is_deleted(self):
         """
@@ -545,7 +667,7 @@ class ExclusiveDB:
         Returns:
             Bool: True if the database is deleted, False otherwise.
         """
-        return self._matrix_serializer.IS_DELETED
+        return self._IS_DELETED
 
     def __len__(self):
         return self.shape[0]

@@ -9,8 +9,12 @@ from lynse.execution_layer.query_view import QueryView
 
 from .filter import MatchField, MatchID, FieldCondition, Filter, MatchRange
 from .expression_parse import ExpressionParser
-from .fields_storage import FieldsStorage
-from .fields_query import FieldsQuery
+try:
+    from .fields_storage import FieldsStorage
+    from .fields_query import FieldsQuery
+except (ImportError, ModuleNotFoundError):
+    FieldsStorage = None
+    FieldsQuery = None
 
 
 class FieldsCache:

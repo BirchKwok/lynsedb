@@ -126,6 +126,13 @@ class ConditionNode(ASTNode):
                 value = self.parse_value(self.value)
                 all_comparators = False
 
+        # :id: with in/not in uses MatchID instead of MatchField
+        if field == ':id:' and self.op in ['in', 'not in']:
+            condition = FieldCondition(field, MatchID(value))
+            if self.op == 'not in':
+                return Filter(must_not=[condition])
+            return Filter(must=[condition])
+
         comparator = operator_map[self.op]
         condition = FieldCondition(
             field,
@@ -502,6 +509,13 @@ class ExpressionParser:
             raise ValueError("Expression is incomplete, lacks value.")
         right = self.tokens[self.current]
         self.current += 1
+
+        if op not in operator_map:
+            raise ValueError(f"Unknown operator: '{op}'")
+
+        # Reject cases where value is itself an operator (e.g. '>>>' tokenized as '>' '>' '>')
+        if right in operator_map or right in ('and', 'or', 'not', '(', ')', '||('):
+            raise ValueError(f"Unexpected token '{right}' where a value was expected.")
 
         # Check if the field is on the left side
         if ':' in left:

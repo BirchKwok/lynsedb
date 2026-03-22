@@ -594,6 +594,99 @@ impl Collection {
         Ok(())
     }
 
+    /// Return the first `n` vectors with their field metadata.
+    ///
+    /// Returns `(flat_f32_data, dimension, fields)`.
+    pub fn head(&self, n: usize) -> Result<(Vec<f32>, Vec<HashMap<String, serde_json::Value>>)> {
+        let dim = self.meta.dimension;
+        let all_files = self.vector_store.get_all_files();
+        let id_mapper = self.vector_store.id_mapper();
+
+        let mut data: Vec<f32> = Vec::new();
+        let mut ids: Vec<u64> = Vec::new();
+        let mut count = 0usize;
+
+        for filename in &all_files {
+            let chunk = self.vector_store.load_chunk_npk(filename)?;
+            let n_vecs = chunk.len() / dim;
+            let take = n_vecs.min(n - count);
+
+            data.extend_from_slice(&chunk[..take * dim]);
+
+            if let Some(chunk_ids) = id_mapper.generate_ids(filename) {
+                ids.extend_from_slice(&chunk_ids[..take]);
+            }
+
+            count += take;
+            if count >= n {
+                break;
+            }
+        }
+
+        let fields = self.field_store.retrieve_many(&ids)?;
+        Ok((data, fields))
+    }
+
+    /// Return the last `n` vectors with their field metadata.
+    pub fn tail(&self, n: usize) -> Result<(Vec<f32>, Vec<HashMap<String, serde_json::Value>>)> {
+        let dim = self.meta.dimension;
+        let all_files = self.vector_store.get_all_files();
+        let id_mapper = self.vector_store.id_mapper();
+
+        let mut data: Vec<f32> = Vec::new();
+        let mut ids: Vec<u64> = Vec::new();
+        let mut count = 0usize;
+
+        for filename in all_files.iter().rev() {
+            let chunk = self.vector_store.load_chunk_npk(filename)?;
+            let n_vecs = chunk.len() / dim;
+            let take = n_vecs.min(n - count);
+            let skip = n_vecs - take;
+
+            // Prepend to front (reverse order iteration)
+            let mut prefix = chunk[skip * dim..].to_vec();
+            prefix.extend_from_slice(&data);
+            data = prefix;
+
+            if let Some(chunk_ids) = id_mapper.generate_ids(filename) {
+                let mut prefix_ids = chunk_ids[skip..].to_vec();
+                prefix_ids.extend_from_slice(&ids);
+                ids = prefix_ids;
+            }
+
+            count += take;
+            if count >= n {
+                break;
+            }
+        }
+
+        let fields = self.field_store.retrieve_many(&ids)?;
+        Ok((data, fields))
+    }
+
+    /// Query field metadata with a SQL-like filter. Returns matching external IDs.
+    pub fn query_fields(&self, filter_expr: &str) -> Result<Vec<u64>> {
+        self.field_store.query(filter_expr)
+    }
+
+    /// Retrieve field metadata for specific IDs.
+    pub fn retrieve_fields(
+        &self,
+        ids: &[u64],
+    ) -> Result<Vec<HashMap<String, serde_json::Value>>> {
+        self.field_store.retrieve_many(ids)
+    }
+
+    /// List all field names in the collection.
+    pub fn list_fields(&self) -> Result<Vec<String>> {
+        self.field_store.list_fields()
+    }
+
+    /// Get the current index mode string.
+    pub fn get_index_mode(&self) -> Option<&str> {
+        self.index_mode.as_deref()
+    }
+
     /// Delete the entire collection from disk.
     pub fn delete(self) -> Result<()> {
         if self.path.exists() {

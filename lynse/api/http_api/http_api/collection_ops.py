@@ -215,9 +215,9 @@ def search():
         else:
             search_filter = Filter().load_dict(data['search_filter'])
 
-        indexer = getattr(collection, '_indexer', None)
-        if indexer is not None:
-            index_mode_judge = 'Binary' not in indexer.index_mode
+        idx_mode = getattr(collection, 'index_mode', None)
+        if idx_mode is not None:
+            index_mode_judge = 'Binary' not in idx_mode
         else:
             index_mode_judge = False
 

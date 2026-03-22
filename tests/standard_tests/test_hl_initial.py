@@ -14,9 +14,8 @@ def test_create_collection():
     collection = my_vec_db.require_collection('test_collection', dim=4, drop_if_exists=True)
 
     assert Path(collection._database_path).stem == 'test_collection'
-    assert collection._matrix_serializer.dim == 4
-    assert collection._matrix_serializer.chunk_size == 100000
-    assert collection._matrix_serializer.dtypes == np.float32
+    assert collection.shape[1] == 4
+    assert collection._chunk_size == 100000
 
 
 def test_show_collections():

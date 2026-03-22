@@ -17,23 +17,18 @@ class DataInsertionSession:
 
     def __enter__(self):
         thread_local.caller_name = "DataInsertionSession"
-        self.db._matrix_serializer.global_lock.acquire()
         return self.db
 
     def _commit(self):
-        handler = getattr(self.db, '_matrix_serializer', self.db)
-        if not handler.COMMIT_FLAG:
-            self.db.commit()
+        self.db.commit()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type:
             self._commit()
-            self.db._matrix_serializer.global_lock.release()
             del thread_local.caller_name
             raise exc_type(exc_val).with_traceback(exc_tb)
 
         self._commit()
-        self.db._matrix_serializer.global_lock.release()
         del thread_local.caller_name
         return False
 

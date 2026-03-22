@@ -5,7 +5,8 @@ import time
 
 import numpy as np
 from spinesUtils.asserts import raise_if
-from ultralog import UltraLog as Logger
+import logging
+Logger = logging.Logger
 
 from ..core_components.locks import ThreadLock
 from ..storage_layer.storage import PersistentFileStorage

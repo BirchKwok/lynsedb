@@ -2,7 +2,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional, Tuple, Union
 import numpy as np
 
-from ultralog import UltraLog as Logger
+import logging
+Logger = logging.Logger
 from spinesUtils.asserts import raise_if
 from ..storage_layer.storage import PersistentFileStorage
 from ..core_components.fields_cache import FieldsCache

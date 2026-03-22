@@ -79,17 +79,23 @@ def unavailable_if_deleted(func):
 
     @wraps(func)
     def wrapper(*args, **kwargs):
-        if hasattr(args[0], '_search'):
-            # self is the first parameter
-            db_name = Path(args[0]._database_path).name
-
-            if args[0]._matrix_serializer.IS_DELETED:
+        obj = args[0]
+        if hasattr(obj, '_IS_DELETED'):
+            # Rust-backed ExclusiveDB
+            if obj._IS_DELETED:
+                db_name = Path(obj._database_path).name
                 raise OpsError(f"The collection `{db_name}` has been deleted, and the `{func.__name__}` function "
                                f"is unavailable.")
-        else:
-            db_name = Path(args[0].root_path).name
-
-            if args[0].STATUS == 'DELETED':
+        elif hasattr(obj, '_matrix_serializer'):
+            # Legacy Python-backed ExclusiveDB
+            db_name = Path(obj._database_path).name
+            if obj._matrix_serializer.IS_DELETED:
+                raise OpsError(f"The collection `{db_name}` has been deleted, and the `{func.__name__}` function "
+                               f"is unavailable.")
+        elif hasattr(obj, 'STATUS'):
+            # LocalClient
+            db_name = Path(obj.root_path).name
+            if obj.STATUS == 'DELETED':
                 raise OpsError(f"The `{db_name}` has been deleted, and the `{func.__name__}` function "
                                f"is unavailable.")
 

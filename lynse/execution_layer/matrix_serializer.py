@@ -10,7 +10,8 @@ import polars as pl
 import pyarrow as pa
 
 from spinesUtils.asserts import raise_if
-from ultralog import UltraLog as Logger
+import logging
+Logger = logging.Logger
 from tqdm import tqdm
 
 from ..core_components.fields_cache import FieldsCache

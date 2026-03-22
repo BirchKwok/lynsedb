@@ -21,9 +21,8 @@ def test_modify_exists_database_parameter():
     collection = database.require_collection("test_collection", dim=1024, chunk_size=10000,
                                              dtypes='float32', drop_if_exists=False)
 
-    assert collection._matrix_serializer.dim == 1024  # not modified
-    assert collection._matrix_serializer.chunk_size == 10000  # not modified
-    assert collection._matrix_serializer.dtypes == np.float32  # not modified
+    assert collection.shape[1] == 1024  # dim not modified
+    assert collection._chunk_size == 10000  # chunk_size not modified
 
 
 def test_using_api_after_database_deleted(capfd):

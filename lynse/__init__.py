@@ -2,7 +2,10 @@ from pathlib import Path
 from typing import Union
 
 from .api.http_api.http_api.app import launch_in_jupyter
-from .core_components import fields_cache as field_models
+try:
+    from .core_components import fields_cache as field_models
+except (ImportError, ModuleNotFoundError):
+    field_models = None
 from .configs.config import generate_config_file, load_config_file
 
 
@@ -263,4 +266,5 @@ def _load_and_register_module(module):
     sys.modules[f'{current_module_name}.{module_name}'] = module
 
 
-_load_and_register_module(field_models)
+if field_models is not None:
+    _load_and_register_module(field_models)

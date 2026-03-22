@@ -134,48 +134,25 @@ class _Register:
 
 class LocalClient:
     """
-    A singleton class for the local LynseDB client.
+    Local LynseDB client.
     Using the LocalClient class, users can create and access database instances,
     as well as operate on the collections within them (Low-Level API).
-    This class is thread-safe only. Using it in multiple processes will result in a race condition.
+    Thread safety is guaranteed by the Rust backend (parking_lot::RwLock).
     """
-    _instance = None
-    _last_root_path = None
 
-    def __new__(cls, root_path: Union[Path, str]):
+    def __init__(self, root_path: Union[Path, str]):
         """
-        Create a new instance or return the existing instance of the class.
+        Initialize the vector database client.
 
         Parameters:
             root_path (Path or str): The root path of the database.
-
-        Returns:
-            LocalClient (LocalClient): The instance of the class.
-        """
-        if cls._instance is not None and cls._last_root_path != root_path:
-            cls._instance = None
-            cls._last_root_path = root_path
-
-        if cls._instance is None:
-            cls._instance = super(LocalClient, cls).__new__(cls)
-            cls._instance._init(root_path)
-
-            cls._last_root_path = root_path
-
-        Path(cls._last_root_path).mkdir(parents=True, exist_ok=True)
-
-        if not (Path(cls._last_root_path) / '.fingerprint').exists():
-            # create a database fingerprint
-            with open(Path(cls._last_root_path) / '.fingerprint', 'w') as f:
-                f.write(uuid.uuid4().hex)
-
-        return cls._instance
-
-    def _init(self, root_path: Union[Path, str]):
-        """
-        Initialize the vector database.
         """
         self._root_path = Path(root_path).absolute()
+        self._root_path.mkdir(parents=True, exist_ok=True)
+
+        if not (self._root_path / '.fingerprint').exists():
+            with open(self._root_path / '.fingerprint', 'w') as f:
+                f.write(uuid.uuid4().hex)
 
         self._register = _Register(root_path)
         self._collections = {}
@@ -186,6 +163,7 @@ class LocalClient:
             collection: str,
             dim: int = None,
             chunk_size: int = 100_000,
+            dtypes: str = 'float32',
             cache_query: bool = True,
             n_threads: Union[int, None] = 10,
             warm_up: bool = False,
@@ -352,7 +330,6 @@ class LocalClient:
         if self._root_path.exists():
             shutil.rmtree(self._root_path)
 
-        LocalClient._instance = None
         self.STATUS = 'DELETED'
 
     def update_collection_description(self, collection: str, description: Union[None, str, int, float, bool]):

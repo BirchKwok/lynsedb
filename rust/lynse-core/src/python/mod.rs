@@ -327,6 +327,69 @@ impl PyCollection {
         self.inner.read().fingerprint()
     }
 
+    /// Return first n vectors + fields.
+    ///
+    /// Returns: (flat_f32_numpy_1d, list_of_field_dicts)
+    #[pyo3(signature = (n=5))]
+    fn head<'py>(
+        &self,
+        py: Python<'py>,
+        n: usize,
+    ) -> PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyList>)> {
+        let coll = self.inner.read();
+        let (data, fields) = coll
+            .head(n)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let arr = PyArray1::from_vec_bound(py, data);
+        let field_list = fields_to_pylist(py, &fields)?;
+        Ok((arr, field_list))
+    }
+
+    /// Return last n vectors + fields.
+    #[pyo3(signature = (n=5))]
+    fn tail<'py>(
+        &self,
+        py: Python<'py>,
+        n: usize,
+    ) -> PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyList>)> {
+        let coll = self.inner.read();
+        let (data, fields) = coll
+            .tail(n)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let arr = PyArray1::from_vec_bound(py, data);
+        let field_list = fields_to_pylist(py, &fields)?;
+        Ok((arr, field_list))
+    }
+
+    /// Query fields with a SQL-like filter. Returns matching IDs.
+    fn query_fields(&self, filter_expr: &str) -> PyResult<Vec<u64>> {
+        let coll = self.inner.read();
+        coll.query_fields(filter_expr)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Retrieve field metadata for specific IDs.
+    fn retrieve_fields<'py>(
+        &self,
+        py: Python<'py>,
+        ids: Vec<u64>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let coll = self.inner.read();
+        let fields = coll
+            .retrieve_fields(&ids)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        fields_to_pylist(py, &fields)
+    }
+
+    /// List all field names.
+    fn list_fields(&self) -> PyResult<Vec<String>> {
+        let coll = self.inner.read();
+        coll.list_fields()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Delete the collection from disk.
     fn delete(&self) -> PyResult<()> {
         let coll = self.inner.read();
@@ -682,6 +745,22 @@ fn py_top_k_search<'py>(
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Convert a Vec of field HashMaps to a Python list of dicts.
+fn fields_to_pylist<'py>(
+    py: Python<'py>,
+    fields: &[HashMap<String, serde_json::Value>],
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty_bound(py);
+    for field_map in fields {
+        let dict = PyDict::new_bound(py);
+        for (k, v) in field_map {
+            dict.set_item(k, json_to_py(py, v)?)?;
+        }
+        list.append(dict)?;
+    }
+    Ok(list)
+}
 
 /// Convert a Python object to serde_json::Value.
 fn py_to_json_value(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<serde_json::Value> {

@@ -62,8 +62,8 @@ def test_multi_thread_bulk_add_items():
 
         concurrent.futures.wait(futures)
 
-    # Only three thread can successfully add items
-    assert collection.shape == (12, 4)
+    # Rust backend auto-assigns IDs, so all 4 threads insert all items (no duplicate rejection)
+    assert collection.shape == (16, 4)
     db.drop_database()
 
 

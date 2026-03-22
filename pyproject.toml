@@ -48,7 +48,6 @@ dependencies = [
     "pandas>=1.5.2",
     "pyarrow>=10.0.0",
     "portalocker>=2.6.0",
-    "ultralog>=0.0.6",
 ]
 
 [project.urls]

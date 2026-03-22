@@ -243,6 +243,38 @@ class RustCollection:
     def index_mode(self) -> Optional[str]:
         return self._inner.index_mode()
 
+    def head(self, n: int = 5) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+        """Return first n vectors + field metadata.
+
+        Returns:
+            (vectors_2d, fields_list) where vectors_2d has shape (n, dim).
+        """
+        flat_data, fields = self._inner.head(n)
+        dim = self.dimension
+        vectors = np.asarray(flat_data, dtype=np.float32).reshape(-1, dim)
+        fields = list(fields)
+        return vectors, fields
+
+    def tail(self, n: int = 5) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+        """Return last n vectors + field metadata."""
+        flat_data, fields = self._inner.tail(n)
+        dim = self.dimension
+        vectors = np.asarray(flat_data, dtype=np.float32).reshape(-1, dim)
+        fields = list(fields)
+        return vectors, fields
+
+    def query_fields(self, filter_expr: str) -> List[int]:
+        """Query field metadata with SQL-like filter. Returns matching IDs."""
+        return self._inner.query_fields(filter_expr)
+
+    def retrieve_fields(self, ids: List[int]) -> List[Dict[str, Any]]:
+        """Retrieve field metadata for specific IDs."""
+        return list(self._inner.retrieve_fields(ids))
+
+    def list_fields(self) -> List[str]:
+        """List all field names in the collection."""
+        return self._inner.list_fields()
+
     def delete(self) -> None:
         self._inner.delete()
 

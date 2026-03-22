@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Union
 from getpass import getpass
 
-from ultralog import UltraLog as Logger
+import logging
+Logger = logging.Logger
 
 
 class AuthenticationError(Exception):
