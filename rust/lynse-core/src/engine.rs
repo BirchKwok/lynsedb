@@ -7,6 +7,7 @@ use crate::distance::DistanceMetric;
 use crate::error::{LynseError, Result};
 use crate::index::{self, SearchParams, VectorIndex};
 use crate::storage::field_store::FieldStore;
+use crate::storage::flat_mmap::FlatMmap;
 use crate::storage::vector_store::VectorStore;
 use crate::storage::wal::WALStorage;
 use parking_lot::RwLock;
@@ -36,6 +37,9 @@ pub struct Collection {
     index_mode: Option<String>,
     /// Fingerprint of the last index sync (for incremental updates)
     last_sync_fingerprint: Option<String>,
+    /// Ultra-fast mmap-backed flat index for non-quantized Flat types.
+    /// When set, search bypasses the in-memory FlatIndex entirely.
+    flat_mmap: Option<(FlatMmap, DistanceMetric)>,
 }
 
 impl Collection {
@@ -70,6 +74,9 @@ impl Collection {
 
         let (index, index_mode) = Self::try_load_index(&index_meta_path, &index_path)?;
 
+        // Try to open existing FlatMmap if index is a non-quantized Flat type
+        let flat_mmap = Self::try_open_flat_mmap(&collection_path, dimension, index_mode.as_deref());
+
         // Load last sync fingerprint
         let last_sync_fingerprint = Self::load_sync_fingerprint(&collection_path);
 
@@ -90,6 +97,7 @@ impl Collection {
             index,
             index_mode,
             last_sync_fingerprint,
+            flat_mmap,
         };
 
         // Recover any uncommitted WAL data on startup
@@ -130,6 +138,35 @@ impl Collection {
             std::fs::write(&fp_path, fp)?;
         }
         Ok(())
+    }
+
+    /// Check if an index type string is a non-quantized Flat type (eligible for FlatMmap).
+    fn is_flat_mmap_type(index_type: &str) -> Option<DistanceMetric> {
+        match index_type {
+            "Flat-IP" | "flat-ip" | "FLAT" => Some(DistanceMetric::InnerProduct),
+            "Flat-L2" | "flat-l2" => Some(DistanceMetric::L2Squared),
+            "Flat-Cos" | "flat-cosine" => Some(DistanceMetric::Cosine),
+            _ => None,
+        }
+    }
+
+    /// Path for the consolidated flat mmap vector file.
+    fn flat_mmap_path(collection_path: &Path) -> PathBuf {
+        collection_path.join("flat_vectors.bin")
+    }
+
+    /// Try to open an existing FlatMmap from disk (used during Collection::open).
+    fn try_open_flat_mmap(
+        collection_path: &Path,
+        dimension: usize,
+        index_mode: Option<&str>,
+    ) -> Option<(FlatMmap, DistanceMetric)> {
+        let metric = index_mode.and_then(Self::is_flat_mmap_type)?;
+        let fpath = Self::flat_mmap_path(collection_path);
+        if !fpath.exists() {
+            return None;
+        }
+        FlatMmap::open(&fpath, dimension).ok().map(|fm| (fm, metric))
     }
 
     /// Try to load an existing index from disk.
@@ -181,9 +218,7 @@ impl Collection {
         // Write to WAL first for crash safety
         let wal_fields: Vec<HashMap<String, serde_json::Value>> = match fields {
             Some(fl) => fl.to_vec(),
-            None => (0..n_vectors)
-                .map(|_| HashMap::new())
-                .collect(),
+            None => Vec::new(),
         };
         self.wal.write_log_data(vectors, dim, &wal_fields)?;
 
@@ -193,6 +228,12 @@ impl Collection {
         // Store fields only when provided (skip empty metadata to avoid slow per-row I/O)
         if let Some(field_list) = fields {
             self.field_store.batch_store(field_list)?;
+        }
+
+        // Append to FlatMmap if active (keeps mmap in sync with storage)
+        if let Some((ref mut fm, _)) = self.flat_mmap {
+            fm.write(vectors)
+                .map_err(|e| LynseError::Storage(format!("FlatMmap append error: {}", e)))?;
         }
 
         // Insert into index if exists
@@ -234,17 +275,38 @@ impl Collection {
             return Err(LynseError::EmptyDatabase);
         }
 
-        let ids: Vec<u64> = (0..n_vectors as u64).collect();
+        // For non-quantized Flat types, use FlatMmap (zero-copy mmap + fused parallel topk).
+        // This avoids storing all vectors in memory AND avoids the 512MB clone per search.
+        if let Some(metric) = Self::is_flat_mmap_type(index_type) {
+            let fpath = Self::flat_mmap_path(&self.path);
+            // Remove old file to avoid appending to stale data
+            let _ = std::fs::remove_file(&fpath);
+            let mut fm = FlatMmap::open(&fpath, dim)
+                .map_err(|e| LynseError::Storage(format!("FlatMmap open error: {}", e)))?;
+            fm.write(&all_data)
+                .map_err(|e| LynseError::Storage(format!("FlatMmap write error: {}", e)))?;
 
-        // Create and build index
-        let mut idx = index::create_index(index_type)?;
-        idx.build(&all_data, n_vectors, dim, Some(&ids))?;
+            self.flat_mmap = Some((fm, metric));
+            // No in-memory FlatIndex needed
+            self.index = None;
+        } else {
+            // Clear flat_mmap if switching to a non-flat index type
+            self.flat_mmap = None;
 
-        // Save index
-        let index_data = idx.serialize()?;
-        let index_path = self.path.join("index");
-        std::fs::create_dir_all(&index_path)?;
-        std::fs::write(index_path.join("index.bin"), &index_data)?;
+            let ids: Vec<u64> = (0..n_vectors as u64).collect();
+
+            // Create and build index
+            let mut idx = index::create_index(index_type)?;
+            idx.build(&all_data, n_vectors, dim, Some(&ids))?;
+
+            // Save index
+            let index_data = idx.serialize()?;
+            let index_path = self.path.join("index");
+            std::fs::create_dir_all(&index_path)?;
+            std::fs::write(index_path.join("index.bin"), &index_data)?;
+
+            self.index = Some(idx);
+        }
 
         // Save metadata
         let meta_path = self.path.join("index_meta");
@@ -260,7 +322,6 @@ impl Collection {
                 .map_err(|e| LynseError::Serialization(e.to_string()))?,
         )?;
 
-        self.index = Some(idx);
         self.index_mode = Some(index_type.to_string());
         self.meta.index_mode = self.index_mode.clone();
 
@@ -297,21 +358,31 @@ impl Collection {
             subset_indices,
         };
 
-        // Use index if available, otherwise brute-force
-        let (result_ids, result_dists) = if let Some(ref idx) = self.index {
+        // Use FlatMmap (fastest path) → regular index → brute-force fallback
+        let (result_ids, result_dists) = if let Some((ref fm, metric)) = self.flat_mmap {
+            if search_params.subset_indices.is_some() {
+                // Filtered search: fall back to chunk-based brute-force
+                self.brute_force_search(query, k, &search_params)?
+            } else {
+                // Unfiltered FlatMmap: zero-copy mmap + fused parallel topk
+                let (indices, dists) = fm.search(query, k, metric);
+                let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
+                (ids, dists)
+            }
+        } else if let Some(ref idx) = self.index {
             idx.search(query, k, &search_params)?
         } else {
             // Brute-force search across all chunks
             self.brute_force_search(query, k, &search_params)?
         };
 
-        // Retrieve fields for results
-        let fields = self.field_store.retrieve_many(&result_ids)?;
+        // Fields are NOT retrieved during search for performance.
+        // Use Collection::retrieve_fields() for lazy loading when needed.
 
         Ok(SearchResult {
             ids: result_ids,
             distances: result_dists,
-            fields,
+            fields: Vec::new(),
             index_mode: self.index_mode.clone().unwrap_or("flat-ip".into()),
             dimension: dim,
             k,
@@ -358,18 +429,24 @@ impl Collection {
                     subset_indices: subset_indices.clone(),
                 };
 
-                let (result_ids, result_dists) = if let Some(ref idx) = self.index {
+                let (result_ids, result_dists) = if let Some((ref fm, metric)) = self.flat_mmap {
+                    if search_params.subset_indices.is_some() {
+                        self.brute_force_search(query, k, &search_params)?
+                    } else {
+                        let (indices, dists) = fm.search(query, k, metric);
+                        let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
+                        (ids, dists)
+                    }
+                } else if let Some(ref idx) = self.index {
                     idx.search(query, k, &search_params)?
                 } else {
                     self.brute_force_search(query, k, &search_params)?
                 };
 
-                let fields = self.field_store.retrieve_many(&result_ids)?;
-
                 Ok(SearchResult {
                     ids: result_ids,
                     distances: result_dists,
-                    fields,
+                    fields: Vec::new(),
                     index_mode: self.index_mode.clone().unwrap_or("flat-ip".into()),
                     dimension: dim,
                     k,
@@ -519,17 +596,22 @@ impl Collection {
     /// Remove the index.
     pub fn remove_index(&mut self) -> Result<()> {
         self.index = None;
+        self.flat_mmap = None;
         self.index_mode = None;
         self.meta.index_mode = None;
         self.last_sync_fingerprint = None;
 
         let index_path = self.path.join("index");
         let meta_path = self.path.join("index_meta");
+        let flat_mmap_file = Self::flat_mmap_path(&self.path);
         if index_path.exists() {
             std::fs::remove_dir_all(&index_path)?;
         }
         if meta_path.exists() {
             std::fs::remove_dir_all(&meta_path)?;
+        }
+        if flat_mmap_file.exists() {
+            std::fs::remove_file(&flat_mmap_file)?;
         }
 
         Ok(())
@@ -550,7 +632,7 @@ impl Collection {
         let current_fp = self.vector_store.fingerprint().unwrap_or_default();
         match &self.last_sync_fingerprint {
             Some(fp) => fp != &current_fp,
-            None => self.index.is_some(),
+            None => self.index.is_some() || self.flat_mmap.is_some(),
         }
     }
 
@@ -562,14 +644,28 @@ impl Collection {
         }
 
         let current_fp = self.vector_store.fingerprint().unwrap_or_default();
+        let dim = self.meta.dimension;
 
-        if let Some(ref mut idx) = self.index {
-            let dim = self.meta.dimension;
+        // FlatMmap path: rebuild the consolidated flat file
+        if let Some((ref mut fm, _metric)) = self.flat_mmap {
             let all_files = self.vector_store.get_all_files();
-
-            // Collect new data from all chunks
-            // (in a full implementation we'd track which chunks are new,
-            //  but for correctness we rebuild from all data)
+            let mut all_data: Vec<f32> = Vec::new();
+            for filename in &all_files {
+                let chunk = self.vector_store.load_chunk_npk(filename)?;
+                all_data.extend_from_slice(&chunk);
+            }
+            if !all_data.is_empty() {
+                // Truncate and rewrite
+                let fpath = Self::flat_mmap_path(&self.path);
+                let _ = std::fs::remove_file(&fpath);
+                let mut new_fm = FlatMmap::open(&fpath, dim)
+                    .map_err(|e| LynseError::Storage(format!("FlatMmap open error: {}", e)))?;
+                new_fm.write(&all_data)
+                    .map_err(|e| LynseError::Storage(format!("FlatMmap write error: {}", e)))?;
+                *fm = new_fm;
+            }
+        } else if let Some(ref mut idx) = self.index {
+            let all_files = self.vector_store.get_all_files();
             let mut all_data: Vec<f32> = Vec::new();
             for filename in &all_files {
                 let chunk = self.vector_store.load_chunk_npk(filename)?;
@@ -579,10 +675,8 @@ impl Collection {
             let n_vectors = all_data.len() / dim;
             if n_vectors > 0 {
                 let ids: Vec<u64> = (0..n_vectors as u64).collect();
-                // Rebuild the index with all data
                 idx.build(&all_data, n_vectors, dim, Some(&ids))?;
 
-                // Save updated index
                 let index_data = idx.serialize()?;
                 let index_path = self.path.join("index");
                 std::fs::write(index_path.join("index.bin"), &index_data)?;

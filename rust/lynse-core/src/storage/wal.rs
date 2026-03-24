@@ -562,7 +562,7 @@ impl WALStorage {
         let f = inner.current_file.as_mut().unwrap();
         f.write_all(&inner.write_buf[..inner.write_buf_pos])?;
         f.flush()?;
-        f.sync_all()?;
+        // Note: skip sync_all() here for throughput; data is fsynced on commit/stop
         inner.write_buf_pos = 0;
         // Reset write_buf to fixed size if it grew
         if inner.write_buf.len() > WRITE_BUFFER_SIZE {
@@ -586,7 +586,7 @@ impl WALStorage {
         f.seek(SeekFrom::Start(24))?; // offset of count_rows in header
         f.write_all(&new_count.to_le_bytes())?;
         f.flush()?;
-        f.sync_all()?;
+        // Note: skip sync_all() here for throughput; data is fsynced on commit/stop
 
         inner.pending_row_count = 0;
         Ok(())

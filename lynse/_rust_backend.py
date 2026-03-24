@@ -21,33 +21,23 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_RUST_AVAILABLE = False
-_lynse_core = None
-
-try:
-    import lynse_core as _lynse_core
-    _RUST_AVAILABLE = True
-    logger.info("LynseDB Rust backend loaded successfully.")
-except ImportError:
-    logger.debug("Rust backend (lynse_core) not available; using pure-Python fallback.")
+import lynse_core as _lynse_core
 
 
 def rust_available() -> bool:
-    """Check if the Rust backend is available."""
-    return _RUST_AVAILABLE
+    """Check if the Rust backend is available. Always True since Rust is now required."""
+    return True
 
 
 # ─── Distance computation bridge ─────────────────────────────────────────────
 
 def compute_distance(a: np.ndarray, b: np.ndarray, metric: str = "ip") -> float:
-    """Compute distance between two vectors using Rust SIMD if available."""
-    if _RUST_AVAILABLE:
-        return _lynse_core.py_compute_distance(
-            a.astype(np.float32, copy=False),
-            b.astype(np.float32, copy=False),
-            metric,
-        )
-    raise RuntimeError("Rust backend not available")
+    """Compute distance between two vectors using Rust SIMD."""
+    return _lynse_core.py_compute_distance(
+        a.astype(np.float32, copy=False),
+        b.astype(np.float32, copy=False),
+        metric,
+    )
 
 
 def top_k_search(
@@ -61,14 +51,12 @@ def top_k_search(
     Returns:
         (ids, distances) arrays sorted by relevance.
     """
-    if _RUST_AVAILABLE:
-        return _lynse_core.py_top_k_search(
-            query.astype(np.float32, copy=False),
-            candidates.astype(np.float32, copy=False),
-            metric,
-            k,
-        )
-    raise RuntimeError("Rust backend not available")
+    return _lynse_core.py_top_k_search(
+        query.astype(np.float32, copy=False),
+        candidates.astype(np.float32, copy=False),
+        metric,
+        k,
+    )
 
 
 # ─── Engine bridge ────────────────────────────────────────────────────────────
@@ -81,8 +69,6 @@ class RustEngine:
     """
 
     def __init__(self, root_path: str):
-        if not _RUST_AVAILABLE:
-            raise RuntimeError("Rust backend (lynse_core) is not installed.")
         self._engine = _lynse_core.DatabaseEngine(root_path)
 
     # ── Collection management ──
@@ -166,7 +152,11 @@ class RustCollection:
         """
         vector = np.ascontiguousarray(vector, dtype=np.float32).ravel()
         result = self._inner.search(vector, k, search_filter, nprobe)
-        return RustSearchResult(result)
+        return RustSearchResult(result, collection=self)
+
+    def retrieve_fields(self, ids: List[int]) -> List[Dict[str, Any]]:
+        """Retrieve fields for given IDs (lazy loading after search)."""
+        return self._inner.retrieve_fields(ids)
 
     def batch_search(
         self,
@@ -190,7 +180,7 @@ class RustCollection:
         if vectors.ndim == 1:
             vectors = vectors.reshape(1, -1)
         results = self._inner.batch_search(vectors, k, search_filter, nprobe)
-        return [RustSearchResult(r) for r in results]
+        return [RustSearchResult(r, collection=self) for r in results]
 
     def update_items(
         self,
@@ -286,8 +276,9 @@ class RustSearchResult:
     to_dict, to_list, to_json, to_pandas, to_polars, to_arrow.
     """
 
-    def __init__(self, inner):
+    def __init__(self, inner, collection=None):
         self._inner = inner
+        self._collection = collection
         self._ids = None
         self._distances = None
         self._fields = None
@@ -307,7 +298,19 @@ class RustSearchResult:
     @property
     def fields(self) -> List[Dict[str, Any]]:
         if self._fields is None:
-            self._fields = list(self._inner.fields())
+            raw = list(self._inner.fields())
+            if raw and self._collection is None:
+                self._fields = raw
+            elif raw:
+                self._fields = raw
+            else:
+                # Lazy load: fields not retrieved during search, fetch now
+                if self._collection is not None:
+                    self._fields = self._collection.retrieve_fields(
+                        [int(i) for i in self.ids]
+                    )
+                else:
+                    self._fields = [{} for _ in range(len(self))]
         return self._fields
 
     @property

@@ -26,6 +26,8 @@ pub struct FieldStore {
     table_name: String,
     /// Auto-increment counter for internal IDs
     next_id: Arc<RwLock<u64>>,
+    /// In-memory cache: external_id -> fields (populated during insert, O(1) retrieval)
+    cache: RwLock<HashMap<u64, HashMap<String, serde_json::Value>>>,
 }
 
 impl FieldStore {
@@ -54,6 +56,7 @@ impl FieldStore {
             db,
             table_name: table_name.to_string(),
             next_id: Arc::new(RwLock::new(next_id)),
+            cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -87,6 +90,9 @@ impl FieldStore {
         table
             .insert(row)
             .map_err(|e| LynseError::ApexBase(format!("Insert error: {}", e)))?;
+
+        // Cache the fields for fast retrieval
+        self.cache.write().insert(ext_id, fields.clone());
 
         Ok(ext_id)
     }
@@ -130,11 +136,17 @@ impl FieldStore {
             rows.push(row);
         }
 
-        // Use batch insert for better performance
-        for row in rows {
-            table
-                .insert(row)
-                .map_err(|e| LynseError::ApexBase(format!("Batch insert error: {}", e)))?;
+        // Use native batch insert for much better performance
+        table
+            .insert_batch(&rows)
+            .map_err(|e| LynseError::ApexBase(format!("Batch insert error: {}", e)))?;
+
+        // Cache all fields for fast retrieval
+        {
+            let mut cache = self.cache.write();
+            for (id, flds) in ids.iter().zip(fields_list.iter()) {
+                cache.insert(*id, flds.clone());
+            }
         }
 
         Ok(ids)
@@ -206,14 +218,84 @@ impl FieldStore {
     }
 
     /// Retrieve multiple records by external IDs.
+    /// Uses in-memory cache for O(1) lookups; falls back to batched SQL for cache misses.
     pub fn retrieve_many(
         &self,
         external_ids: &[u64],
     ) -> Result<Vec<HashMap<String, serde_json::Value>>> {
-        let mut results = Vec::with_capacity(external_ids.len());
-        for &id in external_ids {
-            results.push(self.retrieve(id)?);
+        if external_ids.is_empty() {
+            return Ok(Vec::new());
         }
+
+        // Fast path: try to serve entirely from cache
+        let cache = self.cache.read();
+        let mut results = Vec::with_capacity(external_ids.len());
+        let mut miss_indices: Vec<usize> = Vec::new();
+        let mut miss_ids: Vec<u64> = Vec::new();
+
+        for (i, &id) in external_ids.iter().enumerate() {
+            if let Some(fields) = cache.get(&id) {
+                results.push(fields.clone());
+            } else {
+                results.push(HashMap::new());
+                miss_indices.push(i);
+                miss_ids.push(id);
+            }
+        }
+        drop(cache);
+
+        // If all hits, return immediately (common case after insert)
+        if miss_ids.is_empty() {
+            return Ok(results);
+        }
+
+        // Slow path: fetch misses from ApexBase with batched IN(...) query
+        let table = self
+            .db
+            .table(&self.table_name)
+            .map_err(|e| LynseError::ApexBase(format!("Table error: {}", e)))?;
+
+        let id_list: Vec<String> = miss_ids.iter().map(|id| id.to_string()).collect();
+        let sql = format!(
+            "SELECT * FROM {} WHERE external_id IN ({})",
+            self.table_name,
+            id_list.join(", ")
+        );
+
+        let result_set = table
+            .execute(&sql)
+            .map_err(|e| LynseError::ApexBase(format!("Query error: {}", e)))?;
+
+        let rows = result_set
+            .to_rows()
+            .map_err(|e| LynseError::ApexBase(format!("Result conversion error: {}", e)))?;
+
+        let mut id_to_fields: HashMap<u64, HashMap<String, serde_json::Value>> =
+            HashMap::with_capacity(rows.len());
+        for row in rows {
+            let ext_id = if let Some(apexbase::data::Value::Int64(id)) = row.get("external_id") {
+                *id as u64
+            } else {
+                continue;
+            };
+            let mut fields = HashMap::new();
+            for (key, value) in row.iter() {
+                if key != "external_id" && key != "_id" {
+                    fields.insert(key.clone(), apex_value_to_json(value));
+                }
+            }
+            id_to_fields.insert(ext_id, fields);
+        }
+
+        // Fill in miss results and update cache
+        let mut cache = self.cache.write();
+        for (&idx, &id) in miss_indices.iter().zip(miss_ids.iter()) {
+            if let Some(fields) = id_to_fields.remove(&id) {
+                cache.insert(id, fields.clone());
+                results[idx] = fields;
+            }
+        }
+
         Ok(results)
     }
 

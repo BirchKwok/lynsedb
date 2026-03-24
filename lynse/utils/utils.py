@@ -1,9 +1,7 @@
-from collections import OrderedDict
 import os
 import re
 import threading
 from contextlib import contextmanager
-from threading import Lock
 import time
 from functools import wraps
 from pathlib import Path
@@ -84,12 +82,6 @@ def unavailable_if_deleted(func):
             # Rust-backed ExclusiveDB
             if obj._IS_DELETED:
                 db_name = Path(obj._database_path).name
-                raise OpsError(f"The collection `{db_name}` has been deleted, and the `{func.__name__}` function "
-                               f"is unavailable.")
-        elif hasattr(obj, '_matrix_serializer'):
-            # Legacy Python-backed ExclusiveDB
-            db_name = Path(obj._database_path).name
-            if obj._matrix_serializer.IS_DELETED:
                 raise OpsError(f"The collection `{db_name}` has been deleted, and the `{func.__name__}` function "
                                f"is unavailable.")
         elif hasattr(obj, 'STATUS'):
@@ -189,98 +181,6 @@ def collection_repr(collection):
             f'    collection="{collection._collection_name}", \n'
             f'    shape={collection.shape}'
             f'\n)')
-
-
-class FileHandlePool:
-    def __init__(self, max_open_files=100):
-        self.max_open_files = max_open_files
-        self.open_files = OrderedDict()
-        self.lock = Lock()
-
-    def get_file_handle(self, file_path):
-        from ..core_components.io import load_nnp
-        with self.lock:
-            if file_path in self.open_files:
-                # If the file has already been opened, move it to the end of the OrderedDict
-                self.open_files.move_to_end(file_path)
-                return self.open_files[file_path]
-
-            # If the maximum number of open files has been reached, close the oldest file
-            if len(self.open_files) >= self.max_open_files:
-                oldest_file, oldest_handle = self.open_files.popitem(last=False)
-                self._close_handle(oldest_handle)
-
-            # open new file
-            file_handle = load_nnp(file_path, mmap_mode=True)
-            self.open_files[file_path] = file_handle
-            return file_handle
-
-    def _close_handle(self, handle):
-        """安全地关闭文件句柄"""
-        if isinstance(handle, dict):
-            # 如果是字典（load_nnp 的返回值），关闭字典中的每个 memmap 对象
-            for array_name, array in handle.items():
-                if hasattr(array, '_mmap') and array._mmap is not None:
-                    try:
-                        array._mmap.close()
-                    except (AttributeError, OSError):
-                        # 如果关闭失败，静默忽略
-                        pass
-        elif hasattr(handle, '_mmap') and handle._mmap is not None:
-            # 如果是单个 memmap 对象
-            try:
-                handle._mmap.close()
-            except (AttributeError, OSError):
-                # 如果关闭失败，静默忽略
-                pass
-
-    def close_all(self):
-        with self.lock:
-            for handle in self.open_files.values():
-                self._close_handle(handle)
-            self.open_files.clear()
-
-    def __del__(self):
-        try:
-            self.close_all()
-        except:
-            # 在析构函数中，忽略所有错误
-            pass
-
-
-class SafeMmapReader:
-    def __init__(self, max_open_files=100):
-        from ..core_components.locks import ThreadLock
-
-        self.file_pool = FileHandlePool(max_open_files)
-        self.lock = ThreadLock()
-
-    def load_nnp(self, path, ids=None):
-        try:
-            with self.lock:
-                mmap_handle = self.file_pool.get_file_handle(path)
-
-            if ids is None:
-                return mmap_handle
-            return mmap_handle[ids]
-        except Exception as e:
-            raise IOError(f"Failed to load file {path}: {e}")
-
-    def close(self):
-        self.file_pool.close_all()
-
-    def __del__(self):
-        try:
-            self.close()
-        except:
-            # 在析构函数中，忽略所有错误
-            pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
 
 
 # Use threading.local to create thread-local storage

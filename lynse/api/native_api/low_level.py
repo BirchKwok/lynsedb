@@ -513,11 +513,16 @@ class ExclusiveDB:
             rust_result = self._rust_coll.batch_search(
                 vector, k=k, search_filter=filter_str, nprobe=nprobe
             )
-            # For batch, return list of Result objects
-            return [Result(r.ids, r.distances, r.fields) for r in rust_result]
+            # For batch, return list of Result objects with lazy field loading
+            return [
+                Result(r.ids, r.distances,
+                       field_loader=lambda _r=r: _r.fields)
+                for r in rust_result
+            ]
 
-        # Wrap Rust result into the existing Python Result object for API compatibility
-        return Result(rust_result.ids, rust_result.distances, rust_result.fields)
+        # Wrap Rust result with lazy field loading (fields fetched on .to_df() etc.)
+        return Result(rust_result.ids, rust_result.distances,
+                      field_loader=lambda: rust_result.fields)
 
     @unavailable_if_deleted
     @unavailable_if_empty

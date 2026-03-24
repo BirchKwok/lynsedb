@@ -25,10 +25,12 @@ class Result:
         k: Optional[int] = None,
         index_mode: Optional[str] = None,
         res_num: Optional[int] = None,
+        field_loader=None,
     ) -> None:
         self.indices: np.ndarray = indices
         self.distances: np.ndarray = distances
-        self.fields: Optional[List[Dict[str, Any]]] = fields
+        self._fields: Optional[List[Dict[str, Any]]] = fields
+        self._field_loader = field_loader
 
         # meta info for concise repr
         self._meta: Dict[str, Any] = {
@@ -37,6 +39,16 @@ class Result:
             'index_mode': index_mode,
             'res_num': res_num if res_num is not None else (len(indices) if isinstance(indices, np.ndarray) else None),
         }
+
+    @property
+    def fields(self):
+        if self._fields is None and self._field_loader is not None:
+            self._fields = self._field_loader()
+        return self._fields
+
+    @fields.setter
+    def fields(self, value):
+        self._fields = value
 
     # ---------------------------------------------------------------------
     # 魔术方法 —— 保持与旧接口兼容
