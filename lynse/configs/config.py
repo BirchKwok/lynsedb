@@ -2,7 +2,7 @@ import os
 from copy import deepcopy
 from pathlib import Path
 
-from spinesUtils.asserts import raise_if, augmented_isinstance
+from ..utils.asserts import raise_if, augmented_isinstance
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 

@@ -2,7 +2,7 @@ import json
 from functools import wraps
 from pathlib import Path
 
-from spinesUtils.asserts import raise_if, generate_function_kwargs
+from ..utils.asserts import raise_if, generate_function_kwargs
 import logging
 Logger = logging.Logger
 

@@ -5,7 +5,7 @@ from typing import Union, List, Tuple
 import msgpack
 import numpy as np
 import httpx
-from spinesUtils.asserts import raise_if
+from ...utils.asserts import raise_if
 from tqdm import trange
 
 from ...core_components.fields_cache import ExpressionParser

@@ -72,7 +72,7 @@ class VectorDBClient:
         self._is_remote = uri is not None and (uri.startswith('http://') or uri.startswith('https://'))
 
         if self._is_remote:
-            from spinesUtils.asserts import raise_if
+            from .utils.asserts import raise_if
             import httpx
 
             raise_if(ValueError, not isinstance(uri, (str, Path)),
@@ -154,7 +154,7 @@ class VectorDBClient:
                 If the root path is a local path, return a LocalClient instance,
                 otherwise return a HTTPClient instance.
         """
-        from spinesUtils.asserts import raise_if
+        from .utils.asserts import raise_if
 
         from .api.http_api.client_api import raise_error_response
         from .configs.config import config

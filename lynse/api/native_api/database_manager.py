@@ -1,7 +1,7 @@
 import json
 import shutil
 
-from spinesUtils.asserts import raise_if
+from ...utils.asserts import raise_if
 
 
 class DatabaseManager:

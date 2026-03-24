@@ -1,5 +1,4 @@
 numpy>=1.17.0
-spinesUtils>=0.4.1
 msgpack>=1.0.2
 flask>=2.0.1
 waitress>=2.0.0

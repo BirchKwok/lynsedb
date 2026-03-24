@@ -7,7 +7,7 @@ import pandas as pd
 import polars as pl
 import pyarrow as pa
 
-from spinesUtils.asserts import raise_if, ParameterTypeAssert
+from ...utils.asserts import raise_if, ParameterTypeAssert
 
 from lynse.execution_layer.query_view import QueryView
 

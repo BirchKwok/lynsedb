@@ -1,7 +1,7 @@
 import operator
 
 import msgpack
-from spinesUtils.asserts import raise_if
+from ...utils.asserts import raise_if
 
 
 def _check_field_name(field_name):

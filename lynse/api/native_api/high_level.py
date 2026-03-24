@@ -5,7 +5,7 @@ from functools import partial
 from pathlib import Path
 from typing import Union
 
-from spinesUtils.asserts import ParameterTypeAssert
+from ...utils.asserts import ParameterTypeAssert
 
 from ...api import logger
 from ...utils.utils import unavailable_if_deleted
