@@ -2,8 +2,8 @@
 import time
 import numpy as np
 
-from test import VectorDBClient
-from test import HTTPClient, Collection
+from lynse import VectorDBClient
+from lynse.api.http_api.client_api import HTTPClient, Collection
 
 
 def test_initialization():
@@ -61,7 +61,7 @@ def test_bulk_add_items():
 def test_query():
     import operator
 
-    from lynse.core_components.fields_cache.filter import Filter, FieldCondition, MatchField, MatchID
+    from lynse.core_components.fields_cache import Filter, FieldCondition, MatchField, MatchID
 
     client = VectorDBClient('http://localhost:7637')
     db = client.create_database('test_db', drop_if_exists=False)
@@ -70,7 +70,7 @@ def test_query():
     ids, scores, fields = collection.search(
         vector=[0.36, 0.43, 0.56, 0.12],
         k=10,
-        search_filter=Filter(
+        where=Filter(
             must=[
                 FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
             ],

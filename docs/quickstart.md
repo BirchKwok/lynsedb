@@ -292,7 +292,7 @@ See [FieldExpression Tutorial](FieldExpression.md)
 ids, scores, fields = collection.search(
     vector=[0.36, 0.43, 0.56, 0.12],
     k=10,
-    search_filter="""
+    where="""
         :field: == 'test_1' and
         ((0 <= :order: <= 8) or (:id: in [1, 2, 3, 4, 5])) and
         not (:id: == 8 and :order: >= 8)
@@ -331,7 +331,7 @@ from lynse.field_models import Filter, FieldCondition, MatchField, MatchID, Matc
 ids, scores, fields = collection.search(
     vector=[0.36, 0.43, 0.56, 0.12],
     k=10,
-    search_filter=Filter(
+    where=Filter(
         must=[
             FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
         ],
@@ -383,7 +383,7 @@ collection.query("""
 
 
 ```python linenums="1"
-query_filter=Filter(
+where=Filter(
     must=[
         FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
     ],
@@ -397,7 +397,7 @@ query_filter=Filter(
     ]
 )
 
-collection.query(query_filter)
+collection.query(where)
 ```
 
 

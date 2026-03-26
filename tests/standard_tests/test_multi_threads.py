@@ -146,10 +146,10 @@ def test_multi_thread_search_with_filter():
         concurrent.futures.wait(futures)
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(collection.search, items[0][0], 3, search_filter=":name: == 'John Doe'"),
-                   executor.submit(collection.search, items[1][0], 3, search_filter=":name: == 'Jane Doe'"),
-                   executor.submit(collection.search, items[2][0], 3, search_filter=":name: == 'John Smith'"),
-                   executor.submit(collection.search, items[3][0], 3, search_filter=":name: == 'Jane Smith'")]
+        futures = [executor.submit(collection.search, items[0][0], 3, where=":name: == 'John Doe'"),
+                   executor.submit(collection.search, items[1][0], 3, where=":name: == 'Jane Doe'"),
+                   executor.submit(collection.search, items[2][0], 3, where=":name: == 'John Smith'"),
+                   executor.submit(collection.search, items[3][0], 3, where=":name: == 'Jane Smith'")]
 
         concurrent.futures.wait(futures)
 

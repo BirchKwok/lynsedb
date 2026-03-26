@@ -1,6 +1,6 @@
 import pytest
 
-from test import Filter, FieldCondition, MatchField, MatchID
+from lynse.core_components.fields_cache import Filter, FieldCondition, MatchField, MatchID
 import numpy as np
 import lynse
 
@@ -100,7 +100,7 @@ def test_query_with_field():
 
     vec = np.random.random(100)
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[FieldCondition(key=":test:", matcher=MatchField('test_1'))]
         )
     )
@@ -116,7 +116,7 @@ def test_query_with_list_field():
 
     vec = np.random.random(100)
     n, d, f = collection.search(
-        vec, k=12, search_filter=Filter(
+        vec, k=12, where=Filter(
             any=[
                 FieldCondition(key=":test:", matcher=MatchField('test_1')),
                 FieldCondition(key=":test:", matcher=MatchField('test_7'))
@@ -135,7 +135,7 @@ def test_query_with_chinese_field():
 
     vec = np.random.random(100)
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[
                 FieldCondition(key=":test:", matcher=MatchField('测试_1'))
             ]
@@ -153,7 +153,7 @@ def test_query_with_chinese_list_field():
 
     vec = np.random.random(100)
     n, d, f = collection.search(
-        vec, k=12, search_filter=Filter(
+        vec, k=12, where=Filter(
             any=[
                 FieldCondition(key=":test:", matcher=MatchField('测试_1')),
                 FieldCondition(key=":test:", matcher=MatchField('测试_7'))
@@ -172,7 +172,7 @@ def test_query_with_subset_indices():
 
     vec = np.random.random(100)
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[FieldCondition(key=":id:", matcher=MatchID(list(range(10))))]
         )
     )
@@ -188,7 +188,7 @@ def test_query_with_subset_indices_and_field():
 
     vec = np.random.random(100)
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[
                 FieldCondition(key=":test:", matcher=MatchField('test_0')),
                 FieldCondition(key=":id:", matcher=MatchID(list(range(10))))
@@ -207,7 +207,7 @@ def test_query_with_subset_indices_and_list_field():
 
     vec = np.random.random(100)
     n, d, f = collection.search(
-        vec, k=12, search_filter=Filter(
+        vec, k=12, where=Filter(
             must=[
                 FieldCondition(key=":id:", matcher=MatchID(list(range(10, 20)) + list(range(70, 80))))
             ],
@@ -229,7 +229,7 @@ def test_query_with_subset_indices_and_chinese_field():
 
     vec = np.random.random(100)
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[
                 FieldCondition(key=":test:", matcher=MatchField('测试_0')),
                 FieldCondition(key=":id:", matcher=MatchID(list(range(10))))
@@ -248,7 +248,7 @@ def test_query_with_subset_indices_and_chinese_list_field():
 
     vec = np.random.random(100)
     n, d, f = collection.search(
-        vec, k=12, search_filter=Filter(
+        vec, k=12, where=Filter(
             must=[
                 FieldCondition(key=":id:", matcher=MatchID(list(range(10, 20)) + list(range(70, 80))))
             ],
@@ -271,7 +271,7 @@ def test_query_stability_of_mvdb_files():
     vec = np.random.random(100)
     last_n, last_d, last_f = collection.search(
         vec, k=6,
-        search_filter=Filter(
+        where=Filter(
             must=[FieldCondition(key=":test:", matcher=MatchField('test_1'))]
         )
     )
@@ -280,7 +280,7 @@ def test_query_stability_of_mvdb_files():
     for i in range(20):
         n, d, f = collection.search(
             vec, k=6,
-            search_filter=Filter(
+            where=Filter(
                 must=[FieldCondition(key=":test:", matcher=MatchField('test_1'))]
             )
         )
@@ -429,7 +429,7 @@ def test_filter():
 
     vec = np.random.random(100)
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[FieldCondition(key=":test:", matcher=MatchField('test_1'))]
         )
     )
@@ -440,7 +440,7 @@ def test_filter():
     assert all(10 <= i < 20 for i in n)
 
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[FieldCondition(key=":test:", matcher=MatchField('test_1'))],
             any=[FieldCondition(key=":test:", matcher=MatchField('test_7'))]
         )
@@ -449,7 +449,7 @@ def test_filter():
     assert len(n) == len(d) == 0
 
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[FieldCondition(key=":test:", matcher=MatchField('test_1'))],
             any=[FieldCondition(key=":test:", matcher=MatchField('test_0'))],
             must_not=[FieldCondition(key=":test:", matcher=MatchField('test_0'))]
@@ -459,7 +459,7 @@ def test_filter():
     assert len(n) == len(d) == 0
 
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[FieldCondition(key=":id:", matcher=MatchID([1, 2, 3]))],
             any=[FieldCondition(key=":test:", matcher=MatchField('test_0'))],
         )
@@ -471,7 +471,7 @@ def test_filter():
     assert all(1 <= i < 4 for i in n)
 
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[FieldCondition(key=":id:", matcher=MatchID([1, 2, 3]))],
             any=[FieldCondition(key=":test:", matcher=MatchField('test_0'))],
             must_not=[FieldCondition(key=":test:", matcher=MatchField('test_0'))]
@@ -481,7 +481,7 @@ def test_filter():
     assert len(n) == len(d) == 0
 
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[FieldCondition(key=":id:", matcher=MatchID([1, 2, 3]))],
             any=[FieldCondition(key=":test:", matcher=MatchField('test_0'))],
             must_not=[FieldCondition(key=":id:", matcher=MatchID([1, 2, 3]))]
@@ -491,7 +491,7 @@ def test_filter():
     assert len(n) == len(d) == 0
 
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[FieldCondition(key=":id:", matcher=MatchID([1, 2, 3]))],
             any=[FieldCondition(key=":test:", matcher=MatchField('test_0'))],
             must_not=[FieldCondition(key=":id:", matcher=MatchID([4, 5, 6]))]
@@ -504,7 +504,7 @@ def test_filter():
     assert all(1 <= i < 4 for i in n)
 
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[
                 FieldCondition(key=":test:", matcher=MatchField('test_0')),
             ],
@@ -519,7 +519,7 @@ def test_filter():
     assert all(0 <= i < 6 for i in n)
 
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[
                 FieldCondition(key=":test:", matcher=MatchField(['test_0', 'test_00'], all_comparators=True)),
             ],
@@ -531,7 +531,7 @@ def test_filter():
     assert len(n) == len(d) == 0
 
     n, d, f = collection.search(
-        vec, k=6, search_filter=Filter(
+        vec, k=6, where=Filter(
             must=[
                 FieldCondition(key=":test:", matcher=MatchField(['test_0', 'test_00'], all_comparators=False)),
             ],

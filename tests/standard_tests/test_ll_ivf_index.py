@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import lynse
-from test import Filter, FieldCondition, MatchField, MatchID
+from lynse.core_components.fields_cache import Filter, FieldCondition, MatchField, MatchID
 
 client = lynse.VectorDBClient()
 database = client.create_database(database_name='test_ivf_db', drop_if_exists=True)
@@ -46,7 +46,7 @@ def test_ivf_binary_index():
     # 带过滤器的搜索
     ids, scores, fields = collection.search(
         query, k=10,
-        search_filter=Filter(
+        where=Filter(
             must=[FieldCondition(key=":group:", matcher=MatchField('group_1'))]
         )
     )
@@ -76,7 +76,7 @@ def test_ivf_sq_index():
     # 带过滤器的搜索
     ids, scores, fields = collection.search(
         query, k=10,
-        search_filter=Filter(
+        where=Filter(
             must=[FieldCondition(key=":group:", matcher=MatchField('group_1'))]
         )
     )
@@ -152,7 +152,7 @@ def test_ivf_edge_cases():
     # 空过滤器结果
     ids, scores, _ = collection.search(
         query, k=10,
-        search_filter=Filter(
+        where=Filter(
             must=[FieldCondition(key=":group:", matcher=MatchField('non_existent_group'))]
         )
     )

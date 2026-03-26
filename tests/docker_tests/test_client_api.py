@@ -1,7 +1,8 @@
 import concurrent.futures
 import time
 
-from test import VectorDBClient, HTTPClient
+from lynse import VectorDBClient
+from lynse.api.http_api.client_api import HTTPClient
 
 
 def test_initialization():

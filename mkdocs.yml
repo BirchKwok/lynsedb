@@ -94,6 +94,3 @@ nav:
         - Collection: http_api/serve_api/collection_ops.md
         - Database: http_api/serve_api/database_ops.md
       - HTTP Client: http_api/client_api.md
-    - Native API:
-      - ExclusiveDB: native_api/low_level.md
-      - Local Client: native_api/high_level.md

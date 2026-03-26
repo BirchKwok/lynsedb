@@ -21,7 +21,7 @@ setup(
     author="Birch Kwok",
     author_email="birchkwok@gmail.com",
     url="https://github.com/BirchKwok/lynsedb",
-    packages=find_packages(),
+    packages=find_packages(include=["lynse", "lynse.*"]),
     python_requires=">=3.9",
     install_requires=reqs,
     classifiers=[
@@ -40,7 +40,7 @@ setup(
     keywords=["vector", "database", "vector database", "Similarity Search"],
     entry_points={
         'console_scripts': [
-            'lynse=lynse.api.http_api.http_api.app:main',
+            'lynse=lynse.python.server:main',
         ],
     }
 )
