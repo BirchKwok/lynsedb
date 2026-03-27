@@ -16,7 +16,7 @@ pyo3 = { version = "0.22", features = ["extension-module"] }
 numpy = "0.22"
 
 # Storage backends
-apexbase = { version = "1.13.0", default-features = false }
+apexbase = { version = "1.14.0", default-features = false }
 
 
 # Parallelism

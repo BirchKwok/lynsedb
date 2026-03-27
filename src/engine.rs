@@ -485,19 +485,15 @@ impl Collection {
 
     /// Filtered brute-force search on mmap data.
     ///
-    /// Fused pre-filter: scans mmap in-place, skips non-matching vectors via
-    /// BitSet O(1) lookup, computes SIMD distance only on matching vectors.
-    /// No data is copied — 7-10x faster than the old copy-based approach.
+    /// Delegates to FlatMmap::search_filtered() which uses two strategies:
+    /// - Few matches (≤ 50K): direct random access — O(matches) not O(n)
+    /// - Many matches (> 50K): parallel scan with bitset — same SIMD parallelism as unfiltered
     fn brute_force_search_filtered(
         &self,
         query: &[f32],
         k: usize,
         params: &SearchParams,
     ) -> Result<(Vec<u64>, Vec<f32>)> {
-        use crate::distance::{self, DistanceMetric};
-        use crate::distance::simd;
-
-        let dim = self.meta.dimension;
         let metric = self.resolve_metric();
 
         let guard = self.vector_store.read_mmap()?;
@@ -521,80 +517,8 @@ impl Collection {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        let all_data = fm.as_slice();
-        let n_vectors = fm.len();
-
-        // Build BitSet for O(1) membership test
-        let max_id = subset.iter().copied().max().unwrap_or(0) as usize;
-        let mut bitset = vec![0u64; (max_id / 64) + 1];
-        for &id in subset {
-            let idx = id as usize;
-            bitset[idx / 64] |= 1u64 << (idx % 64);
-        }
-
-        // Select distance function
-        let dist_fn: Box<dyn Fn(&[f32], &[f32]) -> f32> = match metric {
-            DistanceMetric::InnerProduct => Box::new(|a: &[f32], b: &[f32]| simd::inner_product_f32(a, b)),
-            DistanceMetric::L2Squared => Box::new(|a: &[f32], b: &[f32]| simd::l2_squared_f32(a, b)),
-            DistanceMetric::Cosine => Box::new(|a: &[f32], b: &[f32]| simd::cosine_distance_f32(a, b)),
-            _ => Box::new(move |a: &[f32], b: &[f32]| distance::compute_distance_f32(a, b, metric)),
-        };
-        let ascending = metric.is_ascending();
-
-        // Fused scan: iterate mmap, skip non-matching, compute distance inline
-        let mut top: Vec<(f32, u64)> = Vec::with_capacity(k);
-        let mut threshold = if ascending { f32::INFINITY } else { f32::NEG_INFINITY };
-        let mut filled = false;
-
-        for id in 0..n_vectors {
-            if id <= max_id && (bitset[id / 64] & (1u64 << (id % 64))) != 0 {
-                let start = id * dim;
-                let cand = &all_data[start..start + dim];
-                let dist = dist_fn(query, cand);
-
-                if !filled {
-                    top.push((dist, id as u64));
-                    if top.len() == k {
-                        if ascending {
-                            top.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-                        } else {
-                            top.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                        }
-                        threshold = top[k - 1].0;
-                        filled = true;
-                    }
-                } else {
-                    let dominated = if ascending { dist < threshold } else { dist > threshold };
-                    if dominated {
-                        top[k - 1] = (dist, id as u64);
-                        let mut j = k - 1;
-                        if ascending {
-                            while j > 0 && top[j].0 < top[j - 1].0 {
-                                top.swap(j, j - 1);
-                                j -= 1;
-                            }
-                        } else {
-                            while j > 0 && top[j].0 > top[j - 1].0 {
-                                top.swap(j, j - 1);
-                                j -= 1;
-                            }
-                        }
-                        threshold = top[k - 1].0;
-                    }
-                }
-            }
-        }
-
-        if !filled && !top.is_empty() {
-            if ascending {
-                top.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            } else {
-                top.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            }
-        }
-
-        let ids = top.iter().map(|(_, id)| *id).collect();
-        let dists = top.iter().map(|(d, _)| *d).collect();
+        let (indices, dists) = fm.search_filtered(query, k, metric, subset);
+        let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
         Ok((ids, dists))
     }
 

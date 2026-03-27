@@ -160,7 +160,6 @@ impl FieldStore {
             .table(&self.table_name)
             .map_err(|e| LynseError::ApexBase(format!("Table error: {}", e)))?;
 
-        // Execute SQL query through ApexBase
         let sql = format!(
             "SELECT external_id FROM {} WHERE {}",
             self.table_name, filter_expr

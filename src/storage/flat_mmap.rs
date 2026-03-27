@@ -191,6 +191,68 @@ impl FlatMmap {
         }
     }
 
+    /// Filtered brute-force top-k search on mmap'd data.
+    ///
+    /// Two strategies based on selectivity:
+    /// - **Few matches** (≤ 50K): Direct random access — O(matches) work, no full scan.
+    /// - **Many matches** (> 50K): Parallel scan with bitset — same SIMD parallelism
+    ///   as unfiltered path, skipping non-matching vectors via O(1) bitset check.
+    pub fn search_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+        subset_indices: &[u64],
+    ) -> (Vec<u32>, Vec<f32>) {
+        let n = self.n_vectors;
+        if n == 0 || k == 0 || subset_indices.is_empty() {
+            return (vec![], vec![]);
+        }
+        let k = k.min(subset_indices.len());
+        let dim = self.dim;
+        let candidates = self.as_slice();
+
+        // Threshold: direct access for few matches, parallel scan for many
+        const DIRECT_ACCESS_LIMIT: usize = 50_000;
+
+        if subset_indices.len() <= DIRECT_ACCESS_LIMIT {
+            // Strategy 1: Direct random access — O(matches) not O(n)
+            return match metric {
+                DistanceMetric::InnerProduct =>
+                    direct_access_topk::<false>(query, candidates, dim, k, n, subset_indices, simd::inner_product_f32),
+                DistanceMetric::L2Squared =>
+                    direct_access_topk::<true>(query, candidates, dim, k, n, subset_indices, simd::l2_squared_f32),
+                DistanceMetric::Cosine =>
+                    direct_access_topk::<true>(query, candidates, dim, k, n, subset_indices, simd::cosine_distance_f32),
+                _ =>
+                    direct_access_topk::<true>(query, candidates, dim, k, n, subset_indices,
+                        |a, b| distance::compute_distance_f32(a, b, metric)),
+            };
+        }
+
+        // Strategy 2: Parallel scan with bitset — for high-selectivity filters
+        let max_id = subset_indices.iter().copied().max().unwrap_or(0) as usize;
+        let mut bitset = vec![0u64; (max_id / 64) + 1];
+        for &id in subset_indices {
+            let idx = id as usize;
+            if idx < n {
+                bitset[idx / 64] |= 1u64 << (idx % 64);
+            }
+        }
+
+        match metric {
+            DistanceMetric::InnerProduct =>
+                fused_topk_parallel_filtered::<false>(query, candidates, dim, k, n, &bitset, max_id, simd::inner_product_f32),
+            DistanceMetric::L2Squared =>
+                fused_topk_parallel_filtered::<true>(query, candidates, dim, k, n, &bitset, max_id, simd::l2_squared_f32),
+            DistanceMetric::Cosine =>
+                fused_topk_parallel_filtered::<true>(query, candidates, dim, k, n, &bitset, max_id, simd::cosine_distance_f32),
+            _ =>
+                fused_topk_parallel_filtered::<true>(query, candidates, dim, k, n, &bitset, max_id,
+                    |a, b| distance::compute_distance_f32(a, b, metric)),
+        }
+    }
+
     /// Brute-force top-k search on mmap'd data.
     ///
     /// When `use_sq8` is true (user specified SQ8 index mode), uses two-pass acceleration:
@@ -445,6 +507,142 @@ fn merge_topk_results<const ASC: bool>(
     let indices = merged.iter().map(|e| e.idx).collect();
     let dists = merged.iter().map(|e| e.dist).collect();
     (indices, dists)
+}
+
+// ─── Filtered search helpers ─────────────────────────────────────────────────
+
+/// Direct random access top-k for low-selectivity filters.
+///
+/// Instead of scanning ALL vectors, reads only the matching vectors by index.
+/// O(matches) work — ideal when matches << n_vectors.
+#[inline(never)]
+fn direct_access_topk<const ASC: bool>(
+    query: &[f32],
+    candidates: &[f32],
+    dim: usize,
+    k: usize,
+    n_vectors: usize,
+    subset_ids: &[u64],
+    dist_fn: impl Fn(&[f32], &[f32]) -> f32,
+) -> (Vec<u32>, Vec<f32>) {
+    let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
+    let mut threshold: f32 = if ASC { f32::INFINITY } else { f32::NEG_INFINITY };
+    let mut filled = false;
+
+    for &id in subset_ids {
+        let idx = id as usize;
+        if idx >= n_vectors { continue; }
+        let start = idx * dim;
+        let cand = unsafe { candidates.get_unchecked(start..start + dim) };
+        let dist = dist_fn(query, cand);
+
+        if !filled || passes_threshold::<ASC>(dist, threshold) {
+            topk_insert::<ASC>(&mut top, k, TopKEntry { dist, idx: idx as u32 }, &mut threshold, &mut filled);
+        }
+    }
+
+    if !filled && !top.is_empty() {
+        if ASC {
+            top.sort_unstable_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal));
+        } else {
+            top.sort_unstable_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal));
+        }
+    }
+
+    let indices = top.iter().map(|e| e.idx).collect();
+    let dists = top.iter().map(|e| e.dist).collect();
+    (indices, dists)
+}
+
+/// Parallel scan with bitset filtering for high-selectivity filters.
+///
+/// Same structure as `fused_topk_parallel` but skips non-matching vectors
+/// via O(1) bitset lookup. Retains full SIMD parallelism.
+#[inline(never)]
+fn fused_topk_parallel_filtered<const ASC: bool>(
+    query: &[f32],
+    candidates: &[f32],
+    dim: usize,
+    k: usize,
+    n: usize,
+    bitset: &[u64],
+    max_id: usize,
+    dist_fn: impl Fn(&[f32], &[f32]) -> f32 + Send + Sync,
+) -> (Vec<u32>, Vec<f32>) {
+    if n < 4096 {
+        // Sequential fallback for small datasets
+        let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
+        let mut threshold: f32 = if ASC { f32::INFINITY } else { f32::NEG_INFINITY };
+        let mut filled = false;
+
+        for i in 0..n {
+            if i > max_id || (bitset[i / 64] & (1u64 << (i % 64))) == 0 {
+                continue;
+            }
+            let start = i * dim;
+            let cand = unsafe { candidates.get_unchecked(start..start + dim) };
+            let dist = dist_fn(query, cand);
+            if !filled || passes_threshold::<ASC>(dist, threshold) {
+                topk_insert::<ASC>(&mut top, k, TopKEntry { dist, idx: i as u32 }, &mut threshold, &mut filled);
+            }
+        }
+
+        if !filled && !top.is_empty() {
+            if ASC {
+                top.sort_unstable_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal));
+            } else {
+                top.sort_unstable_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal));
+            }
+        }
+
+        let indices = top.iter().map(|e| e.idx).collect();
+        let dists = top.iter().map(|e| e.dist).collect();
+        return (indices, dists);
+    }
+
+    let n_threads = rayon::current_num_threads();
+    let chunk_vecs = (n / n_threads).max(512);
+    let chunk_floats = chunk_vecs * dim;
+
+    let chunk_results: Vec<Vec<TopKEntry>> = candidates
+        .par_chunks(chunk_floats)
+        .enumerate()
+        .map(|(chunk_idx, cand_chunk)| {
+            let n_in_chunk = cand_chunk.len() / dim;
+            let base_idx = chunk_idx * chunk_vecs;
+
+            let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
+            let mut threshold: f32 = if ASC { f32::INFINITY } else { f32::NEG_INFINITY };
+            let mut filled = false;
+
+            for i in 0..n_in_chunk {
+                let global_id = base_idx + i;
+                // Bitset check: skip non-matching vectors
+                if global_id > max_id || (bitset[global_id / 64] & (1u64 << (global_id % 64))) == 0 {
+                    continue;
+                }
+
+                let start = i * dim;
+                let cand = unsafe { cand_chunk.get_unchecked(start..start + dim) };
+                let dist = dist_fn(query, cand);
+
+                if !filled || passes_threshold::<ASC>(dist, threshold) {
+                    topk_insert::<ASC>(&mut top, k, TopKEntry { dist, idx: global_id as u32 }, &mut threshold, &mut filled);
+                }
+            }
+
+            if !filled && !top.is_empty() {
+                if ASC {
+                    top.sort_unstable_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal));
+                } else {
+                    top.sort_unstable_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal));
+                }
+            }
+            top
+        })
+        .collect();
+
+    merge_topk_results::<ASC>(&chunk_results, k)
 }
 
 // ─── SQ8 Scalar Quantization for bandwidth-efficient search ─────────────────
