@@ -14,6 +14,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use crate::storage::pq_mmap::{PQIndex, parse_n_subspaces,
+    DEFAULT_OVERSAMPLE as PQ_OVERSAMPLE};
+use crate::storage::rabitq_mmap::{RaBitQIndex,
+    DEFAULT_OVERSAMPLE as RABITQ_OVERSAMPLE};
+use crate::storage::polarvec_mmap::{PolarVecIndex, parse_bits,
+    DEFAULT_OVERSAMPLE as POLARVEC_OVERSAMPLE, DEFAULT_BITS as POLARVEC_DEFAULT_BITS};
 
 /// Collection metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +42,12 @@ pub struct Collection {
     index_mode: Option<String>,
     /// Fingerprint of the last index sync (for incremental updates)
     last_sync_fingerprint: Option<String>,
+    /// PQ index for FLAT-*-PQ index modes.
+    pq_index: Option<PQIndex>,
+    /// RaBitQ index for FLAT-*-RABITQ index modes.
+    rabitq_index: Option<RaBitQIndex>,
+    /// PolarVec index for FLAT-*-POLARVEC index modes.
+    polarvec_index: Option<PolarVecIndex>,
 }
 
 impl Collection {
@@ -98,10 +110,16 @@ impl Collection {
             index,
             index_mode,
             last_sync_fingerprint,
+            pq_index: None,
+            rabitq_index: None,
+            polarvec_index: None,
         };
 
         // Recover any uncommitted WAL data on startup
         coll.recover_wal()?;
+
+        // Load quantizer indices from disk if present
+        coll.try_load_pq_rabitq()?;
 
         Ok(coll)
     }
@@ -122,6 +140,47 @@ impl Collection {
 
         // Clean WAL after successful recovery
         self.wal.cleanup()?;
+        Ok(())
+    }
+
+    /// Load PQ / RaBitQ / PolarVec indices from disk if the index_mode requires them.
+    fn try_load_pq_rabitq(&mut self) -> Result<()> {
+        let upper = self.index_mode
+            .as_ref()
+            .map(|m| m.to_uppercase())
+            .unwrap_or_default();
+
+        if upper.contains("PQ") && !upper.contains("IVF") {
+            let pq_path = self.path.join("pq_index.bin");
+            if pq_path.exists() {
+                match PQIndex::load(&pq_path) {
+                    Ok(pq) => { self.pq_index = Some(pq); }
+                    Err(e) => {
+                        log::warn!("Failed to load PQ index: {}", e);
+                    }
+                }
+            }
+        } else if upper.contains("RABITQ") {
+            let rq_path = self.path.join("rabitq_index.bin");
+            if rq_path.exists() {
+                match RaBitQIndex::load(&rq_path) {
+                    Ok(rq) => { self.rabitq_index = Some(rq); }
+                    Err(e) => {
+                        log::warn!("Failed to load RaBitQ index: {}", e);
+                    }
+                }
+            }
+        } else if upper.contains("POLARVEC") {
+            let pv_path = self.path.join("polarvec_index.bin");
+            if pv_path.exists() {
+                match PolarVecIndex::load(&pv_path) {
+                    Ok(pv) => { self.polarvec_index = Some(pv); }
+                    Err(e) => {
+                        log::warn!("Failed to load PolarVec index: {}", e);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -158,6 +217,12 @@ impl Collection {
         let index_type = meta["index_type"]
             .as_str()
             .ok_or_else(|| LynseError::Storage("Missing index_type in metadata".into()))?;
+
+        // Flat-family types (PQ/RaBitQ/PolarVec/SQ8) never write index.bin — skip loading
+        let index_type_upper = index_type.to_uppercase();
+        if index_type_upper.starts_with("FLAT") {
+            return Ok((None, Some(index_type.to_string())));
+        }
 
         let index_data_file = index_path.join("index.bin");
         if !index_data_file.exists() {
@@ -231,14 +296,61 @@ impl Collection {
     /// For HNSW/IVF types: loads data from mmap and builds the index structure.
     pub fn build_index(&mut self, index_type: &str) -> Result<()> {
         let dim = self.meta.dimension;
+        let upper = index_type.to_uppercase();
+
+        // Clear any previously built quantizer indices
+        self.pq_index = None;
+        self.rabitq_index = None;
+        self.polarvec_index = None;
+
         let is_flat = Self::resolve_metric_from_type(index_type).is_some();
 
         let n_vectors = if is_flat {
-            // Flat: no index structure needed — just set metric.
-            // Clear any existing HNSW/IVF index. Works even on empty collections.
+            // Flat family: clear any HNSW/IVF tree index, and remove stale graph index.bin
             self.index = None;
-            // Get vector count for metadata (0 is fine)
-            self.vector_store.get_shape().map(|(n, _)| n as usize).unwrap_or(0)
+            let stale_index = self.path.join("index").join("index.bin");
+            if stale_index.exists() {
+                let _ = std::fs::remove_file(&stale_index);
+            }
+            let n = self.vector_store.get_shape().map(|(n, _)| n as usize).unwrap_or(0);
+            // Build PQ index if requested
+            if upper.contains("PQ") {
+                if n > 0 {
+                    let n_subspaces = parse_n_subspaces(&upper, dim);
+                    let guard = self.vector_store.read_mmap()?;
+                    let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
+                    let pq = PQIndex::build(fm.as_slice(), n, dim, n_subspaces);
+                    drop(guard);
+                    let pq_path = self.path.join("pq_index.bin");
+                    pq.save(&pq_path)
+                        .map_err(|e| LynseError::Storage(e.to_string()))?;
+                    self.pq_index = Some(pq);
+                }
+            } else if upper.contains("RABITQ") {
+                if n > 0 {
+                    let guard = self.vector_store.read_mmap()?;
+                    let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
+                    let rq = RaBitQIndex::build(fm.as_slice(), n, dim);
+                    drop(guard);
+                    let rq_path = self.path.join("rabitq_index.bin");
+                    rq.save(&rq_path)
+                        .map_err(|e| LynseError::Storage(e.to_string()))?;
+                    self.rabitq_index = Some(rq);
+                }
+            } else if upper.contains("POLARVEC") {
+                if n > 0 {
+                    let bits = parse_bits(&upper, POLARVEC_DEFAULT_BITS);
+                    let guard = self.vector_store.read_mmap()?;
+                    let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
+                    let pv = PolarVecIndex::build(fm.as_slice(), n, dim, bits);
+                    drop(guard);
+                    let pv_path = self.path.join("polarvec_index.bin");
+                    pv.save(&pv_path)
+                        .map_err(|e| LynseError::Storage(e.to_string()))?;
+                    self.polarvec_index = Some(pv);
+                }
+            }
+            n
         } else {
             // HNSW/IVF: need data to build
             let guard = self.vector_store.read_mmap()?;
@@ -366,6 +478,42 @@ impl Collection {
         let (result_ids, result_dists) = if let Some(ref idx) = self.index {
             // HNSW/IVF index path
             idx.search(query, k, &search_params)?
+        } else if let Some(ref pq) = self.pq_index {
+            // PQ (Product Quantization) two-pass search
+            let metric = self.resolve_metric();
+            let guard = self.vector_store.read_mmap()?;
+            match guard.as_ref() {
+                None => (vec![], vec![]),
+                Some(fm) => {
+                    let (indices, dists) = pq.search(query, k, fm.as_slice(), metric, PQ_OVERSAMPLE);
+                    let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
+                    (ids, dists)
+                }
+            }
+        } else if let Some(ref rq) = self.rabitq_index {
+            // RaBitQ binary two-pass search
+            let metric = self.resolve_metric();
+            let guard = self.vector_store.read_mmap()?;
+            match guard.as_ref() {
+                None => (vec![], vec![]),
+                Some(fm) => {
+                    let (indices, dists) = rq.search(query, k, fm.as_slice(), metric, RABITQ_OVERSAMPLE);
+                    let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
+                    (ids, dists)
+                }
+            }
+        } else if let Some(ref pv) = self.polarvec_index {
+            // PolarVec multi-bit LUT two-pass search
+            let metric = self.resolve_metric();
+            let guard = self.vector_store.read_mmap()?;
+            match guard.as_ref() {
+                None => (vec![], vec![]),
+                Some(fm) => {
+                    let (indices, dists) = pv.search(query, k, fm.as_slice(), metric, POLARVEC_OVERSAMPLE);
+                    let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
+                    (ids, dists)
+                }
+            }
         } else if search_params.subset_indices.is_some() {
             // Filtered brute-force on mmap data
             self.brute_force_search_filtered(query, k, &search_params)?
@@ -445,6 +593,39 @@ impl Collection {
 
                 let (result_ids, result_dists) = if let Some(ref idx) = self.index {
                     idx.search(query, k, &search_params)?
+                } else if let Some(ref pq) = self.pq_index {
+                    let metric = self.resolve_metric();
+                    let guard = self.vector_store.read_mmap()?;
+                    match guard.as_ref() {
+                        None => (vec![], vec![]),
+                        Some(fm) => {
+                            let (indices, dists) = pq.search(query, k, fm.as_slice(), metric, PQ_OVERSAMPLE);
+                            let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
+                            (ids, dists)
+                        }
+                    }
+                } else if let Some(ref rq) = self.rabitq_index {
+                    let metric = self.resolve_metric();
+                    let guard = self.vector_store.read_mmap()?;
+                    match guard.as_ref() {
+                        None => (vec![], vec![]),
+                        Some(fm) => {
+                            let (indices, dists) = rq.search(query, k, fm.as_slice(), metric, RABITQ_OVERSAMPLE);
+                            let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
+                            (ids, dists)
+                        }
+                    }
+                } else if let Some(ref pv) = self.polarvec_index {
+                    let metric = self.resolve_metric();
+                    let guard = self.vector_store.read_mmap()?;
+                    match guard.as_ref() {
+                        None => (vec![], vec![]),
+                        Some(fm) => {
+                            let (indices, dists) = pv.search(query, k, fm.as_slice(), metric, POLARVEC_OVERSAMPLE);
+                            let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
+                            (ids, dists)
+                        }
+                    }
                 } else if search_params.subset_indices.is_some() {
                     self.brute_force_search_filtered(query, k, &search_params)?
                 } else {
@@ -863,15 +1044,21 @@ impl Collection {
         self.index_mode = None;
         self.meta.index_mode = None;
         self.last_sync_fingerprint = None;
+        self.pq_index = None;
+        self.rabitq_index = None;
+        self.polarvec_index = None;
 
         let index_path = self.path.join("index");
-        let meta_path = self.path.join("index_meta");
-        if index_path.exists() {
-            std::fs::remove_dir_all(&index_path)?;
-        }
-        if meta_path.exists() {
-            std::fs::remove_dir_all(&meta_path)?;
-        }
+        let meta_path  = self.path.join("index_meta");
+        let pq_path    = self.path.join("pq_index.bin");
+        let rq_path    = self.path.join("rabitq_index.bin");
+        let pv_path    = self.path.join("polarvec_index.bin");
+
+        if index_path.exists() { std::fs::remove_dir_all(&index_path)?; }
+        if meta_path.exists()  { std::fs::remove_dir_all(&meta_path)?; }
+        if pq_path.exists()    { std::fs::remove_file(&pq_path)?; }
+        if rq_path.exists()    { std::fs::remove_file(&rq_path)?; }
+        if pv_path.exists()    { std::fs::remove_file(&pv_path)?; }
 
         Ok(())
     }

@@ -8,6 +8,7 @@ use crate::error::{LynseError, Result};
 use crate::quantizer::{self, Quantizer, QuantizerType};
 use super::{IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
 use rand::Rng;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::cmp::Ordering;
@@ -69,96 +70,96 @@ impl IVFIndex {
     }
 
     /// Train centroids using K-means (Lloyd's algorithm).
+    ///
+    /// Uses subsampled KMeans++ init (O(K × min(N,10K))) and parallel Lloyd
+    /// assignment via rayon (O(max_iter × N × K) but parallelised).
     fn train_centroids(&mut self, data: &[f32], n_vectors: usize, dim: usize) {
         let n_centroids = self.n_centroids.min(n_vectors);
-        let max_iter = 50;
+        let max_iter = 20;
 
-        // K-means++ initialization
-        let mut centroids = vec![0.0f32; n_centroids * dim];
+        // ── Subsampled KMeans++ init ──────────────────────────────────────────
+        // Use at most 10K points so init is O(K × 10K) not O(K² × N).
+        let init_n = n_vectors.min(10_000);
         let mut rng = rand::thread_rng();
+        let mut centroids = vec![0.0f32; n_centroids * dim];
 
-        // First centroid: random
-        let first = rng.gen_range(0..n_vectors);
+        let first = rng.gen_range(0..init_n);
         centroids[..dim].copy_from_slice(&data[first * dim..(first + 1) * dim]);
 
-        // Remaining centroids
+        let mut min_dists = vec![f32::MAX; init_n];
         for c in 1..n_centroids {
-            let mut max_dist = 0.0f32;
-            let mut best_idx = 0;
-            for i in 0..n_vectors {
-                let mut min_dist = f32::MAX;
-                for prev_c in 0..c {
-                    let dist = compute_distance_f32(
-                        &data[i * dim..(i + 1) * dim],
-                        &centroids[prev_c * dim..(prev_c + 1) * dim],
-                        DistanceMetric::L2Squared,
-                    );
-                    min_dist = min_dist.min(dist);
-                }
-                if min_dist > max_dist {
-                    max_dist = min_dist;
-                    best_idx = i;
+            // Incremental D² update: only need to check the *last* centroid added
+            let prev = c - 1;
+            for i in 0..init_n {
+                let d = compute_distance_f32(
+                    &data[i * dim..(i + 1) * dim],
+                    &centroids[prev * dim..(prev + 1) * dim],
+                    DistanceMetric::L2Squared,
+                );
+                if d < min_dists[i] {
+                    min_dists[i] = d;
                 }
             }
+            let best = min_dists
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
             centroids[c * dim..(c + 1) * dim]
-                .copy_from_slice(&data[best_idx * dim..(best_idx + 1) * dim]);
+                .copy_from_slice(&data[best * dim..(best + 1) * dim]);
         }
 
-        // Lloyd iterations
+        // ── Parallel Lloyd iterations ─────────────────────────────────────────
         let mut assignments = vec![0usize; n_vectors];
         for _iter in 0..max_iter {
-            let mut changed = false;
-
-            // Assign
-            for i in 0..n_vectors {
-                let mut best_c = 0usize;
-                let mut best_dist = f32::MAX;
-                for c in 0..n_centroids {
-                    let dist = compute_distance_f32(
-                        &data[i * dim..(i + 1) * dim],
-                        &centroids[c * dim..(c + 1) * dim],
-                        DistanceMetric::L2Squared,
-                    );
-                    if dist < best_dist {
-                        best_dist = dist;
-                        best_c = c;
+            // Parallel assignment across all N vectors
+            let new_assignments: Vec<usize> = (0..n_vectors)
+                .into_par_iter()
+                .map(|i| {
+                    let vec = &data[i * dim..(i + 1) * dim];
+                    let mut best_c = 0usize;
+                    let mut best_dist = f32::MAX;
+                    for c in 0..n_centroids {
+                        let d = compute_distance_f32(
+                            vec,
+                            &centroids[c * dim..(c + 1) * dim],
+                            DistanceMetric::L2Squared,
+                        );
+                        if d < best_dist {
+                            best_dist = d;
+                            best_c = c;
+                        }
                     }
+                    best_c
+                })
+                .collect();
+
+            let changed = new_assignments.iter().zip(&assignments).any(|(a, b)| a != b);
+            assignments = new_assignments;
+
+            // Update centroids
+            let mut sums = vec![0.0f32; n_centroids * dim];
+            let mut counts = vec![0u32; n_centroids];
+            for i in 0..n_vectors {
+                let c = assignments[i];
+                counts[c] += 1;
+                for d in 0..dim {
+                    sums[c * dim + d] += data[i * dim + d];
                 }
-                if assignments[i] != best_c {
-                    assignments[i] = best_c;
-                    changed = true;
+            }
+            for c in 0..n_centroids {
+                if counts[c] > 0 {
+                    let inv = 1.0 / counts[c] as f32;
+                    for d in 0..dim {
+                        centroids[c * dim + d] = sums[c * dim + d] * inv;
+                    }
                 }
             }
 
             if !changed {
                 break;
             }
-
-            // Update centroids
-            let mut counts = vec![0u32; n_centroids];
-            let mut new_centroids = vec![0.0f32; n_centroids * dim];
-
-            for i in 0..n_vectors {
-                let c = assignments[i];
-                counts[c] += 1;
-                for d in 0..dim {
-                    new_centroids[c * dim + d] += data[i * dim + d];
-                }
-            }
-
-            for c in 0..n_centroids {
-                if counts[c] > 0 {
-                    for d in 0..dim {
-                        new_centroids[c * dim + d] /= counts[c] as f32;
-                    }
-                } else {
-                    // Keep old centroid for empty clusters
-                    new_centroids[c * dim..(c + 1) * dim]
-                        .copy_from_slice(&centroids[c * dim..(c + 1) * dim]);
-                }
-            }
-
-            centroids = new_centroids;
         }
 
         self.centroids = centroids;

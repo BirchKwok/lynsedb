@@ -231,22 +231,61 @@ class Collection:
         Args:
             index_mode (str): The index mode, must be one of the following:
 
+                **Flat (brute-force):**
+
                 - 'FLAT': Flat index with inner product. (Default)
-                - 'FLAT-L2': Flat index with squared L2 distance.
-                - 'FLAT-COS': Flat index with cosine similarity.
-                - 'FLAT-IP-SQ8': Flat index with inner product and SQ8 quantizer.
-                - 'FLAT-L2-SQ8': Flat index with squared L2 distance and SQ8 quantizer.
-                - 'FLAT-COS-SQ8': Flat index with cosine similarity and SQ8 quantizer.
-                - 'FLAT-JACCARD-BINARY': Flat index with Jaccard distance (binary).
-                - 'FLAT-HAMMING-BINARY': Flat index with Hamming distance (binary).
+                - 'Flat-L2': Flat index with squared L2 distance.
+                - 'Flat-Cos': Flat index with cosine similarity.
+                - 'Flat-IP-SQ8': Flat index with inner product and SQ8 quantizer.
+                - 'Flat-L2-SQ8': Flat index with squared L2 distance and SQ8 quantizer.
+                - 'Flat-Cos-SQ8': Flat index with cosine similarity and SQ8 quantizer.
+                - 'Flat-Jaccard-Binary': Flat index with Jaccard distance (binary vectors).
+                - 'Flat-Hamming-Binary': Flat index with Hamming distance (binary vectors).
+
+                **Flat + PQ (Product Quantization, two-pass ADC search):**
+
+                - 'FLAT-IP-PQ': PQ with inner product (auto subspace count).
+                - 'FLAT-L2-PQ': PQ with squared L2 distance.
+                - 'FLAT-COS-PQ': PQ with cosine similarity.
+                - 'FLAT-IP-PQ8': PQ with inner product and 8 subspaces.
+                - 'FLAT-IP-PQ16': PQ with inner product and 16 subspaces.
+                - 'FLAT-L2-PQ8': PQ with squared L2 and 8 subspaces.
+
+                **Flat + RaBitQ (Randomized Binary Quantization, ~32x compression):**
+
+                - 'FLAT-IP-RABITQ': RaBitQ with inner product.
+                - 'FLAT-L2-RABITQ': RaBitQ with squared L2 distance.
+                - 'FLAT-COS-RABITQ': RaBitQ with cosine similarity.
+
+                **HNSW (graph-based ANN):**
+
+                - 'HNSW': HNSW index with inner product.
+                - 'HNSW-L2': HNSW index with squared L2 distance.
+                - 'HNSW-Cos': HNSW index with cosine similarity.
+                - 'HNSW-IP-SQ8': HNSW index with inner product and SQ8 quantizer.
+                - 'HNSW-L2-SQ8': HNSW index with squared L2 distance and SQ8 quantizer.
+                - 'HNSW-Cos-SQ8': HNSW index with cosine similarity and SQ8 quantizer.
+
+                **DiskANN (disk-friendly graph ANN):**
+
+                - 'DiskANN': DiskANN index with inner product.
+                - 'DiskANN-L2': DiskANN index with squared L2 distance.
+                - 'DiskANN-Cos': DiskANN index with cosine similarity.
+                - 'DiskANN-IP-SQ8': DiskANN index with inner product and SQ8 quantizer.
+                - 'DiskANN-L2-SQ8': DiskANN index with squared L2 distance and SQ8 quantizer.
+                - 'DiskANN-Cos-SQ8': DiskANN index with cosine similarity and SQ8 quantizer.
+
+                **IVF (inverted file ANN):**
+
                 - 'IVF': IVF index with inner product.
                 - 'IVF-L2': IVF index with squared L2 distance.
-                - 'IVF-COS': IVF index with cosine similarity.
+                - 'IVF-Cos': IVF index with cosine similarity.
                 - 'IVF-IP-SQ8': IVF index with inner product and SQ8 quantizer.
                 - 'IVF-L2-SQ8': IVF index with squared L2 distance and SQ8 quantizer.
-                - 'IVF-COS-SQ8': IVF index with cosine similarity and SQ8 quantizer.
-                - 'IVF-JACCARD-BINARY': IVF index with Jaccard distance (binary).
-                - 'IVF-HAMMING-BINARY': IVF index with Hamming distance (binary).
+                - 'IVF-Cos-SQ8': IVF index with cosine similarity and SQ8 quantizer.
+                - 'IVF-Jaccard-Binary': IVF index with Jaccard distance (binary vectors).
+                - 'IVF-Hamming-Binary': IVF index with Hamming distance (binary vectors).
+
             **kwargs: Additional keyword arguments:
                 - 'n_clusters' (int): Number of clusters (IVF modes only).
         """
@@ -268,7 +307,10 @@ class Collection:
             vector: query vector, shape (dim,), dtype float32.
             k: number of results.
             where: optional SQL-like filter.
-            nprobe: number of IVF probes.
+            nprobe: controls search breadth by index type (default: 10).
+                - **IVF**: number of partitions to probe — higher = better recall, slower.
+                - **HNSW**: ef_search beam width — higher = better recall, slower.
+                - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).
 
         Returns:
             ResultView with ids, distances.
@@ -301,7 +343,10 @@ class Collection:
             vectors: shape (n_queries, dim), dtype float32.
             k: number of results per query.
             where: optional SQL-like filter.
-            nprobe: number of IVF probes.
+            nprobe: controls search breadth by index type (default: 10).
+                - **IVF**: number of partitions to probe — higher = better recall, slower.
+                - **HNSW**: ef_search beam width — higher = better recall, slower.
+                - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).
 
         Returns:
             List of ResultView, one per query.

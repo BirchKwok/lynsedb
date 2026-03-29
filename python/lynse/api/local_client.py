@@ -404,22 +404,69 @@ class LocalCollection:
         Parameters:
             index_mode (str): The index mode, must be one of the following:
 
+                **Flat (brute-force):**
+
                 - 'FLAT': Flat index with inner product. (Default)
                 - 'FLAT-L2': Flat index with squared L2 distance.
                 - 'FLAT-COS': Flat index with cosine similarity.
-                - 'FLAT-IP-SQ8': Flat index with inner product and scalar quantizer with 8 bits.
-                - 'FLAT-L2-SQ8': Flat index with squared L2 distance and scalar quantizer with 8 bits.
-                - 'FLAT-COS-SQ8': Flat index with cosine similarity and scalar quantizer with 8 bits.
-                - 'FLAT-JACCARD-BINARY': Flat index with binary quantizer. The distance is Jaccard distance.
-                - 'FLAT-HAMMING-BINARY': Flat index with binary quantizer. The distance is Hamming distance.
+                - 'FLAT-IP-SQ8': Flat index with inner product and SQ8 quantizer.
+                - 'FLAT-L2-SQ8': Flat index with squared L2 distance and SQ8 quantizer.
+                - 'FLAT-COS-SQ8': Flat index with cosine similarity and SQ8 quantizer.
+                - 'FLAT-JACCARD-BINARY': Flat index with Jaccard distance (binary vectors).
+                - 'FLAT-HAMMING-BINARY': Flat index with Hamming distance (binary vectors).
+
+                **Flat + PQ (Product Quantization, two-pass ADC search):**
+
+                - 'FLAT-IP-PQ': PQ with inner product (auto subspace count).
+                - 'FLAT-L2-PQ': PQ with squared L2 distance.
+                - 'FLAT-COS-PQ': PQ with cosine similarity.
+                - 'FLAT-IP-PQ8': PQ with inner product and 8 subspaces.
+                - 'FLAT-IP-PQ16': PQ with inner product and 16 subspaces.
+                - 'FLAT-L2-PQ8': PQ with squared L2 and 8 subspaces.
+
+                **Flat + RaBitQ (Randomized Binary Quantization, ~32x compression):**
+
+                - 'FLAT-IP-RABITQ': RaBitQ with inner product.
+                - 'FLAT-L2-RABITQ': RaBitQ with squared L2 distance.
+                - 'FLAT-COS-RABITQ': RaBitQ with cosine similarity.
+
+                **Flat + PolarVec (training-free multi-bit quantization, 4-8x compression):**
+
+                - 'FLAT-IP-POLARVEC': PolarVec with inner product (auto bits, default 4).
+                - 'FLAT-L2-POLARVEC': PolarVec with squared L2 distance.
+                - 'FLAT-COS-POLARVEC': PolarVec with cosine similarity.
+                - 'FLAT-IP-POLARVEC3': PolarVec with inner product and 3-bit codes (~10.7x).
+                - 'FLAT-IP-POLARVEC4': PolarVec with inner product and 4-bit codes (~8x).
+                - 'FLAT-IP-POLARVEC8': PolarVec with inner product and 8-bit codes (~4x).
+
+                **HNSW (graph-based ANN):**
+
+                - 'HNSW': HNSW index with inner product.
+                - 'HNSW-L2': HNSW index with squared L2 distance.
+                - 'HNSW-Cos': HNSW index with cosine similarity.
+                - 'HNSW-IP-SQ8': HNSW index with inner product and SQ8 quantizer.
+                - 'HNSW-L2-SQ8': HNSW index with squared L2 distance and SQ8 quantizer.
+                - 'HNSW-Cos-SQ8': HNSW index with cosine similarity and SQ8 quantizer.
+
+                **DiskANN (disk-friendly graph ANN):**
+
+                - 'DiskANN': DiskANN index with inner product.
+                - 'DiskANN-L2': DiskANN index with squared L2 distance.
+                - 'DiskANN-Cos': DiskANN index with cosine similarity.
+                - 'DiskANN-IP-SQ8': DiskANN index with inner product and SQ8 quantizer.
+                - 'DiskANN-L2-SQ8': DiskANN index with squared L2 distance and SQ8 quantizer.
+                - 'DiskANN-Cos-SQ8': DiskANN index with cosine similarity and SQ8 quantizer.
+
+                **IVF (inverted file ANN):**
+
                 - 'IVF': IVF index with inner product.
                 - 'IVF-L2': IVF index with squared L2 distance.
                 - 'IVF-COS': IVF index with cosine similarity.
-                - 'IVF-IP-SQ8': IVF index with inner product and scalar quantizer with 8 bits.
-                - 'IVF-L2-SQ8': IVF index with squared L2 distance and scalar quantizer with 8 bits.
-                - 'IVF-COS-SQ8': IVF index with cosine similarity and scalar quantizer with 8 bits.
-                - 'IVF-JACCARD-BINARY': IVF index with binary quantizer. The distance is Jaccard distance.
-                - 'IVF-HAMMING-BINARY': IVF index with binary quantizer. The distance is Hamming distance.
+                - 'IVF-IP-SQ8': IVF index with inner product and SQ8 quantizer.
+                - 'IVF-L2-SQ8': IVF index with squared L2 distance and SQ8 quantizer.
+                - 'IVF-COS-SQ8': IVF index with cosine similarity and SQ8 quantizer.
+                - 'IVF-JACCARD-BINARY': IVF index with Jaccard distance (binary vectors).
+                - 'IVF-HAMMING-BINARY': IVF index with Hamming distance (binary vectors).
             kwargs: Additional keyword arguments. The following are available:
 
                 - 'n_clusters' (int): The number of clusters. Only available for IVF modes.
@@ -453,7 +500,12 @@ class LocalCollection:
             k (int): The number of nearest vectors to return.
             where (str, optional): SQL/WHERE expression string to filter results.
             return_fields (bool): Whether to return the fields of the search results.
-            **kwargs: Additional keyword arguments (nprobe, etc.).
+            **kwargs: Additional keyword arguments:
+
+                - nprobe (int): Controls search breadth by index type (default: 10).
+                    - **IVF**: number of partitions to probe — higher = better recall, slower.
+                    - **HNSW**: ef_search beam width — higher = better recall, slower.
+                    - **Flat / PQ / RaBitQ / PolarVec**: ignored (exhaustive two-pass search).
 
         Returns:
             ResultView: Search results with ids, distances, and optional fields.
@@ -487,7 +539,10 @@ class LocalCollection:
             k (int): The number of nearest vectors to return per query.
             where (str, optional): SQL/WHERE expression string to filter results.
             return_fields (bool): Whether to return the fields.
-            nprobe (int): Number of IVF probes. Default is 10.
+            nprobe (int): Controls search breadth by index type (default: 10).
+                - **IVF**: number of partitions to probe — higher = better recall, slower.
+                - **HNSW**: ef_search beam width — higher = better recall, slower.
+                - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).
 
         Returns:
             List[ResultView]: List of ResultView objects, one per query vector.

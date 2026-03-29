@@ -131,100 +131,73 @@ impl Default for SearchParams {
 }
 
 /// Index alias map matching Python's `Indexer._INDEX_ALIAS`.
+/// Case-insensitive: all inputs are normalised to uppercase before matching.
 pub fn resolve_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, QuantizerType)> {
-    let _lower = alias.to_lowercase();
-    match alias {
-        // Flat indices
-        "FLAT" | "Flat-IP" | "flat-ip" => {
-            Some((IndexType::Flat, DistanceMetric::InnerProduct, QuantizerType::None))
-        }
-        "Flat-L2" | "flat-l2" => {
-            Some((IndexType::Flat, DistanceMetric::L2Squared, QuantizerType::None))
-        }
-        "Flat-Cos" | "flat-cosine" => {
-            Some((IndexType::Flat, DistanceMetric::Cosine, QuantizerType::None))
-        }
-        "Flat-IP-SQ8" | "flat-ip-sq8" => {
-            Some((IndexType::Flat, DistanceMetric::InnerProduct, QuantizerType::Scalar))
-        }
-        "Flat-L2-SQ8" | "flat-l2-sq8" => {
-            Some((IndexType::Flat, DistanceMetric::L2Squared, QuantizerType::Scalar))
-        }
-        "Flat-Cos-SQ8" | "flat-cosine-sq8" => {
-            Some((IndexType::Flat, DistanceMetric::Cosine, QuantizerType::Scalar))
-        }
-        "Flat-Jaccard-Binary" | "flat-jaccard" => {
-            Some((IndexType::Flat, DistanceMetric::Jaccard, QuantizerType::Binary))
-        }
-        "Flat-Hamming-Binary" | "flat-hamming" => {
-            Some((IndexType::Flat, DistanceMetric::Hamming, QuantizerType::Binary))
-        }
+    let u = alias.to_uppercase();
+    match u.as_str() {
+        // ── Flat ────────────────────────────────────────────────────────────
+        "FLAT" | "FLAT-IP" =>
+            Some((IndexType::Flat, DistanceMetric::InnerProduct, QuantizerType::None)),
+        "FLAT-L2" =>
+            Some((IndexType::Flat, DistanceMetric::L2Squared, QuantizerType::None)),
+        "FLAT-COS" | "FLAT-COSINE" =>
+            Some((IndexType::Flat, DistanceMetric::Cosine, QuantizerType::None)),
+        "FLAT-IP-SQ8" =>
+            Some((IndexType::Flat, DistanceMetric::InnerProduct, QuantizerType::Scalar)),
+        "FLAT-L2-SQ8" =>
+            Some((IndexType::Flat, DistanceMetric::L2Squared, QuantizerType::Scalar)),
+        "FLAT-COS-SQ8" | "FLAT-COSINE-SQ8" =>
+            Some((IndexType::Flat, DistanceMetric::Cosine, QuantizerType::Scalar)),
+        "FLAT-JACCARD-BINARY" | "FLAT-JACCARD" =>
+            Some((IndexType::Flat, DistanceMetric::Jaccard, QuantizerType::Binary)),
+        "FLAT-HAMMING-BINARY" | "FLAT-HAMMING" =>
+            Some((IndexType::Flat, DistanceMetric::Hamming, QuantizerType::Binary)),
 
-        // HNSW indices
-        "HNSW" | "HNSW-IP" | "hnsw-ip" => {
-            Some((IndexType::HNSW, DistanceMetric::InnerProduct, QuantizerType::None))
-        }
-        "HNSW-L2" | "hnsw-l2" => {
-            Some((IndexType::HNSW, DistanceMetric::L2Squared, QuantizerType::None))
-        }
-        "HNSW-Cos" | "hnsw-cosine" => {
-            Some((IndexType::HNSW, DistanceMetric::Cosine, QuantizerType::None))
-        }
-        "HNSW-IP-SQ8" | "hnsw-ip-sq8" => {
-            Some((IndexType::HNSW, DistanceMetric::InnerProduct, QuantizerType::Scalar))
-        }
-        "HNSW-L2-SQ8" | "hnsw-l2-sq8" => {
-            Some((IndexType::HNSW, DistanceMetric::L2Squared, QuantizerType::Scalar))
-        }
-        "HNSW-Cos-SQ8" | "hnsw-cosine-sq8" => {
-            Some((IndexType::HNSW, DistanceMetric::Cosine, QuantizerType::Scalar))
-        }
+        // ── HNSW ────────────────────────────────────────────────────────────
+        "HNSW" | "HNSW-IP" =>
+            Some((IndexType::HNSW, DistanceMetric::InnerProduct, QuantizerType::None)),
+        "HNSW-L2" =>
+            Some((IndexType::HNSW, DistanceMetric::L2Squared, QuantizerType::None)),
+        "HNSW-COS" | "HNSW-COSINE" =>
+            Some((IndexType::HNSW, DistanceMetric::Cosine, QuantizerType::None)),
+        "HNSW-IP-SQ8" =>
+            Some((IndexType::HNSW, DistanceMetric::InnerProduct, QuantizerType::Scalar)),
+        "HNSW-L2-SQ8" =>
+            Some((IndexType::HNSW, DistanceMetric::L2Squared, QuantizerType::Scalar)),
+        "HNSW-COS-SQ8" | "HNSW-COSINE-SQ8" =>
+            Some((IndexType::HNSW, DistanceMetric::Cosine, QuantizerType::Scalar)),
 
-        // DiskANN indices
-        "DiskANN" | "DiskANN-IP" | "diskann-ip" => {
-            Some((IndexType::DiskANN, DistanceMetric::InnerProduct, QuantizerType::None))
-        }
-        "DiskANN-L2" | "diskann-l2" => {
-            Some((IndexType::DiskANN, DistanceMetric::L2Squared, QuantizerType::None))
-        }
-        "DiskANN-Cos" | "diskann-cosine" => {
-            Some((IndexType::DiskANN, DistanceMetric::Cosine, QuantizerType::None))
-        }
-        "DiskANN-IP-SQ8" | "diskann-ip-sq8" => {
-            Some((IndexType::DiskANN, DistanceMetric::InnerProduct, QuantizerType::Scalar))
-        }
-        "DiskANN-L2-SQ8" | "diskann-l2-sq8" => {
-            Some((IndexType::DiskANN, DistanceMetric::L2Squared, QuantizerType::Scalar))
-        }
-        "DiskANN-Cos-SQ8" | "diskann-cosine-sq8" => {
-            Some((IndexType::DiskANN, DistanceMetric::Cosine, QuantizerType::Scalar))
-        }
+        // ── DiskANN ─────────────────────────────────────────────────────────
+        "DISKANN" | "DISKANN-IP" =>
+            Some((IndexType::DiskANN, DistanceMetric::InnerProduct, QuantizerType::None)),
+        "DISKANN-L2" =>
+            Some((IndexType::DiskANN, DistanceMetric::L2Squared, QuantizerType::None)),
+        "DISKANN-COS" | "DISKANN-COSINE" =>
+            Some((IndexType::DiskANN, DistanceMetric::Cosine, QuantizerType::None)),
+        "DISKANN-IP-SQ8" =>
+            Some((IndexType::DiskANN, DistanceMetric::InnerProduct, QuantizerType::Scalar)),
+        "DISKANN-L2-SQ8" =>
+            Some((IndexType::DiskANN, DistanceMetric::L2Squared, QuantizerType::Scalar)),
+        "DISKANN-COS-SQ8" | "DISKANN-COSINE-SQ8" =>
+            Some((IndexType::DiskANN, DistanceMetric::Cosine, QuantizerType::Scalar)),
 
-        // IVF indices
-        "IVF" | "IVF-IP" | "ivf-ip" => {
-            Some((IndexType::IVF, DistanceMetric::InnerProduct, QuantizerType::None))
-        }
-        "IVF-L2" | "ivf-l2" => {
-            Some((IndexType::IVF, DistanceMetric::L2Squared, QuantizerType::None))
-        }
-        "IVF-Cos" | "ivf-cosine" => {
-            Some((IndexType::IVF, DistanceMetric::Cosine, QuantizerType::None))
-        }
-        "IVF-IP-SQ8" | "ivf-ip-sq8" => {
-            Some((IndexType::IVF, DistanceMetric::InnerProduct, QuantizerType::Scalar))
-        }
-        "IVF-L2-SQ8" | "ivf-l2-sq8" => {
-            Some((IndexType::IVF, DistanceMetric::L2Squared, QuantizerType::Scalar))
-        }
-        "IVF-Cos-SQ8" | "ivf-cosine-sq8" => {
-            Some((IndexType::IVF, DistanceMetric::Cosine, QuantizerType::Scalar))
-        }
-        "IVF-Jaccard-Binary" | "ivf-jaccard" => {
-            Some((IndexType::IVF, DistanceMetric::Jaccard, QuantizerType::Binary))
-        }
-        "IVF-Hamming-Binary" | "ivf-hamming" => {
-            Some((IndexType::IVF, DistanceMetric::Hamming, QuantizerType::Binary))
-        }
+        // ── IVF ─────────────────────────────────────────────────────────────
+        "IVF" | "IVF-IP" =>
+            Some((IndexType::IVF, DistanceMetric::InnerProduct, QuantizerType::None)),
+        "IVF-L2" =>
+            Some((IndexType::IVF, DistanceMetric::L2Squared, QuantizerType::None)),
+        "IVF-COS" | "IVF-COSINE" =>
+            Some((IndexType::IVF, DistanceMetric::Cosine, QuantizerType::None)),
+        "IVF-IP-SQ8" =>
+            Some((IndexType::IVF, DistanceMetric::InnerProduct, QuantizerType::Scalar)),
+        "IVF-L2-SQ8" =>
+            Some((IndexType::IVF, DistanceMetric::L2Squared, QuantizerType::Scalar)),
+        "IVF-COS-SQ8" | "IVF-COSINE-SQ8" =>
+            Some((IndexType::IVF, DistanceMetric::Cosine, QuantizerType::Scalar)),
+        "IVF-JACCARD-BINARY" | "IVF-JACCARD" =>
+            Some((IndexType::IVF, DistanceMetric::Jaccard, QuantizerType::Binary)),
+        "IVF-HAMMING-BINARY" | "IVF-HAMMING" =>
+            Some((IndexType::IVF, DistanceMetric::Hamming, QuantizerType::Binary)),
 
         _ => None,
     }

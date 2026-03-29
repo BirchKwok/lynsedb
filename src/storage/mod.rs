@@ -11,3 +11,6 @@ pub mod wal;
 pub mod bitset;
 pub mod flat_mmap;
 pub mod ivf_flat_mmap;
+pub mod pq_mmap;
+pub mod rabitq_mmap;
+pub mod polarvec_mmap;
