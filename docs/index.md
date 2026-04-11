@@ -68,6 +68,9 @@ After installing the [Client API package](#install-client-api-package-mandatory)
 
 ```shell
 docker pull birchkwok/lynsedb:latest
+docker run -p 7637:7637 -v lynsedb-data:/data birchkwok/lynsedb:latest
+# optional auth:
+# docker run -p 7637:7637 -e LYNSE_API_KEY=your_key -v lynsedb-data:/data birchkwok/lynsedb:latest
 ```
 
 ## License

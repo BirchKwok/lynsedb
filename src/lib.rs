@@ -8,13 +8,13 @@
 //! - Multiple index types: Flat, IVF, HNSW, DiskANN
 
 pub mod distance;
-pub mod quantizer;
-pub mod storage;
-pub mod index;
 pub mod engine;
 pub mod error;
+pub mod index;
 pub mod python;
+pub mod quantizer;
 pub mod server;
+pub mod storage;
 
 use pyo3::prelude::*;
 

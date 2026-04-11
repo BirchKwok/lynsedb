@@ -20,7 +20,7 @@ use std::time::Instant;
 
 /// File header: version(u64) + chunk_size(u64) + flush_interval_ms(u64) + count_rows(u64)
 const HEADER_SIZE: usize = 32; // 4 * 8 bytes
-const WAL_VERSION: u64 = 1;
+const WAL_VERSION: u64 = 2;
 
 /// Segment header: data_size(u64) + record_count(u64) + status(u8) + data_dim(u64)
 const SEGMENT_HEADER_SIZE: usize = 25; // 8 + 8 + 1 + 8
@@ -39,6 +39,8 @@ const WRITE_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB
 struct WALBuffer {
     /// Accumulated f32 vector data (flattened)
     data: Vec<Vec<f32>>,
+    /// User-facing IDs for each vector.
+    ids: Vec<u64>,
     /// Accumulated field metadata per vector
     fields: Vec<HashMap<String, serde_json::Value>>,
     /// Dimension of vectors (set on first append)
@@ -51,6 +53,7 @@ impl WALBuffer {
     fn new() -> Self {
         Self {
             data: Vec::new(),
+            ids: Vec::new(),
             fields: Vec::new(),
             dim: 0,
             size: 0,
@@ -61,18 +64,27 @@ impl WALBuffer {
         &mut self,
         data: &[f32],
         dim: usize,
+        ids: &[u64],
         fields: &[HashMap<String, serde_json::Value>],
     ) {
         if self.dim == 0 {
             self.dim = dim;
         }
         self.data.push(data.to_vec());
+        self.ids.extend_from_slice(ids);
         self.fields.extend(fields.iter().cloned());
-        self.size += fields.len();
+        self.size += ids.len();
     }
 
     /// Return concatenated data + fields, consuming the buffer contents.
-    fn take(&mut self) -> Option<(Vec<f32>, usize, Vec<HashMap<String, serde_json::Value>>)> {
+    fn take(
+        &mut self,
+    ) -> Option<(
+        Vec<f32>,
+        usize,
+        Vec<u64>,
+        Vec<HashMap<String, serde_json::Value>>,
+    )> {
         if self.size == 0 {
             return None;
         }
@@ -80,15 +92,17 @@ impl WALBuffer {
         for chunk in &self.data {
             concatenated.extend_from_slice(chunk);
         }
+        let ids = std::mem::take(&mut self.ids);
         let fields = std::mem::take(&mut self.fields);
         let dim = self.dim;
         self.data.clear();
         self.size = 0;
-        Some((concatenated, dim, fields))
+        Some((concatenated, dim, ids, fields))
     }
 
     fn clear(&mut self) {
         self.data.clear();
+        self.ids.clear();
         self.fields.clear();
         self.size = 0;
         self.dim = 0;
@@ -101,6 +115,8 @@ impl WALBuffer {
 pub struct WALSegment {
     /// Vector data as flat f32 slice, shape = (n_vectors, dim)
     pub data: Vec<f32>,
+    /// User-facing IDs for each vector.
+    pub ids: Vec<u64>,
     /// Dimension of each vector
     pub dim: usize,
     /// Number of vectors in this segment
@@ -227,8 +243,44 @@ impl WALStorage {
         &self,
         data: &[f32],
         dim: usize,
+        ids: &[u64],
         fields: &[HashMap<String, serde_json::Value>],
     ) -> Result<()> {
+        if dim == 0 {
+            return Err(LynseError::InvalidArgument(
+                "WAL write requires a non-zero vector dimension".to_string(),
+            ));
+        }
+        if data.len() % dim != 0 {
+            return Err(LynseError::DimensionMismatch {
+                expected: dim,
+                got: data.len() % dim,
+            });
+        }
+        let n_vectors = data.len() / dim;
+        if ids.len() != n_vectors {
+            return Err(LynseError::InvalidArgument(format!(
+                "ids length ({}) must match WAL vector count ({})",
+                ids.len(),
+                n_vectors
+            )));
+        }
+        if !fields.is_empty() && fields.len() != n_vectors {
+            return Err(LynseError::InvalidArgument(format!(
+                "fields length ({}) must match WAL vector count ({})",
+                fields.len(),
+                n_vectors
+            )));
+        }
+
+        let normalized_fields;
+        let fields = if fields.is_empty() {
+            normalized_fields = vec![HashMap::new(); n_vectors];
+            &normalized_fields
+        } else {
+            fields
+        };
+
         let mut inner = self.inner.lock();
 
         // Lazy-initialize the WAL file
@@ -236,12 +288,21 @@ impl WALStorage {
             self.initialize_wal_file(&mut inner)?;
         }
 
-        inner.buffer.append(data, dim, fields);
+        inner.buffer.append(data, dim, ids, fields);
 
         if inner.buffer.size >= BUFFER_FLUSH_SIZE
             || inner.last_flush.elapsed().as_millis() as u64 >= self.flush_interval_ms
         {
             self.flush_buffer_to_disk(&mut inner)?;
+        }
+
+        // Keep WAL durable before callers append to the main vector store.
+        self.flush_buffer_to_disk(&mut inner)?;
+        self.flush_write_buffer(&mut inner)?;
+        self.flush_row_count(&mut inner)?;
+        if let Some(ref mut f) = inner.current_file {
+            f.flush()?;
+            f.sync_all()?;
         }
 
         Ok(())
@@ -262,6 +323,19 @@ impl WALStorage {
         // Also check in-memory buffer
         let inner = self.inner.lock();
         count > 0 || inner.buffer.size > 0
+    }
+
+    /// Flush all pending WAL buffers and fsync the active WAL file.
+    pub fn flush(&self) -> Result<()> {
+        let mut inner = self.inner.lock();
+        self.flush_buffer_to_disk(&mut inner)?;
+        self.flush_write_buffer(&mut inner)?;
+        self.flush_row_count(&mut inner)?;
+        if let Some(ref mut f) = inner.current_file {
+            f.flush()?;
+            f.sync_all()?;
+        }
+        Ok(())
     }
 
     /// Iterate over all committed segments across all WAL files.
@@ -299,21 +373,19 @@ impl WALStorage {
             if file_data.len() < HEADER_SIZE {
                 continue;
             }
+            let version = u64::from_le_bytes(file_data[0..8].try_into().unwrap());
 
             let mut pos = HEADER_SIZE;
 
             while pos + SEGMENT_HEADER_SIZE <= file_data.len() {
                 // Read segment header
-                let data_size = u64::from_le_bytes(
-                    file_data[pos..pos + 8].try_into().unwrap(),
-                ) as usize;
-                let record_count = u64::from_le_bytes(
-                    file_data[pos + 8..pos + 16].try_into().unwrap(),
-                ) as usize;
+                let data_size =
+                    u64::from_le_bytes(file_data[pos..pos + 8].try_into().unwrap()) as usize;
+                let record_count =
+                    u64::from_le_bytes(file_data[pos + 8..pos + 16].try_into().unwrap()) as usize;
                 let status = file_data[pos + 16];
-                let data_dim = u64::from_le_bytes(
-                    file_data[pos + 17..pos + 25].try_into().unwrap(),
-                ) as usize;
+                let data_dim =
+                    u64::from_le_bytes(file_data[pos + 17..pos + 25].try_into().unwrap()) as usize;
 
                 pos += SEGMENT_HEADER_SIZE;
 
@@ -339,9 +411,8 @@ impl WALStorage {
                 if pos + 8 > file_data.len() {
                     break;
                 }
-                let vec_data_size = u64::from_le_bytes(
-                    file_data[pos..pos + 8].try_into().unwrap(),
-                ) as usize;
+                let vec_data_size =
+                    u64::from_le_bytes(file_data[pos..pos + 8].try_into().unwrap()) as usize;
                 pos += 8;
 
                 if pos + vec_data_size > file_data.len() {
@@ -361,9 +432,8 @@ impl WALStorage {
                 if pos + 8 > file_data.len() {
                     break;
                 }
-                let fields_size = u64::from_le_bytes(
-                    file_data[pos..pos + 8].try_into().unwrap(),
-                ) as usize;
+                let fields_size =
+                    u64::from_le_bytes(file_data[pos..pos + 8].try_into().unwrap()) as usize;
                 pos += 8;
 
                 if pos + fields_size > file_data.len() {
@@ -376,6 +446,28 @@ impl WALStorage {
                 let fields: Vec<HashMap<String, serde_json::Value>> =
                     serde_json::from_slice(fields_bytes).unwrap_or_default();
 
+                let ids = if version >= 2 {
+                    if pos + 8 > file_data.len() {
+                        break;
+                    }
+                    let ids_size =
+                        u64::from_le_bytes(file_data[pos..pos + 8].try_into().unwrap()) as usize;
+                    pos += 8;
+
+                    if pos + ids_size > file_data.len() {
+                        break;
+                    }
+                    let ids_bytes = &file_data[pos..pos + ids_size];
+                    pos += ids_size;
+
+                    ids_bytes
+                        .chunks_exact(8)
+                        .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
                 let n_vectors = if data_dim > 0 {
                     n_floats / data_dim
                 } else {
@@ -384,6 +476,7 @@ impl WALStorage {
 
                 segments.push(WALSegment {
                     data: float_data,
+                    ids,
                     dim: data_dim,
                     n_vectors,
                     fields,
@@ -489,7 +582,7 @@ impl WALStorage {
         self.maybe_rotate_wal(inner)?;
 
         let taken = inner.buffer.take();
-        let (data, dim, fields) = match taken {
+        let (data, dim, ids, fields) = match taken {
             Some(t) => t,
             None => return Ok(()),
         };
@@ -497,12 +590,13 @@ impl WALStorage {
         // Serialize fields as JSON (compatible with Python msgpack for simple types)
         let fields_bytes =
             serde_json::to_vec(&fields).map_err(|e| LynseError::Serialization(e.to_string()))?;
+        let ids_bytes: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
 
         // Vector data as raw LE f32 bytes
         let data_bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
 
-        let total_size = data_bytes.len() + fields_bytes.len();
-        let record_count = fields.len();
+        let total_size = 8 + data_bytes.len() + 8 + fields_bytes.len() + 8 + ids_bytes.len();
+        let record_count = ids.len();
 
         // Write segment header
         let mut header = Vec::with_capacity(SEGMENT_HEADER_SIZE);
@@ -520,6 +614,10 @@ impl WALStorage {
         self.write_to_buffer(inner, &(fields_bytes.len() as u64).to_le_bytes());
         self.write_to_buffer(inner, &fields_bytes);
 
+        // Write user IDs: length + bytes
+        self.write_to_buffer(inner, &(ids_bytes.len() as u64).to_le_bytes());
+        self.write_to_buffer(inner, &ids_bytes);
+
         // Flush write buffer
         self.flush_write_buffer(inner)?;
 
@@ -534,8 +632,9 @@ impl WALStorage {
 
     fn write_to_buffer(&self, inner: &mut WALInner, data: &[u8]) {
         if inner.write_buf_pos + data.len() > WRITE_BUFFER_SIZE {
-            // Must flush first — but we can't return Result here, so just extend the buffer
-            // In practice the flush happens in flush_buffer_to_disk before large writes
+            // Grow from the actually used prefix. Extending the full fixed-size
+            // buffer would write zero-filled slack bytes into the WAL segment.
+            inner.write_buf.truncate(inner.write_buf_pos);
             inner.write_buf.extend_from_slice(data);
             inner.write_buf_pos = inner.write_buf.len();
             return;
@@ -631,7 +730,8 @@ mod tests {
             },
         ];
 
-        wal.write_log_data(&vectors, dim, &fields).unwrap();
+        let ids = vec![10, 11];
+        wal.write_log_data(&vectors, dim, &ids, &fields).unwrap();
 
         assert!(wal.has_uncommitted_data());
 
@@ -640,6 +740,7 @@ mod tests {
         assert_eq!(segments[0].n_vectors, 2);
         assert_eq!(segments[0].dim, 4);
         assert_eq!(segments[0].data, vectors);
+        assert_eq!(segments[0].ids, ids);
         assert_eq!(segments[0].fields.len(), 2);
 
         // Cleanup
@@ -660,11 +761,31 @@ mod tests {
                 m.insert("idx".to_string(), serde_json::json!(i));
                 m
             }];
-            wal.write_log_data(&vectors, dim, &fields).unwrap();
+            wal.write_log_data(&vectors, dim, &[i as u64], &fields)
+                .unwrap();
         }
 
         let segments = wal.get_segments().unwrap();
         let total_vectors: usize = segments.iter().map(|s| s.n_vectors).sum();
         assert_eq!(total_vectors, 5);
+    }
+
+    #[test]
+    fn test_wal_vector_only_records_are_counted() {
+        let tmp = TempDir::new().unwrap();
+        let wal = WALStorage::new("test_col", 100_000, tmp.path(), 5000).unwrap();
+
+        let dim = 2;
+        let vectors = vec![1.0, 2.0, 3.0, 4.0];
+        let ids = vec![100, 101];
+        wal.write_log_data(&vectors, dim, &ids, &[]).unwrap();
+
+        assert!(wal.has_uncommitted_data());
+        let segments = wal.get_segments().unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].n_vectors, 2);
+        assert_eq!(segments[0].ids, ids);
+        assert_eq!(segments[0].fields.len(), 2);
+        assert!(segments[0].fields.iter().all(|fields| fields.is_empty()));
     }
 }

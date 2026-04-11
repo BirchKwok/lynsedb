@@ -3,14 +3,14 @@
 //! Graph-based approximate nearest neighbor search optimized for disk-resident data.
 //! Supports billion-scale datasets with good recall-latency tradeoff.
 
+use super::{IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
 use crate::distance::{self, compute_distance_f32, DistanceMetric};
 use crate::error::{LynseError, Result};
 use crate::quantizer::{self, Quantizer, QuantizerType};
-use super::{IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
 /// DiskANN graph-based index.
 pub struct DiskANNIndex {
@@ -38,14 +38,12 @@ impl DiskANNIndex {
         alpha: f32,
         max_degree: usize,
     ) -> Self {
-        let quantizer = quantizer::create_quantizer(
-            match quant_type {
-                QuantizerType::None => "none",
-                QuantizerType::Scalar => "sq8",
-                QuantizerType::Binary => "binary",
-                QuantizerType::Product => "pq",
-            },
-        )
+        let quantizer = quantizer::create_quantizer(match quant_type {
+            QuantizerType::None => "none",
+            QuantizerType::Scalar => "sq8",
+            QuantizerType::Binary => "binary",
+            QuantizerType::Product => "pq",
+        })
         .unwrap();
 
         Self {
@@ -318,11 +316,7 @@ impl VectorIndex for DiskANNIndex {
         // Update entry point before moving new_graph
         if let Some(ep) = self.entry_point {
             if indices_to_delete.contains(&ep) {
-                self.entry_point = if new_graph.is_empty() {
-                    None
-                } else {
-                    Some(0)
-                };
+                self.entry_point = if new_graph.is_empty() { None } else { Some(0) };
             } else {
                 self.entry_point = Some(index_map[&ep]);
             }
@@ -351,13 +345,7 @@ impl VectorIndex for DiskANNIndex {
         Ok(())
     }
 
-    fn insert(
-        &mut self,
-        vectors: &[f32],
-        n_vectors: usize,
-        dim: usize,
-        ids: &[u64],
-    ) -> Result<()> {
+    fn insert(&mut self, vectors: &[f32], n_vectors: usize, dim: usize, ids: &[u64]) -> Result<()> {
         if dim != self.config.dimension {
             return Err(LynseError::DimensionMismatch {
                 expected: self.config.dimension,

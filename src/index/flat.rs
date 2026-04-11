@@ -3,10 +3,10 @@
 //! Exact nearest neighbor search by computing distances to all vectors.
 //! Best for small-to-medium datasets or as a baseline for accuracy.
 
+use super::{IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
 use crate::distance::{self, DistanceMetric};
 use crate::error::{LynseError, Result};
 use crate::quantizer::{self, Quantizer, QuantizerType};
-use super::{IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
 use serde::{Deserialize, Serialize};
 
 /// Flat index: exhaustive search over all vectors.
@@ -25,14 +25,12 @@ pub struct FlatIndex {
 
 impl FlatIndex {
     pub fn new(metric: DistanceMetric, quant_type: QuantizerType) -> Self {
-        let quantizer = quantizer::create_quantizer(
-            match quant_type {
-                QuantizerType::None => "none",
-                QuantizerType::Scalar => "sq8",
-                QuantizerType::Binary => "binary",
-                QuantizerType::Product => "pq",
-            },
-        )
+        let quantizer = quantizer::create_quantizer(match quant_type {
+            QuantizerType::None => "none",
+            QuantizerType::Scalar => "sq8",
+            QuantizerType::Binary => "binary",
+            QuantizerType::Product => "pq",
+        })
         .unwrap();
 
         Self {
@@ -165,13 +163,7 @@ impl VectorIndex for FlatIndex {
         Ok(())
     }
 
-    fn insert(
-        &mut self,
-        vectors: &[f32],
-        n_vectors: usize,
-        dim: usize,
-        ids: &[u64],
-    ) -> Result<()> {
+    fn insert(&mut self, vectors: &[f32], n_vectors: usize, dim: usize, ids: &[u64]) -> Result<()> {
         if dim != self.config.dimension {
             return Err(LynseError::DimensionMismatch {
                 expected: self.config.dimension,

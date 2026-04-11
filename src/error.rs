@@ -64,9 +64,7 @@ impl From<LynseError> for pyo3::PyErr {
             LynseError::InvalidArgument(_) => {
                 pyo3::exceptions::PyValueError::new_err(err.to_string())
             }
-            LynseError::EmptyDatabase => {
-                pyo3::exceptions::PyValueError::new_err(err.to_string())
-            }
+            LynseError::EmptyDatabase => pyo3::exceptions::PyValueError::new_err(err.to_string()),
             LynseError::Io(_) => pyo3::exceptions::PyIOError::new_err(err.to_string()),
             _ => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
         }

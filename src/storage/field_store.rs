@@ -86,7 +86,11 @@ impl IndexKey {
 #[inline]
 fn normalize_f64_bits(f: f64) -> u64 {
     let bits = f.to_bits();
-    if bits >> 63 == 0 { bits | (1u64 << 63) } else { !bits }
+    if bits >> 63 == 0 {
+        bits | (1u64 << 63)
+    } else {
+        !bits
+    }
 }
 
 /// Per-field index: uses Vec for dense integer ranges, HashMap for sparse/non-integer.
@@ -111,6 +115,37 @@ impl FieldIndexType {
                 None
             }
             FieldIndexType::Sparse(map) => map.get(key),
+        }
+    }
+
+    fn remove(
+        &mut self,
+        field: &str,
+        int_ranges: &HashMap<String, (i64, i64, usize)>,
+        key: &IndexKey,
+        ext_id: u64,
+    ) {
+        match self {
+            FieldIndexType::DenseInt(vec) => {
+                if let IndexKey::Int(i) = key {
+                    let min = int_ranges.get(field).map(|(m, _, _)| *m).unwrap_or(0);
+                    let offset = i - min;
+                    if offset >= 0 {
+                        let idx = offset as usize;
+                        if idx < vec.len() {
+                            vec[idx].retain(|&id| id != ext_id);
+                        }
+                    }
+                }
+            }
+            FieldIndexType::Sparse(map) => {
+                if let Some(ids) = map.get_mut(key) {
+                    ids.retain(|&id| id != ext_id);
+                    if ids.is_empty() {
+                        map.remove(key);
+                    }
+                }
+            }
         }
     }
 }
@@ -138,7 +173,10 @@ impl FieldIndex {
         // Track integer ranges for dense field detection
         let is_int = matches!(key, IndexKey::Int(_));
         if let IndexKey::Int(i) = &key {
-            let entry = self.int_ranges.entry(field.clone()).or_insert((i64::MAX, i64::MIN, 0));
+            let entry = self
+                .int_ranges
+                .entry(field.clone())
+                .or_insert((i64::MAX, i64::MIN, 0));
             entry.0 = entry.0.min(*i);
             entry.1 = entry.1.max(*i);
             entry.2 += 1;
@@ -153,15 +191,17 @@ impl FieldIndex {
                     // Create DenseInt index now that we know the full range
                     let mut vec = Vec::with_capacity(range as usize);
                     vec.resize_with(range as usize, Vec::new);
-                    self.index.insert(field.clone(), FieldIndexType::DenseInt(vec));
+                    self.index
+                        .insert(field.clone(), FieldIndexType::DenseInt(vec));
                 }
             }
         }
 
         // Get or create the field index (Sparse if not dense enough yet)
-        let idx = self.index.entry(field.clone()).or_insert_with(|| {
-            FieldIndexType::Sparse(HashMap::new())
-        });
+        let idx = self
+            .index
+            .entry(field.clone())
+            .or_insert_with(|| FieldIndexType::Sparse(HashMap::new()));
 
         // Insert based on index type
         match idx {
@@ -221,10 +261,20 @@ impl FieldIndex {
         idx.get(key)
     }
 
+    fn remove(&mut self, field: &str, key: &IndexKey, ext_id: u64) {
+        if let Some(idx) = self.index.get_mut(field) {
+            idx.remove(field, &self.int_ranges, key, ext_id);
+        }
+    }
+
     fn contains_field(&self, field: &str) -> bool {
         self.index.contains_key(field)
     }
 }
+
+/// Maximum number of entries to keep in the in-memory field cache.
+/// Beyond this limit inserts are stored in ApexBase only and retrieved on demand.
+const MAX_CACHE_ENTRIES: usize = 200_000;
 
 /// ApexBase-backed field store for per-vector metadata.
 ///
@@ -269,7 +319,8 @@ impl FieldStore {
             let table = db
                 .table(table_name)
                 .map_err(|e| LynseError::ApexBase(format!("Table error: {}", e)))?;
-            let count = table.count()
+            let count = table
+                .count()
                 .map_err(|e| LynseError::ApexBase(format!("Count error: {}", e)))?;
             count as u64
         };
@@ -331,7 +382,7 @@ impl FieldStore {
             .insert(row)
             .map_err(|e| LynseError::ApexBase(format!("Insert error: {}", e)))?;
 
-        // Update apex_id_map, cache, field_eq_index, and persist
+        // Update apex_id_map, cache (capped), field_eq_index, and persist
         {
             let mut map = self.apex_id_map.write();
             if ext_id as usize >= map.len() {
@@ -339,11 +390,19 @@ impl FieldStore {
             }
             map[ext_id as usize] = apex_id;
         }
-        self.cache.write().insert(ext_id, fields.clone());
+        {
+            let mut cache = self.cache.write();
+            if cache.len() < MAX_CACHE_ENTRIES {
+                cache.insert(ext_id, fields.clone());
+            }
+        }
         {
             let mut idx = self.field_eq_index.write();
             for (field, value) in fields {
-                if !matches!(value, serde_json::Value::Array(_) | serde_json::Value::Object(_)) {
+                if !matches!(
+                    value,
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                ) {
                     idx.insert(field.clone(), IndexKey::from_json(value), ext_id);
                 }
             }
@@ -397,19 +456,26 @@ impl FieldStore {
             .insert_batch(&rows)
             .map_err(|e| LynseError::ApexBase(format!("Batch insert error: {}", e)))?;
 
-        // Update apex_id_map (sequential push), cache, field_eq_index, and persist
+        // Update apex_id_map (sequential push), cache (capped), field_eq_index, and persist
         {
             let mut map = self.apex_id_map.write();
             let mut cache = self.cache.write();
             let mut idx = self.field_eq_index.write();
-            for ((&ext_id, &apex_id), flds) in ids.iter().zip(apex_ids.iter()).zip(fields_list.iter()) {
+            for ((&ext_id, &apex_id), flds) in
+                ids.iter().zip(apex_ids.iter()).zip(fields_list.iter())
+            {
                 if ext_id as usize >= map.len() {
                     map.resize(ext_id as usize + 1, TOMBSTONE);
                 }
                 map[ext_id as usize] = apex_id;
-                cache.insert(ext_id, flds.clone());
+                if cache.len() < MAX_CACHE_ENTRIES {
+                    cache.insert(ext_id, flds.clone());
+                }
                 for (field, value) in flds {
-                    if !matches!(value, serde_json::Value::Array(_) | serde_json::Value::Object(_)) {
+                    if !matches!(
+                        value,
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                    ) {
                         idx.insert(field.clone(), IndexKey::from_json(value), ext_id);
                     }
                 }
@@ -419,6 +485,174 @@ impl FieldStore {
         let _ = self.append_map_records(&pairs);
 
         Ok(ids)
+    }
+
+    /// Batch store records with caller-provided external IDs.
+    ///
+    /// Collection storage uses row offsets as field-store external IDs. This
+    /// method keeps metadata aligned even when earlier vector rows had no
+    /// metadata and were intentionally skipped in ApexBase.
+    pub fn batch_store_at_ids(
+        &self,
+        external_ids: &[u64],
+        fields_list: &[HashMap<String, serde_json::Value>],
+    ) -> Result<Vec<u64>> {
+        if external_ids.len() != fields_list.len() {
+            return Err(LynseError::InvalidArgument(format!(
+                "external_ids length ({}) must match fields length ({})",
+                external_ids.len(),
+                fields_list.len()
+            )));
+        }
+
+        let table = self
+            .db
+            .table(&self.table_name)
+            .map_err(|e| LynseError::ApexBase(format!("Table error: {}", e)))?;
+
+        let mut ids = Vec::new();
+        let mut rows: Vec<HashMap<String, apexbase::data::Value>> = Vec::new();
+        let mut stored_fields: Vec<HashMap<String, serde_json::Value>> = Vec::new();
+
+        for (&ext_id, fields) in external_ids.iter().zip(fields_list.iter()) {
+            if fields.is_empty() {
+                continue;
+            }
+
+            let mut row: HashMap<String, apexbase::data::Value> = HashMap::new();
+            for (key, value) in fields {
+                row.insert(key.clone(), json_to_apex_value(value));
+            }
+            row.insert(
+                "external_id".to_string(),
+                apexbase::data::Value::Int64(ext_id as i64),
+            );
+
+            ids.push(ext_id);
+            rows.push(row);
+            stored_fields.push(fields.clone());
+        }
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        {
+            let max_ext_id = ids.iter().copied().max().unwrap_or(0);
+            let mut next = self.next_id.write();
+            if *next <= max_ext_id {
+                *next = max_ext_id + 1;
+            }
+        }
+
+        let apex_ids = table
+            .insert_batch(&rows)
+            .map_err(|e| LynseError::ApexBase(format!("Batch insert error: {}", e)))?;
+
+        {
+            let mut map = self.apex_id_map.write();
+            let mut cache = self.cache.write();
+            let mut idx = self.field_eq_index.write();
+            for ((&ext_id, &apex_id), flds) in
+                ids.iter().zip(apex_ids.iter()).zip(stored_fields.iter())
+            {
+                if ext_id as usize >= map.len() {
+                    map.resize(ext_id as usize + 1, TOMBSTONE);
+                }
+                map[ext_id as usize] = apex_id;
+                if cache.len() < MAX_CACHE_ENTRIES {
+                    cache.insert(ext_id, flds.clone());
+                }
+                for (field, value) in flds {
+                    if !matches!(
+                        value,
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                    ) {
+                        idx.insert(field.clone(), IndexKey::from_json(value), ext_id);
+                    }
+                }
+            }
+        }
+
+        let pairs: Vec<(u64, u64)> = ids.iter().copied().zip(apex_ids.iter().copied()).collect();
+        self.append_map_records(&pairs)?;
+
+        Ok(ids)
+    }
+
+    /// Replace field records for caller-provided external IDs.
+    ///
+    /// Existing ApexBase rows are deleted and the point-lookup map is moved to
+    /// the new rows. Empty replacement maps clear fields for that external ID.
+    pub fn replace_fields_at_ids(
+        &self,
+        external_ids: &[u64],
+        fields_list: &[HashMap<String, serde_json::Value>],
+    ) -> Result<()> {
+        if external_ids.len() != fields_list.len() {
+            return Err(LynseError::InvalidArgument(format!(
+                "external_ids length ({}) must match fields length ({})",
+                external_ids.len(),
+                fields_list.len()
+            )));
+        }
+        if external_ids.is_empty() {
+            return Ok(());
+        }
+
+        let old_fields = self.retrieve_many(external_ids)?;
+        let table = self
+            .db
+            .table(&self.table_name)
+            .map_err(|e| LynseError::ApexBase(format!("Table error: {}", e)))?;
+
+        let old_apex_ids = {
+            let map = self.apex_id_map.read();
+            external_ids
+                .iter()
+                .filter_map(|&ext_id| {
+                    let i = ext_id as usize;
+                    if i < map.len() && map[i] != TOMBSTONE {
+                        Some(map[i])
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if !old_apex_ids.is_empty() {
+            table
+                .delete_batch(&old_apex_ids)
+                .map_err(|e| LynseError::ApexBase(format!("Delete batch error: {}", e)))?;
+        }
+
+        {
+            let mut map = self.apex_id_map.write();
+            let mut cache = self.cache.write();
+            let mut idx = self.field_eq_index.write();
+            for (&ext_id, old) in external_ids.iter().zip(old_fields.iter()) {
+                let i = ext_id as usize;
+                if i < map.len() {
+                    map[i] = TOMBSTONE;
+                }
+                cache.remove(&ext_id);
+                for (field, value) in old {
+                    if !matches!(
+                        value,
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                    ) {
+                        idx.remove(field, &IndexKey::from_json(value), ext_id);
+                    }
+                }
+            }
+        }
+
+        let tombstones: Vec<(u64, u64)> = external_ids.iter().map(|&id| (id, TOMBSTONE)).collect();
+        self.append_map_records(&tombstones)?;
+        self.batch_store_at_ids(external_ids, fields_list)?;
+
+        Ok(())
     }
 
     /// Query fields using a SQL-like filter expression.
@@ -438,7 +672,7 @@ impl FieldStore {
             .map_err(|e| LynseError::ApexBase(format!("Table error: {}", e)))?;
 
         let sql = format!(
-            "SELECT external_id FROM {} WHERE {}",
+            "SELECT _id, external_id FROM {} WHERE {}",
             self.table_name, filter_expr
         );
 
@@ -453,7 +687,14 @@ impl FieldStore {
         let mut ids = Vec::new();
         for row in rows {
             if let Some(apexbase::data::Value::Int64(id)) = row.get("external_id") {
-                ids.push(*id as u64);
+                let ext_id = *id as u64;
+                let apex_id = match row.get("_id") {
+                    Some(apexbase::data::Value::Int64(apex_id)) => *apex_id as u64,
+                    _ => continue,
+                };
+                if self.is_current_apex_id(ext_id, apex_id) {
+                    ids.push(ext_id);
+                }
             }
         }
 
@@ -478,10 +719,7 @@ impl FieldStore {
             .table(&self.table_name)
             .map_err(|e| LynseError::ApexBase(format!("Table error: {}", e)))?;
 
-        let sql = format!(
-            "SELECT * FROM {} WHERE {}",
-            self.table_name, filter_expr
-        );
+        let sql = format!("SELECT * FROM {} WHERE {}", self.table_name, filter_expr);
 
         let result_set = table
             .execute(&sql)
@@ -500,6 +738,13 @@ impl FieldStore {
             } else {
                 continue;
             };
+            let apex_id = match row.get("_id") {
+                Some(apexbase::data::Value::Int64(id)) => *id as u64,
+                _ => continue,
+            };
+            if !self.is_current_apex_id(ext_id, apex_id) {
+                continue;
+            }
             ids.push(ext_id);
 
             let mut fields = HashMap::new();
@@ -533,7 +778,11 @@ impl FieldStore {
         let apex_id = {
             let map = self.apex_id_map.read();
             let i = external_id as usize;
-            if i < map.len() && map[i] != TOMBSTONE { Some(map[i]) } else { None }
+            if i < map.len() && map[i] != TOMBSTONE {
+                Some(map[i])
+            } else {
+                None
+            }
         };
         if let Some(apex_id) = apex_id {
             if let Some(row) = table
@@ -571,6 +820,12 @@ impl FieldStore {
         } else {
             Ok(HashMap::new())
         }
+    }
+
+    fn is_current_apex_id(&self, external_id: u64, apex_id: u64) -> bool {
+        let map = self.apex_id_map.read();
+        let i = external_id as usize;
+        i < map.len() && map[i] == apex_id && map[i] != TOMBSTONE
     }
 
     /// Retrieve multiple records by external IDs.
@@ -637,8 +892,10 @@ impl FieldStore {
             let rows = apexbase::embedded::record_batch_to_rows(&batch)
                 .map_err(|e| LynseError::ApexBase(format!("Row conversion error: {}", e)))?;
             // Build apex_id→ext_id lookup for O(1) result mapping
-            let apex_to_ext: HashMap<u64, u64> =
-                mapped.iter().map(|&(_, ext_id, apex_id)| (apex_id, ext_id)).collect();
+            let apex_to_ext: HashMap<u64, u64> = mapped
+                .iter()
+                .map(|&(_, ext_id, apex_id)| (apex_id, ext_id))
+                .collect();
             for row in rows {
                 let apex_id = match row.get("_id") {
                     Some(apexbase::data::Value::Int64(id)) => *id as u64,
@@ -751,7 +1008,6 @@ impl FieldStore {
         {
             let mut map = self.apex_id_map.write();
             let mut cache = self.cache.write();
-            let mut idx = self.field_eq_index.write();
             for &id in ext_ids {
                 let i = id as usize;
                 if i < map.len() {
@@ -795,8 +1051,7 @@ impl FieldStore {
             sets[0].clone()
         } else {
             // Build a HashSet from the smallest set, intersect with the rest
-            let mut current: std::collections::HashSet<u64> =
-                sets[0].iter().copied().collect();
+            let mut current: std::collections::HashSet<u64> = sets[0].iter().copied().collect();
             for set in &sets[1..] {
                 let other: std::collections::HashSet<u64> = set.iter().copied().collect();
                 current.retain(|id| other.contains(id));
@@ -877,10 +1132,7 @@ impl FieldStore {
 
     /// Rebuild the apex_id_map from ApexBase (slow path, O(N)).
     /// Returns a Vec<u64> directly indexed by external_id.
-    fn rebuild_map_from_db(
-        db: &apexbase::embedded::ApexDB,
-        table_name: &str,
-    ) -> Result<Vec<u64>> {
+    fn rebuild_map_from_db(db: &apexbase::embedded::ApexDB, table_name: &str) -> Result<Vec<u64>> {
         let table = db
             .table(table_name)
             .map_err(|e| LynseError::ApexBase(format!("Table error: {}", e)))?;
@@ -928,7 +1180,11 @@ fn parse_equality_where(expr: &str) -> Option<Vec<(String, IndexKey)>> {
     for part in parts {
         conditions.push(parse_single_equality(part.trim())?);
     }
-    if conditions.is_empty() { None } else { Some(conditions) }
+    if conditions.is_empty() {
+        None
+    } else {
+        Some(conditions)
+    }
 }
 
 /// Split `expr` on ` AND ` / ` and ` boundaries that are not inside quotes.
@@ -942,8 +1198,14 @@ fn split_on_and(expr: &str) -> Vec<&str> {
 
     while i < bytes.len() {
         match bytes[i] {
-            b'"' if !in_squote => { in_dquote = !in_dquote; i += 1; }
-            b'\'' if !in_dquote => { in_squote = !in_squote; i += 1; }
+            b'"' if !in_squote => {
+                in_dquote = !in_dquote;
+                i += 1;
+            }
+            b'\'' if !in_dquote => {
+                in_squote = !in_squote;
+                i += 1;
+            }
             _ if !in_dquote && !in_squote => {
                 // Check for " AND " (case-insensitive, 5 bytes)
                 if i + 5 <= bytes.len()
@@ -960,7 +1222,9 @@ fn split_on_and(expr: &str) -> Vec<&str> {
                     i += 1;
                 }
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
     parts.push(expr[start..].trim());

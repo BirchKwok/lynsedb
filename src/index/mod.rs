@@ -3,9 +3,9 @@
 //! Implements: Flat, IVF, HNSW, DiskANN indices with multiple distance metrics
 //! and quantization support. Designed for billion-scale datasets.
 
+pub mod diskann;
 pub mod flat;
 pub mod hnsw;
-pub mod diskann;
 pub mod ivf;
 
 use crate::distance::DistanceMetric;
@@ -114,8 +114,8 @@ pub trait VectorIndex: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct SearchParams {
     pub k: usize,
-    pub nprobe: usize,           // for IVF
-    pub ef_search: Option<usize>, // for HNSW
+    pub nprobe: usize,                    // for IVF
+    pub ef_search: Option<usize>,         // for HNSW
     pub subset_indices: Option<Vec<u64>>, // filter IDs
 }
 
@@ -136,68 +136,146 @@ pub fn resolve_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, Qua
     let u = alias.to_uppercase();
     match u.as_str() {
         // ── Flat ────────────────────────────────────────────────────────────
-        "FLAT" | "FLAT-IP" =>
-            Some((IndexType::Flat, DistanceMetric::InnerProduct, QuantizerType::None)),
-        "FLAT-L2" =>
-            Some((IndexType::Flat, DistanceMetric::L2Squared, QuantizerType::None)),
-        "FLAT-COS" | "FLAT-COSINE" =>
-            Some((IndexType::Flat, DistanceMetric::Cosine, QuantizerType::None)),
-        "FLAT-IP-SQ8" =>
-            Some((IndexType::Flat, DistanceMetric::InnerProduct, QuantizerType::Scalar)),
-        "FLAT-L2-SQ8" =>
-            Some((IndexType::Flat, DistanceMetric::L2Squared, QuantizerType::Scalar)),
-        "FLAT-COS-SQ8" | "FLAT-COSINE-SQ8" =>
-            Some((IndexType::Flat, DistanceMetric::Cosine, QuantizerType::Scalar)),
-        "FLAT-JACCARD-BINARY" | "FLAT-JACCARD" =>
-            Some((IndexType::Flat, DistanceMetric::Jaccard, QuantizerType::Binary)),
-        "FLAT-HAMMING-BINARY" | "FLAT-HAMMING" =>
-            Some((IndexType::Flat, DistanceMetric::Hamming, QuantizerType::Binary)),
+        "FLAT" | "FLAT-IP" => Some((
+            IndexType::Flat,
+            DistanceMetric::InnerProduct,
+            QuantizerType::None,
+        )),
+        "FLAT-L2" => Some((
+            IndexType::Flat,
+            DistanceMetric::L2Squared,
+            QuantizerType::None,
+        )),
+        "FLAT-COS" | "FLAT-COSINE" => {
+            Some((IndexType::Flat, DistanceMetric::Cosine, QuantizerType::None))
+        }
+        "FLAT-IP-SQ8" => Some((
+            IndexType::Flat,
+            DistanceMetric::InnerProduct,
+            QuantizerType::Scalar,
+        )),
+        "FLAT-L2-SQ8" => Some((
+            IndexType::Flat,
+            DistanceMetric::L2Squared,
+            QuantizerType::Scalar,
+        )),
+        "FLAT-COS-SQ8" | "FLAT-COSINE-SQ8" => Some((
+            IndexType::Flat,
+            DistanceMetric::Cosine,
+            QuantizerType::Scalar,
+        )),
+        "FLAT-JACCARD-BINARY" | "FLAT-JACCARD" => Some((
+            IndexType::Flat,
+            DistanceMetric::Jaccard,
+            QuantizerType::Binary,
+        )),
+        "FLAT-HAMMING-BINARY" | "FLAT-HAMMING" => Some((
+            IndexType::Flat,
+            DistanceMetric::Hamming,
+            QuantizerType::Binary,
+        )),
 
         // ── HNSW ────────────────────────────────────────────────────────────
-        "HNSW" | "HNSW-IP" =>
-            Some((IndexType::HNSW, DistanceMetric::InnerProduct, QuantizerType::None)),
-        "HNSW-L2" =>
-            Some((IndexType::HNSW, DistanceMetric::L2Squared, QuantizerType::None)),
-        "HNSW-COS" | "HNSW-COSINE" =>
-            Some((IndexType::HNSW, DistanceMetric::Cosine, QuantizerType::None)),
-        "HNSW-IP-SQ8" =>
-            Some((IndexType::HNSW, DistanceMetric::InnerProduct, QuantizerType::Scalar)),
-        "HNSW-L2-SQ8" =>
-            Some((IndexType::HNSW, DistanceMetric::L2Squared, QuantizerType::Scalar)),
-        "HNSW-COS-SQ8" | "HNSW-COSINE-SQ8" =>
-            Some((IndexType::HNSW, DistanceMetric::Cosine, QuantizerType::Scalar)),
+        "HNSW" | "HNSW-IP" => Some((
+            IndexType::HNSW,
+            DistanceMetric::InnerProduct,
+            QuantizerType::None,
+        )),
+        "HNSW-L2" => Some((
+            IndexType::HNSW,
+            DistanceMetric::L2Squared,
+            QuantizerType::None,
+        )),
+        "HNSW-COS" | "HNSW-COSINE" => {
+            Some((IndexType::HNSW, DistanceMetric::Cosine, QuantizerType::None))
+        }
+        "HNSW-IP-SQ8" => Some((
+            IndexType::HNSW,
+            DistanceMetric::InnerProduct,
+            QuantizerType::Scalar,
+        )),
+        "HNSW-L2-SQ8" => Some((
+            IndexType::HNSW,
+            DistanceMetric::L2Squared,
+            QuantizerType::Scalar,
+        )),
+        "HNSW-COS-SQ8" | "HNSW-COSINE-SQ8" => Some((
+            IndexType::HNSW,
+            DistanceMetric::Cosine,
+            QuantizerType::Scalar,
+        )),
 
         // ── DiskANN ─────────────────────────────────────────────────────────
-        "DISKANN" | "DISKANN-IP" =>
-            Some((IndexType::DiskANN, DistanceMetric::InnerProduct, QuantizerType::None)),
-        "DISKANN-L2" =>
-            Some((IndexType::DiskANN, DistanceMetric::L2Squared, QuantizerType::None)),
-        "DISKANN-COS" | "DISKANN-COSINE" =>
-            Some((IndexType::DiskANN, DistanceMetric::Cosine, QuantizerType::None)),
-        "DISKANN-IP-SQ8" =>
-            Some((IndexType::DiskANN, DistanceMetric::InnerProduct, QuantizerType::Scalar)),
-        "DISKANN-L2-SQ8" =>
-            Some((IndexType::DiskANN, DistanceMetric::L2Squared, QuantizerType::Scalar)),
-        "DISKANN-COS-SQ8" | "DISKANN-COSINE-SQ8" =>
-            Some((IndexType::DiskANN, DistanceMetric::Cosine, QuantizerType::Scalar)),
+        "DISKANN" | "DISKANN-IP" => Some((
+            IndexType::DiskANN,
+            DistanceMetric::InnerProduct,
+            QuantizerType::None,
+        )),
+        "DISKANN-L2" => Some((
+            IndexType::DiskANN,
+            DistanceMetric::L2Squared,
+            QuantizerType::None,
+        )),
+        "DISKANN-COS" | "DISKANN-COSINE" => Some((
+            IndexType::DiskANN,
+            DistanceMetric::Cosine,
+            QuantizerType::None,
+        )),
+        "DISKANN-IP-SQ8" => Some((
+            IndexType::DiskANN,
+            DistanceMetric::InnerProduct,
+            QuantizerType::Scalar,
+        )),
+        "DISKANN-L2-SQ8" => Some((
+            IndexType::DiskANN,
+            DistanceMetric::L2Squared,
+            QuantizerType::Scalar,
+        )),
+        "DISKANN-COS-SQ8" | "DISKANN-COSINE-SQ8" => Some((
+            IndexType::DiskANN,
+            DistanceMetric::Cosine,
+            QuantizerType::Scalar,
+        )),
 
         // ── IVF ─────────────────────────────────────────────────────────────
-        "IVF" | "IVF-IP" =>
-            Some((IndexType::IVF, DistanceMetric::InnerProduct, QuantizerType::None)),
-        "IVF-L2" =>
-            Some((IndexType::IVF, DistanceMetric::L2Squared, QuantizerType::None)),
-        "IVF-COS" | "IVF-COSINE" =>
-            Some((IndexType::IVF, DistanceMetric::Cosine, QuantizerType::None)),
-        "IVF-IP-SQ8" =>
-            Some((IndexType::IVF, DistanceMetric::InnerProduct, QuantizerType::Scalar)),
-        "IVF-L2-SQ8" =>
-            Some((IndexType::IVF, DistanceMetric::L2Squared, QuantizerType::Scalar)),
-        "IVF-COS-SQ8" | "IVF-COSINE-SQ8" =>
-            Some((IndexType::IVF, DistanceMetric::Cosine, QuantizerType::Scalar)),
-        "IVF-JACCARD-BINARY" | "IVF-JACCARD" =>
-            Some((IndexType::IVF, DistanceMetric::Jaccard, QuantizerType::Binary)),
-        "IVF-HAMMING-BINARY" | "IVF-HAMMING" =>
-            Some((IndexType::IVF, DistanceMetric::Hamming, QuantizerType::Binary)),
+        "IVF" | "IVF-IP" => Some((
+            IndexType::IVF,
+            DistanceMetric::InnerProduct,
+            QuantizerType::None,
+        )),
+        "IVF-L2" => Some((
+            IndexType::IVF,
+            DistanceMetric::L2Squared,
+            QuantizerType::None,
+        )),
+        "IVF-COS" | "IVF-COSINE" => {
+            Some((IndexType::IVF, DistanceMetric::Cosine, QuantizerType::None))
+        }
+        "IVF-IP-SQ8" => Some((
+            IndexType::IVF,
+            DistanceMetric::InnerProduct,
+            QuantizerType::Scalar,
+        )),
+        "IVF-L2-SQ8" => Some((
+            IndexType::IVF,
+            DistanceMetric::L2Squared,
+            QuantizerType::Scalar,
+        )),
+        "IVF-COS-SQ8" | "IVF-COSINE-SQ8" => Some((
+            IndexType::IVF,
+            DistanceMetric::Cosine,
+            QuantizerType::Scalar,
+        )),
+        "IVF-JACCARD-BINARY" | "IVF-JACCARD" => Some((
+            IndexType::IVF,
+            DistanceMetric::Jaccard,
+            QuantizerType::Binary,
+        )),
+        "IVF-HAMMING-BINARY" | "IVF-HAMMING" => Some((
+            IndexType::IVF,
+            DistanceMetric::Hamming,
+            QuantizerType::Binary,
+        )),
 
         _ => None,
     }
@@ -205,32 +283,25 @@ pub fn resolve_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, Qua
 
 /// Create an index from a type alias string.
 pub fn create_index(alias: &str) -> Result<Box<dyn VectorIndex>> {
-    let (index_type, metric, quant) = resolve_index_type(alias).ok_or_else(|| {
-        LynseError::InvalidArgument(format!("Unknown index type: {}", alias))
-    })?;
+    let (index_type, metric, quant) = resolve_index_type(alias)
+        .ok_or_else(|| LynseError::InvalidArgument(format!("Unknown index type: {}", alias)))?;
 
     match index_type {
         IndexType::Flat => Ok(Box::new(flat::FlatIndex::new(metric, quant))),
         IndexType::HNSW => Ok(Box::new(hnsw::HNSWIndex::new(
-            metric,
-            quant,
-            16,   // M
+            metric, quant, 16,   // M
             128,  // ef_construction (matches usearch default)
             50,   // ef_search
             None, // max_level
         ))),
         IndexType::DiskANN => Ok(Box::new(diskann::DiskANNIndex::new(
-            metric,
-            quant,
-            64,   // R
-            100,  // L
-            1.2,  // alpha
-            128,  // max_degree
+            metric, quant, 64,  // R
+            100, // L
+            1.2, // alpha
+            128, // max_degree
         ))),
         IndexType::IVF => Ok(Box::new(ivf::IVFIndex::new(
-            metric,
-            quant,
-            256, // n_centroids
+            metric, quant, 256, // n_centroids
             32,  // nprobe
         ))),
     }

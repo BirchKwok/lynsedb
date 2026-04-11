@@ -33,12 +33,14 @@ _server_thread = None
 _server_lock = threading.Lock()
 
 
-def start_server(host: str = "127.0.0.1", port: int = 7637, root_path: str = ".") -> None:
+def start_server(host: str = "127.0.0.1", port: int = 7637, root_path: str = ".",
+                 api_key: str = None) -> None:
     """Start the Rust HTTP server (blocking). Call from a background thread."""
-    _lynse.py_start_server(host, port, root_path)
+    _lynse.py_start_server(host, port, root_path, api_key)
 
 
-def start_server_background(host: str = "127.0.0.1", port: int = 7637, root_path: str = ".") -> None:
+def start_server_background(host: str = "127.0.0.1", port: int = 7637, root_path: str = ".",
+                            api_key: str = None) -> None:
     """Start the Rust HTTP server in a background thread.
 
     The server runs until the process exits. Safe to call multiple times
@@ -49,7 +51,7 @@ def start_server_background(host: str = "127.0.0.1", port: int = 7637, root_path
         if _server_thread is not None and _server_thread.is_alive():
             return
         _server_thread = threading.Thread(
-            target=start_server, args=(host, port, root_path), daemon=True
+            target=start_server, args=(host, port, root_path, api_key), daemon=True
         )
         _server_thread.start()
         # Give server time to bind
@@ -212,18 +214,20 @@ class Collection:
     def add_items(
         self,
         vectors: np.ndarray,
+        ids: List[int],
         fields: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
-        """Add vectors (and optional per-vector field metadata).
+        """Add vectors with user-specified IDs and optional per-vector field metadata.
 
         Args:
             vectors: shape (n, dim), dtype float32.
+            ids: list of integer user IDs, one per vector.
             fields: optional list of dicts, one per vector.
         """
         vectors = np.ascontiguousarray(vectors, dtype=np.float32)
         if vectors.ndim == 1:
             vectors = vectors.reshape(1, -1)
-        self._inner.add_items(vectors, fields)
+        self._inner.add_items(vectors, [int(i) for i in ids], fields)
 
     def build_index(self, index_mode: str, **kwargs) -> None:
         """Build or rebuild the index.
@@ -383,9 +387,37 @@ class Collection:
             vectors = vectors.reshape(1, -1)
         self._inner.update_items(ids, vectors, fields)
 
+    def upsert_items(
+        self,
+        ids: List[int],
+        vectors: np.ndarray,
+        fields: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Insert or update vectors by IDs.
+
+        Existing IDs are updated in place. Missing IDs are inserted.
+        If fields are provided, each field map replaces the row's current fields.
+        """
+        vectors = np.ascontiguousarray(vectors, dtype=np.float32)
+        if vectors.ndim == 1:
+            vectors = vectors.reshape(1, -1)
+        self._inner.upsert_items([int(i) for i in ids], vectors, fields)
+
     def commit(self) -> None:
         """Commit: clear WAL after successful writes."""
         self._inner.commit()
+
+    def flush(self) -> None:
+        """Flush pending bytes and fsync collection files without clearing WAL."""
+        self._inner.flush()
+
+    def checkpoint(self) -> None:
+        """Checkpoint durable state and clear WAL."""
+        self._inner.checkpoint()
+
+    def close(self) -> None:
+        """Flush and close the collection handle from an API perspective."""
+        self._inner.close()
 
     def has_uncommitted_data(self) -> bool:
         """Check if there is uncommitted WAL data."""
@@ -416,17 +448,20 @@ class Collection:
     def index_mode(self) -> Optional[str]:
         return self._inner.index_mode()
 
+    def get_index_mode(self) -> Optional[str]:
+        """Return the current index mode (callable form)."""
+        return self._inner.index_mode()
+
     def head(self, n: int = 5) -> ResultView:
         """Return first n vectors + field metadata.
 
         Returns:
             ResultView with vectors, ids, fields.
         """
-        flat_data, fields = self._inner.head(n)
+        flat_data, ids_raw, fields = self._inner.head(n)
         dim = self.dimension
         vectors = np.asarray(flat_data, dtype=np.float32).reshape(-1, dim)
-        actual_n = vectors.shape[0]
-        ids = np.arange(actual_n, dtype=np.int64)
+        ids = np.asarray(ids_raw, dtype=np.int64)
         return ResultView(
             vectors=vectors, ids=ids, fields=list(fields),
             result_type="data",
@@ -434,16 +469,18 @@ class Collection:
 
     def tail(self, n: int = 5) -> ResultView:
         """Return last n vectors + field metadata."""
-        flat_data, fields = self._inner.tail(n)
+        flat_data, ids_raw, fields = self._inner.tail(n)
         dim = self.dimension
         vectors = np.asarray(flat_data, dtype=np.float32).reshape(-1, dim)
-        actual_n = vectors.shape[0]
-        total = self.shape[0]
-        ids = np.arange(max(0, total - actual_n), total, dtype=np.int64)
+        ids = np.asarray(ids_raw, dtype=np.int64)
         return ResultView(
             vectors=vectors, ids=ids, fields=list(fields),
             result_type="data",
         )
+
+    def get_vectors(self, ids: List[int]) -> "np.ndarray":
+        """Retrieve vectors by user IDs. Returns numpy array of shape (len(ids), dim)."""
+        return self._inner.get_vectors([int(i) for i in ids])
 
     def query_fields(self, where: str) -> List[int]:
         """Query field metadata with SQL-like filter. Returns matching IDs."""
@@ -461,6 +498,43 @@ class Collection:
     def list_fields(self) -> List[str]:
         """List all field names in the collection."""
         return self._inner.list_fields()
+
+    def delete_items(self, ids: List[int]) -> None:
+        """Soft-delete vectors by user ID."""
+        self._inner.delete_items([int(i) for i in ids])
+
+    def restore_items(self, ids: List[int]) -> None:
+        """Restore previously soft-deleted vectors."""
+        self._inner.restore_items([int(i) for i in ids])
+
+    def list_deleted_ids(self) -> List[int]:
+        """Return sorted list of all currently soft-deleted user IDs."""
+        return list(self._inner.list_deleted_ids())
+
+    def search_range(self, vector: "np.ndarray", threshold: float, max_results: int = 1000) -> ResultView:
+        """Return all vectors within distance threshold."""
+        vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
+        ids_raw, dists_raw = self._inner.search_range(vec, float(threshold), int(max_results))
+        idx_type, metric = _parse_index_mode(self._inner.index_mode())
+        ids = np.array(ids_raw, dtype=np.int64)
+        dists = np.array(dists_raw, dtype=np.float32)
+        return ResultView(
+            ids=ids, distances=dists,
+            k=len(ids), distance=metric, index=idx_type,
+            result_type="search",
+        )
+
+    def is_id_exists(self, user_id: int) -> bool:
+        """Check whether a user ID exists in the collection."""
+        return self._inner.is_id_exists(int(user_id))
+
+    def max_id(self) -> int:
+        """Return the maximum user ID stored, or -1 if empty."""
+        return self._inner.max_id()
+
+    def compact(self) -> int:
+        """Physically remove tombstoned vectors. Returns count removed."""
+        return self._inner.compact()
 
     def delete(self) -> None:
         self._inner.delete()

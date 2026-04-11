@@ -38,9 +38,9 @@
 
 use crate::distance::DistanceMetric;
 use crate::storage::pq_mmap::rescore_exact;
-use rayon::prelude::*;
-use rand::{SeedableRng, Rng};
 use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs::File;
@@ -116,15 +116,16 @@ impl PolarVecIndex {
         let bytes_per_vec = compute_bytes_per_vec(padded_dim, bits);
         let sign_words_len = (padded_dim + 63) / 64;
         let sign_words = generate_sign_words(sign_words_len, SIGN_SEED);
-        let projection_words = generate_projection_words(
-            RESIDUAL_SIGN_BITS,
-            sign_words_len,
-            RESIDUAL_SIGN_SEED,
-        );
+        let projection_words =
+            generate_projection_words(RESIDUAL_SIGN_BITS, sign_words_len, RESIDUAL_SIGN_SEED);
 
         // Pass 1: compute per-dim min/max using a subsample (up to 50K vectors)
         let n_sample = n_vectors.min(50_000);
-        let stride = if n_vectors <= 50_000 { 1 } else { n_vectors / n_sample };
+        let stride = if n_vectors <= 50_000 {
+            1
+        } else {
+            n_vectors / n_sample
+        };
         let sample_indices: Vec<usize> = (0..n_sample).map(|i| i * stride).collect();
 
         let stat_chunk = 1024usize;
@@ -144,12 +145,18 @@ impl PolarVecIndex {
                     let vi = sample_indices[si];
                     let src = &data[vi * dim..(vi + 1) * dim];
                     buf[..dim].copy_from_slice(src);
-                    for j in dim..padded_dim { buf[j] = 0.0; }
+                    for j in dim..padded_dim {
+                        buf[j] = 0.0;
+                    }
                     apply_signs(&mut buf, &sign_words, padded_dim);
                     fwht(&mut buf[..padded_dim]);
                     for d in 0..padded_dim {
-                        if buf[d] < local_mins[d] { local_mins[d] = buf[d]; }
-                        if buf[d] > local_maxs[d] { local_maxs[d] = buf[d]; }
+                        if buf[d] < local_mins[d] {
+                            local_mins[d] = buf[d];
+                        }
+                        if buf[d] > local_maxs[d] {
+                            local_maxs[d] = buf[d];
+                        }
                     }
                 }
                 (local_mins, local_maxs)
@@ -161,8 +168,12 @@ impl PolarVecIndex {
         let mut dim_maxs_raw = vec![f32::NEG_INFINITY; padded_dim];
         for (lmin, lmax) in local_stats {
             for d in 0..padded_dim {
-                if lmin[d] < dim_mins_raw[d] { dim_mins_raw[d] = lmin[d]; }
-                if lmax[d] > dim_maxs_raw[d] { dim_maxs_raw[d] = lmax[d]; }
+                if lmin[d] < dim_mins_raw[d] {
+                    dim_mins_raw[d] = lmin[d];
+                }
+                if lmax[d] > dim_maxs_raw[d] {
+                    dim_maxs_raw[d] = lmax[d];
+                }
             }
         }
 
@@ -187,7 +198,8 @@ impl PolarVecIndex {
         let enc_chunk = 4096usize;
         let n_enc_chunks = (n_vectors + enc_chunk - 1) / enc_chunk;
 
-        let results: Vec<(usize, Vec<u8>, Vec<f32>, Vec<f32>, Vec<u32>, Vec<f32>)> = (0..n_enc_chunks)
+        let results: Vec<(usize, Vec<u8>, Vec<f32>, Vec<f32>, Vec<u32>, Vec<f32>)> = (0
+            ..n_enc_chunks)
             .into_par_iter()
             .map(|chunk| {
                 let start = chunk * enc_chunk;
@@ -212,7 +224,9 @@ impl PolarVecIndex {
 
                     // Apply RHT
                     buf[..dim].copy_from_slice(src);
-                    for j in dim..padded_dim { buf[j] = 0.0; }
+                    for j in dim..padded_dim {
+                        buf[j] = 0.0;
+                    }
                     apply_signs(&mut buf, &sign_words, padded_dim);
                     fwht(&mut buf[..padded_dim]);
 
@@ -236,10 +250,18 @@ impl PolarVecIndex {
                         v_hat_sq += v_hat_d * v_hat_d;
                     }
                     chunk_residual_sq[i] = res_sq;
-                    chunk_residual_signs[i] = project_sign_bits(&residual, &projection_words, sign_words_len);
+                    chunk_residual_signs[i] =
+                        project_sign_bits(&residual, &projection_words, sign_words_len);
                     chunk_inv_v_hat_norms[i] = 1.0 / v_hat_sq.sqrt().max(1e-12);
                 }
-                (start, chunk_codes, chunk_norms, chunk_residual_sq, chunk_residual_signs, chunk_inv_v_hat_norms)
+                (
+                    start,
+                    chunk_codes,
+                    chunk_norms,
+                    chunk_residual_sq,
+                    chunk_residual_signs,
+                    chunk_inv_v_hat_norms,
+                )
             })
             .collect();
 
@@ -249,7 +271,15 @@ impl PolarVecIndex {
         let mut residual_sq = vec![0.0f32; n_vectors];
         let mut residual_signs = vec![0u32; n_vectors];
         let mut inv_v_hat_norms = vec![0.0f32; n_vectors];
-        for (start, chunk_codes, chunk_norms, chunk_residual_sq, chunk_residual_signs, chunk_inv_v_hat_norms) in results {
+        for (
+            start,
+            chunk_codes,
+            chunk_norms,
+            chunk_residual_sq,
+            chunk_residual_signs,
+            chunk_inv_v_hat_norms,
+        ) in results
+        {
             let end = (start + enc_chunk).min(n_vectors);
             let n_in = end - start;
             codes[start * bytes_per_vec..end * bytes_per_vec]
@@ -261,9 +291,20 @@ impl PolarVecIndex {
         }
 
         PolarVecIndex {
-            dim, padded_dim, bits, bytes_per_vec, n_levels,
-            sign_words, dim_mins, dim_scales, codes, norms, residual_sq, residual_signs,
-            inv_v_hat_norms, n_vectors,
+            dim,
+            padded_dim,
+            bits,
+            bytes_per_vec,
+            n_levels,
+            sign_words,
+            dim_mins,
+            dim_scales,
+            codes,
+            norms,
+            residual_sq,
+            residual_signs,
+            inv_v_hat_norms,
+            n_vectors,
         }
     }
 
@@ -302,11 +343,14 @@ impl PolarVecIndex {
         // Cache the sum of projected values so sign_correction_score_scaled avoids recomputing
         // it on every vector in the one-pass path.
         let sign_projection: Option<([f32; RESIDUAL_SIGN_BITS], f32)> =
-            if matches!(metric, DistanceMetric::InnerProduct | DistanceMetric::Cosine)
-                && !self.residual_signs.is_empty()
+            if matches!(
+                metric,
+                DistanceMetric::InnerProduct | DistanceMetric::Cosine
+            ) && !self.residual_signs.is_empty()
             {
                 let n_words = (self.padded_dim + 63) / 64;
-                let projection_words = generate_projection_words(RESIDUAL_SIGN_BITS, n_words, RESIDUAL_SIGN_SEED);
+                let projection_words =
+                    generate_projection_words(RESIDUAL_SIGN_BITS, n_words, RESIDUAL_SIGN_SEED);
                 let proj = project_query_values(&q_rot, &projection_words, n_words);
                 let total = proj.iter().sum::<f32>();
                 Some((proj, total))
@@ -316,8 +360,13 @@ impl PolarVecIndex {
 
         // Build per-dimension LUT (padded_dim × n_levels floats)
         let lut = build_lut(
-            &q_rot, self.padded_dim, self.bits, self.n_levels,
-            &self.dim_mins, &self.dim_scales, metric,
+            &q_rot,
+            self.padded_dim,
+            self.bits,
+            self.n_levels,
+            &self.dim_mins,
+            &self.dim_scales,
+            metric,
         );
 
         // For 4-bit codes: build byte-combined LUT (bytes_per_vec × 256).
@@ -359,23 +408,53 @@ impl PolarVecIndex {
             let (proj, total) = sign_projection.as_ref().unwrap();
             // Phase 1a: fast LUT-only coarse scan → Vec<(score, idx)>
             let coarse = scan_topn(
-                &self.codes, self.n_vectors, self.bytes_per_vec,
-                self.bits, self.n_levels, &lut, &byte_lut_4bit, n_coarse, ascending,
-                correction, metric, None, &[], &self.inv_v_hat_norms,
+                &self.codes,
+                self.n_vectors,
+                self.bytes_per_vec,
+                self.bits,
+                self.n_levels,
+                &lut,
+                &byte_lut_4bit,
+                n_coarse,
+                ascending,
+                correction,
+                metric,
+                None,
+                &[],
+                &self.inv_v_hat_norms,
             );
             // Phase 1b: apply sign correction to the small subset (no LUT rescore)
             rerank_candidates_metric_aware(
-                &coarse, metric, proj, *total,
-                &self.residual_signs, &self.inv_v_hat_norms, n_candidates, ascending,
+                &coarse,
+                metric,
+                proj,
+                *total,
+                &self.residual_signs,
+                &self.inv_v_hat_norms,
+                n_candidates,
+                ascending,
             )
         } else {
             // One-pass: sign correction (with total_qv cached) per-vector inside scan
             scan_topn(
-                &self.codes, self.n_vectors, self.bytes_per_vec,
-                self.bits, self.n_levels, &lut, &byte_lut_4bit, n_candidates, ascending,
-                correction, metric, sign_proj_ref, &self.residual_signs,
+                &self.codes,
+                self.n_vectors,
+                self.bytes_per_vec,
+                self.bits,
+                self.n_levels,
+                &lut,
+                &byte_lut_4bit,
+                n_candidates,
+                ascending,
+                correction,
+                metric,
+                sign_proj_ref,
+                &self.residual_signs,
                 &self.inv_v_hat_norms,
-            ).into_iter().map(|(_, idx)| idx).collect()
+            )
+            .into_iter()
+            .map(|(_, idx)| idx)
+            .collect()
         };
 
         // Pass 2: exact f32 re-rank
@@ -410,22 +489,34 @@ impl PolarVecIndex {
         }
 
         // Quantization parameters (padded_dim × 2 f32 arrays)
-        for &v in &self.dim_mins   { w.write_all(&v.to_le_bytes())?; }
-        for &v in &self.dim_scales { w.write_all(&v.to_le_bytes())?; }
+        for &v in &self.dim_mins {
+            w.write_all(&v.to_le_bytes())?;
+        }
+        for &v in &self.dim_scales {
+            w.write_all(&v.to_le_bytes())?;
+        }
 
         // Codes (raw u8)
         w.write_all(&self.codes)?;
 
         // Norms (f32 LE)
-        for &n in &self.norms { w.write_all(&n.to_le_bytes())?; }
+        for &n in &self.norms {
+            w.write_all(&n.to_le_bytes())?;
+        }
 
         // v2: residual squared norms (f32 LE)
-        for &r in &self.residual_sq { w.write_all(&r.to_le_bytes())?; }
+        for &r in &self.residual_sq {
+            w.write_all(&r.to_le_bytes())?;
+        }
 
-        for &bits in &self.residual_signs { w.write_all(&bits.to_le_bytes())?; }
+        for &bits in &self.residual_signs {
+            w.write_all(&bits.to_le_bytes())?;
+        }
 
         // v4: reciprocal of ||v_hat_rot|| for true cosine coarse scoring
-        for &v in &self.inv_v_hat_norms { w.write_all(&v.to_le_bytes())?; }
+        for &v in &self.inv_v_hat_norms {
+            w.write_all(&v.to_le_bytes())?;
+        }
 
         w.flush()?;
         Ok(())
@@ -443,12 +534,12 @@ impl PolarVecIndex {
                 "Invalid PolarVec magic bytes",
             ));
         }
-        let _version    = read_u32le(&mut r)?;
-        let dim         = read_u32le(&mut r)? as usize;
-        let padded_dim  = read_u32le(&mut r)? as usize;
-        let bits        = read_u32le(&mut r)? as usize;
-        let n_vectors   = read_u64le(&mut r)? as usize;
-        let n_levels    = 1usize << bits;
+        let _version = read_u32le(&mut r)?;
+        let dim = read_u32le(&mut r)? as usize;
+        let padded_dim = read_u32le(&mut r)? as usize;
+        let bits = read_u32le(&mut r)? as usize;
+        let n_vectors = read_u64le(&mut r)? as usize;
+        let n_levels = 1usize << bits;
         let bytes_per_vec = compute_bytes_per_vec(padded_dim, bits);
 
         let n_sign_words = read_u32le(&mut r)? as usize;
@@ -509,22 +600,35 @@ impl PolarVecIndex {
             inv
         } else {
             // Recompute from stored codes + quantization params
-            (0..n_vectors).map(|vi| {
-                let vec_base = vi * bytes_per_vec;
-                let mut v_hat_sq = 0.0f32;
-                for d in 0..padded_dim {
-                    let code = unpack_code_at(&codes, vec_base, d, bits);
-                    let v_hat_d = dim_mins[d] + code as f32 * dim_scales[d];
-                    v_hat_sq += v_hat_d * v_hat_d;
-                }
-                1.0 / v_hat_sq.sqrt().max(1e-12)
-            }).collect()
+            (0..n_vectors)
+                .map(|vi| {
+                    let vec_base = vi * bytes_per_vec;
+                    let mut v_hat_sq = 0.0f32;
+                    for d in 0..padded_dim {
+                        let code = unpack_code_at(&codes, vec_base, d, bits);
+                        let v_hat_d = dim_mins[d] + code as f32 * dim_scales[d];
+                        v_hat_sq += v_hat_d * v_hat_d;
+                    }
+                    1.0 / v_hat_sq.sqrt().max(1e-12)
+                })
+                .collect()
         };
 
         Ok(PolarVecIndex {
-            dim, padded_dim, bits, bytes_per_vec, n_levels,
-            sign_words, dim_mins, dim_scales, codes, norms, residual_sq, residual_signs,
-            inv_v_hat_norms, n_vectors,
+            dim,
+            padded_dim,
+            bits,
+            bytes_per_vec,
+            n_levels,
+            sign_words,
+            dim_mins,
+            dim_scales,
+            codes,
+            norms,
+            residual_sq,
+            residual_signs,
+            inv_v_hat_norms,
+            n_vectors,
         })
     }
 }
@@ -622,7 +726,7 @@ fn fwht(data: &mut [f32]) {
             for j in 0..h {
                 let x = data[i + j];
                 let y = data[i + j + h];
-                data[i + j]     = x + y;
+                data[i + j] = x + y;
                 data[i + j + h] = x - y;
             }
             i += step;
@@ -639,7 +743,11 @@ fn project_sign_bits(vec: &[f32], projection_words: &[u64], n_words: usize) -> u
         let mut dot = 0.0f32;
         for (i, &val) in vec.iter().enumerate() {
             let word = unsafe { *projection_words.get_unchecked(proj_base + i / 64) };
-            let sign = if (word >> (i % 64)) & 1 == 1 { -1.0f32 } else { 1.0f32 };
+            let sign = if (word >> (i % 64)) & 1 == 1 {
+                -1.0f32
+            } else {
+                1.0f32
+            };
             dot += sign * val;
         }
         if dot * inv_sqrt_dim >= 0.0 {
@@ -649,7 +757,11 @@ fn project_sign_bits(vec: &[f32], projection_words: &[u64], n_words: usize) -> u
     out
 }
 
-fn project_query_values(q_rot: &[f32], projection_words: &[u64], n_words: usize) -> [f32; RESIDUAL_SIGN_BITS] {
+fn project_query_values(
+    q_rot: &[f32],
+    projection_words: &[u64],
+    n_words: usize,
+) -> [f32; RESIDUAL_SIGN_BITS] {
     let mut out = [0.0f32; RESIDUAL_SIGN_BITS];
     let inv_sqrt_dim = 1.0 / (q_rot.len() as f32).sqrt();
     for p in 0..RESIDUAL_SIGN_BITS {
@@ -657,7 +769,11 @@ fn project_query_values(q_rot: &[f32], projection_words: &[u64], n_words: usize)
         let mut dot = 0.0f32;
         for (i, &val) in q_rot.iter().enumerate() {
             let word = unsafe { *projection_words.get_unchecked(proj_base + i / 64) };
-            let sign = if (word >> (i % 64)) & 1 == 1 { -1.0f32 } else { 1.0f32 };
+            let sign = if (word >> (i % 64)) & 1 == 1 {
+                -1.0f32
+            } else {
+                1.0f32
+            };
             dot += sign * val;
         }
         out[p] = dot * inv_sqrt_dim;
@@ -715,10 +831,10 @@ fn build_lut(
     let mut lut = vec![0.0f32; padded_dim * n_levels];
 
     for d in 0..padded_dim {
-        let q_d     = q_rot[d];
-        let min_d   = dim_mins[d];
+        let q_d = q_rot[d];
+        let min_d = dim_mins[d];
         let scale_d = dim_scales[d];
-        let base    = d * n_levels;
+        let base = d * n_levels;
 
         match metric {
             DistanceMetric::InnerProduct => {
@@ -763,15 +879,14 @@ fn build_lut(
 fn build_byte_lut_4bit(lut: &[f32], bytes_per_vec: usize) -> Vec<f32> {
     let mut byte_lut = vec![0.0f32; bytes_per_vec * 256];
     for b in 0..bytes_per_vec {
-        let base_even = (b * 2) * 16;      // lut[d_even * 16 ..]
-        let base_odd  = (b * 2 + 1) * 16;  // lut[d_odd  * 16 ..]
-        let out_base  = b * 256;
+        let base_even = (b * 2) * 16; // lut[d_even * 16 ..]
+        let base_odd = (b * 2 + 1) * 16; // lut[d_odd  * 16 ..]
+        let out_base = b * 256;
         for v in 0..256usize {
             let lo = v & 0x0f;
             let hi = v >> 4;
-            byte_lut[out_base + v] =
-                unsafe { *lut.get_unchecked(base_even + lo) }
-              + unsafe { *lut.get_unchecked(base_odd  + hi) };
+            byte_lut[out_base + v] = unsafe { *lut.get_unchecked(base_even + lo) }
+                + unsafe { *lut.get_unchecked(base_odd + hi) };
         }
     }
     byte_lut
@@ -798,16 +913,18 @@ fn compute_lut_score(
     if bits == 4 && !byte_lut.is_empty() {
         // Byte-combined fast path: 64 lookups instead of 128, with 4-accumulator
         // unrolling to break the serial FP-add dependency chain.
-        let mut s0 = 0.0f32; let mut s1 = 0.0f32;
-        let mut s2 = 0.0f32; let mut s3 = 0.0f32;
+        let mut s0 = 0.0f32;
+        let mut s1 = 0.0f32;
+        let mut s2 = 0.0f32;
+        let mut s3 = 0.0f32;
         let full = (bytes_per_vec / 4) * 4;
         let mut b = 0usize;
         while b < full {
-            let v0 = unsafe { *codes.get_unchecked(vec_base + b)     } as usize;
+            let v0 = unsafe { *codes.get_unchecked(vec_base + b) } as usize;
             let v1 = unsafe { *codes.get_unchecked(vec_base + b + 1) } as usize;
             let v2 = unsafe { *codes.get_unchecked(vec_base + b + 2) } as usize;
             let v3 = unsafe { *codes.get_unchecked(vec_base + b + 3) } as usize;
-            s0 += unsafe { *byte_lut.get_unchecked(b       * 256 + v0) };
+            s0 += unsafe { *byte_lut.get_unchecked(b * 256 + v0) };
             s1 += unsafe { *byte_lut.get_unchecked((b + 1) * 256 + v1) };
             s2 += unsafe { *byte_lut.get_unchecked((b + 2) * 256 + v2) };
             s3 += unsafe { *byte_lut.get_unchecked((b + 3) * 256 + v3) };
@@ -825,23 +942,29 @@ fn compute_lut_score(
             4 => {
                 for d in 0..padded_dim {
                     let byte = unsafe { *codes.get_unchecked(vec_base + d / 2) };
-                    let code = if d & 1 == 0 { (byte & 0x0f) as usize } else { (byte >> 4) as usize };
+                    let code = if d & 1 == 0 {
+                        (byte & 0x0f) as usize
+                    } else {
+                        (byte >> 4) as usize
+                    };
                     score += unsafe { *lut.get_unchecked(d * n_levels + code) };
                 }
             }
             8 => {
                 // 4-accumulator unrolling: breaks the serial FP-add dependency chain,
                 // allowing the CPU to execute 4 independent load+add streams in parallel.
-                let mut s0 = 0.0f32; let mut s1 = 0.0f32;
-                let mut s2 = 0.0f32; let mut s3 = 0.0f32;
+                let mut s0 = 0.0f32;
+                let mut s1 = 0.0f32;
+                let mut s2 = 0.0f32;
+                let mut s3 = 0.0f32;
                 let full = (bytes_per_vec / 4) * 4;
                 let mut b = 0usize;
                 while b < full {
-                    let c0 = unsafe { *codes.get_unchecked(vec_base + b)     } as usize;
+                    let c0 = unsafe { *codes.get_unchecked(vec_base + b) } as usize;
                     let c1 = unsafe { *codes.get_unchecked(vec_base + b + 1) } as usize;
                     let c2 = unsafe { *codes.get_unchecked(vec_base + b + 2) } as usize;
                     let c3 = unsafe { *codes.get_unchecked(vec_base + b + 3) } as usize;
-                    s0 += unsafe { *lut.get_unchecked(b       * n_levels + c0) };
+                    s0 += unsafe { *lut.get_unchecked(b * n_levels + c0) };
                     s1 += unsafe { *lut.get_unchecked((b + 1) * n_levels + c1) };
                     s2 += unsafe { *lut.get_unchecked((b + 2) * n_levels + c2) };
                     s3 += unsafe { *lut.get_unchecked((b + 3) * n_levels + c3) };
@@ -858,26 +981,32 @@ fn compute_lut_score(
                 // Process 8 dims per 3-byte group: pack 3 bytes into a u32, extract 8×3-bit codes
                 // with simple bit-shifts (no branches, no generic unpack_code_at overhead).
                 // 4 independent accumulators to hide FP-add latency.
-                debug_assert_eq!(padded_dim % 8, 0, "padded_dim must be multiple of 8 for 3-bit");
-                let mut s0 = 0.0f32; let mut s1 = 0.0f32;
-                let mut s2 = 0.0f32; let mut s3 = 0.0f32;
+                debug_assert_eq!(
+                    padded_dim % 8,
+                    0,
+                    "padded_dim must be multiple of 8 for 3-bit"
+                );
+                let mut s0 = 0.0f32;
+                let mut s1 = 0.0f32;
+                let mut s2 = 0.0f32;
+                let mut s3 = 0.0f32;
                 let n_groups = padded_dim / 8;
                 for g in 0..n_groups {
                     let byte_base = vec_base + g * 3;
-                    let b0 = unsafe { *codes.get_unchecked(byte_base)     } as u32;
+                    let b0 = unsafe { *codes.get_unchecked(byte_base) } as u32;
                     let b1 = unsafe { *codes.get_unchecked(byte_base + 1) } as u32;
                     let b2 = unsafe { *codes.get_unchecked(byte_base + 2) } as u32;
                     let w = b0 | (b1 << 8) | (b2 << 16);
                     let base_d = g * 8;
-                    let c0 = ( w        & 0x7) as usize;
-                    let c1 = ((w >> 3)  & 0x7) as usize;
-                    let c2 = ((w >> 6)  & 0x7) as usize;
-                    let c3 = ((w >> 9)  & 0x7) as usize;
+                    let c0 = (w & 0x7) as usize;
+                    let c1 = ((w >> 3) & 0x7) as usize;
+                    let c2 = ((w >> 6) & 0x7) as usize;
+                    let c3 = ((w >> 9) & 0x7) as usize;
                     let c4 = ((w >> 12) & 0x7) as usize;
                     let c5 = ((w >> 15) & 0x7) as usize;
                     let c6 = ((w >> 18) & 0x7) as usize;
                     let c7 = ((w >> 21) & 0x7) as usize;
-                    s0 += unsafe { *lut.get_unchecked((base_d)     * n_levels + c0) };
+                    s0 += unsafe { *lut.get_unchecked((base_d) * n_levels + c0) };
                     s1 += unsafe { *lut.get_unchecked((base_d + 1) * n_levels + c1) };
                     s2 += unsafe { *lut.get_unchecked((base_d + 2) * n_levels + c2) };
                     s3 += unsafe { *lut.get_unchecked((base_d + 3) * n_levels + c3) };
@@ -913,20 +1042,26 @@ fn score_metric_aware(
     match metric {
         DistanceMetric::InnerProduct => {
             if let Some((projected_query, total)) = sign_projection {
-                base_score + sign_correction_score_scaled(
-                    unsafe { *residual_signs.get_unchecked(vi) },
-                    projected_query, total, IP_SIGN_CORRECTION_SCALE,
-                )
+                base_score
+                    + sign_correction_score_scaled(
+                        unsafe { *residual_signs.get_unchecked(vi) },
+                        projected_query,
+                        total,
+                        IP_SIGN_CORRECTION_SCALE,
+                    )
             } else {
                 base_score
             }
         }
         DistanceMetric::Cosine => {
             let corrected_ip = if let Some((projected_query, total)) = sign_projection {
-                -base_score + sign_correction_score_scaled(
-                    unsafe { *residual_signs.get_unchecked(vi) },
-                    projected_query, total, COSINE_SIGN_CORRECTION_SCALE,
-                )
+                -base_score
+                    + sign_correction_score_scaled(
+                        unsafe { *residual_signs.get_unchecked(vi) },
+                        projected_query,
+                        total,
+                        COSINE_SIGN_CORRECTION_SCALE,
+                    )
             } else {
                 -base_score
             };
@@ -956,21 +1091,35 @@ fn rerank_candidates_metric_aware(
     n_candidates: usize,
     ascending: bool,
 ) -> Vec<u32> {
-    let mut scored: Vec<(f32, u32)> = coarse.iter().map(|&(coarse_score, idx)| {
-        let vi = idx as usize;
-        let sign_bits = unsafe { *residual_signs.get_unchecked(vi) };
-        let final_score = match metric {
-            DistanceMetric::InnerProduct => {
-                coarse_score + sign_correction_score_scaled(sign_bits, sign_projection, total_qv, IP_SIGN_CORRECTION_SCALE)
-            }
-            DistanceMetric::Cosine => {
-                let corr = sign_correction_score_scaled(sign_bits, sign_projection, total_qv, COSINE_SIGN_CORRECTION_SCALE);
-                coarse_score - corr * unsafe { *inv_v_hat_norms.get_unchecked(vi) }
-            }
-            _ => coarse_score,
-        };
-        (final_score, idx)
-    }).collect();
+    let mut scored: Vec<(f32, u32)> = coarse
+        .iter()
+        .map(|&(coarse_score, idx)| {
+            let vi = idx as usize;
+            let sign_bits = unsafe { *residual_signs.get_unchecked(vi) };
+            let final_score = match metric {
+                DistanceMetric::InnerProduct => {
+                    coarse_score
+                        + sign_correction_score_scaled(
+                            sign_bits,
+                            sign_projection,
+                            total_qv,
+                            IP_SIGN_CORRECTION_SCALE,
+                        )
+                }
+                DistanceMetric::Cosine => {
+                    let corr = sign_correction_score_scaled(
+                        sign_bits,
+                        sign_projection,
+                        total_qv,
+                        COSINE_SIGN_CORRECTION_SCALE,
+                    );
+                    coarse_score - corr * unsafe { *inv_v_hat_norms.get_unchecked(vi) }
+                }
+                _ => coarse_score,
+            };
+            (final_score, idx)
+        })
+        .collect();
 
     if ascending {
         scored.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
@@ -987,10 +1136,16 @@ struct ScanEntry {
     score: f32,
     idx: u32,
 }
-impl PartialEq  for ScanEntry { fn eq(&self, o: &Self) -> bool { self.score == o.score } }
-impl Eq         for ScanEntry {}
+impl PartialEq for ScanEntry {
+    fn eq(&self, o: &Self) -> bool {
+        self.score == o.score
+    }
+}
+impl Eq for ScanEntry {}
 impl PartialOrd for ScanEntry {
-    fn partial_cmp(&self, o: &Self) -> Option<Ordering> { Some(self.cmp(o)) }
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+        Some(self.cmp(o))
+    }
 }
 impl Ord for ScanEntry {
     fn cmp(&self, o: &Self) -> Ordering {
@@ -1039,12 +1194,23 @@ fn scan_topn(
                 let mut heap: BinaryHeap<ScanEntry> = BinaryHeap::with_capacity(n_candidates + 1);
                 for i in 0..n_in {
                     let vi = base + i;
-                    let mut score = compute_lut_score(codes, vi, bytes_per_vec, bits, lut, n_levels, byte_lut);
+                    let mut score =
+                        compute_lut_score(codes, vi, bytes_per_vec, bits, lut, n_levels, byte_lut);
                     if has_correction {
                         score += unsafe { *correction_scores.get_unchecked(vi) };
                     }
-                    score = score_metric_aware(score, vi, metric, sign_projection, residual_signs, inv_v_hat_norms);
-                    let entry = ScanEntry { score, idx: vi as u32 };
+                    score = score_metric_aware(
+                        score,
+                        vi,
+                        metric,
+                        sign_projection,
+                        residual_signs,
+                        inv_v_hat_norms,
+                    );
+                    let entry = ScanEntry {
+                        score,
+                        idx: vi as u32,
+                    };
                     if heap.len() < n_candidates {
                         heap.push(entry);
                     } else if let Some(&top) = heap.peek() {
@@ -1060,12 +1226,23 @@ fn scan_topn(
                     BinaryHeap::with_capacity(n_candidates + 1);
                 for i in 0..n_in {
                     let vi = base + i;
-                    let mut score = compute_lut_score(codes, vi, bytes_per_vec, bits, lut, n_levels, byte_lut);
+                    let mut score =
+                        compute_lut_score(codes, vi, bytes_per_vec, bits, lut, n_levels, byte_lut);
                     if has_correction {
                         score += unsafe { *correction_scores.get_unchecked(vi) };
                     }
-                    score = score_metric_aware(score, vi, metric, sign_projection, residual_signs, inv_v_hat_norms);
-                    let entry = ScanEntry { score, idx: vi as u32 };
+                    score = score_metric_aware(
+                        score,
+                        vi,
+                        metric,
+                        sign_projection,
+                        residual_signs,
+                        inv_v_hat_norms,
+                    );
+                    let entry = ScanEntry {
+                        score,
+                        idx: vi as u32,
+                    };
                     if heap.len() < n_candidates {
                         heap.push(std::cmp::Reverse(entry));
                     } else if let Some(&std::cmp::Reverse(top)) = heap.peek() {
@@ -1075,7 +1252,9 @@ fn scan_topn(
                         }
                     }
                 }
-                heap.into_iter().map(|std::cmp::Reverse(e)| (e.score, e.idx)).collect()
+                heap.into_iter()
+                    .map(|std::cmp::Reverse(e)| (e.score, e.idx))
+                    .collect()
             }
         })
         .collect();
@@ -1197,11 +1376,14 @@ mod tests {
             &[][..]
         };
         let sign_projection: Option<([f32; RESIDUAL_SIGN_BITS], f32)> =
-            if matches!(metric, DistanceMetric::InnerProduct | DistanceMetric::Cosine)
-                && !idx.residual_signs.is_empty()
+            if matches!(
+                metric,
+                DistanceMetric::InnerProduct | DistanceMetric::Cosine
+            ) && !idx.residual_signs.is_empty()
             {
                 let n_words = (idx.padded_dim + 63) / 64;
-                let projection_words = generate_projection_words(RESIDUAL_SIGN_BITS, n_words, RESIDUAL_SIGN_SEED);
+                let projection_words =
+                    generate_projection_words(RESIDUAL_SIGN_BITS, n_words, RESIDUAL_SIGN_SEED);
                 let proj = project_query_values(&q_rot, &projection_words, n_words);
                 let total = proj.iter().sum::<f32>();
                 Some((proj, total))
@@ -1231,24 +1413,58 @@ mod tests {
     }
 
     // Baseline: pure LUT scan, no sign correction, no inv_v_hat_norm — old proxy behaviour.
-    fn search_proxy_baseline(idx: &PolarVecIndex, query: &[f32], k: usize,
-        f32_data: &[f32], metric: DistanceMetric, oversample: usize) -> (Vec<u32>, Vec<f32>)
-    {
+    fn search_proxy_baseline(
+        idx: &PolarVecIndex,
+        query: &[f32],
+        k: usize,
+        f32_data: &[f32],
+        metric: DistanceMetric,
+        oversample: usize,
+    ) -> (Vec<u32>, Vec<f32>) {
         let n_candidates = (k * oversample).min(idx.n_vectors);
         let mut q_rot = vec![0.0f32; idx.padded_dim];
         q_rot[..idx.dim].copy_from_slice(query);
         apply_signs(&mut q_rot, &idx.sign_words, idx.padded_dim);
         fwht(&mut q_rot[..idx.padded_dim]);
-        let lut = build_lut(&q_rot, idx.padded_dim, idx.bits, idx.n_levels,
-            &idx.dim_mins, &idx.dim_scales, metric);
-        let byte_lut_4bit = if idx.bits == 4 { build_byte_lut_4bit(&lut, idx.bytes_per_vec) }
-            else { Vec::new() };
-        let correction = if metric == DistanceMetric::L2Squared { &idx.residual_sq[..] } else { &[][..] };
+        let lut = build_lut(
+            &q_rot,
+            idx.padded_dim,
+            idx.bits,
+            idx.n_levels,
+            &idx.dim_mins,
+            &idx.dim_scales,
+            metric,
+        );
+        let byte_lut_4bit = if idx.bits == 4 {
+            build_byte_lut_4bit(&lut, idx.bytes_per_vec)
+        } else {
+            Vec::new()
+        };
+        let correction = if metric == DistanceMetric::L2Squared {
+            &idx.residual_sq[..]
+        } else {
+            &[][..]
+        };
         let empty_inv = vec![1.0f32; idx.n_vectors];
-        let ids: Vec<u32> = scan_topn(&idx.codes, idx.n_vectors, idx.bytes_per_vec,
-            idx.bits, idx.n_levels, &lut, &byte_lut_4bit, n_candidates, metric.is_ascending(),
-            correction, metric, None, &[], &empty_inv)
-            .into_iter().map(|(_, i)| i).collect();
+        let ids: Vec<u32> = scan_topn(
+            &idx.codes,
+            idx.n_vectors,
+            idx.bytes_per_vec,
+            idx.bits,
+            idx.n_levels,
+            &lut,
+            &byte_lut_4bit,
+            n_candidates,
+            metric.is_ascending(),
+            correction,
+            metric,
+            None,
+            &[],
+            &empty_inv,
+        )
+        .into_iter()
+        .map(|(_, i)| i)
+        .collect();
         rescore_exact(&ids, query, f32_data, idx.dim, k, metric)
     }
 
@@ -1257,7 +1473,13 @@ mod tests {
         hits as f32 / exact.len().max(1) as f32
     }
 
-    fn exact_topk(data: &[f32], dim: usize, query: &[f32], k: usize, metric: DistanceMetric) -> Vec<u32> {
+    fn exact_topk(
+        data: &[f32],
+        dim: usize,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+    ) -> Vec<u32> {
         let mut scores: Vec<(f32, u32)> = (0..data.len() / dim)
             .map(|i| {
                 (
@@ -1328,7 +1550,9 @@ mod tests {
             .0;
         assert!(
             ids.contains(&(brute_best as u32)),
-            "exact best {} not in top-10: {:?}", brute_best, ids
+            "exact best {} not in top-10: {:?}",
+            brute_best,
+            ids
         );
     }
 
@@ -1494,13 +1718,17 @@ mod tests {
                 for qi in 0..nq_r {
                     let q = &queries[qi * dim..(qi + 1) * dim];
                     let exact = exact_topk(&data, dim, q, k, DistanceMetric::InnerProduct);
-                    let approx = idx.search(q, k, &data, DistanceMetric::InnerProduct, oversample).0;
+                    let approx = idx
+                        .search(q, k, &data, DistanceMetric::InnerProduct, oversample)
+                        .0;
                     recall_ip += recall_at_k(&exact, &approx);
                 }
                 for qi in 0..nq_r {
                     let q = &queries_cos[qi * dim..(qi + 1) * dim];
                     let exact = exact_topk(&data_cos, dim, q, k, DistanceMetric::Cosine);
-                    let approx = idx_cos.search(q, k, &data_cos, DistanceMetric::Cosine, oversample).0;
+                    let approx = idx_cos
+                        .search(q, k, &data_cos, DistanceMetric::Cosine, oversample)
+                        .0;
                     recall_cos += recall_at_k(&exact, &approx);
                 }
 
@@ -1534,13 +1762,30 @@ mod tests {
         for qi in 0..nq {
             let query = &queries_ip[qi * dim..(qi + 1) * dim];
             let exact = exact_topk(&data_ip, dim, query, k, DistanceMetric::InnerProduct);
-            let proxy  = search_proxy_baseline(&idx_ip, query, k, &data_ip, DistanceMetric::InnerProduct, oversample).0;
-            let improved = idx_ip.search(query, k, &data_ip, DistanceMetric::InnerProduct, oversample).0;
-            proxy_ip    += recall_at_k(&exact, &proxy);
+            let proxy = search_proxy_baseline(
+                &idx_ip,
+                query,
+                k,
+                &data_ip,
+                DistanceMetric::InnerProduct,
+                oversample,
+            )
+            .0;
+            let improved = idx_ip
+                .search(query, k, &data_ip, DistanceMetric::InnerProduct, oversample)
+                .0;
+            proxy_ip += recall_at_k(&exact, &proxy);
             improved_ip += recall_at_k(&exact, &improved);
         }
-        println!("IP bits={} oversample={}: proxy recall@{}={:.4}, sign+inv_norm recall@{}={:.4}",
-            bits, oversample, k, proxy_ip / nq as f32, k, improved_ip / nq as f32);
+        println!(
+            "IP bits={} oversample={}: proxy recall@{}={:.4}, sign+inv_norm recall@{}={:.4}",
+            bits,
+            oversample,
+            k,
+            proxy_ip / nq as f32,
+            k,
+            improved_ip / nq as f32
+        );
 
         let mut data_cos = random_data(n, dim, 789);
         let mut queries_cos = random_data(nq, dim, 987);
@@ -1552,12 +1797,29 @@ mod tests {
         for qi in 0..nq {
             let query = &queries_cos[qi * dim..(qi + 1) * dim];
             let exact = exact_topk(&data_cos, dim, query, k, DistanceMetric::Cosine);
-            let proxy    = search_proxy_baseline(&idx_cos, query, k, &data_cos, DistanceMetric::Cosine, oversample).0;
-            let improved = idx_cos.search(query, k, &data_cos, DistanceMetric::Cosine, oversample).0;
-            proxy_cos   += recall_at_k(&exact, &proxy);
+            let proxy = search_proxy_baseline(
+                &idx_cos,
+                query,
+                k,
+                &data_cos,
+                DistanceMetric::Cosine,
+                oversample,
+            )
+            .0;
+            let improved = idx_cos
+                .search(query, k, &data_cos, DistanceMetric::Cosine, oversample)
+                .0;
+            proxy_cos += recall_at_k(&exact, &proxy);
             improved_cos += recall_at_k(&exact, &improved);
         }
-        println!("Cosine bits={} oversample={}: proxy recall@{}={:.4}, sign+inv_norm recall@{}={:.4}",
-            bits, oversample, k, proxy_cos / nq as f32, k, improved_cos / nq as f32);
+        println!(
+            "Cosine bits={} oversample={}: proxy recall@{}={:.4}, sign+inv_norm recall@{}={:.4}",
+            bits,
+            oversample,
+            k,
+            proxy_cos / nq as f32,
+            k,
+            improved_cos / nq as f32
+        );
     }
 }

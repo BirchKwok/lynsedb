@@ -123,9 +123,8 @@ impl VectorStore {
         }
 
         // Raw byte append — no mmap involved
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
-        };
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
         {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -136,7 +135,9 @@ impl VectorStore {
         }
 
         // Update in-memory counter
-        let new_total = self.total_vectors.fetch_add(n_vectors as u64, Ordering::Relaxed)
+        let new_total = self
+            .total_vectors
+            .fetch_add(n_vectors as u64, Ordering::Relaxed)
             + n_vectors as u64;
 
         // Invalidate mmap cache (will be re-created on next read)
@@ -194,6 +195,78 @@ impl VectorStore {
     pub fn read_mmap(&self) -> Result<parking_lot::RwLockReadGuard<'_, Option<FlatMmap>>> {
         self.ensure_mmap()?;
         Ok(self.mmap_cache.read())
+    }
+
+    /// Replace ALL stored vectors with new data (used by compaction).
+    /// Atomically writes new data, resets the vector count, and invalidates the mmap cache.
+    pub fn replace_data(&self, data: &[f32]) -> Result<()> {
+        let n_vectors = if self.dimension > 0 {
+            data.len() / self.dimension
+        } else {
+            0
+        };
+
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
+        atomic_write(&self.vectors_path, bytes)?;
+
+        self.total_vectors
+            .store(n_vectors as u64, Ordering::Relaxed);
+        *self.mmap_cache.write() = None;
+
+        // Update info.json
+        let info_path = self.collection_path.join("info.json");
+        let info = serde_json::json!({ "total_shape": [n_vectors, self.dimension] });
+        atomic_write(
+            &info_path,
+            serde_json::to_string(&info)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?
+                .as_bytes(),
+        )?;
+
+        Ok(())
+    }
+
+    /// Truncate the vector file to the first `n_vectors` rows.
+    ///
+    /// Used during WAL recovery when `id_map.bin` proves that a previous write
+    /// reached the vector file but did not fully reach the commit boundary.
+    pub fn truncate_to_vectors(&self, n_vectors: usize) -> Result<()> {
+        let target_len = n_vectors as u64 * self.dimension as u64 * 4;
+        let current_len = std::fs::metadata(&self.vectors_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if target_len > current_len {
+            return Err(LynseError::Storage(format!(
+                "cannot truncate vectors.bin to {} bytes; current length is {} bytes",
+                target_len, current_len
+            )));
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&self.vectors_path)?;
+        file.set_len(target_len)?;
+        file.sync_all()?;
+
+        self.total_vectors
+            .store(n_vectors as u64, Ordering::Relaxed);
+        *self.mmap_cache.write() = None;
+
+        let info_path = self.collection_path.join("info.json");
+        let info = serde_json::json!({ "total_shape": [n_vectors, self.dimension] });
+        atomic_write(
+            &info_path,
+            serde_json::to_string(&info)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?
+                .as_bytes(),
+        )?;
+
+        let new_fp = uuid::Uuid::new_v4().to_string().replace("-", "");
+        *self.fingerprint.write() = Some(new_fp);
+
+        Ok(())
     }
 
     /// Check if any vector data exists.

@@ -10,11 +10,11 @@
 //! ADC LUT: 16 × 256 × 4B = 16KB — fits entirely in L1 cache.
 //! ADC scan throughput: ~2ms/1M vectors (parallel, arm64).
 
-use crate::distance::DistanceMetric;
 use crate::distance::simd;
-use rayon::prelude::*;
-use rand::{SeedableRng, Rng};
+use crate::distance::DistanceMetric;
 use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs::File;
@@ -105,9 +105,25 @@ impl PQIndex {
         let codebooks: Vec<f32> = codebook_parts.into_iter().flatten().collect();
 
         // Encode all vectors (parallel across vectors)
-        let codes = encode_vectors(data, n_vectors, dim, &codebooks, n_subspaces, n_clusters, subspace_size);
+        let codes = encode_vectors(
+            data,
+            n_vectors,
+            dim,
+            &codebooks,
+            n_subspaces,
+            n_clusters,
+            subspace_size,
+        );
 
-        PQIndex { n_subspaces, n_clusters, subspace_size, codebooks, codes, n_vectors, dim }
+        PQIndex {
+            n_subspaces,
+            n_clusters,
+            subspace_size,
+            codebooks,
+            codes,
+            n_vectors,
+            dim,
+        }
     }
 
     /// ADC (Asymmetric Distance Computation) search.
@@ -131,7 +147,14 @@ impl PQIndex {
         let n_candidates = (k * oversample).min(self.n_vectors);
 
         // Build ADC lookup table: [n_subspaces × n_clusters] f32
-        let lut = build_lut(query, &self.codebooks, self.n_subspaces, self.n_clusters, self.subspace_size, metric);
+        let lut = build_lut(
+            query,
+            &self.codebooks,
+            self.n_subspaces,
+            self.n_clusters,
+            self.subspace_size,
+            metric,
+        );
 
         // ADC scan: find top-N candidate indices
         let candidate_indices = adc_scan_topn(
@@ -171,7 +194,9 @@ impl PQIndex {
         w.write_all(&(self.dim as u32).to_le_bytes())?;
 
         // Codebooks (f32 LE)
-        let cb_bytes: Vec<u8> = self.codebooks.iter()
+        let cb_bytes: Vec<u8> = self
+            .codebooks
+            .iter()
             .flat_map(|v| v.to_le_bytes())
             .collect();
         w.write_all(&cb_bytes)?;
@@ -197,10 +222,10 @@ impl PQIndex {
         }
         let _version = read_u32le(&mut r)?;
         let n_subspaces = read_u32le(&mut r)? as usize;
-        let n_clusters  = read_u32le(&mut r)? as usize;
+        let n_clusters = read_u32le(&mut r)? as usize;
         let subspace_size = read_u32le(&mut r)? as usize;
-        let n_vectors   = read_u64le(&mut r)? as usize;
-        let dim         = read_u32le(&mut r)? as usize;
+        let n_vectors = read_u64le(&mut r)? as usize;
+        let dim = read_u32le(&mut r)? as usize;
 
         let cb_len = n_subspaces * n_clusters * subspace_size;
         let mut codebooks = vec![0.0f32; cb_len];
@@ -212,7 +237,15 @@ impl PQIndex {
         let mut codes = vec![0u8; n_vectors * n_subspaces];
         r.read_exact(&mut codes)?;
 
-        Ok(PQIndex { n_subspaces, n_clusters, subspace_size, codebooks, codes, n_vectors, dim })
+        Ok(PQIndex {
+            n_subspaces,
+            n_clusters,
+            subspace_size,
+            codebooks,
+            codes,
+            n_vectors,
+            dim,
+        })
     }
 }
 
@@ -256,8 +289,8 @@ fn kmeans_subspace(
     n_vectors: usize,
     stride: usize,
     start_col: usize,
-    ss: usize,      // subspace_size
-    k: usize,       // n_clusters
+    ss: usize, // subspace_size
+    k: usize,  // n_clusters
     seed: u64,
 ) -> Vec<f32> {
     let k = k.min(n_vectors);
@@ -326,8 +359,8 @@ fn kmeans_subspace(
                 let src = max_cluster * ss;
                 let dst = c * ss;
                 for d in 0..ss {
-                    new_centroids[dst + d] = new_centroids[src + d]
-                        * (1.0 + 0.01 * ((d % 2) as f32 - 0.5));
+                    new_centroids[dst + d] =
+                        new_centroids[src + d] * (1.0 + 0.01 * ((d % 2) as f32 - 0.5));
                 }
             }
         }
@@ -347,8 +380,7 @@ fn random_init_centroids(data: &[f32], n: usize, ss: usize, k: usize, seed: u64)
     while c < k && attempts < k * 10 {
         let idx = rng.gen_range(0..n);
         if chosen.insert(idx) {
-            centroids[c * ss..(c + 1) * ss]
-                .copy_from_slice(&data[idx * ss..(idx + 1) * ss]);
+            centroids[c * ss..(c + 1) * ss].copy_from_slice(&data[idx * ss..(idx + 1) * ss]);
             c += 1;
         }
         attempts += 1;
@@ -386,7 +418,8 @@ fn encode_vectors(
                 let mut best_c = 0u8;
                 let mut best_d = f32::MAX;
                 for c in 0..n_clusters {
-                    let cb = &codebooks[cb_base + c * subspace_size..cb_base + (c + 1) * subspace_size];
+                    let cb =
+                        &codebooks[cb_base + c * subspace_size..cb_base + (c + 1) * subspace_size];
                     let d = l2sq_slice(v_sub, cb);
                     if d < best_d {
                         best_d = d;
@@ -409,15 +442,21 @@ struct HeapEntry {
 }
 
 impl PartialEq for HeapEntry {
-    fn eq(&self, other: &Self) -> bool { self.score == other.score }
+    fn eq(&self, other: &Self) -> bool {
+        self.score == other.score
+    }
 }
 impl Eq for HeapEntry {}
 impl PartialOrd for HeapEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.score.partial_cmp(&other.score).unwrap_or(Ordering::Equal)
+        self.score
+            .partial_cmp(&other.score)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -448,16 +487,16 @@ fn adc_scan_topn(
                 // Keep smallest N: MAX-heap (evict largest when full)
                 let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(n_candidates + 1);
                 for i in 0..n_in_chunk {
-                    let code = unsafe {
-                        code_chunk.get_unchecked(i * n_subspaces..(i + 1) * n_subspaces)
-                    };
+                    let code =
+                        unsafe { code_chunk.get_unchecked(i * n_subspaces..(i + 1) * n_subspaces) };
                     let mut score = 0.0f32;
                     for m in 0..n_subspaces {
-                        score += unsafe {
-                            *lut.get_unchecked(m * n_clusters + code[m] as usize)
-                        };
+                        score += unsafe { *lut.get_unchecked(m * n_clusters + code[m] as usize) };
                     }
-                    let entry = HeapEntry { score, idx: (base_idx + i) as u32 };
+                    let entry = HeapEntry {
+                        score,
+                        idx: (base_idx + i) as u32,
+                    };
                     if heap.len() < n_candidates {
                         heap.push(entry);
                     } else if let Some(&top) = heap.peek() {
@@ -473,16 +512,16 @@ fn adc_scan_topn(
                 let mut heap: BinaryHeap<std::cmp::Reverse<HeapEntry>> =
                     BinaryHeap::with_capacity(n_candidates + 1);
                 for i in 0..n_in_chunk {
-                    let code = unsafe {
-                        code_chunk.get_unchecked(i * n_subspaces..(i + 1) * n_subspaces)
-                    };
+                    let code =
+                        unsafe { code_chunk.get_unchecked(i * n_subspaces..(i + 1) * n_subspaces) };
                     let mut score = 0.0f32;
                     for m in 0..n_subspaces {
-                        score += unsafe {
-                            *lut.get_unchecked(m * n_clusters + code[m] as usize)
-                        };
+                        score += unsafe { *lut.get_unchecked(m * n_clusters + code[m] as usize) };
                     }
-                    let entry = HeapEntry { score, idx: (base_idx + i) as u32 };
+                    let entry = HeapEntry {
+                        score,
+                        idx: (base_idx + i) as u32,
+                    };
                     if heap.len() < n_candidates {
                         heap.push(std::cmp::Reverse(entry));
                     } else if let Some(&std::cmp::Reverse(top)) = heap.peek() {
@@ -539,8 +578,8 @@ pub fn rescore_exact(
             let cand = unsafe { f32_data.get_unchecked(base..base + dim) };
             let dist = match metric {
                 DistanceMetric::InnerProduct => simd::inner_product_f32(query, cand),
-                DistanceMetric::L2Squared    => simd::l2_squared_f32(query, cand),
-                DistanceMetric::Cosine       => simd::cosine_distance_f32(query, cand),
+                DistanceMetric::L2Squared => simd::l2_squared_f32(query, cand),
+                DistanceMetric::Cosine => simd::cosine_distance_f32(query, cand),
                 _ => crate::distance::compute_distance_f32(query, cand, metric),
             };
             (dist, idx)
@@ -555,7 +594,7 @@ pub fn rescore_exact(
     exact.truncate(k);
 
     let indices = exact.iter().map(|e| e.1).collect();
-    let dists   = exact.iter().map(|e| e.0).collect();
+    let dists = exact.iter().map(|e| e.0).collect();
     (indices, dists)
 }
 
@@ -564,7 +603,13 @@ pub fn rescore_exact(
 /// Scalar L2² distance for small subspace vectors.
 #[inline(always)]
 fn l2sq_slice(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(&x, &y)| { let d = x - y; d * d }).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| {
+            let d = x - y;
+            d * d
+        })
+        .sum()
 }
 
 // ─── I/O helpers ──────────────────────────────────────────────────────────────
@@ -688,6 +733,6 @@ mod tests {
         assert_eq!(parse_n_subspaces("FLAT-IP-PQ8", 128), 8);
         assert_eq!(parse_n_subspaces("FLAT-IP-PQ16", 128), 16);
         assert_eq!(parse_n_subspaces("FLAT-IP-PQ", 128), 16); // default
-        assert_eq!(parse_n_subspaces("FLAT-L2-PQ", 32), 16);  // 32 % 16 == 0
+        assert_eq!(parse_n_subspaces("FLAT-L2-PQ", 32), 16); // 32 % 16 == 0
     }
 }

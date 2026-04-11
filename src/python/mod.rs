@@ -3,13 +3,13 @@
 //! Exposes the Rust engine to Python, maintaining API compatibility
 //! with the existing LynseDB Python interface.
 
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 use crate::engine::{Collection, DatabaseEngine, DatabaseManager, SearchResult};
 
@@ -46,11 +46,7 @@ impl PyDatabaseEngine {
     }
 
     /// Create a new collection.
-    fn create_collection(
-        &self,
-        name: &str,
-        dimension: usize,
-    ) -> PyResult<PyCollection> {
+    fn create_collection(&self, name: &str, dimension: usize) -> PyResult<PyCollection> {
         let coll = self
             .inner
             .create_collection(name, dimension, 100_000)
@@ -59,11 +55,7 @@ impl PyDatabaseEngine {
     }
 
     /// Get or open an existing collection.
-    fn get_collection(
-        &self,
-        name: &str,
-        dimension: usize,
-    ) -> PyResult<PyCollection> {
+    fn get_collection(&self, name: &str, dimension: usize) -> PyResult<PyCollection> {
         let coll = self
             .inner
             .get_or_open_collection(name, dimension, 100_000)
@@ -104,15 +96,17 @@ pub struct PyCollection {
 
 #[pymethods]
 impl PyCollection {
-    /// Add vectors with optional field metadata.
+    /// Add vectors with user-specified IDs and optional field metadata.
     ///
     /// Args:
     ///     vectors: numpy array of shape (n, dim) with dtype float32
+    ///     ids: list of integer user IDs, one per vector
     ///     fields: optional list of dicts, one per vector
-    #[pyo3(signature = (vectors, fields=None))]
+    #[pyo3(signature = (vectors, ids, fields=None))]
     fn add_items(
         &self,
         vectors: PyReadonlyArray2<f32>,
+        ids: Vec<u64>,
         fields: Option<&Bound<'_, PyList>>,
     ) -> PyResult<()> {
         let array = vectors.as_array();
@@ -126,8 +120,7 @@ impl PyCollection {
 
         // Convert Python dicts to Rust HashMaps
         let rust_fields = if let Some(field_list) = fields {
-            let mut result: Vec<HashMap<String, serde_json::Value>> =
-                Vec::with_capacity(n_vectors);
+            let mut result: Vec<HashMap<String, serde_json::Value>> = Vec::with_capacity(n_vectors);
             for item in field_list.iter() {
                 let dict = item.downcast::<PyDict>()?;
                 let mut map = HashMap::new();
@@ -144,12 +137,8 @@ impl PyCollection {
         };
 
         let mut coll = self.inner.write();
-        coll.add_items(
-            &flat_data,
-            n_vectors,
-            rust_fields.as_deref(),
-        )
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        coll.add_items(&flat_data, n_vectors, &ids, rust_fields.as_deref())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
     /// Build or rebuild the index.
@@ -277,26 +266,34 @@ impl PyCollection {
             .as_slice()
             .expect("numpy array must be contiguous (C-order)");
 
-        let rust_fields = if let Some(field_list) = fields {
-            let mut result: Vec<HashMap<String, serde_json::Value>> =
-                Vec::with_capacity(n_vectors);
-            for item in field_list.iter() {
-                let dict = item.downcast::<PyDict>()?;
-                let mut map = HashMap::new();
-                for (key, value) in dict.iter() {
-                    let k: String = key.extract()?;
-                    let v = py_to_json_value(&value)?;
-                    map.insert(k, v);
-                }
-                result.push(map);
-            }
-            Some(result)
-        } else {
-            None
-        };
+        let rust_fields = py_fields_to_json(fields, n_vectors)?;
 
         let mut coll = self.inner.write();
         coll.update_items(&ids, flat_data, n_vectors, rust_fields.as_deref())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Insert or update vectors by IDs.
+    ///
+    /// Existing IDs are updated in place. Missing IDs are inserted. If fields
+    /// are provided, each field map replaces the row's current fields.
+    #[pyo3(signature = (ids, vectors, fields=None))]
+    fn upsert_items(
+        &self,
+        ids: Vec<u64>,
+        vectors: PyReadonlyArray2<f32>,
+        fields: Option<&Bound<'_, PyList>>,
+    ) -> PyResult<()> {
+        let array = vectors.as_array();
+        let n_vectors = array.nrows();
+        let flat_data: &[f32] = array
+            .as_slice()
+            .expect("numpy array must be contiguous (C-order)");
+
+        let rust_fields = py_fields_to_json(fields, n_vectors)?;
+
+        let mut coll = self.inner.write();
+        coll.upsert_items(&ids, flat_data, n_vectors, rust_fields.as_deref())
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -304,6 +301,27 @@ impl PyCollection {
     fn commit(&self) -> PyResult<()> {
         let coll = self.inner.read();
         coll.commit()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Flush pending WAL bytes and fsync collection files without clearing WAL.
+    fn flush(&self) -> PyResult<()> {
+        let coll = self.inner.read();
+        coll.flush()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Checkpoint durable state and clear WAL.
+    fn checkpoint(&self) -> PyResult<()> {
+        let coll = self.inner.read();
+        coll.checkpoint()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Close the collection handle from an API perspective.
+    fn close(&self) -> PyResult<()> {
+        let mut coll = self.inner.write();
+        coll.close()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -324,40 +342,40 @@ impl PyCollection {
         self.inner.read().fingerprint()
     }
 
-    /// Return first n vectors + fields.
+    /// Return first n vectors + user IDs + fields.
     ///
-    /// Returns: (flat_f32_numpy_1d, list_of_field_dicts)
+    /// Returns: (flat_f32_numpy_1d, ids: Vec<u64>, list_of_field_dicts)
     #[pyo3(signature = (n=5))]
     fn head<'py>(
         &self,
         py: Python<'py>,
         n: usize,
-    ) -> PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyList>)> {
+    ) -> PyResult<(Bound<'py, PyArray1<f32>>, Vec<u64>, Bound<'py, PyList>)> {
         let coll = self.inner.read();
-        let (data, fields) = coll
+        let (data, ids, fields) = coll
             .head(n)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let arr = data.into_pyarray_bound(py);
         let field_list = fields_to_pylist(py, &fields)?;
-        Ok((arr, field_list))
+        Ok((arr, ids, field_list))
     }
 
-    /// Return last n vectors + fields.
+    /// Return last n vectors + user IDs + fields.
     #[pyo3(signature = (n=5))]
     fn tail<'py>(
         &self,
         py: Python<'py>,
         n: usize,
-    ) -> PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyList>)> {
+    ) -> PyResult<(Bound<'py, PyArray1<f32>>, Vec<u64>, Bound<'py, PyList>)> {
         let coll = self.inner.read();
-        let (data, fields) = coll
+        let (data, ids, fields) = coll
             .tail(n)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let arr = data.into_pyarray_bound(py);
         let field_list = fields_to_pylist(py, &fields)?;
-        Ok((arr, field_list))
+        Ok((arr, ids, field_list))
     }
 
     /// Get vector store info for zero-copy mmap access.
@@ -421,32 +439,16 @@ impl PyCollection {
     ) -> PyResult<Bound<'py, numpy::PyArray2<f32>>> {
         let coll = self.inner.read();
         let dim = coll.dimension();
-        let guard = coll
-            .vector_store_read_mmap()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
         let n_ids = ids.len();
 
-        // Allocate numpy array directly — avoid Rust Vec intermediate
+        let (flat, _fields) = coll
+            .read_vectors_by_ids(&ids)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
         let arr = unsafe { numpy::PyArray2::<f32>::new_bound(py, [n_ids, dim], false) };
         let out_slice = unsafe { arr.as_slice_mut()? };
-
-        if let Some(fm) = guard.as_ref() {
-            let all_data = fm.as_slice();
-            let n_total = fm.len();
-
-            for (out_pos, &id) in ids.iter().enumerate() {
-                let idx = id as usize;
-                if idx < n_total {
-                    let src_start = idx * dim;
-                    let src_end = src_start + dim;
-                    if src_end <= all_data.len() {
-                        let dst = &mut out_slice[out_pos * dim..(out_pos + 1) * dim];
-                        dst.copy_from_slice(&all_data[src_start..src_end]);
-                    }
-                }
-            }
-        }
+        let copy_len = flat.len().min(out_slice.len());
+        out_slice[..copy_len].copy_from_slice(&flat[..copy_len]);
 
         Ok(arr)
     }
@@ -474,11 +476,7 @@ impl PyCollection {
     }
 
     /// Retrieve field metadata for specific IDs.
-    fn retrieve_fields<'py>(
-        &self,
-        py: Python<'py>,
-        ids: Vec<u64>,
-    ) -> PyResult<Bound<'py, PyList>> {
+    fn retrieve_fields<'py>(&self, py: Python<'py>, ids: Vec<u64>) -> PyResult<Bound<'py, PyList>> {
         let coll = self.inner.read();
         let fields = coll
             .retrieve_fields(&ids)
@@ -490,6 +488,46 @@ impl PyCollection {
     fn list_fields(&self) -> PyResult<Vec<String>> {
         let coll = self.inner.read();
         coll.list_fields()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Soft-delete vectors by ID. Deleted IDs are excluded from all future search results.
+    /// The raw data is NOT removed from disk; use vacuum() to physically compact.
+    fn delete_items(&self, ids: Vec<u64>) -> PyResult<()> {
+        let coll = self.inner.read();
+        coll.delete_items(&ids)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Restore previously soft-deleted vectors (remove from tombstone).
+    fn restore_items(&self, ids: Vec<u64>) -> PyResult<()> {
+        let coll = self.inner.read();
+        coll.restore_items(&ids)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Return the sorted list of all currently soft-deleted IDs.
+    fn list_deleted_ids(&self) -> PyResult<Vec<u64>> {
+        let coll = self.inner.read();
+        Ok(coll.list_deleted_ids())
+    }
+
+    /// Range search: return all non-deleted vectors within a distance threshold.
+    ///
+    /// For L2 metric: returns IDs where distance ≤ threshold (ascending).
+    /// For IP/Cosine: returns IDs where score ≥ threshold (descending).
+    ///
+    /// Returns (ids: Vec<u64>, distances: Vec<f32>) capped at max_results.
+    #[pyo3(signature = (vector, threshold, max_results=1000))]
+    fn search_range(
+        &self,
+        vector: PyReadonlyArray1<f32>,
+        threshold: f32,
+        max_results: usize,
+    ) -> PyResult<(Vec<u64>, Vec<f32>)> {
+        let query = vector.as_slice()?;
+        let coll = self.inner.read();
+        coll.search_range(query, threshold, max_results)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -515,6 +553,27 @@ impl PyCollection {
         let coll = self.inner.read();
         coll.benchmark_filtered_search(query, k, where_expr, oversample, warmup, iterations)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Compact the collection: physically remove all tombstoned vectors,
+    /// rewrite vectors.bin and id_map.bin, rebuild index if present.
+    /// Returns the number of vectors removed.
+    fn compact(&self) -> PyResult<usize> {
+        let mut coll = self.inner.write();
+        coll.compact()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Check whether a user ID exists in the collection.
+    fn is_id_exists(&self, user_id: u64) -> PyResult<bool> {
+        let coll = self.inner.read();
+        Ok(coll.is_id_exists(user_id))
+    }
+
+    /// Return the maximum user ID stored in the collection, or -1 if empty.
+    fn max_id(&self) -> PyResult<i64> {
+        let coll = self.inner.read();
+        Ok(coll.max_id().map(|id| id as i64).unwrap_or(-1))
     }
 
     /// Delete the collection from disk.
@@ -575,7 +634,10 @@ impl PySearchResult {
     }
 
     /// Get (ids, distances, fields) tuple for Python unpacking.
-    fn to_tuple<'py>(&self, py: Python<'py>) -> PyResult<(
+    fn to_tuple<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(
         Bound<'py, PyArray1<i64>>,
         Bound<'py, PyArray1<f32>>,
         Bound<'py, PyList>,
@@ -611,11 +673,8 @@ pub struct PyFlatIndex {
 impl PyFlatIndex {
     #[new]
     fn new(path: &str, dim: usize) -> PyResult<Self> {
-        let inner = crate::storage::flat_mmap::FlatMmap::open(
-            std::path::Path::new(path),
-            dim,
-        )
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let inner = crate::storage::flat_mmap::FlatMmap::open(std::path::Path::new(path), dim)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
 
@@ -633,11 +692,9 @@ impl PyFlatIndex {
     /// Write vectors from a contiguous numpy array (n_vectors × dim).
     fn write(&mut self, data: PyReadonlyArray2<f32>) -> PyResult<()> {
         let arr = data.as_array();
-        let flat = arr
-            .as_slice()
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                "numpy array must be contiguous (C-order)"
-            ))?;
+        let flat = arr.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("numpy array must be contiguous (C-order)")
+        })?;
         self.inner
             .write(flat)
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
@@ -666,10 +723,7 @@ impl PyFlatIndex {
         })?;
         let q = query.as_slice()?;
         let (ids, dists) = self.inner.search(q, k, metric, false);
-        Ok((
-            ids.into_pyarray_bound(py),
-            dists.into_pyarray_bound(py),
-        ))
+        Ok((ids.into_pyarray_bound(py), dists.into_pyarray_bound(py)))
     }
 
     /// Batch search: multiple queries against the same data.
@@ -694,11 +748,9 @@ impl PyFlatIndex {
         })?;
         let arr = queries.as_array();
         let dim = arr.ncols();
-        let flat = arr
-            .as_slice()
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                "numpy array must be contiguous (C-order)"
-            ))?;
+        let flat = arr.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("numpy array must be contiguous (C-order)")
+        })?;
         let n_queries = arr.nrows();
 
         // Sequential search (each search already uses rayon internally)
@@ -706,11 +758,10 @@ impl PyFlatIndex {
         for q in 0..n_queries {
             let q_start = q * dim;
             let q_end = q_start + dim;
-            let (ids, dists) = self.inner.search(&flat[q_start..q_end], k, metric_enum, false);
-            results.push((
-                ids.into_pyarray_bound(py),
-                dists.into_pyarray_bound(py),
-            ));
+            let (ids, dists) = self
+                .inner
+                .search(&flat[q_start..q_end], k, metric_enum, false);
+            results.push((ids.into_pyarray_bound(py), dists.into_pyarray_bound(py)));
         }
         Ok(results)
     }
@@ -748,11 +799,9 @@ impl PyIvfFlatIndex {
             pyo3::exceptions::PyValueError::new_err(format!("Unknown metric: {}", metric))
         })?;
         let arr = data.as_array();
-        let flat = arr
-            .as_slice()
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                "numpy array must be contiguous (C-order)"
-            ))?;
+        let flat = arr.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("numpy array must be contiguous (C-order)")
+        })?;
         let inner = crate::storage::ivf_flat_mmap::IvfFlatMmap::build(
             std::path::Path::new(path),
             flat,
@@ -768,11 +817,9 @@ impl PyIvfFlatIndex {
     /// Open an existing IVF_FLAT index.
     #[staticmethod]
     fn open(path: &str, dim: usize) -> PyResult<Self> {
-        let inner = crate::storage::ivf_flat_mmap::IvfFlatMmap::open(
-            std::path::Path::new(path),
-            dim,
-        )
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let inner =
+            crate::storage::ivf_flat_mmap::IvfFlatMmap::open(std::path::Path::new(path), dim)
+                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
 
@@ -811,10 +858,7 @@ impl PyIvfFlatIndex {
         })?;
         let q = query.as_slice()?;
         let (ids, dists) = self.inner.search(q, k, nprobe, metric);
-        Ok((
-            ids.into_pyarray_bound(py),
-            dists.into_pyarray_bound(py),
-        ))
+        Ok((ids.into_pyarray_bound(py), dists.into_pyarray_bound(py)))
     }
 }
 
@@ -837,7 +881,9 @@ fn py_compute_distance(
             "Vector dimensions must match",
         ));
     }
-    Ok(crate::distance::compute_distance_f32(a_slice, b_slice, metric))
+    Ok(crate::distance::compute_distance_f32(
+        a_slice, b_slice, metric,
+    ))
 }
 
 /// Top-k search: find k nearest vectors from candidates.
@@ -865,10 +911,7 @@ fn py_top_k_search<'py>(
 
     let (ids, dists) = crate::distance::top_k_search(q, flat, dim, k, metric);
 
-    Ok((
-        ids.into_pyarray_bound(py),
-        dists.into_pyarray_bound(py),
-    ))
+    Ok((ids.into_pyarray_bound(py), dists.into_pyarray_bound(py)))
 }
 
 // ─── DatabaseManager binding ─────────────────────────────────────────────────
@@ -885,16 +928,20 @@ impl PyDatabaseManager {
     fn new(root_path: &str) -> PyResult<Self> {
         let mgr = DatabaseManager::new(Path::new(root_path))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(Self { inner: Arc::new(mgr) })
+        Ok(Self {
+            inner: Arc::new(mgr),
+        })
     }
 
     fn create_database(&self, name: &str) -> PyResult<()> {
-        self.inner.create_database(name)
+        self.inner
+            .create_database(name)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
     fn drop_database(&self, name: &str) -> PyResult<()> {
-        self.inner.drop_database(name)
+        self.inner
+            .drop_database(name)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -907,7 +954,8 @@ impl PyDatabaseManager {
     }
 
     fn show_collections(&self, db_name: &str) -> PyResult<Vec<String>> {
-        self.inner.show_collections(db_name)
+        self.inner
+            .show_collections(db_name)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -920,23 +968,27 @@ impl PyDatabaseManager {
         drop_if_exists: Option<bool>,
         description: Option<&str>,
     ) -> PyResult<()> {
-        self.inner.require_collection(
-            db_name,
-            collection_name,
-            dim,
-            100_000,
-            drop_if_exists.unwrap_or(false),
-            description,
-        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        self.inner
+            .require_collection(
+                db_name,
+                collection_name,
+                dim,
+                100_000,
+                drop_if_exists.unwrap_or(false),
+                description,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
     fn drop_collection(&self, db_name: &str, collection_name: &str) -> PyResult<()> {
-        self.inner.drop_collection(db_name, collection_name)
+        self.inner
+            .drop_collection(db_name, collection_name)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
     fn collection_exists(&self, db_name: &str, collection_name: &str) -> PyResult<bool> {
-        self.inner.collection_exists(db_name, collection_name)
+        self.inner
+            .collection_exists(db_name, collection_name)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -947,7 +999,8 @@ impl PyDatabaseManager {
         collection_name: &str,
         description: Option<&str>,
     ) -> PyResult<()> {
-        self.inner.update_collection_description(db_name, collection_name, description)
+        self.inner
+            .update_collection_description(db_name, collection_name, description)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -958,11 +1011,15 @@ impl PyDatabaseManager {
         collection_name: &str,
         dim: usize,
     ) -> PyResult<PyCollection> {
-        self.inner.get_or_open_database(db_name)
+        self.inner
+            .get_or_open_database(db_name)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        let coll = self.inner.with_database(db_name, |engine| {
-            engine.get_or_open_collection(collection_name, dim, 100_000)
-        }).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let coll = self
+            .inner
+            .with_database(db_name, |engine| {
+                engine.get_or_open_collection(collection_name, dim, 100_000)
+            })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(PyCollection { inner: coll })
     }
 
@@ -972,9 +1029,13 @@ impl PyDatabaseManager {
         db_name: &str,
         collection_name: &str,
     ) -> PyResult<Option<(usize, usize, Option<String>)>> {
-        let configs = self.inner.get_collection_configs(db_name)
+        let configs = self
+            .inner
+            .get_collection_configs(db_name)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(configs.get(collection_name).map(|c| (c.dim, c.chunk_size, c.description.clone())))
+        Ok(configs
+            .get(collection_name)
+            .map(|c| (c.dim, c.chunk_size, c.description.clone())))
     }
 
     fn root_path(&self) -> String {
@@ -986,12 +1047,18 @@ impl PyDatabaseManager {
 
 /// Start the HTTP server (blocking). Releases GIL so other Python threads can run.
 #[pyfunction]
-#[pyo3(signature = (host="127.0.0.1", port=7637, root_path="."))]
-fn py_start_server(py: Python<'_>, host: &str, port: u16, root_path: &str) -> PyResult<()> {
+#[pyo3(signature = (host="127.0.0.1", port=7637, root_path=".", api_key=None))]
+fn py_start_server(
+    py: Python<'_>,
+    host: &str,
+    port: u16,
+    root_path: &str,
+    api_key: Option<String>,
+) -> PyResult<()> {
     let host = host.to_string();
     let root_path = root_path.to_string();
     py.allow_threads(move || {
-        crate::server::run_server(&host, port, &root_path)
+        crate::server::run_server(&host, port, &root_path, api_key)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     })
 }
@@ -999,17 +1066,18 @@ fn py_start_server(py: Python<'_>, host: &str, port: u16, root_path: &str) -> Py
 /// Start the HTTP server in a background thread.
 /// Returns immediately. The server runs until the process exits.
 #[pyfunction]
-#[pyo3(signature = (host="127.0.0.1", port=7637, root_path="."))]
+#[pyo3(signature = (host="127.0.0.1", port=7637, root_path=".", api_key=None))]
 fn py_start_server_background(
     py: Python<'_>,
     host: &str,
     port: u16,
     root_path: &str,
+    api_key: Option<String>,
 ) -> PyResult<()> {
     let host = host.to_string();
     let root_path = root_path.to_string();
     py.allow_threads(move || {
-        crate::server::start_server_background(host, port, root_path);
+        crate::server::start_server_background(host, port, root_path, api_key);
     });
     // Give server a moment to start
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -1032,6 +1100,35 @@ fn fields_to_pylist<'py>(
         list.append(dict)?;
     }
     Ok(list)
+}
+
+fn py_fields_to_json(
+    fields: Option<&Bound<'_, PyList>>,
+    expected_len: usize,
+) -> PyResult<Option<Vec<HashMap<String, serde_json::Value>>>> {
+    let Some(field_list) = fields else {
+        return Ok(None);
+    };
+    if field_list.len() != expected_len {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "fields length ({}) must match vector count ({})",
+            field_list.len(),
+            expected_len
+        )));
+    }
+
+    let mut result: Vec<HashMap<String, serde_json::Value>> = Vec::with_capacity(expected_len);
+    for item in field_list.iter() {
+        let dict = item.downcast::<PyDict>()?;
+        let mut map = HashMap::new();
+        for (key, value) in dict.iter() {
+            let k: String = key.extract()?;
+            let v = py_to_json_value(&value)?;
+            map.insert(k, v);
+        }
+        result.push(map);
+    }
+    Ok(Some(result))
 }
 
 /// Convert a Python object to serde_json::Value.

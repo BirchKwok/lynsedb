@@ -92,13 +92,14 @@ class HTTPClient:
     """
     The HTTPClient class is used to interact with the LynseDB server.
     """
-    def __init__(self, uri, database_name):
+    def __init__(self, uri, database_name, api_key=None):
         """
         Initialize the client.
 
         Parameters:
             uri (str): The URI of the server, must start with "http://" or "https://".
             database_name (str): The name of the database.
+            api_key (str or None): Optional Bearer token for authorization.
 
         Raises:
             TypeError: If the URI is not a string.
@@ -107,10 +108,14 @@ class HTTPClient:
         """
 
         raise_if(TypeError, not isinstance(uri, str), 'The URI must be a string.')
-        raise_if(ValueError, not uri.startswith('http://') or uri.startswith('https://'),
+        raise_if(ValueError, not (uri.startswith('http://') or uri.startswith('https://')),
                  'The URI must start with "http://" or "https://".')
 
-        self._session = httpx.Client()
+        headers = {}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+        self._session = httpx.Client(headers=headers)
+        self._api_key = api_key
 
         if uri.endswith('/'):
             self.uri = uri[:-1]
@@ -166,7 +171,7 @@ class HTTPClient:
                 del data['collection_name']
                 del data['database_name']
                 collection = Collection(uri=self.uri, database_name=self.database_name,
-                                        collection_name=collection, **data)
+                                        collection_name=collection, api_key=self._api_key, **data)
                 return collection
             else:
                 raise_error_response(response)
@@ -200,7 +205,7 @@ class HTTPClient:
             params.update({'warm_up': warm_up})
 
             return Collection(uri=self.uri, database_name=self.database_name, collection_name=collection,
-                              **params)
+                              api_key=self._api_key, **params)
         else:
             raise_error_response(response)
 
@@ -431,7 +436,8 @@ class Collection:
         self._uri = uri
         self._database_name = database_name
         self._collection_name = collection_name
-        self._session = Poster()
+        api_key = params.pop('api_key', None)
+        self._session = Poster(api_key=api_key)
         self._init_params = params
 
         self.COMMIT_FLAG = False
@@ -572,6 +578,32 @@ class Collection:
 
         return items
 
+    @staticmethod
+    def _check_upsert_items(vectors):
+        items = []
+        for vector in vectors:
+            raise_if(TypeError, not isinstance(vector, tuple), 'Each item must be a tuple of vector, '
+                                                               'ID, and fields(optional).')
+            vec_len = len(vector)
+
+            if vec_len == 3:
+                v1, v2, v3 = vector
+                items.append({
+                    "vector": v1.tolist() if isinstance(v1, np.ndarray) else v1,
+                    "id": v2,
+                    "field": v3,
+                })
+            elif vec_len == 2:
+                v1, v2 = vector
+                items.append({
+                    "vector": v1.tolist() if isinstance(v1, np.ndarray) else v1,
+                    "id": v2,
+                })
+            else:
+                raise TypeError('Each item must be a tuple of vector, ID, and fields(optional).')
+
+        return items
+
     def bulk_add_items(
             self,
             vectors: List[Union[
@@ -624,6 +656,79 @@ class Collection:
                 "items": items_after_checking,
             }
 
+            response = self._session.post(uri, json=data)
+
+            if response.status_code == 200:
+                self.COMMIT_FLAG = False
+                ids.extend(response.json()['params']['ids'])
+            else:
+                raise_error_response(response)
+
+        return ids
+
+    def upsert_item(self, vector: Union[list[float], np.ndarray], id: int, *,
+                    field: Union[dict, None] = None):
+        """
+        Insert or update a single item by ID.
+
+        Existing IDs are updated in place. Missing IDs are inserted. If
+        ``field`` is provided, it replaces the current fields for that ID.
+        """
+        item = {
+            "vector": vector if isinstance(vector, list) else vector.tolist(),
+            "id": id,
+        }
+        if field is not None:
+            item["field"] = field
+
+        uri = f'{self._uri}/upsert_items'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "items": [item],
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            self.COMMIT_FLAG = False
+            return response.json()['params']['ids'][0]
+        else:
+            raise_error_response(response)
+
+    def upsert_items(
+            self,
+            vectors: List[Union[
+                Tuple[Union[List, Tuple, np.ndarray], int, dict],
+                Tuple[Union[List, Tuple, np.ndarray], int]
+            ]],
+            batch_size: int = 1000,
+            enable_progress_bar: bool = True
+    ):
+        """
+        Insert or update multiple items by ID.
+
+        Two-tuples ``(vector, id)`` preserve existing fields. Three-tuples
+        ``(vector, id, field)`` replace fields for that ID.
+        """
+        uri = f'{self._uri}/upsert_items'
+        total_batches = (len(vectors) + batch_size - 1) // batch_size
+        ids = []
+
+        if enable_progress_bar:
+            iter_obj = trange(total_batches, desc='Upserting items', unit='batch')
+        else:
+            iter_obj = range(total_batches)
+
+        for i in iter_obj:
+            start = i * batch_size
+            end = (i + 1) * batch_size
+            items = vectors[start:end]
+            items_after_checking = self._check_upsert_items(items)
+
+            data = {
+                "database_name": self._database_name,
+                "collection_name": self._collection_name,
+                "items": items_after_checking,
+            }
             response = self._session.post(uri, json=data)
 
             if response.status_code == 200:
@@ -691,6 +796,23 @@ class Collection:
 
         return added
 
+    def _flush_pending_items(self):
+        if self._mesosphere_list.empty():
+            return
+
+        uri = f'{self._uri}/bulk_add_items'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "items": list(self._mesosphere_list.queue),
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            self.COMMIT_FLAG = False
+            self._mesosphere_list = queue.Queue()
+        else:
+            raise_error_response(response)
+
     def commit(self):
         """
         Commit the changes in the collection.
@@ -731,6 +853,50 @@ class Collection:
                     raise_error_response(status_response)
 
                 time.sleep(2)
+        else:
+            raise_error_response(response)
+
+    def flush(self):
+        """Flush pending bytes and fsync collection files without clearing WAL."""
+        uri = f'{self._uri}/flush'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name}
+
+        if not self._mesosphere_list.empty():
+            self._flush_pending_items()
+
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def checkpoint(self):
+        """Checkpoint durable state and clear WAL."""
+        uri = f'{self._uri}/checkpoint'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name}
+
+        if not self._mesosphere_list.empty():
+            self._flush_pending_items()
+
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            self.COMMIT_FLAG = True
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def close(self):
+        """Flush and close the collection handle from an API perspective."""
+        uri = f'{self._uri}/close_collection'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name}
+
+        if not self._mesosphere_list.empty():
+            self._flush_pending_items()
+
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            self.COMMIT_FLAG = True
+            return response.json()
         else:
             raise_error_response(response)
 
@@ -1286,6 +1452,123 @@ class Collection:
 
         if response.status_code == 200:
             return response.json()['params']['collection_path']
+        else:
+            raise_error_response(response)
+
+    def delete_items(self, ids):
+        """
+        Soft-delete vectors by ID.
+
+        Deleted IDs are excluded from all future search results.
+
+        Parameters:
+            ids (list[int]): External IDs to soft-delete.
+        """
+        uri = f'{self._uri}/delete_items'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "ids": [int(i) for i in ids],
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code != 200:
+            raise_error_response(response)
+
+    def restore_items(self, ids):
+        """
+        Restore previously soft-deleted vectors.
+
+        Parameters:
+            ids (list[int]): External IDs to restore.
+        """
+        uri = f'{self._uri}/restore_items'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "ids": [int(i) for i in ids],
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code != 200:
+            raise_error_response(response)
+
+    def list_deleted_ids(self):
+        """
+        Return the sorted list of all currently soft-deleted IDs.
+
+        Returns:
+            list[int]: Sorted list of soft-deleted external IDs.
+        """
+        uri = f'{self._uri}/list_deleted_ids'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name}
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()['params']['ids']
+        else:
+            raise_error_response(response)
+
+    def search_range(self, vector, threshold, max_results=1000):
+        """
+        Range search: return all non-deleted vectors within a distance threshold.
+
+        For L2 metric: returns IDs where distance <= threshold.
+        For IP / Cosine: returns IDs where score >= threshold.
+
+        Parameters:
+            vector (np.ndarray): Query vector of shape (dim,).
+            threshold (float): Distance / score threshold.
+            max_results (int): Maximum number of results to return (default 1000).
+
+        Returns:
+            tuple: (ids, distances) as numpy arrays.
+        """
+        import numpy as np
+        uri = f'{self._uri}/search_range'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "vector": np.asarray(vector, dtype=np.float32).tolist(),
+            "threshold": float(threshold),
+            "max_results": int(max_results),
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            result = response.json()['params']['result']
+            ids = np.array(result['ids'], dtype=np.int64)
+            dists = np.array(result['distances'], dtype=np.float32)
+            from ...result_view import ResultView
+            return ResultView(
+                ids=ids, distances=dists,
+                k=len(ids),
+                result_type="search",
+            )
+        else:
+            raise_error_response(response)
+
+    def compact(self) -> int:
+        """Physically remove all tombstoned vectors and rebuild storage.
+
+        Returns:
+            int: Number of vectors physically removed.
+        """
+        uri = f'{self._uri}/compact'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name}
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()['params']['vectors_removed']
+        else:
+            raise_error_response(response)
+
+    def stats(self) -> dict:
+        """Return collection statistics.
+
+        Returns:
+            dict: n_vectors, n_live, n_tombstoned, dimension, index_mode, max_id.
+        """
+        uri = f'{self._uri}/stats'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name}
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()['params']['stats']
         else:
             raise_error_response(response)
 

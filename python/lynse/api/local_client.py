@@ -243,7 +243,7 @@ class LocalCollection:
         if buffer_size == 0:
             vec = np.ascontiguousarray(vector, dtype=np.float32).reshape(1, -1)
             fields = [field] if field else None
-            self._rust_coll.add_items(vec, fields)
+            self._rust_coll.add_items(vec, [int(id)], fields)
             self.COMMIT_FLAG = False
             return id
         else:
@@ -265,9 +265,10 @@ class LocalCollection:
         if not items:
             return
         vectors = np.array([item['vector'] for item in items], dtype=np.float32)
+        ids = [int(item['id']) for item in items]
         fields = [item.get('field', {}) for item in items]
         has_fields = any(f for f in fields)
-        self._rust_coll.add_items(vectors, fields if has_fields else None)
+        self._rust_coll.add_items(vectors, ids, fields if has_fields else None)
         self.COMMIT_FLAG = False
         self._mesosphere_list = queue.Queue()
 
@@ -324,7 +325,8 @@ class LocalCollection:
                 batch_ids.append(vid)
 
             vec_array = np.array(batch_vecs, dtype=np.float32)
-            self._rust_coll.add_items(vec_array, batch_fields if has_fields else None)
+            int_ids = [int(vid) for vid in batch_ids]
+            self._rust_coll.add_items(vec_array, int_ids, batch_fields if has_fields else None)
             self.COMMIT_FLAG = False
             ids.extend(batch_ids)
 
@@ -362,15 +364,104 @@ class LocalCollection:
         else:
             iter_obj = range(total_batches)
 
+        offset = self._rust_coll.max_id()
+        start_id = int(offset) + 1 if offset >= 0 else 0
+
         for i in iter_obj:
             start = i * batch_size
             end = min((i + 1) * batch_size, n_total)
             batch = vectors[start:end]
-            self._rust_coll.add_items(batch, None)
+            n_batch = batch.shape[0]
+            seq_ids = list(range(start_id, start_id + n_batch))
+            self._rust_coll.add_items(batch, seq_ids, None)
+            start_id += n_batch
             self.COMMIT_FLAG = False
-            added += batch.shape[0]
+            added += n_batch
 
         return added
+
+    def upsert_item(self, vector: Union[list, np.ndarray], id: int, *,
+                    field: Union[dict, None] = None):
+        """
+        Insert or update a single item by ID.
+
+        Existing IDs are updated in place. Missing IDs are inserted. If
+        ``field`` is provided, it replaces the current fields for that row; if
+        omitted, existing fields are preserved.
+        """
+        vec = np.ascontiguousarray(vector, dtype=np.float32).reshape(1, -1)
+        fields = [field] if field is not None else None
+        self._rust_coll.upsert_items([int(id)], vec, fields)
+        self.COMMIT_FLAG = False
+        return id
+
+    def upsert_items(
+            self,
+            vectors: List[Union[
+                Tuple[Union[List, Tuple, np.ndarray], int, dict],
+                Tuple[Union[List, Tuple, np.ndarray], int]
+            ]],
+            batch_size: int = 1000,
+            enable_progress_bar: bool = True
+    ):
+        """
+        Insert or update multiple items by ID.
+
+        Two-tuples ``(vector, id)`` update only the vector and preserve existing
+        fields. Three-tuples ``(vector, id, field)`` replace fields for that ID.
+        """
+        total_batches = (len(vectors) + batch_size - 1) // batch_size
+        ids = []
+
+        if enable_progress_bar:
+            iter_obj = trange(total_batches, desc='Upserting items', unit='batch')
+        else:
+            iter_obj = range(total_batches)
+
+        for i in iter_obj:
+            start = i * batch_size
+            end = (i + 1) * batch_size
+            items = vectors[start:end]
+
+            vecs_with_fields = []
+            ids_with_fields = []
+            fields_with_fields = []
+            vecs_without_fields = []
+            ids_without_fields = []
+            seen_ids = set()
+
+            for item in items:
+                if not isinstance(item, tuple):
+                    raise TypeError('Each item must be a tuple of vector, ID, and fields(optional).')
+                if len(item) == 3:
+                    v, vid, vf = item
+                    if int(vid) in seen_ids:
+                        raise ValueError(f'duplicate id {vid} within the same upsert batch')
+                    seen_ids.add(int(vid))
+                    vecs_with_fields.append(v if isinstance(v, np.ndarray) else np.array(v, dtype=np.float32))
+                    ids_with_fields.append(int(vid))
+                    fields_with_fields.append(vf)
+                    ids.append(vid)
+                elif len(item) == 2:
+                    v, vid = item
+                    if int(vid) in seen_ids:
+                        raise ValueError(f'duplicate id {vid} within the same upsert batch')
+                    seen_ids.add(int(vid))
+                    vecs_without_fields.append(v if isinstance(v, np.ndarray) else np.array(v, dtype=np.float32))
+                    ids_without_fields.append(int(vid))
+                    ids.append(vid)
+                else:
+                    raise TypeError('Each item must be a tuple of vector, ID, and fields(optional).')
+
+            if vecs_without_fields:
+                vec_array = np.array(vecs_without_fields, dtype=np.float32)
+                self._rust_coll.upsert_items(ids_without_fields, vec_array, None)
+            if vecs_with_fields:
+                vec_array = np.array(vecs_with_fields, dtype=np.float32)
+                self._rust_coll.upsert_items(ids_with_fields, vec_array, fields_with_fields)
+            self.COMMIT_FLAG = False
+
+        return ids
 
     def commit(self):
         """Commit the changes in the collection."""
@@ -380,22 +471,64 @@ class LocalCollection:
         self.COMMIT_FLAG = True
         return {'status': 'success'}
 
-    def is_id_exists(self, id: int):
-        """Check if an ID exists in the collection."""
-        # Use query_fields or retrieve_fields to check
-        try:
-            fields = self._rust_coll.retrieve_fields([id])
-            return len(fields) > 0
-        except Exception:
-            return False
+    def flush(self):
+        """Flush pending bytes and fsync collection files without clearing WAL."""
+        if not self._mesosphere_list.empty():
+            self._flush_buffer()
+        self._rust_coll.flush()
+        return {'status': 'success'}
+
+    def checkpoint(self):
+        """Checkpoint durable state and clear WAL."""
+        if not self._mesosphere_list.empty():
+            self._flush_buffer()
+        self._rust_coll.checkpoint()
+        self.COMMIT_FLAG = True
+        return {'status': 'success'}
+
+    def close(self):
+        """Flush and close the collection handle from an API perspective."""
+        if not self._mesosphere_list.empty():
+            self._flush_buffer()
+        self._rust_coll.close()
+        self.COMMIT_FLAG = True
+        return {'status': 'success'}
+
+    def is_id_exists(self, id: int) -> bool:
+        """Check if a user ID exists in the collection."""
+        return self._rust_coll.is_id_exists(int(id))
 
     @property
-    def max_id(self):
-        """Get the maximum ID in the collection."""
-        n_rows, _ = self._rust_coll.shape
-        if n_rows == 0:
-            return -1
-        return int(n_rows - 1)
+    def max_id(self) -> int:
+        """Return the maximum user ID stored in the collection, or -1 if empty."""
+        return self._rust_coll.max_id()
+
+    def compact(self) -> int:
+        """Physically remove all tombstoned vectors and rebuild storage.
+
+        Returns:
+            int: Number of vectors physically removed.
+        """
+        return self._rust_coll.compact()
+
+    def stats(self) -> dict:
+        """Return collection statistics.
+
+        Returns:
+            dict: n_vectors, n_live, n_tombstoned, dimension, index_mode, max_id.
+        """
+        n_vectors, dimension = self._rust_coll.shape
+        deleted = self._rust_coll.list_deleted_ids()
+        n_tombstoned = len(deleted)
+        n_live = max(0, n_vectors - n_tombstoned)
+        return {
+            'n_vectors': n_vectors,
+            'n_live': n_live,
+            'n_tombstoned': n_tombstoned,
+            'dimension': dimension,
+            'index_mode': self._rust_coll.index_mode or 'none',
+            'max_id': self._rust_coll.max_id(),
+        }
 
     def build_index(self, index_mode: str = 'FLAT', **kwargs):
         """
@@ -619,6 +752,88 @@ class LocalCollection:
             fields = []
 
         return ResultView(ids=ids_arr, fields=fields, result_type="query")
+
+    def query_vectors(self, where=None, filter_ids=None):
+        """
+        Query vectors by field filter or ID list.
+
+        Parameters:
+            where (str or None): SQL/WHERE expression string to filter fields.
+            filter_ids (list[int] or None): List of external IDs to retrieve.
+
+        Returns:
+            ResultView: Data result with vectors, ids, and fields.
+        """
+        if where is not None:
+            ids, fields = self._rust_coll.query_with_fields(where)
+            ids_arr = np.array(ids, dtype=np.int64) if ids else np.array([], dtype=np.int64)
+        elif filter_ids is not None:
+            ids = [int(i) for i in filter_ids]
+            ids_arr = np.array(ids, dtype=np.int64)
+            fields = [dict(f) for f in self._rust_coll.retrieve_fields(ids)] if ids else []
+        else:
+            ids = []
+            ids_arr = np.array([], dtype=np.int64)
+            fields = []
+
+        if len(ids_arr) == 0:
+            return ResultView(
+                vectors=np.empty((0, self._rust_coll.dimension), dtype=np.float32),
+                ids=ids_arr, fields=[], result_type="data",
+            )
+
+        vecs = self._rust_coll.get_vectors(ids_arr.tolist())
+        return ResultView(vectors=vecs, ids=ids_arr, fields=list(fields), result_type="data")
+
+    def delete_items(self, ids):
+        """
+        Soft-delete vectors by ID.
+
+        Deleted IDs are excluded from all future search results. The raw vector
+        data is NOT physically removed from disk; it is only tombstoned in memory
+        and persisted as ``tombstone.bin``.
+
+        Parameters:
+            ids (list[int]): External IDs to soft-delete.
+        """
+        self._rust_coll.delete_items([int(i) for i in ids])
+
+    def restore_items(self, ids):
+        """
+        Restore previously soft-deleted vectors.
+
+        Parameters:
+            ids (list[int]): External IDs to restore.
+        """
+        self._rust_coll.restore_items([int(i) for i in ids])
+
+    def list_deleted_ids(self):
+        """
+        Return the sorted list of all currently soft-deleted IDs.
+
+        Returns:
+            list[int]: Sorted list of soft-deleted external IDs.
+        """
+        return list(self._rust_coll.list_deleted_ids())
+
+    def search_range(self, vector, threshold, max_results=1000):
+        """
+        Range search: return all non-deleted vectors within a distance threshold.
+
+        For L2 metric: returns IDs where distance <= threshold.
+        For IP / Cosine: returns IDs where score >= threshold.
+
+        Parameters:
+            vector (np.ndarray): Query vector of shape (dim,).
+            threshold (float): Distance / score threshold.
+            max_results (int): Maximum number of results to return (default 1000).
+
+        Returns:
+            ResultView: Search results with ids and distances.
+        """
+        import numpy as np
+        vec = np.asarray(vector, dtype=np.float32)
+        return self._rust_coll.search_range(vec, float(threshold), int(max_results))
 
     def list_fields(self):
         """List all fields of a collection."""

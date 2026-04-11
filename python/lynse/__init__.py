@@ -21,7 +21,7 @@ class VectorDBClient:
     - **When `uri` is a remote URL**: Connects to an existing remote Rust HTTP server.
     """
 
-    def __init__(self, uri: Union[str, None, Path] = None):
+    def __init__(self, uri: Union[str, None, Path] = None, api_key: str = None):
         """
         Initialize the LynseDB client.
 
@@ -33,6 +33,10 @@ class VectorDBClient:
                     The path refers to the root path of the LynseDB storage.
                - If set to None, the Rust backend is used with the default root path.
 
+            api_key (str or None): Optional API key for HTTP server authentication.
+               When provided, all HTTP requests include an ``Authorization: Bearer <api_key>`` header.
+               Ignored in local (non-HTTP) mode.
+
         """
         if isinstance(uri, Path):
             uri = uri.as_posix()
@@ -40,12 +44,18 @@ class VectorDBClient:
         self._is_remote = uri is not None and isinstance(uri, str) and (
             uri.startswith('http://') or uri.startswith('https://')
         )
+        self._api_key = api_key
 
         if self._is_remote:
             import httpx
+            headers = {}
+            if api_key:
+                headers['Authorization'] = f'Bearer {api_key}'
             # Connect to existing remote server
             try:
-                response = httpx.get(uri)
+                response = httpx.get(uri, headers=headers)
+                if response.status_code == 401:
+                    raise ConnectionError('Authentication failed: invalid api_key.')
                 if response.status_code != 200:
                     raise ConnectionError(f'Failed to connect to the server at {uri}.')
                 rj = response.json()
@@ -60,7 +70,9 @@ class VectorDBClient:
 
             # Persistent connection pool for remote HTTP requests
             transport = httpx.HTTPTransport(retries=3)
-            self._client = httpx.Client(transport=transport, timeout=300, base_url=self._uri)
+            self._client = httpx.Client(
+                transport=transport, timeout=300, base_url=self._uri, headers=headers
+            )
         else:
             # Local mode: direct Rust backend, no HTTP overhead
             from .configs.config import config
@@ -127,7 +139,7 @@ class VectorDBClient:
                 'database_name': database_name,
                 'drop_if_exists': drop_if_exists,
             })
-            return HTTPClient(uri=self._uri, database_name=database_name)
+            return HTTPClient(uri=self._uri, database_name=database_name, api_key=self._api_key)
         else:
             from .api.local_client import LocalClient
 
@@ -152,7 +164,7 @@ class VectorDBClient:
 
         if self._is_remote:
             from .api.http_api.client_api import HTTPClient
-            return HTTPClient(uri=self._uri, database_name=database_name)
+            return HTTPClient(uri=self._uri, database_name=database_name, api_key=self._api_key)
         else:
             from .api.local_client import LocalClient
             return LocalClient(manager=self._manager, database_name=database_name)

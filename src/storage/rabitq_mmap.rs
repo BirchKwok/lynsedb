@@ -22,9 +22,9 @@
 
 use crate::distance::DistanceMetric;
 use crate::storage::pq_mmap::rescore_exact;
-use rayon::prelude::*;
-use rand::{SeedableRng, Rng};
 use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs::File;
@@ -139,7 +139,8 @@ impl RaBitQIndex {
         for (start, chunk_codes, chunk_norms) in results {
             let end = (start + chunk_size).min(n_total);
             let n_in = end - start;
-            codes[start * code_bytes..end * code_bytes].copy_from_slice(&chunk_codes[..n_in * code_bytes]);
+            codes[start * code_bytes..end * code_bytes]
+                .copy_from_slice(&chunk_codes[..n_in * code_bytes]);
             norms[start..end].copy_from_slice(&chunk_norms[..n_in]);
         }
 
@@ -253,10 +254,10 @@ impl RaBitQIndex {
             ));
         }
         let _version = read_u32le(&mut r)?;
-        let dim         = read_u32le(&mut r)? as usize;
-        let padded_dim  = read_u32le(&mut r)? as usize;
-        let n_vectors   = read_u64le(&mut r)? as usize;
-        let code_bytes  = padded_dim / 8;
+        let dim = read_u32le(&mut r)? as usize;
+        let padded_dim = read_u32le(&mut r)? as usize;
+        let n_vectors = read_u64le(&mut r)? as usize;
+        let code_bytes = padded_dim / 8;
 
         let n_sign_words = read_u32le(&mut r)? as usize;
         let mut sign_words = vec![0u64; n_sign_words];
@@ -274,7 +275,15 @@ impl RaBitQIndex {
             *n = f32::from_le_bytes(bytes);
         }
 
-        Ok(RaBitQIndex { dim, padded_dim, code_bytes, sign_words, codes, norms, n_vectors })
+        Ok(RaBitQIndex {
+            dim,
+            padded_dim,
+            code_bytes,
+            sign_words,
+            codes,
+            norms,
+            n_vectors,
+        })
     }
 }
 
@@ -315,7 +324,7 @@ fn fwht(data: &mut [f32]) {
             for j in 0..h {
                 let x = data[i + j];
                 let y = data[i + j + h];
-                data[i + j]     = x + y;
+                data[i + j] = x + y;
                 data[i + j + h] = x - y;
             }
             i += step;
@@ -364,15 +373,21 @@ struct BinEntry {
 }
 
 impl PartialEq for BinEntry {
-    fn eq(&self, other: &Self) -> bool { self.score == other.score }
+    fn eq(&self, other: &Self) -> bool {
+        self.score == other.score
+    }
 }
 impl Eq for BinEntry {}
 impl PartialOrd for BinEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for BinEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.score.partial_cmp(&other.score).unwrap_or(Ordering::Equal)
+        self.score
+            .partial_cmp(&other.score)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -416,8 +431,13 @@ fn binary_scan_topn(
                 let mut heap: BinaryHeap<BinEntry> = BinaryHeap::with_capacity(n_candidates + 1);
                 for i in 0..n_in {
                     let vi = base_idx + i;
-                    let score = compute_binary_score(codes, norms, vi, code_bytes, lut, total_q, padded_dim, true);
-                    let entry = BinEntry { score, idx: vi as u32 };
+                    let score = compute_binary_score(
+                        codes, norms, vi, code_bytes, lut, total_q, padded_dim, true,
+                    );
+                    let entry = BinEntry {
+                        score,
+                        idx: vi as u32,
+                    };
                     if heap.len() < n_candidates {
                         heap.push(entry);
                     } else if let Some(&top) = heap.peek() {
@@ -434,8 +454,13 @@ fn binary_scan_topn(
                     BinaryHeap::with_capacity(n_candidates + 1);
                 for i in 0..n_in {
                     let vi = base_idx + i;
-                    let score = compute_binary_score(codes, norms, vi, code_bytes, lut, total_q, padded_dim, false);
-                    let entry = BinEntry { score, idx: vi as u32 };
+                    let score = compute_binary_score(
+                        codes, norms, vi, code_bytes, lut, total_q, padded_dim, false,
+                    );
+                    let entry = BinEntry {
+                        score,
+                        idx: vi as u32,
+                    };
                     if heap.len() < n_candidates {
                         heap.push(std::cmp::Reverse(entry));
                     } else if let Some(&std::cmp::Reverse(top)) = heap.peek() {
@@ -455,7 +480,16 @@ fn binary_scan_topn(
         .into_iter()
         .flatten()
         .map(|idx| {
-            let score = compute_binary_score(codes, norms, idx as usize, code_bytes, lut, total_q, padded_dim, ascending);
+            let score = compute_binary_score(
+                codes,
+                norms,
+                idx as usize,
+                code_bytes,
+                lut,
+                total_q,
+                padded_dim,
+                ascending,
+            );
             (score, idx)
         })
         .collect();
@@ -589,7 +623,9 @@ mod tests {
             .0;
         assert!(
             ids.contains(&(brute_best as u32)),
-            "exact best {} not in top-10: {:?}", brute_best, ids
+            "exact best {} not in top-10: {:?}",
+            brute_best,
+            ids
         );
     }
 

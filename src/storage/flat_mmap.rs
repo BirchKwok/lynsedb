@@ -11,15 +11,15 @@
 //! 3. Software prefetch — hide memory latency for next vector
 //! 4. Sorted array top-k — less overhead than BinaryHeap for small k
 
-use crate::distance::{self, DistanceMetric};
 use crate::distance::simd;
+use crate::distance::{self, DistanceMetric};
 use memmap2::Mmap;
+use parking_lot::RwLock;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use parking_lot::RwLock;
 
 // ─── Software prefetch ──────────────────────────────────────────────────────
 
@@ -149,16 +149,22 @@ impl FlatMmap {
         if data.is_empty() {
             return Ok(());
         }
-        assert_eq!(data.len() % self.dim, 0, "data length must be multiple of dim");
+        assert_eq!(
+            data.len() % self.dim,
+            0,
+            "data length must be multiple of dim"
+        );
 
         // Drop existing mmap before writing (avoid mmap/write conflict)
         self.mmap = None;
 
         // Append raw bytes
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
-        };
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
         file.write_all(bytes)?;
         file.flush()?;
         drop(file);
@@ -218,15 +224,42 @@ impl FlatMmap {
         if subset_indices.len() <= DIRECT_ACCESS_LIMIT {
             // Strategy 1: Direct random access — O(matches) not O(n)
             return match metric {
-                DistanceMetric::InnerProduct =>
-                    direct_access_topk::<false>(query, candidates, dim, k, n, subset_indices, simd::inner_product_f32),
-                DistanceMetric::L2Squared =>
-                    direct_access_topk::<true>(query, candidates, dim, k, n, subset_indices, simd::l2_squared_f32),
-                DistanceMetric::Cosine =>
-                    direct_access_topk::<true>(query, candidates, dim, k, n, subset_indices, simd::cosine_distance_f32),
-                _ =>
-                    direct_access_topk::<true>(query, candidates, dim, k, n, subset_indices,
-                        |a, b| distance::compute_distance_f32(a, b, metric)),
+                DistanceMetric::InnerProduct => direct_access_topk::<false>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    simd::inner_product_f32,
+                ),
+                DistanceMetric::L2Squared => direct_access_topk::<true>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    simd::l2_squared_f32,
+                ),
+                DistanceMetric::Cosine => direct_access_topk::<true>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    simd::cosine_distance_f32,
+                ),
+                _ => direct_access_topk::<true>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    |a, b| distance::compute_distance_f32(a, b, metric),
+                ),
             };
         }
 
@@ -241,15 +274,46 @@ impl FlatMmap {
         }
 
         match metric {
-            DistanceMetric::InnerProduct =>
-                fused_topk_parallel_filtered::<false>(query, candidates, dim, k, n, &bitset, max_id, simd::inner_product_f32),
-            DistanceMetric::L2Squared =>
-                fused_topk_parallel_filtered::<true>(query, candidates, dim, k, n, &bitset, max_id, simd::l2_squared_f32),
-            DistanceMetric::Cosine =>
-                fused_topk_parallel_filtered::<true>(query, candidates, dim, k, n, &bitset, max_id, simd::cosine_distance_f32),
-            _ =>
-                fused_topk_parallel_filtered::<true>(query, candidates, dim, k, n, &bitset, max_id,
-                    |a, b| distance::compute_distance_f32(a, b, metric)),
+            DistanceMetric::InnerProduct => fused_topk_parallel_filtered::<false>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                simd::inner_product_f32,
+            ),
+            DistanceMetric::L2Squared => fused_topk_parallel_filtered::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                simd::l2_squared_f32,
+            ),
+            DistanceMetric::Cosine => fused_topk_parallel_filtered::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                simd::cosine_distance_f32,
+            ),
+            _ => fused_topk_parallel_filtered::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                |a, b| distance::compute_distance_f32(a, b, metric),
+            ),
         }
     }
 
@@ -276,8 +340,11 @@ impl FlatMmap {
         let candidates = self.as_slice();
 
         // SQ8 two-pass path (only when user explicitly requested SQ8)
-        if use_sq8 && matches!(metric,
-            DistanceMetric::InnerProduct | DistanceMetric::L2Squared | DistanceMetric::Cosine)
+        if use_sq8
+            && matches!(
+                metric,
+                DistanceMetric::InnerProduct | DistanceMetric::L2Squared | DistanceMetric::Cosine
+            )
         {
             self.ensure_sq8();
             let sq8_guard = self.sq8.read();
@@ -288,15 +355,18 @@ impl FlatMmap {
 
         // Full f32 scan
         match metric {
-            DistanceMetric::InnerProduct =>
-                fused_topk_parallel::<false>(query, candidates, dim, k, n, simd::inner_product_f32),
-            DistanceMetric::L2Squared =>
-                fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::l2_squared_f32),
-            DistanceMetric::Cosine =>
-                fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::cosine_distance_f32),
-            _ =>
-                fused_topk_parallel::<true>(query, candidates, dim, k, n,
-                    |a, b| distance::compute_distance_f32(a, b, metric)),
+            DistanceMetric::InnerProduct => {
+                fused_topk_parallel::<false>(query, candidates, dim, k, n, simd::inner_product_f32)
+            }
+            DistanceMetric::L2Squared => {
+                fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::l2_squared_f32)
+            }
+            DistanceMetric::Cosine => {
+                fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::cosine_distance_f32)
+            }
+            _ => fused_topk_parallel::<true>(query, candidates, dim, k, n, |a, b| {
+                distance::compute_distance_f32(a, b, metric)
+            }),
         }
     }
 }
@@ -311,15 +381,21 @@ struct TopKEntry {
 }
 
 impl PartialEq for TopKEntry {
-    fn eq(&self, other: &Self) -> bool { self.dist == other.dist }
+    fn eq(&self, other: &Self) -> bool {
+        self.dist == other.dist
+    }
 }
 impl Eq for TopKEntry {}
 impl PartialOrd for TopKEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for TopKEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.dist.partial_cmp(&other.dist).unwrap_or(Ordering::Equal)
+        self.dist
+            .partial_cmp(&other.dist)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -364,7 +440,11 @@ fn topk_insert<const ASC: bool>(
 /// Check if a distance passes the threshold.
 #[inline(always)]
 fn passes_threshold<const ASC: bool>(dist: f32, threshold: f32) -> bool {
-    if ASC { dist < threshold } else { dist > threshold }
+    if ASC {
+        dist < threshold
+    } else {
+        dist > threshold
+    }
 }
 
 /// Fused parallel distance + sorted-array top-k.
@@ -396,7 +476,11 @@ fn fused_topk_parallel<const ASC: bool>(
             let base_idx = chunk_idx * chunk_vecs;
 
             let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
-            let mut threshold: f32 = if ASC { f32::INFINITY } else { f32::NEG_INFINITY };
+            let mut threshold: f32 = if ASC {
+                f32::INFINITY
+            } else {
+                f32::NEG_INFINITY
+            };
             let mut filled = false;
 
             let mut ptr = cand_chunk.as_ptr();
@@ -410,10 +494,28 @@ fn fused_topk_parallel<const ASC: bool>(
 
                 let idx0 = (base_idx + i * 2) as u32;
                 if !filled || passes_threshold::<ASC>(dist0, threshold) {
-                    topk_insert::<ASC>(&mut top, k, TopKEntry { dist: dist0, idx: idx0 }, &mut threshold, &mut filled);
+                    topk_insert::<ASC>(
+                        &mut top,
+                        k,
+                        TopKEntry {
+                            dist: dist0,
+                            idx: idx0,
+                        },
+                        &mut threshold,
+                        &mut filled,
+                    );
                 }
                 if !filled || passes_threshold::<ASC>(dist1, threshold) {
-                    topk_insert::<ASC>(&mut top, k, TopKEntry { dist: dist1, idx: idx0 + 1 }, &mut threshold, &mut filled);
+                    topk_insert::<ASC>(
+                        &mut top,
+                        k,
+                        TopKEntry {
+                            dist: dist1,
+                            idx: idx0 + 1,
+                        },
+                        &mut threshold,
+                        &mut filled,
+                    );
                 }
                 ptr = unsafe { ptr.add(dim2) };
             }
@@ -422,15 +524,28 @@ fn fused_topk_parallel<const ASC: bool>(
                 let cand = unsafe { std::slice::from_raw_parts(ptr, dim) };
                 let dist = dist_fn(query, cand);
                 if !filled || passes_threshold::<ASC>(dist, threshold) {
-                    topk_insert::<ASC>(&mut top, k, TopKEntry { dist, idx: (base_idx + n_in_chunk - 1) as u32 }, &mut threshold, &mut filled);
+                    topk_insert::<ASC>(
+                        &mut top,
+                        k,
+                        TopKEntry {
+                            dist,
+                            idx: (base_idx + n_in_chunk - 1) as u32,
+                        },
+                        &mut threshold,
+                        &mut filled,
+                    );
                 }
             }
 
             if !filled && !top.is_empty() {
                 if ASC {
-                    top.sort_unstable_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal));
+                    top.sort_unstable_by(|a, b| {
+                        a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal)
+                    });
                 } else {
-                    top.sort_unstable_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal));
+                    top.sort_unstable_by(|a, b| {
+                        b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal)
+                    });
                 }
             }
             top
@@ -451,7 +566,11 @@ fn fused_topk_seq<const ASC: bool>(
 ) -> (Vec<u32>, Vec<f32>) {
     let n = candidates.len() / dim;
     let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
-    let mut threshold: f32 = if ASC { f32::INFINITY } else { f32::NEG_INFINITY };
+    let mut threshold: f32 = if ASC {
+        f32::INFINITY
+    } else {
+        f32::NEG_INFINITY
+    };
     let mut filled = false;
 
     for i in 0..n {
@@ -462,7 +581,16 @@ fn fused_topk_seq<const ASC: bool>(
         let dist = dist_fn(query, cand);
 
         if !filled || passes_threshold::<ASC>(dist, threshold) {
-            topk_insert::<ASC>(&mut top, k, TopKEntry { dist, idx: (base_idx + i) as u32 }, &mut threshold, &mut filled);
+            topk_insert::<ASC>(
+                &mut top,
+                k,
+                TopKEntry {
+                    dist,
+                    idx: (base_idx + i) as u32,
+                },
+                &mut threshold,
+                &mut filled,
+            );
         }
     }
 
@@ -485,7 +613,11 @@ fn merge_topk_results<const ASC: bool>(
     k: usize,
 ) -> (Vec<u32>, Vec<f32>) {
     let mut merged: Vec<TopKEntry> = Vec::with_capacity(k);
-    let mut threshold: f32 = if ASC { f32::INFINITY } else { f32::NEG_INFINITY };
+    let mut threshold: f32 = if ASC {
+        f32::INFINITY
+    } else {
+        f32::NEG_INFINITY
+    };
     let mut filled = false;
 
     for chunk_top in chunk_results {
@@ -526,18 +658,33 @@ fn direct_access_topk<const ASC: bool>(
     dist_fn: impl Fn(&[f32], &[f32]) -> f32,
 ) -> (Vec<u32>, Vec<f32>) {
     let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
-    let mut threshold: f32 = if ASC { f32::INFINITY } else { f32::NEG_INFINITY };
+    let mut threshold: f32 = if ASC {
+        f32::INFINITY
+    } else {
+        f32::NEG_INFINITY
+    };
     let mut filled = false;
 
     for &id in subset_ids {
         let idx = id as usize;
-        if idx >= n_vectors { continue; }
+        if idx >= n_vectors {
+            continue;
+        }
         let start = idx * dim;
         let cand = unsafe { candidates.get_unchecked(start..start + dim) };
         let dist = dist_fn(query, cand);
 
         if !filled || passes_threshold::<ASC>(dist, threshold) {
-            topk_insert::<ASC>(&mut top, k, TopKEntry { dist, idx: idx as u32 }, &mut threshold, &mut filled);
+            topk_insert::<ASC>(
+                &mut top,
+                k,
+                TopKEntry {
+                    dist,
+                    idx: idx as u32,
+                },
+                &mut threshold,
+                &mut filled,
+            );
         }
     }
 
@@ -572,7 +719,11 @@ fn fused_topk_parallel_filtered<const ASC: bool>(
     if n < 4096 {
         // Sequential fallback for small datasets
         let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
-        let mut threshold: f32 = if ASC { f32::INFINITY } else { f32::NEG_INFINITY };
+        let mut threshold: f32 = if ASC {
+            f32::INFINITY
+        } else {
+            f32::NEG_INFINITY
+        };
         let mut filled = false;
 
         for i in 0..n {
@@ -583,7 +734,16 @@ fn fused_topk_parallel_filtered<const ASC: bool>(
             let cand = unsafe { candidates.get_unchecked(start..start + dim) };
             let dist = dist_fn(query, cand);
             if !filled || passes_threshold::<ASC>(dist, threshold) {
-                topk_insert::<ASC>(&mut top, k, TopKEntry { dist, idx: i as u32 }, &mut threshold, &mut filled);
+                topk_insert::<ASC>(
+                    &mut top,
+                    k,
+                    TopKEntry {
+                        dist,
+                        idx: i as u32,
+                    },
+                    &mut threshold,
+                    &mut filled,
+                );
             }
         }
 
@@ -612,13 +772,18 @@ fn fused_topk_parallel_filtered<const ASC: bool>(
             let base_idx = chunk_idx * chunk_vecs;
 
             let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
-            let mut threshold: f32 = if ASC { f32::INFINITY } else { f32::NEG_INFINITY };
+            let mut threshold: f32 = if ASC {
+                f32::INFINITY
+            } else {
+                f32::NEG_INFINITY
+            };
             let mut filled = false;
 
             for i in 0..n_in_chunk {
                 let global_id = base_idx + i;
                 // Bitset check: skip non-matching vectors
-                if global_id > max_id || (bitset[global_id / 64] & (1u64 << (global_id % 64))) == 0 {
+                if global_id > max_id || (bitset[global_id / 64] & (1u64 << (global_id % 64))) == 0
+                {
                     continue;
                 }
 
@@ -627,15 +792,28 @@ fn fused_topk_parallel_filtered<const ASC: bool>(
                 let dist = dist_fn(query, cand);
 
                 if !filled || passes_threshold::<ASC>(dist, threshold) {
-                    topk_insert::<ASC>(&mut top, k, TopKEntry { dist, idx: global_id as u32 }, &mut threshold, &mut filled);
+                    topk_insert::<ASC>(
+                        &mut top,
+                        k,
+                        TopKEntry {
+                            dist,
+                            idx: global_id as u32,
+                        },
+                        &mut threshold,
+                        &mut filled,
+                    );
                 }
             }
 
             if !filled && !top.is_empty() {
                 if ASC {
-                    top.sort_unstable_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal));
+                    top.sort_unstable_by(|a, b| {
+                        a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal)
+                    });
                 } else {
-                    top.sort_unstable_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal));
+                    top.sort_unstable_by(|a, b| {
+                        b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal)
+                    });
                 }
             }
             top
@@ -672,8 +850,12 @@ impl SQ8Data {
             let base = v * dim;
             for d in 0..dim {
                 let val = unsafe { *candidates.get_unchecked(base + d) };
-                if val < mins[d] { mins[d] = val; }
-                if val > maxs[d] { maxs[d] = val; }
+                if val < mins[d] {
+                    mins[d] = val;
+                }
+                if val > maxs[d] {
+                    maxs[d] = val;
+                }
             }
         }
 
@@ -727,10 +909,14 @@ impl SQ8Data {
 #[inline(always)]
 fn sq8_dot_product(a: &[u8], b: &[u8]) -> u32 {
     #[cfg(target_arch = "aarch64")]
-    { return sq8_dot_neon(a, b); }
+    {
+        return sq8_dot_neon(a, b);
+    }
 
     #[cfg(target_arch = "x86_64")]
-    { return sq8_dot_scalar(a, b); }
+    {
+        return sq8_dot_scalar(a, b);
+    }
 
     #[allow(unreachable_code)]
     sq8_dot_scalar(a, b)
@@ -740,10 +926,14 @@ fn sq8_dot_product(a: &[u8], b: &[u8]) -> u32 {
 #[inline(always)]
 fn sq8_l2sq(a: &[u8], b: &[u8]) -> u32 {
     #[cfg(target_arch = "aarch64")]
-    { return sq8_l2sq_neon(a, b); }
+    {
+        return sq8_l2sq_neon(a, b);
+    }
 
     #[cfg(target_arch = "x86_64")]
-    { return sq8_l2sq_scalar(a, b); }
+    {
+        return sq8_l2sq_scalar(a, b);
+    }
 
     #[allow(unreachable_code)]
     sq8_l2sq_scalar(a, b)
@@ -811,15 +1001,21 @@ fn sq8_l2sq_neon(a: &[u8], b: &[u8]) -> u32 {
 
 #[inline]
 fn sq8_dot_scalar(a: &[u8], b: &[u8]) -> u32 {
-    a.iter().zip(b.iter()).map(|(&x, &y)| (x as u32) * (y as u32)).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| (x as u32) * (y as u32))
+        .sum()
 }
 
 #[inline]
 fn sq8_l2sq_scalar(a: &[u8], b: &[u8]) -> u32 {
-    a.iter().zip(b.iter()).map(|(&x, &y)| {
-        let d = (x as i32) - (y as i32);
-        (d * d) as u32
-    }).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| {
+            let d = (x as i32) - (y as i32);
+            (d * d) as u32
+        })
+        .sum()
 }
 
 // ─── SQ8 two-pass search ───────────────────────────────────────────────────
@@ -855,17 +1051,20 @@ fn sq8_two_pass_search(
     };
 
     // Pass 2: exact f32 re-score on candidates
-    let mut exact: Vec<TopKEntry> = candidate_indices.iter().map(|&idx| {
-        let base = (idx as usize) * dim;
-        let cand = unsafe { candidates.get_unchecked(base..base + dim) };
-        let dist = match metric {
-            DistanceMetric::InnerProduct => simd::inner_product_f32(query, cand),
-            DistanceMetric::L2Squared => simd::l2_squared_f32(query, cand),
-            DistanceMetric::Cosine => simd::cosine_distance_f32(query, cand),
-            _ => distance::compute_distance_f32(query, cand, metric),
-        };
-        TopKEntry { dist, idx }
-    }).collect();
+    let mut exact: Vec<TopKEntry> = candidate_indices
+        .iter()
+        .map(|&idx| {
+            let base = (idx as usize) * dim;
+            let cand = unsafe { candidates.get_unchecked(base..base + dim) };
+            let dist = match metric {
+                DistanceMetric::InnerProduct => simd::inner_product_f32(query, cand),
+                DistanceMetric::L2Squared => simd::l2_squared_f32(query, cand),
+                DistanceMetric::Cosine => simd::cosine_distance_f32(query, cand),
+                _ => distance::compute_distance_f32(query, cand, metric),
+            };
+            TopKEntry { dist, idx }
+        })
+        .collect();
 
     // Sort by relevance and take top-k
     let ascending = metric.is_ascending();
@@ -910,11 +1109,16 @@ fn sq8_scan_topn<const ASC: bool>(
                 let mut heap: BinaryHeap<TopKEntry> = BinaryHeap::with_capacity(n_candidates + 1);
                 for i in 0..n_in_chunk {
                     if i + 4 < n_in_chunk {
-                        unsafe { prefetch_read_data(cand_chunk.as_ptr().add((i + 4) * dim)); }
+                        unsafe {
+                            prefetch_read_data(cand_chunk.as_ptr().add((i + 4) * dim));
+                        }
                     }
                     let cand = unsafe { cand_chunk.get_unchecked(i * dim..(i + 1) * dim) };
                     let dist = dist_fn(query_u8, cand) as f32;
-                    let entry = TopKEntry { dist, idx: (base_idx + i) as u32 };
+                    let entry = TopKEntry {
+                        dist,
+                        idx: (base_idx + i) as u32,
+                    };
                     if heap.len() < n_candidates {
                         heap.push(entry);
                     } else if let Some(&top) = heap.peek() {
@@ -931,11 +1135,16 @@ fn sq8_scan_topn<const ASC: bool>(
                     BinaryHeap::with_capacity(n_candidates + 1);
                 for i in 0..n_in_chunk {
                     if i + 4 < n_in_chunk {
-                        unsafe { prefetch_read_data(cand_chunk.as_ptr().add((i + 4) * dim)); }
+                        unsafe {
+                            prefetch_read_data(cand_chunk.as_ptr().add((i + 4) * dim));
+                        }
                     }
                     let cand = unsafe { cand_chunk.get_unchecked(i * dim..(i + 1) * dim) };
                     let dist = dist_fn(query_u8, cand) as f32;
-                    let entry = TopKEntry { dist, idx: (base_idx + i) as u32 };
+                    let entry = TopKEntry {
+                        dist,
+                        idx: (base_idx + i) as u32,
+                    };
                     if heap.len() < n_candidates {
                         heap.push(std::cmp::Reverse(entry));
                     } else if let Some(&std::cmp::Reverse(top)) = heap.peek() {

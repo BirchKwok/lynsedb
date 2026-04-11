@@ -165,38 +165,35 @@ class ResultView:
             return len(self._fields)
         return 0
 
-    def __getitem__(self, index):
-        """Support ``result[i]`` for component access (backward-compatible).
+    def __getitem__(self, key):
+        """Key-based access: ``result["ids"]``, ``result["distance"]``, etc.
 
-        - Integer index returns the i-th component (e.g. 0→ids, 1→distances).
-        - Slice returns a new ResultView with a row-slice of the data.
+        Valid keys:
+          - All result types: ``"ids"``, ``"fields"``
+          - search / search_range: ``"distance"`` (or ``"distances"``), ``"k"``, ``"measure"``, ``"index"``
+          - head / tail / query_vectors: ``"vectors"``, ``"n"``
         """
-        if isinstance(index, int):
-            if index < 0:
-                index += len(self._components)
-            if 0 <= index < len(self._components):
-                return self._components[index]
-            raise IndexError(f"Index {index} out of range (0-{len(self._components) - 1})")
-
-        if isinstance(index, slice):
-            return self._slice(index)
-
-        raise TypeError(f"Indices must be integers or slices, not {type(index).__name__}")
-
-    def _slice(self, s: slice) -> "ResultView":
-        """Return a new ResultView with a row-slice of data."""
-        new_ids = self._ids[s] if self._ids is not None else None
-        new_dists = self._distances[s] if self._distances is not None else None
-        new_vecs = self._vectors[s] if self._vectors is not None else None
-        new_fields = self._fields[s] if self._fields else []
-        new_k = len(new_ids) if new_ids is not None else (
-            len(new_dists) if new_dists is not None else None
-        )
-        return ResultView(
-            ids=new_ids, distances=new_dists, vectors=new_vecs, fields=new_fields,
-            k=new_k, distance=self._distance, index=self._index,
-            result_type=self._result_type,
-        )
+        if not isinstance(key, str):
+            raise TypeError(
+                f"ResultView indices must be strings, not {type(key).__name__}"
+            )
+        if key == "ids":
+            return self._ids
+        if key in ("distance", "distances"):
+            return self._distances
+        if key == "vectors":
+            return self._vectors
+        if key == "fields":
+            return self._fields
+        if key == "k":
+            return self._k
+        if key == "measure":
+            return self._distance
+        if key == "index":
+            return self._index
+        if key == "n":
+            return len(self)
+        raise KeyError(f"ResultView has no key {key!r}")
 
     def __iter__(self):
         """Support tuple unpacking: ``ids, dists, fields = result``."""
@@ -230,44 +227,40 @@ class ResultView:
         return len(self) > 0
 
     def __repr__(self) -> str:
-        n = len(self)
         parts = []
 
         if self._result_type == "search":
-            parts.append(_compact_array_repr(self._ids))
-            parts.append(_compact_array_repr(self._distances))
-        elif self._result_type == "data":
-            parts.append(_compact_array_repr(self._vectors))
-            parts.append(_compact_array_repr(self._ids))
-        else:
             if self._ids is not None:
-                parts.append(_compact_array_repr(self._ids))
-            elif self._fields:
-                parts.append(f"[{len(self._fields)} records]")
+                parts.append(f"ids={_compact_array_repr(self._ids)}")
+            if self._distances is not None:
+                parts.append(f"distance={_compact_array_repr(self._distances)}")
+            if self._k is not None:
+                parts.append(f"k={self._k}")
+            if self._distance:
+                parts.append(f'measure="{self._distance}"')
+            if self._index:
+                parts.append(f'index="{self._index}"')
+        elif self._result_type == "data":
+            if self._vectors is not None:
+                parts.append(f"vectors={_compact_array_repr(self._vectors)}")
+            if self._ids is not None:
+                parts.append(f"ids={_compact_array_repr(self._ids)}")
+            parts.append(f"n={len(self)}")
+        else:  # query
+            if self._ids is not None:
+                parts.append(f"ids={_compact_array_repr(self._ids)}")
+            if self._fields:
+                if len(self._fields) == 1:
+                    parts.append(f"fields={repr(self._fields[0])}")
+                else:
+                    parts.append(f"fields={_compact_fields_repr(self._fields)}")
 
-        meta = []
-        if self._k is not None:
-            meta.append(f"k={self._k}")
-        if self._distance:
-            meta.append(f'distance="{self._distance}"')
-        if self._index:
-            meta.append(f'index="{self._index}"')
-        if self._result_type == "data":
-            meta.append(f"n={n}")
+        inline = ", ".join(parts)
+        if len(f"ResultView({inline})") < 120 and "\n" not in inline:
+            return f"ResultView({inline})"
 
-        meta_str = ", ".join(meta)
-        if meta_str:
-            meta_str = ", " + meta_str
-
-        # Compact single-line form when body is short and has no newlines
-        inline_body = ", ".join(parts)
-        total_len = len("ResultView([") + len(inline_body) + len("]") + len(meta_str) + len(")")
-        if total_len < 120 and "\n" not in inline_body:
-            return f"ResultView([{inline_body}]{meta_str})"
-
-        # Multi-line form
-        indented = "\n".join(f"    {p}," for p in parts)
-        return f"ResultView(\n    [\n{indented}\n    ]{meta_str}\n)"
+        indented = ",\n".join(f"    {p}" for p in parts)
+        return f"ResultView(\n{indented}\n)"
 
     # ------------------------------------------------------------------
     # Conversion methods — zero-copy where possible
@@ -478,3 +471,16 @@ def _compact_array_repr(arr) -> str:
     if arr is None:
         return "None"
     return repr(arr)
+
+
+def _compact_fields_repr(fields: list, max_items: int = 3) -> str:
+    """Produce a compact repr of a fields list, showing actual content."""
+    if not fields:
+        return "[]"
+    if len(fields) == 1:
+        return repr(fields[0])
+    shown = fields[:max_items]
+    inner = ", ".join(repr(f) for f in shown)
+    if len(fields) > max_items:
+        inner += f", ...+{len(fields) - max_items}"
+    return f"[{inner}]"

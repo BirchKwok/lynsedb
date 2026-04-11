@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum QuantizerType {
     None,
-    Scalar,  // SQ8
+    Scalar, // SQ8
     Binary,
     Product, // PQ
 }
@@ -69,10 +69,7 @@ impl Quantizer for NoQuantizer {
 
     fn encode(&self, data: &[f32], _n_vectors: usize, _dim: usize) -> Result<Vec<u8>> {
         // Store f32 data as raw bytes
-        let bytes: Vec<u8> = data
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
         Ok(bytes)
     }
 
@@ -240,14 +237,12 @@ impl Quantizer for ScalarQuantizer {
         let mut data = vec![0.0f32; n_vectors * dim];
 
         if n_vectors > 1000 {
-            data.par_chunks_mut(dim)
-                .enumerate()
-                .for_each(|(i, chunk)| {
-                    let base = i * dim;
-                    for d in 0..dim {
-                        chunk[d] = codes[base + d] as f32 * scale[d] + min_val[d];
-                    }
-                });
+            data.par_chunks_mut(dim).enumerate().for_each(|(i, chunk)| {
+                let base = i * dim;
+                for d in 0..dim {
+                    chunk[d] = codes[base + d] as f32 * scale[d] + min_val[d];
+                }
+            });
         } else {
             for i in 0..n_vectors {
                 let base = i * dim;
@@ -269,13 +264,12 @@ impl Quantizer for ScalarQuantizer {
     }
 
     fn serialize(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self)
-            .map_err(|e| LynseError::Serialization(e.to_string()))
+        bincode::serialize(self).map_err(|e| LynseError::Serialization(e.to_string()))
     }
 
     fn deserialize(&mut self, data: &[u8]) -> Result<()> {
-        let loaded: ScalarQuantizer = bincode::deserialize(data)
-            .map_err(|e| LynseError::Serialization(e.to_string()))?;
+        let loaded: ScalarQuantizer =
+            bincode::deserialize(data).map_err(|e| LynseError::Serialization(e.to_string()))?;
         *self = loaded;
         Ok(())
     }
@@ -355,13 +349,12 @@ impl Quantizer for BinaryQuantizer {
     }
 
     fn serialize(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self)
-            .map_err(|e| LynseError::Serialization(e.to_string()))
+        bincode::serialize(self).map_err(|e| LynseError::Serialization(e.to_string()))
     }
 
     fn deserialize(&mut self, data: &[u8]) -> Result<()> {
-        let loaded: BinaryQuantizer = bincode::deserialize(data)
-            .map_err(|e| LynseError::Serialization(e.to_string()))?;
+        let loaded: BinaryQuantizer =
+            bincode::deserialize(data).map_err(|e| LynseError::Serialization(e.to_string()))?;
         *self = loaded;
         Ok(())
     }
@@ -442,8 +435,7 @@ impl ProductQuantizer {
                 for prev_c in 0..c {
                     let mut dist = 0.0f32;
                     for d in 0..sub_dim {
-                        let diff =
-                            sub_data[i * sub_dim + d] - centroids[prev_c * sub_dim + d];
+                        let diff = sub_data[i * sub_dim + d] - centroids[prev_c * sub_dim + d];
                         dist += diff * diff;
                     }
                     min_dist = min_dist.min(dist);
@@ -470,8 +462,7 @@ impl ProductQuantizer {
                 for c in 0..n_clusters {
                     let mut dist = 0.0f32;
                     for d in 0..sub_dim {
-                        let diff =
-                            sub_data[i * sub_dim + d] - centroids[c * sub_dim + d];
+                        let diff = sub_data[i * sub_dim + d] - centroids[c * sub_dim + d];
                         dist += diff * diff;
                     }
                     if dist < best_dist {
@@ -558,7 +549,9 @@ impl Quantizer for ProductQuantizer {
             .ok_or_else(|| LynseError::QuantizerNotTrained)?;
 
         let sub_dim = self.subspace_size;
-        let n_clusters = self.n_clusters.min(codebooks.len() / (self.n_subspaces * sub_dim));
+        let n_clusters = self
+            .n_clusters
+            .min(codebooks.len() / (self.n_subspaces * sub_dim));
 
         // Each vector encodes to n_subspaces bytes (cluster indices)
         let mut codes = vec![0u8; n_vectors * self.n_subspaces];
@@ -574,8 +567,7 @@ impl Quantizer for ProductQuantizer {
                 for c in 0..n_clusters {
                     let mut dist = 0.0f32;
                     for d in 0..sub_dim {
-                        let diff = data[data_offset + d]
-                            - codebooks[cb_offset + c * sub_dim + d];
+                        let diff = data[data_offset + d] - codebooks[cb_offset + c * sub_dim + d];
                         dist += diff * diff;
                     }
                     if dist < best_dist {
@@ -610,7 +602,9 @@ impl Quantizer for ProductQuantizer {
             .ok_or_else(|| LynseError::QuantizerNotTrained)?;
 
         let sub_dim = self.subspace_size;
-        let n_clusters = self.n_clusters.min(codebooks.len() / (self.n_subspaces * sub_dim));
+        let n_clusters = self
+            .n_clusters
+            .min(codebooks.len() / (self.n_subspaces * sub_dim));
 
         let mut data = vec![0.0f32; n_vectors * dim];
 
@@ -637,13 +631,12 @@ impl Quantizer for ProductQuantizer {
     }
 
     fn serialize(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self)
-            .map_err(|e| LynseError::Serialization(e.to_string()))
+        bincode::serialize(self).map_err(|e| LynseError::Serialization(e.to_string()))
     }
 
     fn deserialize(&mut self, data: &[u8]) -> Result<()> {
-        let loaded: ProductQuantizer = bincode::deserialize(data)
-            .map_err(|e| LynseError::Serialization(e.to_string()))?;
+        let loaded: ProductQuantizer =
+            bincode::deserialize(data).map_err(|e| LynseError::Serialization(e.to_string()))?;
         *self = loaded;
         Ok(())
     }
@@ -700,7 +693,7 @@ mod tests {
         let data = vec![0.1f32, 0.9, 0.3, 0.7];
         let encoded = q.encode(&data, 1, 4).unwrap();
         assert_eq!(encoded.len(), 1); // 4 bits packed in 1 byte
-        // 0.1 < 0.5 → 0, 0.9 > 0.5 → 1, 0.3 < 0.5 → 0, 0.7 > 0.5 → 1
+                                      // 0.1 < 0.5 → 0, 0.9 > 0.5 → 1, 0.3 < 0.5 → 0, 0.7 > 0.5 → 1
         assert_eq!(encoded[0] & 0x0F, 0b1010);
     }
 }

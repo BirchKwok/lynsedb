@@ -275,7 +275,11 @@ pub fn top_k_heap_merge(
     }
 
     // Quickselect
-    let mut fpairs: Vec<(f32, u32)> = pairs.iter().enumerate().map(|(i, &(d, _))| (d, i as u32)).collect();
+    let mut fpairs: Vec<(f32, u32)> = pairs
+        .iter()
+        .enumerate()
+        .map(|(i, &(d, _))| (d, i as u32))
+        .collect();
     quickselect_k(&mut fpairs, k, ascending);
 
     let top_k = &mut fpairs[..k];
@@ -379,9 +383,7 @@ mod tests {
 
     #[test]
     fn test_quickselect_basic() {
-        let mut pairs: Vec<(f32, u32)> = vec![
-            (5.0, 0), (1.0, 1), (3.0, 2), (2.0, 3), (4.0, 4),
-        ];
+        let mut pairs: Vec<(f32, u32)> = vec![(5.0, 0), (1.0, 1), (3.0, 2), (2.0, 3), (4.0, 4)];
         quickselect_k(&mut pairs, 2, true);
         // After quickselect, the 2 smallest should be in [0..2]
         let top2: Vec<f32> = pairs[..2].iter().map(|p| p.0).collect();

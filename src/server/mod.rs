@@ -3,10 +3,14 @@
 //! Provides a RESTful API using actix-web, replacing the Python Flask server.
 //! All endpoints are compatible with the existing HTTPClient Python class.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::future::{ready, Future, Ready};
+use std::pin::Pin;
 use std::sync::Arc;
 
-use actix_web::{web, App, HttpServer, HttpResponse};
+use actix_web::body::EitherBody;
+use actix_web::dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform};
+use actix_web::{web, App, HttpResponse, HttpServer};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::DatabaseManager;
@@ -16,6 +20,95 @@ use crate::error::LynseError;
 
 pub struct AppState {
     pub manager: Arc<DatabaseManager>,
+    pub api_key: Option<String>,
+}
+
+// ─── Basic Auth / Bearer Token Middleware ─────────────────────────────────────
+
+/// Middleware factory. Wraps every request with an optional API key check.
+/// Accepts both `Authorization: Bearer <key>` and `Authorization: Basic base64(:key)` headers.
+pub struct ApiKeyAuth {
+    pub api_key: Option<String>,
+}
+
+impl<S, B> Transform<S, ServiceRequest> for ApiKeyAuth
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error> + 'static,
+    S::Future: 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<EitherBody<B>>;
+    type Error = actix_web::Error;
+    type InitError = ();
+    type Transform = ApiKeyAuthMiddleware<S>;
+    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+
+    fn new_transform(&self, service: S) -> Self::Future {
+        ready(Ok(ApiKeyAuthMiddleware {
+            service,
+            api_key: self.api_key.clone(),
+        }))
+    }
+}
+
+pub struct ApiKeyAuthMiddleware<S> {
+    service: S,
+    api_key: Option<String>,
+}
+
+fn decode_basic(b64: &str) -> Option<String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let bytes = STANDARD.decode(b64).ok()?;
+    let s = String::from_utf8(bytes).ok()?;
+    // Format is "username:password" — take only the password part
+    s.splitn(2, ':').nth(1).map(|p| p.to_string())
+}
+
+fn is_authorized(req: &ServiceRequest, key: &str) -> bool {
+    req.headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            if let Some(bearer) = v.strip_prefix("Bearer ") {
+                bearer == key
+            } else if let Some(b64) = v.strip_prefix("Basic ") {
+                decode_basic(b64).as_deref() == Some(key)
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
+}
+
+impl<S, B> Service<ServiceRequest> for ApiKeyAuthMiddleware<S>
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error> + 'static,
+    S::Future: 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<EitherBody<B>>;
+    type Error = actix_web::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+
+    forward_ready!(service);
+
+    fn call(&self, req: ServiceRequest) -> Self::Future {
+        if let Some(ref key) = self.api_key {
+            if !is_authorized(&req, key) {
+                return Box::pin(async move {
+                    let response = HttpResponse::Unauthorized()
+                        .insert_header(("WWW-Authenticate", "Basic realm=\"LynseDB\""))
+                        .json(serde_json::json!({"error": "Unauthorized"}));
+                    Ok(req.into_response(response.map_into_right_body()))
+                });
+            }
+        }
+        let fut = self.service.call(req);
+        Box::pin(async move {
+            let res = fut.await?;
+            Ok(res.map_into_left_body())
+        })
+    }
 }
 
 // ─── Request/Response types ──────────────────────────────────────────────────
@@ -155,6 +248,27 @@ struct QueryVectorsRequest {
 }
 
 #[derive(Deserialize)]
+struct DeleteItemsRequest {
+    database_name: String,
+    collection_name: String,
+    ids: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+struct SearchRangeRequest {
+    database_name: String,
+    collection_name: String,
+    vector: Vec<f32>,
+    threshold: f32,
+    #[serde(default = "default_max_results")]
+    max_results: usize,
+}
+
+fn default_max_results() -> usize {
+    1000
+}
+
+#[derive(Deserialize)]
 struct UpdateDescriptionRequest {
     database_name: String,
     collection_name: String,
@@ -218,7 +332,7 @@ struct MaxIdRequest {
 struct ReadByIdRequest {
     database_name: String,
     collection_name: String,
-    id: serde_json::Value,  // can be int or list of ints
+    id: serde_json::Value, // can be int or list of ints
 }
 
 #[derive(Serialize)]
@@ -383,7 +497,10 @@ async fn drop_collection(
     state: web::Data<AppState>,
     body: web::Json<CollectionRequest>,
 ) -> HttpResponse {
-    match state.manager.drop_collection(&body.database_name, &body.collection_name) {
+    match state
+        .manager
+        .drop_collection(&body.database_name, &body.collection_name)
+    {
         Ok(()) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name,
             "collection_name": body.collection_name
@@ -410,10 +527,7 @@ async fn show_collections(
     }
 }
 
-async fn add_item(
-    state: web::Data<AppState>,
-    body: web::Json<AddItemRequest>,
-) -> HttpResponse {
+async fn add_item(state: web::Data<AppState>, body: web::Json<AddItemRequest>) -> HttpResponse {
     let dim = body.item.vector.len();
     let vectors = body.item.vector.clone();
     let fields = body.item.field.clone().map(|f| vec![f]);
@@ -424,15 +538,20 @@ async fn add_item(
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, dim, 100_000)?;
         let mut coll = coll_arc.write();
-        coll.add_items(&vectors, 1, fields.as_deref())?;
-        Ok(())
+        let user_id = body.item.id.unwrap_or_else(|| {
+            coll.max_id()
+                .map(|max_id| max_id + 1)
+                .unwrap_or_else(|| coll.shape().map(|(n, _)| n).unwrap_or(0))
+        });
+        coll.add_items(&vectors, 1, &[user_id], fields.as_deref())?;
+        Ok(user_id)
     });
 
     match result {
-        Ok(()) => ApiResponse::success(serde_json::json!({
+        Ok(user_id) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name,
             "collection_name": body.collection_name,
-            "item": { "id": body.item.id }
+            "item": { "id": user_id }
         })),
         Err(e) => error_response(&e.to_string()),
     }
@@ -450,22 +569,30 @@ async fn bulk_add_binary(
     if body.len() != expected_bytes {
         return bad_request(&format!(
             "Expected {} bytes ({} vectors × {} dim × 4), got {}",
-            expected_bytes, n_vectors, dim, body.len()
+            expected_bytes,
+            n_vectors,
+            dim,
+            body.len()
         ));
     }
 
     // Zero-copy reinterpret bytes as f32 slice
-    let float_slice: &[f32] = unsafe {
-        std::slice::from_raw_parts(body.as_ptr() as *const f32, n_vectors * dim)
-    };
+    let float_slice: &[f32] =
+        unsafe { std::slice::from_raw_parts(body.as_ptr() as *const f32, n_vectors * dim) };
 
     if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
         return error_response(&e.to_string());
     }
+    // bulk_add_binary has no user IDs in the binary protocol — assign sequential from current max
     let result = state.manager.with_database(&query.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&query.collection_name, dim, 100_000)?;
         let mut coll = coll_arc.write();
-        coll.add_items(float_slice, n_vectors, None)?;
+        let start_id = coll
+            .max_id()
+            .map(|m| m + 1)
+            .unwrap_or_else(|| coll.shape().map(|(n, _)| n).unwrap_or(0));
+        let seq_ids: Vec<u64> = (start_id..start_id + n_vectors as u64).collect();
+        coll.add_items(float_slice, n_vectors, &seq_ids, None)?;
         Ok(())
     });
 
@@ -507,16 +634,109 @@ async fn bulk_add_items(
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, dim, 100_000)?;
         let mut coll = coll_arc.write();
-        if has_fields {
-            coll.add_items(&flat_vectors, n_vectors, Some(&fields))?;
-        } else {
-            coll.add_items(&flat_vectors, n_vectors, None)?;
+        let mut next_id = coll.max_id().map(|max_id| max_id + 1).unwrap_or(0);
+        let mut reserved = HashSet::with_capacity(n_vectors);
+        let mut resolved_ids = Vec::with_capacity(n_vectors);
+        for opt_id in &ids {
+            if let Some(id) = opt_id {
+                reserved.insert(*id);
+                resolved_ids.push(*id);
+            } else {
+                while coll.is_id_exists(next_id) || reserved.contains(&next_id) {
+                    next_id += 1;
+                }
+                resolved_ids.push(next_id);
+                reserved.insert(next_id);
+                next_id += 1;
+            }
         }
-        Ok(())
+        if has_fields {
+            coll.add_items(&flat_vectors, n_vectors, &resolved_ids, Some(&fields))?;
+        } else {
+            coll.add_items(&flat_vectors, n_vectors, &resolved_ids, None)?;
+        }
+        Ok(resolved_ids)
     });
 
     match result {
-        Ok(()) => ApiResponse::success(serde_json::json!({
+        Ok(resolved_ids) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "ids": resolved_ids
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn upsert_items(
+    state: web::Data<AppState>,
+    body: web::Json<BulkAddItemsRequest>,
+) -> HttpResponse {
+    if body.items.is_empty() {
+        return bad_request("No items provided");
+    }
+
+    let dim = body.items[0].vector.len();
+
+    if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
+        return error_response(&e.to_string());
+    }
+
+    let result = state.manager.with_database(&body.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&body.collection_name, dim, 100_000)?;
+        let mut coll = coll_arc.write();
+
+        let mut vectors_with_fields = Vec::new();
+        let mut ids_with_fields = Vec::new();
+        let mut fields_with_fields = Vec::new();
+        let mut vectors_without_fields = Vec::new();
+        let mut ids_without_fields = Vec::new();
+        let mut returned_ids = Vec::with_capacity(body.items.len());
+        let mut seen_ids = HashSet::with_capacity(body.items.len());
+
+        for item in &body.items {
+            let user_id = item.id.ok_or_else(|| {
+                LynseError::InvalidArgument("upsert_items requires every item to include id".into())
+            })?;
+            if !seen_ids.insert(user_id) {
+                return Err(LynseError::InvalidArgument(format!(
+                    "duplicate id {} within the same upsert batch",
+                    user_id
+                )));
+            }
+            returned_ids.push(user_id);
+            if let Some(field) = item.field.clone() {
+                vectors_with_fields.extend_from_slice(&item.vector);
+                ids_with_fields.push(user_id);
+                fields_with_fields.push(field);
+            } else {
+                vectors_without_fields.extend_from_slice(&item.vector);
+                ids_without_fields.push(user_id);
+            }
+        }
+
+        if !ids_without_fields.is_empty() {
+            coll.upsert_items(
+                &ids_without_fields,
+                &vectors_without_fields,
+                ids_without_fields.len(),
+                None,
+            )?;
+        }
+        if !ids_with_fields.is_empty() {
+            coll.upsert_items(
+                &ids_with_fields,
+                &vectors_with_fields,
+                ids_with_fields.len(),
+                Some(&fields_with_fields),
+            )?;
+        }
+
+        Ok(returned_ids)
+    });
+
+    match result {
+        Ok(ids) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name,
             "collection_name": body.collection_name,
             "ids": ids
@@ -525,10 +745,7 @@ async fn bulk_add_items(
     }
 }
 
-async fn search(
-    state: web::Data<AppState>,
-    body: web::Json<SearchRequest>,
-) -> HttpResponse {
+async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> HttpResponse {
     let k = body.k.unwrap_or(10);
     let nprobe = body.nprobe.unwrap_or(10);
     let return_fields = body.return_fields.unwrap_or(false);
@@ -594,7 +811,11 @@ async fn batch_search(
         let coll = coll_arc.read();
 
         // Flatten vectors for batch_search
-        let dim = if body.vectors.is_empty() { 0 } else { body.vectors[0].len() };
+        let dim = if body.vectors.is_empty() {
+            0
+        } else {
+            body.vectors[0].len()
+        };
         let mut flat: Vec<f32> = Vec::with_capacity(body.vectors.len() * dim);
         for v in &body.vectors {
             flat.extend_from_slice(v);
@@ -630,10 +851,7 @@ async fn batch_search(
     }
 }
 
-async fn commit(
-    state: web::Data<AppState>,
-    body: web::Json<CommitRequest>,
-) -> HttpResponse {
+async fn commit(state: web::Data<AppState>, body: web::Json<CommitRequest>) -> HttpResponse {
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
         return error_response(&e.to_string());
     }
@@ -646,19 +864,38 @@ async fn commit(
                 let dim = items[0].vector.len();
                 let n_vectors = items.len();
                 let mut flat_vectors: Vec<f32> = Vec::with_capacity(n_vectors * dim);
-                let mut fields: Vec<HashMap<String, serde_json::Value>> = Vec::with_capacity(n_vectors);
+                let mut fields: Vec<HashMap<String, serde_json::Value>> =
+                    Vec::with_capacity(n_vectors);
 
-                for item in items {
+                let mut requested_ids: Vec<Option<u64>> = Vec::with_capacity(n_vectors);
+                for item in items.iter() {
                     flat_vectors.extend_from_slice(&item.vector);
                     fields.push(item.field.clone().unwrap_or_default());
+                    requested_ids.push(item.id);
                 }
 
                 let has_fields = fields.iter().any(|f| !f.is_empty());
                 let mut coll = coll_arc.write();
+                let mut next_id = coll.max_id().map(|max_id| max_id + 1).unwrap_or(0);
+                let mut reserved = HashSet::with_capacity(n_vectors);
+                let mut item_ids: Vec<u64> = Vec::with_capacity(n_vectors);
+                for opt_id in &requested_ids {
+                    if let Some(id) = opt_id {
+                        reserved.insert(*id);
+                        item_ids.push(*id);
+                    } else {
+                        while coll.is_id_exists(next_id) || reserved.contains(&next_id) {
+                            next_id += 1;
+                        }
+                        item_ids.push(next_id);
+                        reserved.insert(next_id);
+                        next_id += 1;
+                    }
+                }
                 if has_fields {
-                    coll.add_items(&flat_vectors, n_vectors, Some(&fields))?;
+                    coll.add_items(&flat_vectors, n_vectors, &item_ids, Some(&fields))?;
                 } else {
-                    coll.add_items(&flat_vectors, n_vectors, None)?;
+                    coll.add_items(&flat_vectors, n_vectors, &item_ids, None)?;
                 }
             }
         }
@@ -683,13 +920,73 @@ async fn commit(
     }
 }
 
+async fn flush(state: web::Data<AppState>, body: web::Json<CollectionRequest>) -> HttpResponse {
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| coll.flush(),
+    );
+
+    match result {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn checkpoint(
+    state: web::Data<AppState>,
+    body: web::Json<CollectionRequest>,
+) -> HttpResponse {
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| coll.checkpoint(),
+    );
+
+    match result {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn close_collection(
+    state: web::Data<AppState>,
+    body: web::Json<CollectionRequest>,
+) -> HttpResponse {
+    let result = with_collection_mut(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| coll.close(),
+    );
+
+    match result {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
 async fn collection_shape(
     state: web::Data<AppState>,
     body: web::Json<CollectionRequest>,
 ) -> HttpResponse {
-    let result = with_collection(&state.manager, &body.database_name, &body.collection_name, |coll| {
-        coll.shape()
-    });
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| coll.shape(),
+    );
 
     match result {
         Ok((rows, dim)) => ApiResponse::success(serde_json::json!({
@@ -705,7 +1002,10 @@ async fn is_collection_exists(
     state: web::Data<AppState>,
     body: web::Json<CollectionRequest>,
 ) -> HttpResponse {
-    match state.manager.collection_exists(&body.database_name, &body.collection_name) {
+    match state
+        .manager
+        .collection_exists(&body.database_name, &body.collection_name)
+    {
         Ok(exists) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name,
             "collection_name": body.collection_name,
@@ -728,7 +1028,10 @@ async fn get_collection_config(
                     "config": config
                 }))
             } else {
-                bad_request(&format!("Collection '{}' not found in config", body.collection_name))
+                bad_request(&format!(
+                    "Collection '{}' not found in config",
+                    body.collection_name
+                ))
             }
         }
         Err(e) => error_response(&e.to_string()),
@@ -834,7 +1137,9 @@ async fn build_index(
     let index_mode = body.index_mode.as_deref().unwrap_or("FLAT");
 
     let result = with_collection_mut(
-        &state.manager, &body.database_name, &body.collection_name,
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
         |coll| coll.build_index(index_mode),
     );
 
@@ -853,7 +1158,9 @@ async fn remove_index(
     body: web::Json<CollectionRequest>,
 ) -> HttpResponse {
     let result = with_collection_mut(
-        &state.manager, &body.database_name, &body.collection_name,
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
         |coll| coll.remove_index(),
     );
 
@@ -866,27 +1173,26 @@ async fn remove_index(
     }
 }
 
-async fn head(
-    state: web::Data<AppState>,
-    body: web::Json<HeadTailRequest>,
-) -> HttpResponse {
+async fn head(state: web::Data<AppState>, body: web::Json<HeadTailRequest>) -> HttpResponse {
     let n = body.n.unwrap_or(5);
 
-    let result = with_collection(&state.manager, &body.database_name, &body.collection_name, |coll| {
-        let (data, fields) = coll.head(n)?;
-        let dim_ = coll.meta.dimension;
-        let n_vecs = if dim_ > 0 { data.len() / dim_ } else { 0 };
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| {
+            let (data, user_ids, fields) = coll.head(n)?;
+            let dim_ = coll.meta.dimension;
+            let n_vecs = if dim_ > 0 { data.len() / dim_ } else { 0 };
 
-        // Reshape flat data into list of vectors
-        let vectors: Vec<Vec<f32>> = (0..n_vecs)
-            .map(|i| data[i * dim_..(i + 1) * dim_].to_vec())
-            .collect();
+            let vectors: Vec<Vec<f32>> = (0..n_vecs)
+                .map(|i| data[i * dim_..(i + 1) * dim_].to_vec())
+                .collect();
+            let ids: Vec<i64> = user_ids.iter().map(|&id| id as i64).collect();
 
-        // Generate IDs from vector store positions
-        let ids: Vec<i64> = (0..n_vecs as i64).collect();
-
-        Ok((vectors, ids, fields))
-    });
+            Ok((vectors, ids, fields))
+        },
+    );
 
     match result {
         Ok((vectors, ids, fields)) => ApiResponse::success(serde_json::json!({
@@ -898,25 +1204,26 @@ async fn head(
     }
 }
 
-async fn tail(
-    state: web::Data<AppState>,
-    body: web::Json<HeadTailRequest>,
-) -> HttpResponse {
+async fn tail(state: web::Data<AppState>, body: web::Json<HeadTailRequest>) -> HttpResponse {
     let n = body.n.unwrap_or(5);
 
-    let result = with_collection(&state.manager, &body.database_name, &body.collection_name, |coll| {
-        let (data, fields) = coll.tail(n)?;
-        let dim_ = coll.meta.dimension;
-        let n_vecs = if dim_ > 0 { data.len() / dim_ } else { 0 };
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| {
+            let (data, user_ids, fields) = coll.tail(n)?;
+            let dim_ = coll.meta.dimension;
+            let n_vecs = if dim_ > 0 { data.len() / dim_ } else { 0 };
 
-        let vectors: Vec<Vec<f32>> = (0..n_vecs)
-            .map(|i| data[i * dim_..(i + 1) * dim_].to_vec())
-            .collect();
+            let vectors: Vec<Vec<f32>> = (0..n_vecs)
+                .map(|i| data[i * dim_..(i + 1) * dim_].to_vec())
+                .collect();
+            let ids: Vec<i64> = user_ids.iter().map(|&id| id as i64).collect();
 
-        let ids: Vec<i64> = (0..n_vecs as i64).collect();
-
-        Ok((vectors, ids, fields))
-    });
+            Ok((vectors, ids, fields))
+        },
+    );
 
     match result {
         Ok((vectors, ids, fields)) => ApiResponse::success(serde_json::json!({
@@ -932,7 +1239,9 @@ async fn get_collection_path(
     state: web::Data<AppState>,
     body: web::Json<CollectionRequest>,
 ) -> HttpResponse {
-    let path = state.manager.root_path()
+    let path = state
+        .manager
+        .root_path()
         .join(&body.database_name)
         .join(&body.collection_name);
 
@@ -943,50 +1252,66 @@ async fn get_collection_path(
     }))
 }
 
-async fn query(
-    state: web::Data<AppState>,
-    body: web::Json<QueryRequest>,
-) -> HttpResponse {
+async fn query(state: web::Data<AppState>, body: web::Json<QueryRequest>) -> HttpResponse {
     let return_ids_only = body.return_ids_only.unwrap_or(false);
 
-    let result = with_collection(&state.manager, &body.database_name, &body.collection_name, |coll| {
-        let filter_expr = body.where_expr.as_deref();
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| {
+            let filter_expr = body.where_expr.as_deref();
 
-        // Fast path: single query for both IDs + fields when filtering by expression
-        if let Some(expr) = filter_expr {
-            if return_ids_only {
-                let ids = coll.query_fields(expr)?;
-                return Ok(serde_json::json!(ids.iter().map(|&id| id as i64).collect::<Vec<i64>>()));
+            // Fast path: single query for both IDs + fields when filtering by expression
+            if let Some(expr) = filter_expr {
+                if return_ids_only {
+                    let ids = coll.query_fields(expr)?;
+                    return Ok(serde_json::json!(ids
+                        .iter()
+                        .map(|&id| id as i64)
+                        .collect::<Vec<i64>>()));
+                }
+                let (ids, fields) = coll.query_with_fields(expr)?;
+                let records: Vec<serde_json::Value> = ids
+                    .iter()
+                    .zip(fields.iter())
+                    .map(|(&id, f)| {
+                        let mut rec = f.clone();
+                        rec.insert("id".to_string(), serde_json::json!(id as i64));
+                        serde_json::json!(rec)
+                    })
+                    .collect();
+                return Ok(serde_json::json!(records));
             }
-            let (ids, fields) = coll.query_with_fields(expr)?;
-            let records: Vec<serde_json::Value> = ids.iter().zip(fields.iter()).map(|(&id, f)| {
-                let mut rec = f.clone();
-                rec.insert("id".to_string(), serde_json::json!(id as i64));
-                serde_json::json!(rec)
-            }).collect();
-            return Ok(serde_json::json!(records));
-        }
 
-        let ids = if let Some(ref filter_ids) = body.filter_ids {
-            filter_ids.clone()
-        } else {
-            // Return all IDs
-            let (n, _) = coll.shape()?;
-            (0..n).collect()
-        };
+            let ids = if let Some(ref filter_ids) = body.filter_ids {
+                filter_ids.clone()
+            } else {
+                // Return all IDs
+                let (n, _) = coll.shape()?;
+                (0..n).collect()
+            };
 
-        if return_ids_only {
-            Ok(serde_json::json!(ids.iter().map(|&id| id as i64).collect::<Vec<i64>>()))
-        } else {
-            let fields = coll.retrieve_fields(&ids)?;
-            let records: Vec<serde_json::Value> = ids.iter().zip(fields.iter()).map(|(&id, f)| {
-                let mut rec = f.clone();
-                rec.insert("id".to_string(), serde_json::json!(id as i64));
-                serde_json::json!(rec)
-            }).collect();
-            Ok(serde_json::json!(records))
-        }
-    });
+            if return_ids_only {
+                Ok(serde_json::json!(ids
+                    .iter()
+                    .map(|&id| id as i64)
+                    .collect::<Vec<i64>>()))
+            } else {
+                let fields = coll.retrieve_fields(&ids)?;
+                let records: Vec<serde_json::Value> = ids
+                    .iter()
+                    .zip(fields.iter())
+                    .map(|(&id, f)| {
+                        let mut rec = f.clone();
+                        rec.insert("id".to_string(), serde_json::json!(id as i64));
+                        serde_json::json!(rec)
+                    })
+                    .collect();
+                Ok(serde_json::json!(records))
+            }
+        },
+    );
 
     match result {
         Ok(result_data) => ApiResponse::success(serde_json::json!({
@@ -1002,28 +1327,33 @@ async fn query_vectors(
     state: web::Data<AppState>,
     body: web::Json<QueryVectorsRequest>,
 ) -> HttpResponse {
-    let result = with_collection(&state.manager, &body.database_name, &body.collection_name, |coll| {
-        let filter_expr = body.where_expr.as_deref();
-        let dim = coll.meta.dimension;
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| {
+            let filter_expr = body.where_expr.as_deref();
+            let dim = coll.meta.dimension;
 
-        let ids = if let Some(expr) = filter_expr {
-            coll.query_fields(expr)?
-        } else if let Some(ref filter_ids) = body.filter_ids {
-            filter_ids.clone()
-        } else {
-            let (n, _) = coll.shape()?;
-            (0..n).collect()
-        };
+            let ids = if let Some(expr) = filter_expr {
+                coll.query_fields(expr)?
+            } else if let Some(ref filter_ids) = body.filter_ids {
+                filter_ids.clone()
+            } else {
+                let (n, _) = coll.shape()?;
+                (0..n).collect()
+            };
 
-        let (flat_data, fields) = coll.read_vectors_by_ids(&ids)?;
-        let n_vecs = if dim > 0 { flat_data.len() / dim } else { 0 };
-        let vectors: Vec<Vec<f32>> = (0..n_vecs)
-            .map(|i| flat_data[i * dim..(i + 1) * dim].to_vec())
-            .collect();
-        let id_list: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
+            let (flat_data, fields) = coll.read_vectors_by_ids(&ids)?;
+            let n_vecs = if dim > 0 { flat_data.len() / dim } else { 0 };
+            let vectors: Vec<Vec<f32>> = (0..n_vecs)
+                .map(|i| flat_data[i * dim..(i + 1) * dim].to_vec())
+                .collect();
+            let id_list: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
 
-        Ok((vectors, id_list, fields))
-    });
+            Ok((vectors, id_list, fields))
+        },
+    );
 
     match result {
         Ok((vectors, ids, fields)) => ApiResponse::success(serde_json::json!({
@@ -1062,16 +1392,21 @@ async fn read_by_only_id(
         _ => return bad_request("id must be an integer or list of integers"),
     };
 
-    let result = with_collection(&state.manager, &body.database_name, &body.collection_name, |coll| {
-        let dim = coll.meta.dimension;
-        let (flat_data, fields) = coll.read_vectors_by_ids(&ids)?;
-        let n_vecs = if dim > 0 { flat_data.len() / dim } else { 0 };
-        let vectors: Vec<Vec<f32>> = (0..n_vecs)
-            .map(|i| flat_data[i * dim..(i + 1) * dim].to_vec())
-            .collect();
-        let id_list: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
-        Ok((vectors, id_list, fields))
-    });
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| {
+            let dim = coll.meta.dimension;
+            let (flat_data, fields) = coll.read_vectors_by_ids(&ids)?;
+            let n_vecs = if dim > 0 { flat_data.len() / dim } else { 0 };
+            let vectors: Vec<Vec<f32>> = (0..n_vecs)
+                .map(|i| flat_data[i * dim..(i + 1) * dim].to_vec())
+                .collect();
+            let id_list: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
+            Ok((vectors, id_list, fields))
+        },
+    );
 
     match result {
         Ok((vectors, ids, fields)) => ApiResponse::success(serde_json::json!({
@@ -1083,13 +1418,96 @@ async fn read_by_only_id(
     }
 }
 
+async fn delete_items(
+    state: web::Data<AppState>,
+    body: web::Json<DeleteItemsRequest>,
+) -> HttpResponse {
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| coll.delete_items(&body.ids),
+    );
+    match result {
+        Ok(_) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "status": "ok"
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn restore_items(
+    state: web::Data<AppState>,
+    body: web::Json<DeleteItemsRequest>,
+) -> HttpResponse {
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| coll.restore_items(&body.ids),
+    );
+    match result {
+        Ok(_) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "status": "ok"
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn list_deleted_ids(
+    state: web::Data<AppState>,
+    body: web::Json<CollectionRequest>,
+) -> HttpResponse {
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| Ok(coll.list_deleted_ids()),
+    );
+    match result {
+        Ok(ids) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "ids": ids
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn search_range(
+    state: web::Data<AppState>,
+    body: web::Json<SearchRangeRequest>,
+) -> HttpResponse {
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| coll.search_range(&body.vector, body.threshold, body.max_results),
+    );
+    match result {
+        Ok((ids, dists)) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "result": {"ids": ids, "distances": dists}
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
 async fn list_fields(
     state: web::Data<AppState>,
     body: web::Json<CollectionRequest>,
 ) -> HttpResponse {
-    let result = with_collection(&state.manager, &body.database_name, &body.collection_name, |coll| {
-        coll.list_fields()
-    });
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| coll.list_fields(),
+    );
 
     match result {
         Ok(fields) => ApiResponse::success(serde_json::json!({
@@ -1105,9 +1523,12 @@ async fn index_mode(
     state: web::Data<AppState>,
     body: web::Json<CollectionRequest>,
 ) -> HttpResponse {
-    let result = with_collection(&state.manager, &body.database_name, &body.collection_name, |coll| {
-        Ok(coll.get_index_mode().map(|s| s.to_string()))
-    });
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| Ok(coll.get_index_mode().map(|s| s.to_string())),
+    );
 
     match result {
         Ok(mode) => ApiResponse::success(serde_json::json!({
@@ -1123,11 +1544,12 @@ async fn is_id_exists(
     state: web::Data<AppState>,
     body: web::Json<IsIdExistsRequest>,
 ) -> HttpResponse {
-    let result = with_collection(&state.manager, &body.database_name, &body.collection_name, |coll| {
-        // Check if ID exists by attempting to retrieve fields
-        let fields = coll.retrieve_fields(&[body.id])?;
-        Ok(!fields.is_empty() && !fields[0].is_empty())
-    });
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| Ok(coll.is_id_exists(body.id)),
+    );
 
     match result {
         Ok(exists) => ApiResponse::success(serde_json::json!({
@@ -1143,20 +1565,75 @@ async fn is_id_exists(
     }
 }
 
-async fn max_id(
-    state: web::Data<AppState>,
-    body: web::Json<MaxIdRequest>,
-) -> HttpResponse {
-    let result = with_collection(&state.manager, &body.database_name, &body.collection_name, |coll| {
-        let (n, _) = coll.shape()?;
-        Ok(if n > 0 { n - 1 } else { 0 })
-    });
+async fn max_id(state: web::Data<AppState>, body: web::Json<MaxIdRequest>) -> HttpResponse {
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| Ok(coll.max_id().map(|id| id as i64).unwrap_or(-1)),
+    );
 
     match result {
         Ok(max) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name,
             "collection_name": body.collection_name,
             "max_id": max
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn compact(state: web::Data<AppState>, body: web::Json<CollectionRequest>) -> HttpResponse {
+    if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
+        return error_response(&e.to_string());
+    }
+    let result = state.manager.with_database(&body.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
+        let mut coll = coll_arc.write();
+        let removed = coll.compact()?;
+        Ok(removed)
+    });
+
+    match result {
+        Ok(removed) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "vectors_removed": removed
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn collection_stats(
+    state: web::Data<AppState>,
+    body: web::Json<CollectionRequest>,
+) -> HttpResponse {
+    if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
+        return error_response(&e.to_string());
+    }
+    let result = state.manager.with_database(&body.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
+        let coll = coll_arc.read();
+        let (n_vectors, dimension) = coll.shape()?;
+        let n_tombstoned = coll.list_deleted_ids().len() as u64;
+        let n_live = n_vectors.saturating_sub(n_tombstoned);
+        let index_mode = coll.get_index_mode().unwrap_or("none").to_string();
+        let max_id = coll.max_id().map(|id| id as i64).unwrap_or(-1);
+        Ok(serde_json::json!({
+            "n_vectors": n_vectors,
+            "n_live": n_live,
+            "n_tombstoned": n_tombstoned,
+            "dimension": dimension,
+            "index_mode": index_mode,
+            "max_id": max_id
+        }))
+    });
+
+    match result {
+        Ok(stats) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "stats": stats
         })),
         Err(e) => error_response(&e.to_string()),
     }
@@ -1252,9 +1729,7 @@ async fn search_binary(
             .body(format!("Expected {} bytes, got {}", expected, body.len()));
     }
 
-    let vector: &[f32] = unsafe {
-        std::slice::from_raw_parts(body.as_ptr() as *const f32, dim)
-    };
+    let vector: &[f32] = unsafe { std::slice::from_raw_parts(body.as_ptr() as *const f32, dim) };
 
     let k = query.k.unwrap_or(10);
     let nprobe = query.nprobe.unwrap_or(10);
@@ -1275,7 +1750,11 @@ async fn search_binary(
             Vec::new()
         };
 
-        Ok(encode_search_result_binary(&sr.ids, &sr.distances, &fields_data))
+        Ok(encode_search_result_binary(
+            &sr.ids,
+            &sr.distances,
+            &fields_data,
+        ))
     });
 
     match result {
@@ -1299,13 +1778,16 @@ async fn batch_search_binary(
     if body.len() != expected {
         return HttpResponse::BadRequest()
             .content_type("text/plain")
-            .body(format!("Expected {} bytes ({} queries × {} dim × 4), got {}",
-                          expected, nq, dim, body.len()));
+            .body(format!(
+                "Expected {} bytes ({} queries × {} dim × 4), got {}",
+                expected,
+                nq,
+                dim,
+                body.len()
+            ));
     }
 
-    let flat: &[f32] = unsafe {
-        std::slice::from_raw_parts(body.as_ptr() as *const f32, nq * dim)
-    };
+    let flat: &[f32] = unsafe { std::slice::from_raw_parts(body.as_ptr() as *const f32, nq * dim) };
 
     let k = query.k.unwrap_or(10);
     let nprobe = query.nprobe.unwrap_or(10);
@@ -1354,13 +1836,16 @@ async fn head_binary(
 ) -> HttpResponse {
     let n = query.n.unwrap_or(5);
 
-    let result = with_collection(&state.manager, &query.database_name, &query.collection_name, |coll| {
-        let (data, fields) = coll.head(n)?;
-        let dim = coll.meta.dimension;
-        let n_vecs = if dim > 0 { data.len() / dim } else { 0 };
-        let ids: Vec<u64> = (0..n_vecs as u64).collect();
-        Ok(encode_vectors_binary(&data, dim, &ids, &fields))
-    });
+    let result = with_collection(
+        &state.manager,
+        &query.database_name,
+        &query.collection_name,
+        |coll| {
+            let (data, ids, fields) = coll.head(n)?;
+            let dim = coll.meta.dimension;
+            Ok(encode_vectors_binary(&data, dim, &ids, &fields))
+        },
+    );
 
     match result {
         Ok(buf) => HttpResponse::Ok()
@@ -1376,13 +1861,16 @@ async fn tail_binary(
 ) -> HttpResponse {
     let n = query.n.unwrap_or(5);
 
-    let result = with_collection(&state.manager, &query.database_name, &query.collection_name, |coll| {
-        let (data, fields) = coll.tail(n)?;
-        let dim = coll.meta.dimension;
-        let n_vecs = if dim > 0 { data.len() / dim } else { 0 };
-        let ids: Vec<u64> = (0..n_vecs as u64).collect();
-        Ok(encode_vectors_binary(&data, dim, &ids, &fields))
-    });
+    let result = with_collection(
+        &state.manager,
+        &query.database_name,
+        &query.collection_name,
+        |coll| {
+            let (data, ids, fields) = coll.tail(n)?;
+            let dim = coll.meta.dimension;
+            Ok(encode_vectors_binary(&data, dim, &ids, &fields))
+        },
+    );
 
     match result {
         Ok(buf) => HttpResponse::Ok()
@@ -1410,18 +1898,34 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/show_collections", web::post().to(show_collections))
         .route("/add_item", web::post().to(add_item))
         .route("/bulk_add_items", web::post().to(bulk_add_items))
+        .route("/upsert_items", web::post().to(upsert_items))
         .route("/bulk_add_binary", web::post().to(bulk_add_binary))
         .route("/search", web::post().to(search))
         .route("/search_binary", web::post().to(search_binary))
         .route("/batch_search", web::post().to(batch_search))
         .route("/batch_search_binary", web::post().to(batch_search_binary))
         .route("/commit", web::post().to(commit))
+        .route("/flush", web::post().to(flush))
+        .route("/checkpoint", web::post().to(checkpoint))
+        .route("/close_collection", web::post().to(close_collection))
         .route("/collection_shape", web::post().to(collection_shape))
-        .route("/is_collection_exists", web::post().to(is_collection_exists))
-        .route("/get_collection_config", web::post().to(get_collection_config))
-        .route("/update_collection_description", web::post().to(update_collection_description))
+        .route(
+            "/is_collection_exists",
+            web::post().to(is_collection_exists),
+        )
+        .route(
+            "/get_collection_config",
+            web::post().to(get_collection_config),
+        )
+        .route(
+            "/update_collection_description",
+            web::post().to(update_collection_description),
+        )
         .route("/update_description", web::post().to(update_description))
-        .route("/show_collections_details", web::post().to(show_collections_details))
+        .route(
+            "/show_collections_details",
+            web::post().to(show_collections_details),
+        )
         .route("/build_index", web::post().to(build_index))
         .route("/remove_index", web::post().to(remove_index))
         .route("/head", web::post().to(head))
@@ -1435,27 +1939,43 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/index_mode", web::post().to(index_mode))
         .route("/is_id_exists", web::post().to(is_id_exists))
         .route("/max_id", web::post().to(max_id))
-        .route("/read_by_only_id", web::post().to(read_by_only_id));
+        .route("/read_by_only_id", web::post().to(read_by_only_id))
+        .route("/delete_items", web::post().to(delete_items))
+        .route("/restore_items", web::post().to(restore_items))
+        .route("/list_deleted_ids", web::post().to(list_deleted_ids))
+        .route("/search_range", web::post().to(search_range))
+        .route("/compact", web::post().to(compact))
+        .route("/stats", web::post().to(collection_stats));
 }
 
 /// Start the HTTP server. This function blocks until the server is stopped.
-pub fn run_server(host: &str, port: u16, root_path: &str) -> std::io::Result<()> {
+/// Pass `api_key = Some("secret")` to enable HTTP Basic Auth / Bearer token auth.
+pub fn run_server(
+    host: &str,
+    port: u16,
+    root_path: &str,
+    api_key: Option<String>,
+) -> std::io::Result<()> {
     let manager = Arc::new(
         DatabaseManager::new(std::path::Path::new(root_path))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?,
     );
+    let api_key = Arc::new(api_key);
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         log::info!("Starting LynseDB server on {}:{}", host, port);
 
         HttpServer::new(move || {
+            let key_clone: Option<String> = (*api_key).clone();
             App::new()
                 .app_data(web::Data::new(AppState {
                     manager: Arc::clone(&manager),
+                    api_key: key_clone.clone(),
                 }))
                 .app_data(web::JsonConfig::default().limit(1024 * 1024 * 256)) // 256MB JSON limit
                 .app_data(web::PayloadConfig::default().limit(1024 * 1024 * 512)) // 512MB raw payload limit
+                .wrap(ApiKeyAuth { api_key: key_clone })
                 .configure(configure_routes)
         })
         .workers(num_cpus::get().max(2))
@@ -1472,8 +1992,7 @@ pub fn start_server_background(
     host: String,
     port: u16,
     root_path: String,
+    api_key: Option<String>,
 ) -> std::thread::JoinHandle<std::io::Result<()>> {
-    std::thread::spawn(move || {
-        run_server(&host, port, &root_path)
-    })
+    std::thread::spawn(move || run_server(&host, port, &root_path, api_key))
 }

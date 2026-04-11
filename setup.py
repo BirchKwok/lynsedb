@@ -6,7 +6,8 @@ def read_requirements(path):
     return list(Path(path).read_text().splitlines())
 
 
-reqs = read_requirements(Path('.').parent.joinpath("requirements.txt"))
+ROOT = Path(__file__).resolve().parent
+reqs = read_requirements(ROOT / "requirements.txt")
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
@@ -40,7 +41,7 @@ setup(
     keywords=["vector", "database", "vector database", "Similarity Search"],
     entry_points={
         'console_scripts': [
-            'lynse=lynse.python.server:main',
+            'lynse=lynse.server:main',
         ],
     }
 )

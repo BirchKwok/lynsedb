@@ -1,517 +1,388 @@
 # Quick Start
 
-
 ```python linenums="1"
 import lynse
 
 print("LynseDB version is: ", lynse.__version__)
 ```
 
-    LynseDB version is:  0.2.0
+    LynseDB version is:  0.3.0
 
 
-### Initialize Database
+## Initialize Client
 
-LynseDB now supports HTTP API and Python native code API.
+LynseDB supports two modes:
 
+- **Local mode** — direct Rust backend, no server required (recommended for development and single-process use).
+- **Remote mode** — HTTP API, suitable for multi-process and production deployments.
 
-The HTTP API mode requires starting an HTTP server beforehand. You have two options:
-- start directly.
-
-  For direct startup, the default port is 7637. You can run the following command in the terminal to start the service:
-```shell
-lynse run --host localhost --port 7637
-```
-
-- within Docker
-
-  In Docker, You can run the following command in the terminal to start the service:
-```shell
-docker run -p 7637:7637 birchkwok/lynsedb:latest
-```
-- Remote deploy
-
-  If you want to deploy remotely, you can bind the image to port 80 of the remote host, or allow the host to open access to port 7637.
-  such as:
-```shell
-docker run -p 80:7637 birchkwok/lynsedb:latest
-```
-
-- test if api available
-
-  You can directly request in the browser http://localhost:7637
-
-  For port 80, you can use this url: http://localhost
-
-  If the image is bound to port 80 of the host in remote deployment, you can directly access it http://your_host_ip
-
-
+### Local mode
 
 ```python linenums="1"
-# If you are in a Jupyter environment, you can use this method to start the backend server
-# Ignore this code if you are using docker
-lynse.launch_in_jupyter()
-```
+import lynse
 
-    Server running at http://127.0.0.1:7637
+# No URI → local mode, data stored under LYNSE_DEFAULT_ROOT_PATH
+client = lynse.VectorDBClient()
 
-
-```python linenums="1"
-# Use the HTTP API mode, it is suitable for use in production environments.
-client = lynse.VectorDBClient("http://127.0.0.1:7637")  # If no url is passed, the native api is used.
-# Create a database named "test_db", if it already exists, delete it and rebuild it.
+# Create (or open) a database
 my_db = client.create_database("test_db", drop_if_exists=True)
 ```
 
-### create a collection
+### Remote / HTTP mode
 
-**`WARNING`**
+Start the server first:
 
-When using the `require_collection` method to request a collection, if the `drop_if_exists` parameter is set to True, it will delete all content of the collection if it already exists.
-
-A safer method is to use the `get_collection` method. It is recommended to use the `require_collection` method only when you need to reinitialize a collection or create a new one.
-
-
-```python linenums="1"
-collection = my_db.require_collection("test_collection", dim=4, drop_if_exists=True, description="demo collection")
+```shell
+lynse run --host localhost --port 7637
+# enable auth if needed:
+# lynse run --host localhost --port 7637 --api-key your_key
+# or via Docker:
+docker run -p 7637:7637 birchkwok/lynsedb:latest
+# docker run -p 7637:7637 -e LYNSE_API_KEY=your_key birchkwok/lynsedb:latest
 ```
 
-#### show database collections
-If the pandas library is installed, `show_collections_details` method will show as a pandas dataframe. Otherwise, it will be a dict.
+```python linenums="1"
+# Connect with optional API key
+client = lynse.VectorDBClient("http://127.0.0.1:7637", api_key="your_key")
+my_db = client.create_database("test_db", drop_if_exists=True)
+```
+
+---
+
+## Create a Collection
+
+**`WARNING`** — Setting `drop_if_exists=True` permanently deletes existing data.
+Use `get_collection` to open an existing collection safely.
+
+```python linenums="1"
+collection = my_db.require_collection(
+    "test_collection",
+    dim=4,
+    drop_if_exists=True,
+    description="demo collection",
+)
+```
+
+### Show collections
+
+If pandas is installed, `show_collections_details` returns a DataFrame; otherwise a list of dicts.
 
 ```python linenums="1"
 my_db.show_collections_details()
 ```
 
+    collection_name    dim  n_threads  description
+    test_collection      4         10  demo collection
 
-
-
-<div>
-<style scoped>
-    .dataframe tbody tr th:only-of-type {
-        vertical-align: middle;
-    }
-
-    .dataframe tbody tr th {
-        vertical-align: top;
-    }
-
-    .dataframe thead th {
-        text-align: right;
-    }
-</style>
-<table border="1" class="dataframe">
-  <thead>
-    <tr style="text-align: right;">
-      <th></th>
-      <th>dim</th>
-      <th>chunk_size</th>
-      <th>dtypes</th>
-      <th>use_cache</th>
-      <th>n_threads</th>
-      <th>warm_up</th>
-      <th>description</th>
-      <th>cache_chunks</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <th>test_collection</th>
-      <td>4</td>
-      <td>100000</td>
-      <td>float32</td>
-      <td>True</td>
-      <td>10</td>
-      <td>False</td>
-      <td>demo collection</td>
-      <td>20</td>
-    </tr>
-  </tbody>
-</table>
-</div>
-
-
-
-#### update description
-
+### Update description
 
 ```python linenums="1"
 collection.update_description("Hello World")
-my_db.show_collections_details()
 ```
 
+---
 
+## Add Vectors
 
+Use `insert_session` to guarantee data is committed automatically on exit.
+You can also call `collection.commit()` manually after `add_item` / `bulk_add_items`.
 
-<div>
-<style scoped>
-    .dataframe tbody tr th:only-of-type {
-        vertical-align: middle;
-    }
-
-    .dataframe tbody tr th {
-        vertical-align: top;
-    }
-
-    .dataframe thead th {
-        text-align: right;
-    }
-</style>
-<table border="1" class="dataframe">
-  <thead>
-    <tr style="text-align: right;">
-      <th></th>
-      <th>dim</th>
-      <th>chunk_size</th>
-      <th>dtypes</th>
-      <th>use_cache</th>
-      <th>n_threads</th>
-      <th>warm_up</th>
-      <th>description</th>
-      <th>cache_chunks</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <th>test_collection</th>
-      <td>4</td>
-      <td>100000</td>
-      <td>float32</td>
-      <td>True</td>
-      <td>10</td>
-      <td>False</td>
-      <td>Hello World</td>
-      <td>20</td>
-    </tr>
-  </tbody>
-</table>
-</div>
-
-
-
-### Add vectors
-
-When inserting vectors, the collection requires manually running the `commit` function or inserting within the `insert_session` function context manager, which will run the `commit` function in the background.
-
-It is strongly recommended to use the `insert_session` context manager for insertion, as this provides more comprehensive data security features during the insertion process.
-
+### Single item at a time
 
 ```python linenums="1"
 with collection.insert_session() as session:
-    id = session.add_item(vector=[0.01, 0.34, 0.74, 0.31], id=1, field={'field': 'test_1', 'order': 0})   # id = 1
-    id = session.add_item(vector=[0.36, 0.43, 0.56, 0.12], id=2, field={'field': 'test_1', 'order': 1})   # id = 2
-    id = session.add_item(vector=[0.03, 0.04, 0.10, 0.51], id=3, field={'field': 'test_2', 'order': 2})   # id = 3
-    id = session.add_item(vector=[0.11, 0.44, 0.23, 0.24], id=4, field={'field': 'test_2', 'order': 3})   # id = 4
-    id = session.add_item(vector=[0.91, 0.43, 0.44, 0.67], id=5, field={'field': 'test_2', 'order': 4})   # id = 5
-    id = session.add_item(vector=[0.92, 0.12, 0.56, 0.19], id=6, field={'field': 'test_3', 'order': 5})   # id = 6
-    id = session.add_item(vector=[0.18, 0.34, 0.56, 0.71], id=7, field={'field': 'test_1', 'order': 6})   # id = 7
-    id = session.add_item(vector=[0.01, 0.33, 0.14, 0.31], id=8, field={'field': 'test_2', 'order': 7})   # id = 8
-    id = session.add_item(vector=[0.71, 0.75, 0.91, 0.82], id=9, field={'field': 'test_3', 'order': 8})   # id = 9
-    id = session.add_item(vector=[0.75, 0.44, 0.38, 0.75], id=10, field={'field': 'test_1', 'order': 9})  # id = 10
-
-# If you do not use the insert_session function, you need to manually call the commit function to submit the data
-# collection.commit()
-
-# or use the bulk_add_items function
-# with collection.insert_session():
-#     ids = collection.bulk_add_items([([0.01, 0.34, 0.74, 0.31], 0, {'field': 'test_1', 'order': 0}),
-#                                      ([0.36, 0.43, 0.56, 0.12], 1, {'field': 'test_1', 'order': 1}),
-#                                      ([0.03, 0.04, 0.10, 0.51], 2, {'field': 'test_2', 'order': 2}),
-#                                      ([0.11, 0.44, 0.23, 0.24], 3, {'field': 'test_2', 'order': 3}),
-#                                      ([0.91, 0.43, 0.44, 0.67], 4, {'field': 'test_2', 'order': 4}),
-#                                      ([0.92, 0.12, 0.56, 0.19], 5, {'field': 'test_3', 'order': 5}),
-#                                      ([0.18, 0.34, 0.56, 0.71], 6, {'field': 'test_1', 'order': 6}),
-#                                      ([0.01, 0.33, 0.14, 0.31], 7, {'field': 'test_2', 'order': 7}),
-#                                      ([0.71, 0.75, 0.91, 0.82], 8, {'field': 'test_3', 'order': 8}),
-#                                      ([0.75, 0.44, 0.38, 0.75], 9, {'field': 'test_1', 'order': 9})])
-# print(ids)  # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    session.add_item(vector=[0.01, 0.34, 0.74, 0.31], id=1, field={'field': 'test_1', 'order': 0})
+    session.add_item(vector=[0.36, 0.43, 0.56, 0.12], id=2, field={'field': 'test_1', 'order': 1})
+    session.add_item(vector=[0.03, 0.04, 0.10, 0.51], id=3, field={'field': 'test_2', 'order': 2})
+    session.add_item(vector=[0.11, 0.44, 0.23, 0.24], id=4, field={'field': 'test_2', 'order': 3})
+    session.add_item(vector=[0.91, 0.43, 0.44, 0.67], id=5, field={'field': 'test_2', 'order': 4})
+    session.add_item(vector=[0.92, 0.12, 0.56, 0.19], id=6, field={'field': 'test_3', 'order': 5})
+    session.add_item(vector=[0.18, 0.34, 0.56, 0.71], id=7, field={'field': 'test_1', 'order': 6})
+    session.add_item(vector=[0.01, 0.33, 0.14, 0.31], id=8, field={'field': 'test_2', 'order': 7})
+    session.add_item(vector=[0.71, 0.75, 0.91, 0.82], id=9, field={'field': 'test_3', 'order': 8})
+    session.add_item(vector=[0.75, 0.44, 0.38, 0.75], id=10, field={'field': 'test_1', 'order': 9})
 ```
 
-
-    2024-09-12 17:33:36 - LynseDB - INFO - Task status: {'status': 'Processing'}
-    2024-09-12 17:33:38 - LynseDB - INFO - Task status: {'result': {'collection_name': 'test_collection', 'database_name': 'test_db'}, 'status': 'Success'}
-
-### Find the nearest neighbors of a given vector
-
-The default similarity measure for query is Inner Product (IP). You can specify cosine or L2 to obtain the similarity measure you need.
-
+### Bulk add
 
 ```python linenums="1"
-ids, scores, fields = collection.search(vector=[0.36, 0.43, 0.56, 0.12], k=3, distance="cosine", return_fields=True)
-print("ids: ", ids)
-print("scores: ", scores)
-print("fields: ", fields)
+import numpy as np
+
+items = [
+    (np.random.rand(4).astype(np.float32), i, {'tag': f'item_{i}'})
+    for i in range(11, 21)
+]
+
+with collection.insert_session() as session:
+    ids = session.bulk_add_items(items)
+
+print(ids)  # [11, 12, ..., 20]
 ```
 
-    ids:  [ 9  5 10]
-    scores:  [ 0.18610001 -0.16069996 -0.23799998]
-    fields:  [{':id:': 9, 'field': 'test_3', 'order': 8}, {':id:': 5, 'field': 'test_2', 'order': 4}, {':id:': 10, 'field': 'test_1', 'order': 9}]
-
-
-### List data
-
+### High-throughput binary bulk add (no fields)
 
 ```python linenums="1"
-ids, scores, fields = collection.head(5)
-print("ids: ", ids)
-print("scores: ", scores)
-print("fields: ", fields)
+vecs = np.random.rand(1000, 4).astype(np.float32)
+n_added = collection.bulk_add_binary(vecs)
+collection.commit()
 ```
 
-    ids:  [1 2 3 4 5]
-    scores:  [[0.01       0.34       0.74000001 0.31      ]
-     [0.36000001 0.43000001 0.56       0.12      ]
-     [0.03       0.04       0.1        0.50999999]
-     [0.11       0.44       0.23       0.23999999]
-     [0.91000003 0.43000001 0.44       0.67000002]]
-    fields:  [{':id:': 1, 'field': 'test_1', 'order': 0}, {':id:': 2, 'field': 'test_1', 'order': 1}, {':id:': 3, 'field': 'test_2', 'order': 2}, {':id:': 4, 'field': 'test_2', 'order': 3}, {':id:': 5, 'field': 'test_2', 'order': 4}]
+---
 
-
+## Collection Info
 
 ```python linenums="1"
-ids, scores, fields = collection.tail(5)
-print("ids: ", ids)
-print("scores: ", scores)
-print("fields: ", fields)
+print(collection.shape)   # (n_vectors, dim)
+print(collection.max_id)  # highest user ID stored
+print(collection.stats())
+# {'n_vectors': ..., 'n_live': ..., 'n_tombstoned': ...,
+#  'dimension': 4, 'index_mode': 'FLAT', 'max_id': ...}
 ```
 
-    ids:  [ 6  7  8  9 10]
-    scores:  [[0.92000002 0.12       0.56       0.19      ]
-     [0.18000001 0.34       0.56       0.70999998]
-     [0.01       0.33000001 0.14       0.31      ]
-     [0.70999998 0.75       0.91000003 0.81999999]
-     [0.75       0.44       0.38       0.75      ]]
-    fields:  [{':id:': 6, 'field': 'test_3', 'order': 5}, {':id:': 7, 'field': 'test_1', 'order': 6}, {':id:': 8, 'field': 'test_2', 'order': 7}, {':id:': 9, 'field': 'test_3', 'order': 8}, {':id:': 10, 'field': 'test_1', 'order': 9}]
+---
 
+## Search
 
-## Use FieldExpression for result filtering
+`search` returns a `ResultView` object. Unpack with `ids, distances, fields = result` or
+use `.ids`, `.distances`, `.fields` directly.
 
-See [FieldExpression Tutorial](FieldExpression.md)
+### Basic search (Inner Product)
 
 ```python linenums="1"
-ids, scores, fields = collection.search(
+result = collection.search(vector=[0.36, 0.43, 0.56, 0.12], k=3)
+print(result.ids)        # array of top-k IDs
+print(result.distances)  # array of distances/scores
+```
+
+### Search with field filtering (SQL WHERE)
+
+```python linenums="1"
+result = collection.search(
     vector=[0.36, 0.43, 0.56, 0.12],
     k=10,
-    where="""
-        :field: == 'test_1' and
-        ((0 <= :order: <= 8) or (:id: in [1, 2, 3, 4, 5])) and
-        not (:id: == 8 and :order: >= 8)
-    """,
-    return_fields=False
+    where="\"field\" = 'test_1' AND \"order\" <= 8",
+    return_fields=True,
 )
-
-print("ids: ", ids)
-print("scores: ", scores)
-print("fields: ", fields)
+print(result.ids)
+print(result.fields)
 ```
 
-    ids:  [2 7 1]
-    scores:  [-0.35749996 -0.39020002 -0.39859998]
-    fields:  None
-
-
-### Use Filter for freer conditional expression
-
-Using the Filter class for result filtering can maximize Recall.
-
-The Filter class now supports `must`, `any`, and `must_not` parameters, all of which only accept list-type argument values.
-
-The filtering conditions in `must` must be met, those in `must_not` must not be met.
-
-After filtering with `must` and `must_not` conditions, the conditions in `any` will be considered, and at least one of the conditions in `any` must be met.
-
-The filter result must satisfy both `must` and `any`, but not `must_not`.
-
+### Batch search
 
 ```python linenums="1"
-import operator
+queries = np.random.rand(5, 4).astype(np.float32)
+results = collection.batch_search(queries, k=3)
+for r in results:
+    print(r.ids, r.distances)
+```
 
-from lynse.field_models import Filter, FieldCondition, MatchField, MatchID, MatchRange
+### Range search
 
-ids, scores, fields = collection.search(
+Return all vectors within a distance threshold (L2: ≤ threshold; IP/Cos: ≥ threshold).
+
+```python linenums="1"
+result = collection.search_range(
     vector=[0.36, 0.43, 0.56, 0.12],
-    k=10,
-    where=Filter(
-        must=[
-            FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
-        ],
-        any=[
-            FieldCondition(key='order', matcher=MatchRange(start=0, end=8, inclusive=True)),
-            FieldCondition(key=":id:", matcher=MatchID([1, 2, 3, 4, 5])),  # Support for filtering IDs
-        ],
-        must_not=[
-            FieldCondition(key=":id:", matcher=MatchID([8])),
-            FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),
-        ]
-    ),
-    return_fields=False
+    threshold=0.5,
+    max_results=100,
 )
-
-print("ids: ", ids)
-print("scores: ", scores)
-print("fields: ", fields)
+print(result.ids, result.distances)
 ```
 
-    ids:  [2 7 1]
-    scores:  [-0.35749996 -0.39020002 -0.39859998]
-    fields:  None
+---
 
+## Index Modes
 
-### Query fields
-
-#### Query via FieldExpression
-
+Build an ANN index for faster search on large collections.
 
 ```python linenums="1"
-collection.query("""
-    :field: == 'test_1' and
-    ((0 <= :order: <= 8) or (:id: in [1, 2, 3, 4, 5])) and
-    not (:id: == 8 and :order: >= 8)
-""")
+# Flat brute-force variants
+collection.build_index("FLAT")        # Inner Product (default)
+collection.build_index("FLAT-L2")     # Squared L2
+collection.build_index("FLAT-COS")    # Cosine similarity
+
+# Graph-based ANN
+collection.build_index("HNSW")        # HNSW + Inner Product
+collection.build_index("HNSW-L2")
+collection.build_index("HNSW-Cos")
+
+# Disk-friendly graph ANN
+collection.build_index("DiskANN")
+collection.build_index("DiskANN-L2")
+
+# Inverted-file ANN
+collection.build_index("IVF", n_clusters=256)
+collection.build_index("IVF-L2", n_clusters=256)
+
+# Quantized variants (SQ8 / PQ / RaBitQ / PolarVec)
+collection.build_index("FLAT-IP-SQ8")
+collection.build_index("FLAT-L2-PQ")
+collection.build_index("FLAT-L2-RABITQ")
+collection.build_index("FLAT-IP-POLARVEC")
+
+print(collection.index_mode)  # e.g. "HNSW"
+
+# Remove an existing index (revert to brute-force)
+collection.remove_index()
 ```
 
-
-
-
-    [{':id:': 1, 'field': 'test_1', 'order': 0},
-     {':id:': 2, 'field': 'test_1', 'order': 1},
-     {':id:': 7, 'field': 'test_1', 'order': 6}]
-
-
-
-#### Query via Filter
-
+Search with `nprobe` to tune recall vs. speed for IVF / HNSW:
 
 ```python linenums="1"
-where=Filter(
-    must=[
-        FieldCondition(key='field', matcher=MatchField('test_1')),  # Support for filtering fields
-    ],
-    any=[
-        FieldCondition(key='order', matcher=MatchRange(start=0, end=8, inclusive=True)),
-        FieldCondition(key=":id:", matcher=MatchID([1, 2, 3, 4, 5])),  # Support for filtering IDs
-    ],
-    must_not=[
-        FieldCondition(key=":id:", matcher=MatchID([8])),
-        FieldCondition(key='order', matcher=MatchField(8, comparator=operator.ge)),
-    ]
+result = collection.search(
+    vector=[0.36, 0.43, 0.56, 0.12], k=5, nprobe=20
 )
-
-collection.query(where)
 ```
 
+---
 
-
-
-    [{':id:': 1, 'field': 'test_1', 'order': 0},
-     {':id:': 2, 'field': 'test_1', 'order': 1},
-     {':id:': 7, 'field': 'test_1', 'order': 6}]
-
-
-
-#### Exact Match
-
+## List Data
 
 ```python linenums="1"
-collection.query({':id:': 1, 'field': 'test_1', 'order': 0})
+head_result = collection.head(5)
+print(head_result.ids)      # first 5 IDs
+print(head_result.vectors)  # shape (5, dim)
+
+tail_result = collection.tail(5)
+print(tail_result.ids)
 ```
 
+---
 
+## Query Fields
 
-
-    [{':id:': 1, 'field': 'test_1', 'order': 0}]
-
-
-
-#### Fuzzy Match
-
+`query` returns a `ResultView`; iterate over `.fields` or use `.to_list()` / `.to_pandas()`.
 
 ```python linenums="1"
-collection.query({'field': 'test_1'})
+# Filter by SQL WHERE expression (column names must be double-quoted)
+result = collection.query(where="\"field\" = 'test_1' AND \"order\" <= 6")
+print(result.ids)
+print(result.fields)
+
+# Filter by specific IDs only
+result = collection.query(filter_ids=[1, 2, 3], return_ids_only=True)
+print(result.ids)
 ```
 
-
-
-
-    [{':id:': 1, 'field': 'test_1', 'order': 0},
-     {':id:': 2, 'field': 'test_1', 'order': 1},
-     {':id:': 10, 'field': 'test_1', 'order': 9},
-     {':id:': 7, 'field': 'test_1', 'order': 6}]
-
-
+---
 
 ## Query Vectors
 
-Much like query, you can query using either the FieldExpression string or the Filter class, fuzzy match, or exact match.
-
+Retrieve vectors along with their fields using a WHERE filter or ID list.
 
 ```python linenums="1"
-collection.query_vectors("""
-    :field: == 'test_1' and
-    ((0 <= :order: <= 8) or (:id: in [1, 2, 3, 4, 5])) and
-    not (:id: == 8 and :order: >= 8)
-""")
+result = collection.query_vectors(where="\"field\" = 'test_1'")
+print(result.ids)
+print(result.vectors)  # shape (n, dim)
+print(result.fields)
+
+result2 = collection.query_vectors(filter_ids=[1, 2, 3])
+print(result2.ids, result2.vectors)
 ```
 
+---
 
+## ResultView
 
-
-    (array([1, 2, 7]),
-     array([[0.01      , 0.34      , 0.74000001, 0.31      ],
-            [0.36000001, 0.43000001, 0.56      , 0.12      ],
-            [0.18000001, 0.34      , 0.56      , 0.70999998]]),
-     [{':id:': 1, 'field': 'test_1', 'order': 0},
-      {':id:': 2, 'field': 'test_1', 'order': 1},
-      {':id:': 7, 'field': 'test_1', 'order': 6}])
-
-
-
+All search, query, head, and tail operations return a `ResultView` object.
 
 ```python linenums="1"
-collection.query_vectors({'field': 'test_1'})
+result = collection.search([0.36, 0.43, 0.56, 0.12], k=3, return_fields=True)
+
+# Attribute access
+print(result.ids)           # numpy int64 array
+print(result.distances)     # numpy float32 array
+print(result.fields)        # list of dicts
+
+# Tuple unpacking  (ids, distances, fields)
+ids, distances, fields = result
+
+# Conversion helpers
+result.to_dict()
+result.to_list()
+result.to_json()
+result.to_pandas()    # requires pandas
+result.to_polars()    # requires polars
+result.to_arrow()     # requires pyarrow
+
+# Indexing and iteration
+print(result[0])      # first result row as dict
+for row in result:
+    print(row)
+
+print(len(result))    # number of results
 ```
 
+---
 
+## Soft Delete & Restore
 
-
-    (array([ 1,  2,  7, 10]),
-     array([[0.01      , 0.34      , 0.74000001, 0.31      ],
-            [0.36000001, 0.43000001, 0.56      , 0.12      ],
-            [0.18000001, 0.34      , 0.56      , 0.70999998],
-            [0.75      , 0.44      , 0.38      , 0.75      ]]),
-     [{':id:': 1, 'field': 'test_1', 'order': 0},
-      {':id:': 2, 'field': 'test_1', 'order': 1},
-      {':id:': 7, 'field': 'test_1', 'order': 6},
-      {':id:': 10, 'field': 'test_1', 'order': 9}])
-
-
-
-### Drop a collection
-
-`WARNING: This operation cannot be undone`
-
+Vectors can be logically deleted (tombstoned) without physically removing them.
+Deleted vectors are excluded from all search results.
 
 ```python linenums="1"
-print("Collection list before dropping:", my_db.show_collections())
-status = my_db.drop_collection("test_collection")
-print("Collection list after dropped:", my_db.show_collections())
+collection.delete_items([3, 5])
+print(collection.list_deleted_ids())   # [3, 5]
+
+# Verify exclusion from search
+result = collection.search([0.03, 0.04, 0.10, 0.51], k=10)
+assert 3 not in result.ids
+
+# Restore
+collection.restore_items([3])
+print(collection.list_deleted_ids())   # [5]
 ```
 
-    Collection list before dropping: ['test_collection']
-    Collection list after dropped: []
+---
 
+## Compaction
 
-## Drop the database
-
-`WARNING: This operation cannot be undone`
-
+Physically remove all tombstoned vectors and rebuild storage.
 
 ```python linenums="1"
+removed = collection.compact()
+print(f"Physically removed {removed} vectors")
+print(collection.list_deleted_ids())  # []
+```
+
+---
+
+## Manage Collections and Databases
+
+```python linenums="1"
+# List collections
+print(my_db.show_collections())
+
+# Check existence
+print(my_db.database_exists())
+
+# Get an existing collection by name
+coll = my_db.get_collection("test_collection")
+
+# Drop a collection (irreversible)
+my_db.drop_collection("test_collection")
+print(my_db.show_collections())  # []
+
+# Drop the whole database (irreversible)
 my_db.drop_database()
-my_db
 ```
 
+---
 
+## Utility Functions
 
+```python linenums="1"
+from lynse._backend import compute_distance, top_k_search
+import numpy as np
 
-    RemoteDatabaseInstance(name=test_db, exists=False)
+a = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+b = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+
+print(compute_distance(a, b, "IP"))     # inner product
+print(compute_distance(a, b, "L2"))     # squared L2
+print(compute_distance(a, b, "cosine")) # cosine similarity
+
+candidates = np.random.rand(1000, 3).astype(np.float32)
+ids, dists = top_k_search(a, candidates, metric="IP", k=5)
+print(ids, dists)
+```

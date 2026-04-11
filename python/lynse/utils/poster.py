@@ -2,7 +2,7 @@ import httpx
 
 
 class Poster:
-    def __init__(self, retries=3, timeout=None, http2=False):
+    def __init__(self, retries=3, timeout=None, http2=False, api_key=None):
         """
         A class for making HTTP requests.
 
@@ -10,12 +10,16 @@ class Poster:
             retries (int): The number of times to retry the request.
             timeout (int or None): The request timeout in seconds.
             http2 (bool): Whether to use HTTP/2.
+            api_key (str or None): Optional Bearer token for Authorization header.
         """
         self.retries = retries
         self.timeout = timeout
         self.http2 = http2
         transport = httpx.HTTPTransport(retries=retries, http2=http2)
-        self.session = httpx.Client(transport=transport, timeout=timeout)
+        headers = {}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+        self.session = httpx.Client(transport=transport, timeout=timeout, headers=headers)
 
     def post(self, url, data=None, headers=None, content=None, json=None, params=None):
         """

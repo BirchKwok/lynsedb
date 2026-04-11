@@ -178,7 +178,11 @@ impl BitSet {
         SetBitIter {
             bitset: self,
             word_idx: 0,
-            current_word: if self.words.is_empty() { 0 } else { self.words[0] },
+            current_word: if self.words.is_empty() {
+                0
+            } else {
+                self.words[0]
+            },
             base: 0,
         }
     }
@@ -256,8 +260,8 @@ impl BitSet {
 
     /// Save the BitSet to a file.
     pub fn save_to_file(&self, path: &Path) -> Result<()> {
-        let data = bincode::serialize(self)
-            .map_err(|e| LynseError::Serialization(e.to_string()))?;
+        let data =
+            bincode::serialize(self).map_err(|e| LynseError::Serialization(e.to_string()))?;
         std::fs::write(path, &data)?;
         Ok(())
     }
@@ -265,8 +269,8 @@ impl BitSet {
     /// Load a BitSet from a file.
     pub fn load_from_file(path: &Path) -> Result<Self> {
         let data = std::fs::read(path)?;
-        let bitset: Self = bincode::deserialize(&data)
-            .map_err(|e| LynseError::Serialization(e.to_string()))?;
+        let bitset: Self =
+            bincode::deserialize(&data).map_err(|e| LynseError::Serialization(e.to_string()))?;
         Ok(bitset)
     }
 

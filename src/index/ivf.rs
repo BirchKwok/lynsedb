@@ -3,15 +3,15 @@
 //! Partitions the vector space into clusters using K-means, then searches
 //! only the nearest clusters. Good balance of speed and recall for large datasets.
 
+use super::{IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
 use crate::distance::{self, compute_distance_f32, DistanceMetric};
 use crate::error::{LynseError, Result};
 use crate::quantizer::{self, Quantizer, QuantizerType};
-use super::{IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
 use rand::Rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
 /// IVF index with inverted file structure.
 pub struct IVFIndex {
@@ -36,14 +36,12 @@ impl IVFIndex {
         n_centroids: usize,
         nprobe: usize,
     ) -> Self {
-        let quantizer = quantizer::create_quantizer(
-            match quant_type {
-                QuantizerType::None => "none",
-                QuantizerType::Scalar => "sq8",
-                QuantizerType::Binary => "binary",
-                QuantizerType::Product => "pq",
-            },
-        )
+        let quantizer = quantizer::create_quantizer(match quant_type {
+            QuantizerType::None => "none",
+            QuantizerType::Scalar => "sq8",
+            QuantizerType::Binary => "binary",
+            QuantizerType::Product => "pq",
+        })
         .unwrap();
 
         Self {
@@ -106,8 +104,7 @@ impl IVFIndex {
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
                 .map(|(i, _)| i)
                 .unwrap_or(0);
-            centroids[c * dim..(c + 1) * dim]
-                .copy_from_slice(&data[best * dim..(best + 1) * dim]);
+            centroids[c * dim..(c + 1) * dim].copy_from_slice(&data[best * dim..(best + 1) * dim]);
         }
 
         // ── Parallel Lloyd iterations ─────────────────────────────────────────
@@ -135,7 +132,10 @@ impl IVFIndex {
                 })
                 .collect();
 
-            let changed = new_assignments.iter().zip(&assignments).any(|(a, b)| a != b);
+            let changed = new_assignments
+                .iter()
+                .zip(&assignments)
+                .any(|(a, b)| a != b);
             assignments = new_assignments;
 
             // Update centroids
@@ -348,13 +348,7 @@ impl VectorIndex for IVFIndex {
         Ok(())
     }
 
-    fn insert(
-        &mut self,
-        vectors: &[f32],
-        n_vectors: usize,
-        dim: usize,
-        ids: &[u64],
-    ) -> Result<()> {
+    fn insert(&mut self, vectors: &[f32], n_vectors: usize, dim: usize, ids: &[u64]) -> Result<()> {
         if dim != self.config.dimension {
             return Err(LynseError::DimensionMismatch {
                 expected: self.config.dimension,
