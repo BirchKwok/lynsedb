@@ -65,10 +65,13 @@ Embedded mode should be safe and unsurprising.
 
 Single-node deployment needs operational escape hatches.
 
-- Add database and collection snapshots.
-- Add restore from snapshot.
+- Add collection snapshots.
+- Add restore collection from snapshot.
+- Add database-level snapshots.
+- Add restore database from snapshot.
 - Support consistent snapshot while reads continue.
-- Define write blocking or LSN-based snapshot isolation.
+- Define write-blocking snapshot isolation, with LSN-based snapshots as a
+  future option.
 - Add import/export for JSONL metadata plus binary vectors.
 - Add migration hooks for future storage format upgrades.
 
@@ -154,5 +157,48 @@ Distributed work should wait until single-node semantics are stable.
 - [x] Expose `flush`, `checkpoint`, and `close` through Python and HTTP clients.
 - [x] Add regression tests for writer-lock rejection and checkpoint recovery.
 - [x] Add database-level and manager-level writer locks.
-- [ ] Add read-only open mode for safe multi-process readers.
-- [ ] Add graceful server shutdown that checkpoints open collections.
+- [x] Add read-only open mode for safe multi-process readers.
+- [x] Add graceful server shutdown that checkpoints open collections.
+
+## Milestone 3 Immediate Coding Queue
+
+- [x] Add collection filesystem snapshots.
+- [x] Add restore collection from snapshot.
+- [x] Expose snapshot and restore through Python local bindings.
+- [x] Expose snapshot and restore through HTTP server/client APIs.
+- [x] Add snapshot/restore regression tests.
+- [x] Add database-level filesystem snapshots.
+- [x] Add restore database from snapshot.
+- [x] Expose database snapshot and restore through Python/HTTP APIs.
+- [x] Add database snapshot/restore regression tests.
+- [x] Add consistent snapshot while reads continue.
+- [x] Add import/export for JSONL metadata plus binary vectors.
+
+## Milestone 4 Immediate Coding Queue
+
+- [x] Add CLI support for `lynse serve --data-dir ...` (with backward-compatible `run` / `--root`).
+- [x] Add `/healthz` and `/readyz` endpoints for liveness/readiness probes.
+- [x] Add `/metrics` endpoint with Prometheus gauges, request counters, and latency histogram.
+- [x] Add config-file support with environment-variable overrides.
+- [x] Make request limits and timeout settings configurable.
+- [x] Generate and publish OpenAPI docs from HTTP routes.
+- [x] Publish Docker Compose, systemd, and Kubernetes examples.
+
+## Milestone 5 Immediate Coding Queue
+
+- [x] Add `/search_profile` with filter matches, estimated scanned vectors, index path, and timing data.
+- [x] Add baseline BM25 metadata text search over current field rows.
+- [x] Add hybrid vector/text search with RRF and weighted fusion.
+- [x] Expose query profile, text search, and hybrid search through local and HTTP clients.
+- [x] Add named vector fields per record.
+- [x] Allow each vector field to define its own dimension, metric, and index.
+- [x] Add sparse vector storage and sparse inner-product search.
+- [x] Add persistent inverted indexes for high-throughput text retrieval.
+- [x] Add external rerank hooks for cross-encoders and LLM rerankers.
+- [x] Expand metadata indexes for range, bitmap, keyword, datetime, and arrays.
+
+## Milestone 6 Immediate Coding Queue
+
+- [x] Extend `/metrics` with error counters by kind and estimated p50/p90/p99 latency gauges.
+- [ ] Add Prometheus metrics for WAL size, memory usage, disk usage, and index build progress.
+- [ ] Add structured request logging with request IDs and slow-query warnings.

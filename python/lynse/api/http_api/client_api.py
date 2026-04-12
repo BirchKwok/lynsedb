@@ -2,7 +2,8 @@ import json
 import queue
 import struct
 import time
-from typing import Union, List, Tuple
+from pathlib import Path
+from typing import Union, List, Tuple, Dict, Any, Optional, Callable
 from threading import Lock
 
 import numpy as np
@@ -15,6 +16,7 @@ from ...utils.asserts import raise_if
 from ...utils.poster import Poster
 from ...utils.utils import collection_repr
 from ...result_view import ResultView, _parse_index_mode
+from ..rerank import apply_external_rerank, should_fetch_fields
 
 
 def _decode_search_binary(buf: bytes, offset: int = 0):
@@ -63,6 +65,28 @@ def _decode_vectors_binary(buf: bytes):
     flen = struct.unpack_from('<I', buf, off)[0]; off += 4
     fields = json.loads(buf[off:off + flen]) if flen > 0 else []
     return vecs, ids, fields
+
+
+def _normalize_sparse_vector(vector: Any) -> List[Tuple[int, float]]:
+    items = vector.items() if isinstance(vector, dict) else vector
+    normalized: List[Tuple[int, float]] = []
+    for item in items:
+        if len(item) != 2:
+            raise ValueError("sparse vector entries must be (index, value) pairs")
+        index, value = item
+        index = int(index)
+        if index < 0:
+            raise ValueError("sparse vector indices must be non-negative")
+        normalized.append((index, float(value)))
+    return normalized
+
+
+def _sparse_vector_payload(vector: Any) -> Tuple[Dict[str, list], List[Tuple[int, float]]]:
+    normalized = _normalize_sparse_vector(vector)
+    return {
+        "indices": [int(index) for index, _ in normalized],
+        "values": [float(value) for _, value in normalized],
+    }, normalized
 
 
 class ExecutionError(Exception):
@@ -230,6 +254,105 @@ class HTTPClient:
         uri = f'{self.uri}/drop_collection'
         data = {"database_name": self.database_name, "collection_name": collection}
         return self._session.post(uri, json=data).json()
+
+    def snapshot_collection(self, collection: str, snapshot_path: Union[str, Path]):
+        """Create a filesystem snapshot for a collection on the server."""
+        uri = f'{self.uri}/snapshot_collection'
+        data = {
+            "database_name": self.database_name,
+            "collection_name": collection,
+            "snapshot_path": str(snapshot_path),
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def export_collection(self, collection: str, export_path: Union[str, Path]):
+        """Export a collection as JSONL metadata plus binary vectors on the server."""
+        uri = f'{self.uri}/export_collection'
+        data = {
+            "database_name": self.database_name,
+            "collection_name": collection,
+            "export_path": str(export_path),
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def restore_collection(
+            self,
+            collection: str,
+            snapshot_path: Union[str, Path],
+            overwrite: bool = False,
+    ):
+        """Restore a collection from a filesystem snapshot on the server."""
+        uri = f'{self.uri}/restore_collection'
+        data = {
+            "database_name": self.database_name,
+            "collection_name": collection,
+            "snapshot_path": str(snapshot_path),
+            "overwrite": overwrite,
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def import_collection(
+            self,
+            collection: str,
+            export_path: Union[str, Path],
+            overwrite: bool = False,
+    ):
+        """Import a collection from JSONL metadata plus binary vectors on the server."""
+        uri = f'{self.uri}/import_collection'
+        data = {
+            "database_name": self.database_name,
+            "collection_name": collection,
+            "export_path": str(export_path),
+            "overwrite": overwrite,
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def snapshot_database(self, snapshot_path: Union[str, Path]):
+        """Create a filesystem snapshot for this database on the server."""
+        uri = f'{self.uri}/snapshot_database'
+        data = {
+            "database_name": self.database_name,
+            "snapshot_path": str(snapshot_path),
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def restore_database(
+            self,
+            snapshot_path: Union[str, Path],
+            overwrite: bool = False,
+    ):
+        """Restore this database from a filesystem snapshot on the server."""
+        uri = f'{self.uri}/restore_database'
+        data = {
+            "database_name": self.database_name,
+            "snapshot_path": str(snapshot_path),
+            "overwrite": overwrite,
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
 
     def drop_database(self):
         """
@@ -900,6 +1023,42 @@ class Collection:
         else:
             raise_error_response(response)
 
+    def snapshot_to(self, snapshot_path: Union[str, Path]):
+        """Create a filesystem snapshot of this collection on the server."""
+        uri = f'{self._uri}/snapshot_collection'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "snapshot_path": str(snapshot_path),
+        }
+
+        if not self._mesosphere_list.empty():
+            self._flush_pending_items()
+
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
+    def export_to(self, export_path: Union[str, Path]):
+        """Export this collection as JSONL metadata plus binary vectors on the server."""
+        uri = f'{self._uri}/export_collection'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "export_path": str(export_path),
+        }
+
+        if not self._mesosphere_list.empty():
+            self._flush_pending_items()
+
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise_error_response(response)
+
     def is_id_exists(self, id: int):
         """
         Check if an ID exists in the collection.
@@ -1052,6 +1211,108 @@ class Collection:
         else:
             raise_error_response(response)
 
+    def create_vector_field(
+            self,
+            name: str,
+            dim: int,
+            metric: str = "ip",
+            index_mode: Union[str, None] = None,
+    ):
+        """Create a named vector field with its own dimension and metric."""
+        uri = f'{self._uri}/create_vector_field'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "field_name": name,
+            "dim": int(dim),
+            "metric": metric,
+            "index_mode": index_mode,
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()
+        raise_error_response(response)
+
+    def list_vector_fields(self):
+        """List vector fields, including the reserved default primary vector."""
+        uri = f'{self._uri}/list_vector_fields'
+        data = {"database_name": self._database_name, "collection_name": self._collection_name}
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()['params']['fields']
+        raise_error_response(response)
+
+    def add_named_vectors(
+            self,
+            field_name: str,
+            vectors: Union[list, np.ndarray],
+            ids: List[int],
+    ):
+        """Attach vectors to a named vector field for existing IDs."""
+        uri = f'{self._uri}/add_named_vectors'
+        vecs = np.ascontiguousarray(vectors, dtype=np.float32)
+        if vecs.ndim == 1:
+            vecs = vecs.reshape(1, -1)
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "field_name": field_name,
+            "vectors": vecs.tolist(),
+            "ids": [int(i) for i in ids],
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            self.COMMIT_FLAG = False
+            return response.json()
+        raise_error_response(response)
+
+    def build_vector_field_index(self, field_name: str, index_mode: str = 'FLAT'):
+        """Build or change the index for a named vector field."""
+        uri = f'{self._uri}/build_vector_field_index'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "field_name": field_name,
+            "index_mode": index_mode,
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()
+        raise_error_response(response)
+
+    def remove_vector_field_index(self, field_name: str):
+        """Remove a named vector field index and return it to flat search."""
+        uri = f'{self._uri}/remove_vector_field_index'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "field_name": field_name,
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()
+        raise_error_response(response)
+
+    def add_sparse_vectors(
+            self,
+            vectors: List[Union[Dict[int, float], List[Tuple[int, float]]]],
+            ids: List[int],
+    ):
+        """Attach sparse feature vectors to existing IDs."""
+        uri = f'{self._uri}/add_sparse_vectors'
+        payloads = [_sparse_vector_payload(vector)[0] for vector in vectors]
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "vectors": payloads,
+            "ids": [int(i) for i in ids],
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            self.COMMIT_FLAG = False
+            return response.json()
+        raise_error_response(response)
+
     def insert_session(self):
         """
         Start an insert session.
@@ -1081,6 +1342,9 @@ class Collection:
         }
         if where is not None:
             params['where'] = where
+        vector_field = kwargs.get('vector_field')
+        if vector_field is not None and vector_field != "default":
+            params['vector_field'] = vector_field
         nprobe = kwargs.get('nprobe')
         if nprobe is not None:
             params['nprobe'] = nprobe
@@ -1099,7 +1363,12 @@ class Collection:
     def search(
             self, vector: Union[list[float], np.ndarray], k: int = 10, *,
             where: Union[str, None] = None,
-            return_fields: bool = False, **kwargs
+            return_fields: bool = False,
+            vector_field: str = "default",
+            reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
+            rerank_k: Optional[int] = None,
+            rerank_with_fields: bool = False,
+            **kwargs
     ):
         """
         Search the database for the vectors most similar to the given vector.
@@ -1111,6 +1380,14 @@ class Collection:
             k (int): The number of nearest vectors to return.
             where (str, optional): SQL/WHERE expression string to filter results.
             return_fields (bool): Whether to return the fields of the search results.
+            vector_field (str): Named vector field to search. ``default`` searches
+                the primary collection vector.
+            reranker (callable, optional): External rerank hook. It receives
+                ``{"query": ..., "items": [...]}`` and can return IDs and/or scores.
+            rerank_k (int, optional): Keep top-N after rerank. Defaults to the
+                backend result size.
+            rerank_with_fields (bool): Fetch candidate fields for reranker payload
+                even when ``return_fields=False``.
             **kwargs: Additional keyword arguments:
 
                 - nprobe (int): Controls search breadth by index type (default: 10).
@@ -1129,19 +1406,272 @@ class Collection:
             ValueError: If the collection has been deleted or does not exist.
             ExecutionError: If the server returns an error.
         """
-        buf = self._search(vector=vector, k=k, where=where, return_fields=return_fields, **kwargs)
+        send_return_fields = should_fetch_fields(
+            return_fields=return_fields,
+            reranker=reranker,
+            rerank_with_fields=rerank_with_fields,
+        )
+        vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
+        buf = self._search(
+            vector=vec,
+            k=k,
+            where=where,
+            return_fields=send_return_fields,
+            vector_field=vector_field,
+            **kwargs,
+        )
         ids, dists, fields, _ = _decode_search_binary(buf)
-        idx_type, metric = _parse_index_mode(self.index_mode)
+        ids, dists, reranked_fields = apply_external_rerank(
+            ids=ids,
+            scores=dists,
+            fields=fields,
+            reranker=reranker,
+            query={
+                "type": "vector_search",
+                "vector_field": vector_field,
+                "vector": vec.tolist(),
+                "where": where,
+                "nprobe": kwargs.get("nprobe"),
+            },
+            rerank_k=rerank_k,
+        )
+        if vector_field == "default":
+            index_mode = self.index_mode
+        else:
+            vector_fields = self.list_vector_fields()
+            index_mode = next(
+                (
+                    field.get("index_mode")
+                    for field in vector_fields
+                    if field.get("name") == vector_field
+                ),
+                "FLAT",
+            )
+        idx_type, metric = _parse_index_mode(index_mode)
         return ResultView(
-            ids=ids, distances=dists, fields=fields,
-            k=k, distance=metric, index=idx_type,
+            ids=ids,
+            distances=dists,
+            fields=reranked_fields if return_fields else [],
+            k=len(ids),
+            distance=metric,
+            index=idx_type,
             result_type="search",
         )
+
+    def search_sparse(
+            self, vector: Union[Dict[int, float], List[Tuple[int, float]]],
+            k: int = 10, *, where: Union[str, None] = None,
+            return_fields: bool = False,
+            reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
+            rerank_k: Optional[int] = None,
+            rerank_with_fields: bool = True,
+    ):
+        """Sparse vector search using inner product."""
+        payload, normalized = _sparse_vector_payload(vector)
+        uri = f'{self._uri}/sparse_search'
+        send_return_fields = should_fetch_fields(
+            return_fields=return_fields,
+            reranker=reranker,
+            rerank_with_fields=rerank_with_fields,
+        )
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "vector": payload,
+            "k": k,
+            "where": where,
+            "return_fields": send_return_fields,
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            items = response.json()['params']['items']
+            ids = np.array(items.get('ids', []), dtype=np.int64)
+            scores = np.array(items.get('scores', []), dtype=np.float32)
+            fields = items.get('fields', [])
+            ids, scores, reranked_fields = apply_external_rerank(
+                ids=ids,
+                scores=scores,
+                fields=fields,
+                reranker=reranker,
+                query={
+                    "type": "sparse_search",
+                    "vector": normalized,
+                    "where": where,
+                },
+                rerank_k=rerank_k,
+            )
+            return ResultView(
+                ids=ids,
+                distances=scores,
+                fields=reranked_fields if return_fields else [],
+                k=len(ids),
+                distance="IP",
+                index=items.get('index', 'SPARSE-FLAT-IP'),
+                result_type="search",
+            )
+        raise_error_response(response)
+
+    def search_profile(
+            self, vector: Union[list[float], np.ndarray], k: int = 10, *,
+            where: Union[str, None] = None, return_fields: bool = False,
+            nprobe: int = 10
+    ):
+        """Search and return profile/explain metadata."""
+        vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
+        uri = f'{self._uri}/search_profile'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "vector": vec.tolist(),
+            "k": k,
+            "where": where,
+            "return_fields": return_fields,
+            "nprobe": nprobe,
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            return response.json()['params']
+        raise_error_response(response)
+
+    def text_search(
+            self, text: str, k: int = 10, *,
+            text_fields: Union[list[str], None] = None,
+            where: Union[str, None] = None,
+            return_fields: bool = False,
+            reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
+            rerank_k: Optional[int] = None,
+            rerank_with_fields: bool = True,
+    ):
+        """BM25 text search over metadata fields."""
+        uri = f'{self._uri}/text_search'
+        send_return_fields = should_fetch_fields(
+            return_fields=return_fields,
+            reranker=reranker,
+            rerank_with_fields=rerank_with_fields,
+        )
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "text": text,
+            "text_fields": text_fields,
+            "k": k,
+            "where": where,
+            "return_fields": send_return_fields,
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            items = response.json()['params']['items']
+            ids = np.array(items.get('ids', []), dtype=np.int64)
+            scores = np.array(items.get('scores', []), dtype=np.float32)
+            fields = items.get('fields', [])
+            ids, scores, reranked_fields = apply_external_rerank(
+                ids=ids,
+                scores=scores,
+                fields=fields,
+                reranker=reranker,
+                query={
+                    "type": "text_search",
+                    "text": text,
+                    "text_fields": text_fields,
+                    "where": where,
+                },
+                rerank_k=rerank_k,
+            )
+            return ResultView(
+                ids=ids,
+                distances=scores,
+                fields=reranked_fields if return_fields else [],
+                k=len(ids),
+                distance="bm25",
+                index=items.get('index', 'BM25-SCAN'),
+                result_type="search",
+            )
+        raise_error_response(response)
+
+    def hybrid_search(
+            self, vector: Union[list[float], np.ndarray, None] = None,
+            text: Union[str, None] = None, k: int = 10, *,
+            where: Union[str, None] = None,
+            text_fields: Union[list[str], None] = None,
+            fusion: str = "rrf",
+            vector_weight: float = 1.0,
+            text_weight: float = 1.0,
+            rrf_k: float = 60.0,
+            candidate_limit: Union[int, None] = None,
+            return_fields: bool = False,
+            nprobe: int = 10,
+            reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
+            rerank_k: Optional[int] = None,
+            rerank_with_fields: bool = True,
+    ):
+        """Hybrid vector + BM25 text search with RRF or weighted fusion."""
+        vec = None if vector is None else np.ascontiguousarray(vector, dtype=np.float32).ravel().tolist()
+        uri = f'{self._uri}/hybrid_search'
+        send_return_fields = should_fetch_fields(
+            return_fields=return_fields,
+            reranker=reranker,
+            rerank_with_fields=rerank_with_fields,
+        )
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "vector": vec,
+            "text": text,
+            "text_fields": text_fields,
+            "k": k,
+            "where": where,
+            "fusion": fusion,
+            "vector_weight": vector_weight,
+            "text_weight": text_weight,
+            "rrf_k": rrf_k,
+            "candidate_limit": candidate_limit,
+            "return_fields": send_return_fields,
+            "nprobe": nprobe,
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code == 200:
+            items = response.json()['params']['items']
+            ids = np.array(items.get('ids', []), dtype=np.int64)
+            scores = np.array(items.get('scores', []), dtype=np.float32)
+            fields = items.get('fields', [])
+            ids, scores, reranked_fields = apply_external_rerank(
+                ids=ids,
+                scores=scores,
+                fields=fields,
+                reranker=reranker,
+                query={
+                    "type": "hybrid_search",
+                    "vector": vec,
+                    "text": text,
+                    "text_fields": text_fields,
+                    "where": where,
+                    "fusion": fusion,
+                    "vector_weight": float(vector_weight),
+                    "text_weight": float(text_weight),
+                    "rrf_k": float(rrf_k),
+                    "candidate_limit": candidate_limit,
+                    "nprobe": nprobe,
+                },
+                rerank_k=rerank_k,
+            )
+            return ResultView(
+                ids=ids,
+                distances=scores,
+                fields=reranked_fields if return_fields else [],
+                k=len(ids),
+                distance="fusion",
+                index=items.get('index', 'HYBRID-RRF'),
+                result_type="search",
+            )
+        raise_error_response(response)
 
     def batch_search(
             self, vectors: Union[list, np.ndarray], k: int = 10, *,
             where: Union[str, None] = None,
-            return_fields: bool = False, nprobe: int = 10
+            return_fields: bool = False, nprobe: int = 10,
+            reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
+            rerank_k: Optional[int] = None,
+            rerank_with_fields: bool = False,
     ):
         """
         Batch search: search multiple query vectors in a single request.
@@ -1156,6 +1686,10 @@ class Collection:
                 - **IVF**: number of partitions to probe — higher = better recall, slower.
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
                 - **Flat / PQ / RaBitQ / PolarVec**: ignored (exhaustive two-pass search).
+            reranker (callable, optional): External rerank hook, applied per-query.
+            rerank_k (int, optional): Keep top-N after rerank per query.
+            rerank_with_fields (bool): Fetch candidate fields for reranker payload
+                even when ``return_fields=False``.
 
         Returns:
             List[ResultView]: List of ResultView objects, one per query vector.
@@ -1164,6 +1698,11 @@ class Collection:
         if vecs.ndim == 1:
             vecs = vecs.reshape(1, -1)
         n_queries, dim = vecs.shape
+        send_return_fields = should_fetch_fields(
+            return_fields=return_fields,
+            reranker=reranker,
+            rerank_with_fields=rerank_with_fields,
+        )
 
         params = {
             'database_name': self._database_name,
@@ -1171,7 +1710,7 @@ class Collection:
             'dim': dim,
             'n_queries': n_queries,
             'k': k,
-            'return_fields': str(return_fields).lower(),
+            'return_fields': str(send_return_fields).lower(),
             'nprobe': nprobe,
         }
         if where is not None:
@@ -1189,11 +1728,29 @@ class Collection:
             off = 4
             idx_type, metric = _parse_index_mode(self.index_mode)
             output = []
-            for _ in range(nq):
+            for query_index in range(nq):
                 ids, dists, fields, off = _decode_search_binary(buf, off)
+                ids, dists, reranked_fields = apply_external_rerank(
+                    ids=ids,
+                    scores=dists,
+                    fields=fields,
+                    reranker=reranker,
+                    query={
+                        "type": "batch_vector_search",
+                        "vector": vecs[query_index].tolist(),
+                        "where": where,
+                        "nprobe": nprobe,
+                        "query_index": query_index,
+                    },
+                    rerank_k=rerank_k,
+                )
                 output.append(ResultView(
-                    ids=ids, distances=dists, fields=fields,
-                    k=k, distance=metric, index=idx_type,
+                    ids=ids,
+                    distances=dists,
+                    fields=reranked_fields if return_fields else [],
+                    k=len(ids),
+                    distance=metric,
+                    index=idx_type,
                     result_type="search",
                 ))
             return output

@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lynsedb-secret
+type: Opaque
+stringData:
+  api-key: change-me
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lynsedb-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lynsedb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lynsedb
+  template:
+    metadata:
+      labels:
+        app: lynsedb
+    spec:
+      containers:
+        - name: lynsedb
+          image: birchkwok/lynsedb:latest
+          args:
+            - lynse
+            - serve
+            - --host
+            - 0.0.0.0
+            - --port
+            - "7637"
+            - --data-dir
+            - /data
+          env:
+            - name: LYNSE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lynsedb-secret
+                  key: api-key
+            - name: LYNSE_SERVER_WORKERS
+              value: "4"
+            - name: LYNSE_JSON_LIMIT_MB
+              value: "256"
+            - name: LYNSE_PAYLOAD_LIMIT_MB
+              value: "512"
+            - name: LYNSE_CLIENT_REQUEST_TIMEOUT_SECS
+              value: "300"
+            - name: LYNSE_KEEP_ALIVE_SECS
+              value: "75"
+          ports:
+            - containerPort: 7637
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 7637
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 7637
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: lynsedb-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lynsedb
+spec:
+  selector:
+    app: lynsedb
+  ports:
+    - name: http
+      port: 7637
+      targetPort: 7637

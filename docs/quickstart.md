@@ -6,7 +6,7 @@ import lynse
 print("LynseDB version is: ", lynse.__version__)
 ```
 
-    LynseDB version is:  0.3.0
+    LynseDB version is:  0.2.0
 
 
 ## Initialize Client
@@ -33,9 +33,13 @@ my_db = client.create_database("test_db", drop_if_exists=True)
 Start the server first:
 
 ```shell
-lynse run --host localhost --port 7637
+lynse serve --host localhost --port 7637 --data-dir ./data
 # enable auth if needed:
-# lynse run --host localhost --port 7637 --api-key your_key
+# lynse serve --host localhost --port 7637 --data-dir ./data --api-key your_key
+# optional runtime limits:
+# lynse serve --host localhost --port 7637 --data-dir ./data \
+#   --json-limit-mb 256 --payload-limit-mb 512 \
+#   --request-timeout-secs 300 --keep-alive-secs 75
 # or via Docker:
 docker run -p 7637:7637 birchkwok/lynsedb:latest
 # docker run -p 7637:7637 -e LYNSE_API_KEY=your_key birchkwok/lynsedb:latest
@@ -46,6 +50,17 @@ docker run -p 7637:7637 birchkwok/lynsedb:latest
 client = lynse.VectorDBClient("http://127.0.0.1:7637", api_key="your_key")
 my_db = client.create_database("test_db", drop_if_exists=True)
 ```
+
+Operational endpoints are available from the HTTP server:
+
+```shell
+curl http://127.0.0.1:7637/healthz
+curl http://127.0.0.1:7637/readyz
+curl http://127.0.0.1:7637/metrics
+curl http://127.0.0.1:7637/openapi.json
+```
+
+Deployment examples live in `docs/deployment/` for Docker Compose, systemd, and Kubernetes.
 
 ---
 
@@ -127,6 +142,45 @@ n_added = collection.bulk_add_binary(vecs)
 collection.commit()
 ```
 
+### Named vector fields
+
+Use named vector fields when one record has multiple embeddings, such as
+`default` for semantic text and `image` for CLIP image vectors.
+
+```python linenums="1"
+collection.create_vector_field("image", dim=3, metric="l2")
+
+image_vectors = np.array(
+    [
+        [0.10, 0.20, 0.30],
+        [0.12, 0.19, 0.28],
+        [0.90, 0.20, 0.10],
+    ],
+    dtype=np.float32,
+)
+collection.add_named_vectors("image", image_vectors, ids=[1, 2, 3])
+collection.build_vector_field_index("image", "HNSW-L2")
+collection.commit()
+
+print(collection.list_vector_fields())
+```
+
+### Sparse vectors
+
+Use sparse vectors for keyword, token, or feature-ID signals that should be scored with inner product.
+
+```python linenums="1"
+collection.add_sparse_vectors(
+    vectors=[
+        {10: 1.0, 42: 0.5},
+        {11: 1.0, 42: 0.8},
+        {12: 1.0, 90: 0.4},
+    ],
+    ids=[1, 2, 3],
+)
+collection.commit()
+```
+
 ---
 
 ## Collection Info
@@ -152,6 +206,29 @@ use `.ids`, `.distances`, `.fields` directly.
 result = collection.search(vector=[0.36, 0.43, 0.56, 0.12], k=3)
 print(result.ids)        # array of top-k IDs
 print(result.distances)  # array of distances/scores
+```
+
+### Search a named vector field
+
+```python linenums="1"
+result = collection.search(
+    vector=[0.11, 0.20, 0.29],
+    k=2,
+    vector_field="image",
+    return_fields=True,
+)
+print(result.ids, result.fields)
+```
+
+### Sparse search
+
+```python linenums="1"
+result = collection.search_sparse(
+    {42: 1.0},
+    k=5,
+    return_fields=True,
+)
+print(result.ids, result.distances, result.fields)
 ```
 
 ### Search with field filtering (SQL WHERE)
@@ -185,6 +262,81 @@ result = collection.search_range(
     vector=[0.36, 0.43, 0.56, 0.12],
     threshold=0.5,
     max_results=100,
+)
+print(result.ids, result.distances)
+```
+
+### Search profile
+
+Use `search_profile` to inspect filter cardinality, estimated scanned vectors, index path, and timings.
+
+```python linenums="1"
+profile = collection.search_profile(
+    vector=[0.36, 0.43, 0.56, 0.12],
+    k=5,
+    where="\"field\" = 'test_1'",
+)
+print(profile["items"]["ids"])
+print(profile["profile"])
+```
+
+### Text search over metadata
+
+`text_search` runs BM25 over a persistent inverted index of stored metadata fields. `text_fields` can limit matching to specific columns.
+
+```python linenums="1"
+result = collection.text_search(
+    "vector database",
+    k=5,
+    text_fields=["title", "body"],
+    return_fields=True,
+)
+print(result.ids, result.distances)
+```
+
+### Hybrid search
+
+`hybrid_search` combines vector search and BM25 metadata search with RRF or weighted fusion.
+
+```python linenums="1"
+result = collection.hybrid_search(
+    vector=[0.36, 0.43, 0.56, 0.12],
+    text="vector database",
+    text_fields=["title", "body"],
+    fusion="rrf",
+    k=5,
+    return_fields=True,
+)
+print(result.ids, result.distances)
+```
+
+### External rerank hook
+
+Use `reranker` to inject a cross-encoder / LLM rerank stage on client side.
+The callback receives `{"query": ..., "items": [...]}` and can return:
+
+- ordered IDs: `[id1, id2, ...]`
+- `(id, score)` pairs: `[(id1, 0.91), ...]`
+- score array aligned with input items: `np.array([...])`
+- score map: `{id1: 0.91, id2: 0.77}`
+
+```python linenums="1"
+def rerank(payload):
+    query_text = payload["query"].get("text", "")
+    # Replace with your model inference; higher score = better rank
+    return [
+        (item["id"], 1.0 if query_text in (item["field"] or {}).get("tag", "") else 0.0)
+        for item in payload["items"]
+    ]
+
+result = collection.hybrid_search(
+    vector=[0.36, 0.43, 0.56, 0.12],
+    text="item_3",
+    text_fields=["tag"],
+    k=20,                # retrieve more candidates first
+    reranker=rerank,
+    rerank_k=5,          # keep top-5 after rerank
+    return_fields=True,  # return reranked fields
 )
 print(result.ids, result.distances)
 ```
@@ -258,6 +410,13 @@ print(tail_result.ids)
 result = collection.query(where="\"field\" = 'test_1' AND \"order\" <= 6")
 print(result.ids)
 print(result.fields)
+
+# Indexed metadata filters support numeric ranges, booleans, ISO date strings,
+# keyword equality, and array membership.
+result = collection.query(where="\"order\" >= 2 AND \"order\" < 8")
+result = collection.query(where="\"active\" = true")
+result = collection.query(where="\"tags\" CONTAINS 'rust'")
+result = collection.query(where="\"created_at\" >= '2026-04-01'")
 
 # Filter by specific IDs only
 result = collection.query(filter_ids=[1, 2, 3], return_ids_only=True)

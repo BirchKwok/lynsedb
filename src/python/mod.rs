@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::engine::{Collection, DatabaseEngine, DatabaseManager, SearchResult};
+use crate::engine::{Collection, DatabaseEngine, DatabaseManager, SearchResult, VectorFieldConfig};
 
 /// Register all Python classes and functions into the module.
 pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -45,6 +45,17 @@ impl PyDatabaseEngine {
         Ok(Self { inner: engine })
     }
 
+    #[staticmethod]
+    fn open_read_only(root_path: &str) -> PyResult<Self> {
+        let engine = DatabaseEngine::open_read_only(Path::new(root_path))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self { inner: engine })
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.inner.is_read_only()
+    }
+
     /// Create a new collection.
     fn create_collection(&self, name: &str, dimension: usize) -> PyResult<PyCollection> {
         let coll = self
@@ -67,6 +78,34 @@ impl PyDatabaseEngine {
     fn drop_collection(&self, name: &str) -> PyResult<()> {
         self.inner
             .drop_collection(name)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn snapshot_collection(&self, name: &str, snapshot_path: &str) -> PyResult<()> {
+        self.inner
+            .snapshot_collection(name, Path::new(snapshot_path))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn export_collection(&self, name: &str, export_path: &str) -> PyResult<()> {
+        self.inner
+            .export_collection(name, Path::new(export_path))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    #[pyo3(signature = (name, snapshot_path, overwrite=false))]
+    fn restore_collection(&self, name: &str, snapshot_path: &str, overwrite: bool) -> PyResult<()> {
+        self.inner
+            .restore_collection_from_snapshot(name, Path::new(snapshot_path), overwrite)
+            .map(|_| ())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    #[pyo3(signature = (name, export_path, overwrite=false))]
+    fn import_collection(&self, name: &str, export_path: &str, overwrite: bool) -> PyResult<()> {
+        self.inner
+            .import_collection_from_export(name, Path::new(export_path), overwrite)
+            .map(|_| ())
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -141,6 +180,66 @@ impl PyCollection {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
+    /// Create an additional named vector field for existing records.
+    #[pyo3(signature = (name, dimension, metric=None, index_mode=None))]
+    fn create_vector_field(
+        &self,
+        name: &str,
+        dimension: usize,
+        metric: Option<&str>,
+        index_mode: Option<&str>,
+    ) -> PyResult<()> {
+        let mut coll = self.inner.write();
+        coll.create_vector_field(name, dimension, metric, index_mode)
+            .map(|_| ())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// List vector fields, including the reserved default primary vector field.
+    fn list_vector_fields<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let coll = self.inner.read();
+        vector_fields_to_pylist(py, &coll.list_vector_fields())
+    }
+
+    /// Add vectors to a named vector field for existing IDs.
+    fn add_named_vectors(
+        &self,
+        field_name: &str,
+        vectors: PyReadonlyArray2<f32>,
+        ids: Vec<u64>,
+    ) -> PyResult<()> {
+        let array = vectors.as_array();
+        let n_vectors = array.nrows();
+        let flat_data: &[f32] = array
+            .as_slice()
+            .expect("numpy array must be contiguous (C-order)");
+
+        let mut coll = self.inner.write();
+        coll.add_named_vectors(field_name, flat_data, n_vectors, &ids)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Build or change the index for a named vector field.
+    fn build_vector_field_index(&self, field_name: &str, index_type: &str) -> PyResult<()> {
+        let mut coll = self.inner.write();
+        coll.build_vector_field_index(field_name, index_type)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Remove a named vector field index and return it to flat search.
+    fn remove_vector_field_index(&self, field_name: &str) -> PyResult<()> {
+        let mut coll = self.inner.write();
+        coll.remove_vector_field_index(field_name)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Add sparse vectors for existing IDs.
+    fn add_sparse_vectors(&self, vectors: Vec<Vec<(u32, f32)>>, ids: Vec<u64>) -> PyResult<()> {
+        let mut coll = self.inner.write();
+        coll.add_sparse_vectors(&ids, &vectors)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Build or rebuild the index.
     ///
     /// Args:
@@ -188,6 +287,143 @@ impl PyCollection {
         Ok(PySearchResult { inner: result })
     }
 
+    /// Search a named vector field.
+    #[pyo3(signature = (field_name, vector, k=None, where_expr=None))]
+    fn search_vector_field(
+        &self,
+        field_name: &str,
+        vector: PyReadonlyArray1<f32>,
+        k: Option<usize>,
+        where_expr: Option<&str>,
+    ) -> PyResult<PySearchResult> {
+        let query = vector.as_slice()?;
+        let k = k.unwrap_or(10);
+
+        let coll = self.inner.read();
+        let result = coll
+            .search_vector_field(field_name, query, k, where_expr)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        Ok(PySearchResult { inner: result })
+    }
+
+    /// Search sparse vectors with inner product.
+    #[pyo3(signature = (vector, k=None, where_expr=None))]
+    fn search_sparse(
+        &self,
+        vector: Vec<(u32, f32)>,
+        k: Option<usize>,
+        where_expr: Option<&str>,
+    ) -> PyResult<PySearchResult> {
+        let k = k.unwrap_or(10);
+
+        let coll = self.inner.read();
+        let result = coll
+            .search_sparse(&vector, k, where_expr)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        Ok(PySearchResult { inner: result })
+    }
+
+    /// Search and return profile/explain metadata as a Python dict.
+    #[pyo3(signature = (vector, k=None, where_expr=None, nprobe=None))]
+    fn search_profile<'py>(
+        &self,
+        py: Python<'py>,
+        vector: PyReadonlyArray1<f32>,
+        k: Option<usize>,
+        where_expr: Option<&str>,
+        nprobe: Option<usize>,
+    ) -> PyResult<PyObject> {
+        let query = vector.as_slice()?;
+        let k = k.unwrap_or(10);
+        let nprobe = nprobe.unwrap_or(10);
+
+        let coll = self.inner.read();
+        let (result, profile) = coll
+            .search_with_profile(query, k, where_expr, nprobe)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let value = serde_json::json!({
+            "items": {
+                "k": result.k,
+                "ids": result.ids,
+                "scores": result.distances,
+                "index": result.index_mode,
+            },
+            "profile": profile,
+        });
+        json_to_py(py, &value)
+    }
+
+    /// BM25 text search over metadata fields.
+    #[pyo3(signature = (text, text_fields=None, k=10, where_expr=None))]
+    fn text_search(
+        &self,
+        text: &str,
+        text_fields: Option<Vec<String>>,
+        k: usize,
+        where_expr: Option<&str>,
+    ) -> PyResult<PySearchResult> {
+        let coll = self.inner.read();
+        let result = coll
+            .text_search(text, text_fields.as_deref(), k, where_expr)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PySearchResult { inner: result })
+    }
+
+    /// Hybrid vector + BM25 text search with RRF or weighted fusion.
+    #[pyo3(signature = (
+        vector=None,
+        text=None,
+        k=10,
+        where_expr=None,
+        text_fields=None,
+        fusion="rrf",
+        vector_weight=1.0,
+        text_weight=1.0,
+        rrf_k=60.0,
+        candidate_limit=None,
+        nprobe=10
+    ))]
+    fn hybrid_search(
+        &self,
+        vector: Option<PyReadonlyArray1<f32>>,
+        text: Option<&str>,
+        k: usize,
+        where_expr: Option<&str>,
+        text_fields: Option<Vec<String>>,
+        fusion: &str,
+        vector_weight: f32,
+        text_weight: f32,
+        rrf_k: f32,
+        candidate_limit: Option<usize>,
+        nprobe: usize,
+    ) -> PyResult<PySearchResult> {
+        let vector_slice = match vector.as_ref() {
+            Some(vector) => Some(vector.as_slice()?),
+            None => None,
+        };
+        let candidate_limit = candidate_limit.unwrap_or_else(|| k.saturating_mul(4).max(k));
+
+        let coll = self.inner.read();
+        let result = coll
+            .hybrid_search(
+                vector_slice,
+                text,
+                k,
+                where_expr,
+                text_fields.as_deref(),
+                fusion,
+                vector_weight,
+                text_weight,
+                rrf_k,
+                candidate_limit,
+                nprobe,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PySearchResult { inner: result })
+    }
+
     /// Get collection shape (n_vectors, dimension).
     fn shape(&self) -> PyResult<(u64, usize)> {
         let coll = self.inner.read();
@@ -208,6 +444,11 @@ impl PyCollection {
     /// Get current index mode.
     fn index_mode(&self) -> Option<String> {
         self.inner.read().meta.index_mode.clone()
+    }
+
+    /// Check whether the collection handle was opened read-only.
+    fn is_read_only(&self) -> bool {
+        self.inner.read().is_read_only()
     }
 
     /// Batch search: search multiple query vectors in parallel.
@@ -587,6 +828,18 @@ impl PyCollection {
         }
         Ok(())
     }
+
+    fn snapshot_to(&self, snapshot_path: &str) -> PyResult<()> {
+        let coll = self.inner.read();
+        coll.snapshot_to(Path::new(snapshot_path))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn export_to(&self, export_path: &str) -> PyResult<()> {
+        let coll = self.inner.read();
+        coll.export_to(Path::new(export_path))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
 }
 
 // ─── SearchResult binding ────────────────────────────────────────────────────
@@ -933,6 +1186,19 @@ impl PyDatabaseManager {
         })
     }
 
+    #[staticmethod]
+    fn open_read_only(root_path: &str) -> PyResult<Self> {
+        let mgr = DatabaseManager::new_read_only(Path::new(root_path))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(mgr),
+        })
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.inner.is_read_only()
+    }
+
     fn create_database(&self, name: &str) -> PyResult<()> {
         self.inner
             .create_database(name)
@@ -942,6 +1208,19 @@ impl PyDatabaseManager {
     fn drop_database(&self, name: &str) -> PyResult<()> {
         self.inner
             .drop_database(name)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn snapshot_database(&self, name: &str, snapshot_path: &str) -> PyResult<()> {
+        self.inner
+            .snapshot_database(name, Path::new(snapshot_path))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    #[pyo3(signature = (name, snapshot_path, overwrite=false))]
+    fn restore_database(&self, name: &str, snapshot_path: &str, overwrite: bool) -> PyResult<()> {
+        self.inner
+            .restore_database_from_snapshot(name, Path::new(snapshot_path), overwrite)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -983,6 +1262,64 @@ impl PyDatabaseManager {
     fn drop_collection(&self, db_name: &str, collection_name: &str) -> PyResult<()> {
         self.inner
             .drop_collection(db_name, collection_name)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn snapshot_collection(
+        &self,
+        db_name: &str,
+        collection_name: &str,
+        snapshot_path: &str,
+    ) -> PyResult<()> {
+        self.inner
+            .snapshot_collection(db_name, collection_name, Path::new(snapshot_path))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn export_collection(
+        &self,
+        db_name: &str,
+        collection_name: &str,
+        export_path: &str,
+    ) -> PyResult<()> {
+        self.inner
+            .export_collection(db_name, collection_name, Path::new(export_path))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    #[pyo3(signature = (db_name, collection_name, snapshot_path, overwrite=false))]
+    fn restore_collection(
+        &self,
+        db_name: &str,
+        collection_name: &str,
+        snapshot_path: &str,
+        overwrite: bool,
+    ) -> PyResult<()> {
+        self.inner
+            .restore_collection_from_snapshot(
+                db_name,
+                collection_name,
+                Path::new(snapshot_path),
+                overwrite,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    #[pyo3(signature = (db_name, collection_name, export_path, overwrite=false))]
+    fn import_collection(
+        &self,
+        db_name: &str,
+        collection_name: &str,
+        export_path: &str,
+        overwrite: bool,
+    ) -> PyResult<()> {
+        self.inner
+            .import_collection_from_export(
+                db_name,
+                collection_name,
+                Path::new(export_path),
+                overwrite,
+            )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -1097,6 +1434,22 @@ fn fields_to_pylist<'py>(
         for (k, v) in field_map {
             dict.set_item(k, json_to_py(py, v)?)?;
         }
+        list.append(dict)?;
+    }
+    Ok(list)
+}
+
+fn vector_fields_to_pylist<'py>(
+    py: Python<'py>,
+    fields: &[VectorFieldConfig],
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty_bound(py);
+    for field in fields {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("name", &field.name)?;
+        dict.set_item("dimension", field.dimension)?;
+        dict.set_item("metric", &field.metric)?;
+        dict.set_item("index_mode", &field.index_mode)?;
         list.append(dict)?;
     }
     Ok(list)

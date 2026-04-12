@@ -6,7 +6,7 @@ from .configs.config import generate_config_file, load_config_file
 
 FILE_PATH = Path(__file__).parent.parent
 
-__version__ = '0.3.0'
+__version__ = '0.2.0'
 
 
 generate_config_file(), load_config_file()
@@ -21,7 +21,12 @@ class VectorDBClient:
     - **When `uri` is a remote URL**: Connects to an existing remote Rust HTTP server.
     """
 
-    def __init__(self, uri: Union[str, None, Path] = None, api_key: str = None):
+    def __init__(
+            self,
+            uri: Union[str, None, Path] = None,
+            api_key: str = None,
+            read_only: bool = False,
+    ):
         """
         Initialize the LynseDB client.
 
@@ -36,6 +41,7 @@ class VectorDBClient:
             api_key (str or None): Optional API key for HTTP server authentication.
                When provided, all HTTP requests include an ``Authorization: Bearer <api_key>`` header.
                Ignored in local (non-HTTP) mode.
+            read_only (bool): Open local storage in read-only mode. Ignored in remote mode.
 
         """
         if isinstance(uri, Path):
@@ -86,7 +92,7 @@ class VectorDBClient:
             self._root_path = root_path
             self._uri = None
             self._client = None
-            self._manager = DatabaseManager(root_path)
+            self._manager = DatabaseManager(root_path, read_only=read_only)
 
     # ── HTTP helpers (remote mode only) ──────────────────────────────────────
 
@@ -200,6 +206,45 @@ class VectorDBClient:
             self._post('/delete_database', {'database_name': database_name})
         else:
             self._manager.drop_database(database_name)
+
+    def snapshot_database(self, database_name: str, snapshot_path: Union[str, Path]):
+        """
+        Create a filesystem snapshot for a database.
+
+        Parameters:
+            database_name (str): The name of the database to snapshot.
+            snapshot_path (Pathlike or str): The snapshot target path.
+        """
+        if self._is_remote:
+            self._post('/snapshot_database', {
+                'database_name': database_name,
+                'snapshot_path': str(snapshot_path),
+            })
+        else:
+            self._manager.snapshot_database(database_name, str(snapshot_path))
+
+    def restore_database(
+            self,
+            database_name: str,
+            snapshot_path: Union[str, Path],
+            overwrite: bool = False,
+    ):
+        """
+        Restore a database from a filesystem snapshot.
+
+        Parameters:
+            database_name (str): The database name to restore into.
+            snapshot_path (Pathlike or str): The snapshot source path.
+            overwrite (bool): Whether to replace an existing database.
+        """
+        if self._is_remote:
+            self._post('/restore_database', {
+                'database_name': database_name,
+                'snapshot_path': str(snapshot_path),
+                'overwrite': overwrite,
+            })
+        else:
+            self._manager.restore_database(database_name, str(snapshot_path), overwrite)
 
     def __repr__(self):
         if self._is_remote:

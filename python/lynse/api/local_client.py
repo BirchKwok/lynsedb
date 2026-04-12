@@ -6,15 +6,17 @@ but calls the Rust PyO3 bindings directly, eliminating all network I/O overhead.
 """
 
 import queue
-from typing import Union, List, Tuple, Dict, Any, Optional
+from pathlib import Path
+from typing import Union, List, Tuple, Dict, Any, Optional, Callable
 from threading import Lock
 
 import numpy as np
 from tqdm import trange
 
 from ..utils.utils import collection_repr
-from .._backend import DatabaseManager, Collection, SearchResult
+from .._backend import DatabaseManager, Collection, SearchResult, _normalize_sparse_vector
 from ..result_view import ResultView, _parse_index_mode
+from .rerank import apply_external_rerank, should_fetch_fields
 
 
 class LocalClient:
@@ -27,6 +29,10 @@ class LocalClient:
     def __init__(self, manager: DatabaseManager, database_name: str):
         self._manager = manager
         self.database_name = database_name
+
+    @property
+    def is_read_only(self) -> bool:
+        return self._manager.is_read_only
 
     def require_collection(
             self,
@@ -118,6 +124,54 @@ class LocalClient:
             dict: Status message.
         """
         self._manager.drop_collection(self.database_name, collection)
+        return {'status': 'success'}
+
+    def snapshot_collection(self, collection: str, snapshot_path: Union[str, Path]):
+        """Create a filesystem snapshot for a collection."""
+        self._manager.snapshot_collection(self.database_name, collection, str(snapshot_path))
+        return {'status': 'success'}
+
+    def export_collection(self, collection: str, export_path: Union[str, Path]):
+        """Export a collection as JSONL metadata plus binary vectors."""
+        self._manager.export_collection(self.database_name, collection, str(export_path))
+        return {'status': 'success'}
+
+    def restore_collection(
+            self,
+            collection: str,
+            snapshot_path: Union[str, Path],
+            overwrite: bool = False,
+    ):
+        """Restore a collection from a filesystem snapshot."""
+        self._manager.restore_collection(
+            self.database_name, collection, str(snapshot_path), overwrite
+        )
+        return {'status': 'success'}
+
+    def import_collection(
+            self,
+            collection: str,
+            export_path: Union[str, Path],
+            overwrite: bool = False,
+    ):
+        """Import a collection from JSONL metadata plus binary vectors."""
+        self._manager.import_collection(
+            self.database_name, collection, str(export_path), overwrite
+        )
+        return {'status': 'success'}
+
+    def snapshot_database(self, snapshot_path: Union[str, Path]):
+        """Create a filesystem snapshot for this database."""
+        self._manager.snapshot_database(self.database_name, str(snapshot_path))
+        return {'status': 'success'}
+
+    def restore_database(
+            self,
+            snapshot_path: Union[str, Path],
+            overwrite: bool = False,
+    ):
+        """Restore this database from a filesystem snapshot."""
+        self._manager.restore_database(self.database_name, str(snapshot_path), overwrite)
         return {'status': 'success'}
 
     def drop_database(self):
@@ -215,6 +269,10 @@ class LocalCollection:
         self.COMMIT_FLAG = False
         self._mesosphere_list = queue.Queue()
         self._lock = Lock()
+
+    @property
+    def is_read_only(self) -> bool:
+        return self._rust_coll.is_read_only
 
     def exists(self):
         """Check if the collection exists."""
@@ -494,6 +552,20 @@ class LocalCollection:
         self.COMMIT_FLAG = True
         return {'status': 'success'}
 
+    def snapshot_to(self, snapshot_path: Union[str, Path]):
+        """Create a filesystem snapshot of this collection."""
+        if not self._mesosphere_list.empty():
+            self._flush_buffer()
+        self._rust_coll.snapshot_to(str(snapshot_path))
+        return {'status': 'success'}
+
+    def export_to(self, export_path: Union[str, Path]):
+        """Export this collection as JSONL metadata plus binary vectors."""
+        if not self._mesosphere_list.empty():
+            self._flush_buffer()
+        self._rust_coll.export_to(str(export_path))
+        return {'status': 'success'}
+
     def is_id_exists(self, id: int) -> bool:
         """Check if a user ID exists in the collection."""
         return self._rust_coll.is_id_exists(int(id))
@@ -615,6 +687,60 @@ class LocalCollection:
         self._rust_coll.remove_index()
         return {'status': 'success'}
 
+    def create_vector_field(
+            self,
+            name: str,
+            dim: int,
+            metric: str = "ip",
+            index_mode: Union[str, None] = None,
+    ):
+        """Create a named vector field with its own dimension and metric."""
+        self._rust_coll.create_vector_field(name, int(dim), metric, index_mode)
+        return {'status': 'success'}
+
+    def list_vector_fields(self):
+        """List vector fields, including the reserved default primary vector."""
+        return self._rust_coll.list_vector_fields()
+
+    def add_named_vectors(
+            self,
+            field_name: str,
+            vectors: Union[list, np.ndarray],
+            ids: List[int],
+    ):
+        """Attach vectors to a named vector field for existing IDs."""
+        if not self._mesosphere_list.empty():
+            self._flush_buffer()
+        vecs = np.ascontiguousarray(vectors, dtype=np.float32)
+        if vecs.ndim == 1:
+            vecs = vecs.reshape(1, -1)
+        self._rust_coll.add_named_vectors(field_name, vecs, [int(i) for i in ids])
+        self.COMMIT_FLAG = False
+        return {'status': 'success'}
+
+    def build_vector_field_index(self, field_name: str, index_mode: str = 'FLAT'):
+        """Build or change the index for a named vector field."""
+        self._rust_coll.build_vector_field_index(field_name, index_mode)
+        return {'status': 'success'}
+
+    def remove_vector_field_index(self, field_name: str):
+        """Remove a named vector field index and return it to flat search."""
+        self._rust_coll.remove_vector_field_index(field_name)
+        return {'status': 'success'}
+
+    def add_sparse_vectors(
+            self,
+            vectors: List[Union[Dict[int, float], List[Tuple[int, float]]]],
+            ids: List[int],
+    ):
+        """Attach sparse feature vectors to existing IDs."""
+        if not self._mesosphere_list.empty():
+            self._flush_buffer()
+        normalized = [_normalize_sparse_vector(vector) for vector in vectors]
+        self._rust_coll.add_sparse_vectors(normalized, [int(i) for i in ids])
+        self.COMMIT_FLAG = False
+        return {'status': 'success'}
+
     def insert_session(self):
         """Start an insert session."""
         from ..execution_layer.session import DataInsertionSession
@@ -623,7 +749,12 @@ class LocalCollection:
     def search(
             self, vector: Union[list, np.ndarray], k: int = 10, *,
             where: Union[str, None] = None,
-            return_fields: bool = False, **kwargs
+            return_fields: bool = False,
+            vector_field: str = "default",
+            reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
+            rerank_k: Optional[int] = None,
+            rerank_with_fields: bool = False,
+            **kwargs
     ):
         """
         Search the collection for the vectors most similar to the given vector.
@@ -633,6 +764,14 @@ class LocalCollection:
             k (int): The number of nearest vectors to return.
             where (str, optional): SQL/WHERE expression string to filter results.
             return_fields (bool): Whether to return the fields of the search results.
+            vector_field (str): Named vector field to search. ``default`` searches
+                the primary collection vector.
+            reranker (callable, optional): External rerank hook. It receives
+                ``{"query": ..., "items": [...]}`` and can return IDs and/or scores.
+            rerank_k (int, optional): Keep top-N after rerank. Defaults to the
+                backend result size.
+            rerank_with_fields (bool): Fetch candidate fields for reranker payload
+                even when ``return_fields=False``.
             **kwargs: Additional keyword arguments:
 
                 - nprobe (int): Controls search breadth by index type (default: 10).
@@ -644,25 +783,211 @@ class LocalCollection:
             ResultView: Search results with ids, distances, and optional fields.
         """
         nprobe = kwargs.get('nprobe', 10)
-        result = self._rust_coll.search(
+        vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
+        if vector_field == "default":
+            result = self._rust_coll.search(
+                vec,
+                k=k,
+                where=where,
+                nprobe=nprobe,
+            )
+        else:
+            result = self._rust_coll.search_vector_field(
+                vector_field,
+                vec,
+                k=k,
+                where=where,
+            )
+        need_fields = should_fetch_fields(
+            return_fields=return_fields,
+            reranker=reranker,
+            rerank_with_fields=rerank_with_fields,
+        )
+        fields: List[Dict[str, Any]] = []
+        if need_fields and len(result) > 0:
+            fields = self._rust_coll.retrieve_fields(result.ids.tolist())
+        ids, distances, reranked_fields = apply_external_rerank(
+            ids=result.ids,
+            scores=result.distances,
+            fields=fields,
+            reranker=reranker,
+            query={
+                "type": "vector_search",
+                "vector_field": vector_field,
+                "vector": vec.tolist(),
+                "where": where,
+                "nprobe": nprobe,
+            },
+            rerank_k=rerank_k,
+        )
+        return ResultView(
+            ids=ids,
+            distances=distances,
+            fields=reranked_fields if return_fields else [],
+            k=len(ids),
+            distance=result.distance_metric,
+            index=result.index_type,
+            result_type="search",
+        )
+
+    def search_sparse(
+            self, vector: Union[Dict[int, float], List[Tuple[int, float]]],
+            k: int = 10, *, where: Union[str, None] = None,
+            return_fields: bool = False,
+            reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
+            rerank_k: Optional[int] = None,
+            rerank_with_fields: bool = True,
+    ):
+        """Sparse vector search using inner product."""
+        sparse_vector = _normalize_sparse_vector(vector)
+        result = self._rust_coll.search_sparse(sparse_vector, k=k, where=where)
+        need_fields = should_fetch_fields(
+            return_fields=return_fields,
+            reranker=reranker,
+            rerank_with_fields=rerank_with_fields,
+        )
+        fields: List[Dict[str, Any]] = []
+        if need_fields and len(result) > 0:
+            fields = self._rust_coll.retrieve_fields(result.ids.tolist())
+        ids, distances, reranked_fields = apply_external_rerank(
+            ids=result.ids,
+            scores=result.distances,
+            fields=fields,
+            reranker=reranker,
+            query={
+                "type": "sparse_search",
+                "vector": sparse_vector,
+                "where": where,
+            },
+            rerank_k=rerank_k,
+        )
+        return ResultView(
+            ids=ids,
+            distances=distances,
+            fields=reranked_fields if return_fields else [],
+            k=len(ids),
+            distance=result.distance_metric,
+            index=result.index_type,
+            result_type="search",
+        )
+
+    def search_profile(
+            self, vector: Union[list, np.ndarray], k: int = 10, *,
+            where: Union[str, None] = None, nprobe: int = 10
+    ):
+        """Search and return profile/explain metadata."""
+        return self._rust_coll.search_profile(
             np.ascontiguousarray(vector, dtype=np.float32).ravel(),
             k=k,
             where=where,
             nprobe=nprobe,
         )
-        fields = []
-        if return_fields and len(result) > 0:
+
+    def text_search(
+            self, text: str, k: int = 10, *,
+            text_fields: Union[list[str], None] = None,
+            where: Union[str, None] = None,
+            return_fields: bool = False,
+            reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
+            rerank_k: Optional[int] = None,
+            rerank_with_fields: bool = True,
+    ):
+        """BM25 text search over metadata fields."""
+        result = self._rust_coll.text_search(text, text_fields=text_fields, k=k, where=where)
+        need_fields = should_fetch_fields(
+            return_fields=return_fields,
+            reranker=reranker,
+            rerank_with_fields=rerank_with_fields,
+        )
+        fields: List[Dict[str, Any]] = []
+        if need_fields and len(result) > 0:
             fields = self._rust_coll.retrieve_fields(result.ids.tolist())
+        ids, distances, reranked_fields = apply_external_rerank(
+            ids=result.ids,
+            scores=result.distances,
+            fields=fields,
+            reranker=reranker,
+            query={
+                "type": "text_search",
+                "text": text,
+                "text_fields": text_fields,
+                "where": where,
+            },
+            rerank_k=rerank_k,
+        )
         return ResultView(
-            ids=result.ids, distances=result.distances, fields=fields,
-            k=result.k, distance=result.distance_metric, index=result.index_type,
+            ids=ids,
+            distances=distances,
+            fields=reranked_fields if return_fields else [],
+            k=len(ids),
+            distance=result.distance_metric,
+            index=result.index_type,
+            result_type="search",
+        )
+
+    def hybrid_search(
+            self, vector: Union[list, np.ndarray, None] = None, text: Union[str, None] = None,
+            k: int = 10, *, where: Union[str, None] = None,
+            text_fields: Union[list[str], None] = None, fusion: str = "rrf",
+            vector_weight: float = 1.0, text_weight: float = 1.0,
+            rrf_k: float = 60.0, candidate_limit: Union[int, None] = None,
+            nprobe: int = 10, return_fields: bool = False,
+            reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
+            rerank_k: Optional[int] = None,
+            rerank_with_fields: bool = True,
+    ):
+        """Hybrid vector + BM25 text search with RRF or weighted fusion."""
+        vec = None if vector is None else np.ascontiguousarray(vector, dtype=np.float32).ravel()
+        result = self._rust_coll.hybrid_search(
+            vector=vec, text=text, k=k, where=where, text_fields=text_fields,
+            fusion=fusion, vector_weight=vector_weight, text_weight=text_weight,
+            rrf_k=rrf_k, candidate_limit=candidate_limit, nprobe=nprobe,
+        )
+        need_fields = should_fetch_fields(
+            return_fields=return_fields,
+            reranker=reranker,
+            rerank_with_fields=rerank_with_fields,
+        )
+        fields: List[Dict[str, Any]] = []
+        if need_fields and len(result) > 0:
+            fields = self._rust_coll.retrieve_fields(result.ids.tolist())
+        ids, distances, reranked_fields = apply_external_rerank(
+            ids=result.ids,
+            scores=result.distances,
+            fields=fields,
+            reranker=reranker,
+            query={
+                "type": "hybrid_search",
+                "vector": None if vec is None else vec.tolist(),
+                "text": text,
+                "text_fields": text_fields,
+                "where": where,
+                "fusion": fusion,
+                "vector_weight": float(vector_weight),
+                "text_weight": float(text_weight),
+                "rrf_k": float(rrf_k),
+                "candidate_limit": candidate_limit,
+                "nprobe": nprobe,
+            },
+            rerank_k=rerank_k,
+        )
+        return ResultView(
+            ids=ids,
+            distances=distances,
+            fields=reranked_fields if return_fields else [],
+            k=len(ids),
+            distance=result.distance_metric,
+            index=result.index_type,
             result_type="search",
         )
 
     def batch_search(
             self, vectors: Union[list, np.ndarray], k: int = 10, *,
             where: Union[str, None] = None,
-            return_fields: bool = False, nprobe: int = 10
+            return_fields: bool = False, nprobe: int = 10,
+            reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
+            rerank_k: Optional[int] = None,
+            rerank_with_fields: bool = False,
     ):
         """
         Batch search: search multiple query vectors.
@@ -676,6 +1001,10 @@ class LocalCollection:
                 - **IVF**: number of partitions to probe — higher = better recall, slower.
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
                 - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).
+            reranker (callable, optional): External rerank hook, applied per-query.
+            rerank_k (int, optional): Keep top-N after rerank per query.
+            rerank_with_fields (bool): Fetch candidate fields for reranker payload
+                even when ``return_fields=False``.
 
         Returns:
             List[ResultView]: List of ResultView objects, one per query vector.
@@ -685,13 +1014,36 @@ class LocalCollection:
             vecs = vecs.reshape(1, -1)
         results = self._rust_coll.batch_search(vecs, k=k, where=where, nprobe=nprobe)
         output = []
-        for r in results:
-            fields = []
-            if return_fields and len(r) > 0:
+        need_fields = should_fetch_fields(
+            return_fields=return_fields,
+            reranker=reranker,
+            rerank_with_fields=rerank_with_fields,
+        )
+        for idx, r in enumerate(results):
+            fields: List[Dict[str, Any]] = []
+            if need_fields and len(r) > 0:
                 fields = self._rust_coll.retrieve_fields(r.ids.tolist())
+            ids, distances, reranked_fields = apply_external_rerank(
+                ids=r.ids,
+                scores=r.distances,
+                fields=fields,
+                reranker=reranker,
+                query={
+                    "type": "batch_vector_search",
+                    "vector": vecs[idx].tolist(),
+                    "where": where,
+                    "nprobe": nprobe,
+                    "query_index": idx,
+                },
+                rerank_k=rerank_k,
+            )
             output.append(ResultView(
-                ids=r.ids, distances=r.distances, fields=fields,
-                k=r.k, distance=r.distance_metric, index=r.index_type,
+                ids=ids,
+                distances=distances,
+                fields=reranked_fields if return_fields else [],
+                k=len(ids),
+                distance=r.distance_metric,
+                index=r.index_type,
                 result_type="search",
             ))
         return output

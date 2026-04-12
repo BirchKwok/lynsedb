@@ -8,7 +8,7 @@
 
 use crate::error::{LynseError, Result};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// Binary record size in the .apex_id_map file: [u64 ext_id][u64 apex_id] = 16 bytes.
 const MAP_RECORD_SIZE: usize = 16;
 /// apex_id value used to mark a deleted external_id (tombstone).
-const TOMBSTONE: u64 = 0;
+const TOMBSTONE: u64 = u64::MAX;
 
 /// Maximum unique values per field to index (skip high-cardinality fields like unique IDs).
 const MAX_INDEX_UNIQUE_VALUES: usize = 100_000;
@@ -93,6 +93,43 @@ fn normalize_f64_bits(f: f64) -> u64 {
     }
 }
 
+#[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone)]
+enum RangeKey {
+    Number(u64),
+    Text(String),
+}
+
+impl RangeKey {
+    fn from_json(v: &serde_json::Value) -> Option<Self> {
+        match v {
+            serde_json::Value::Number(n) => n
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .map(|v| RangeKey::Number(normalize_f64_bits(v))),
+            serde_json::Value::String(s) => Some(RangeKey::Text(s.clone())),
+            _ => None,
+        }
+    }
+
+    fn from_token(s: &str) -> Option<Self> {
+        let token = unquote_token(s);
+        if let Ok(v) = token.parse::<f64>() {
+            if v.is_finite() {
+                return Some(RangeKey::Number(normalize_f64_bits(v)));
+            }
+        }
+        Some(RangeKey::Text(token.to_string()))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RangeOp {
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+}
+
 /// Per-field index: uses Vec for dense integer ranges, HashMap for sparse/non-integer.
 enum FieldIndexType {
     /// Dense integer range: values are in 0..len, direct index.
@@ -157,6 +194,11 @@ impl FieldIndexType {
 struct FieldIndex {
     /// Per-field index (either dense Vec or sparse HashMap).
     index: HashMap<String, FieldIndexType>,
+    /// Per-field ordered index for numeric values and lexicographically sortable
+    /// strings such as ISO-8601 datetime values.
+    range_index: HashMap<String, BTreeMap<RangeKey, Vec<u64>>>,
+    /// Per-field array element index for `field CONTAINS value` filters.
+    array_index: HashMap<String, HashMap<IndexKey, Vec<u64>>>,
     /// Track integer ranges to detect dense fields.
     int_ranges: HashMap<String, (i64, i64, usize)>, // (min, max, count)
     /// Fields that exceeded cardinality limit (blacklisted).
@@ -245,6 +287,78 @@ impl FieldIndex {
         }
     }
 
+    fn insert_value(&mut self, field: &str, value: &serde_json::Value, ext_id: u64) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    if matches!(
+                        value,
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                    ) {
+                        continue;
+                    }
+                    self.array_index
+                        .entry(field.to_string())
+                        .or_default()
+                        .entry(IndexKey::from_json(value))
+                        .or_default()
+                        .push(ext_id);
+                }
+            }
+            serde_json::Value::Object(_) => {}
+            _ => {
+                self.insert(field.to_string(), IndexKey::from_json(value), ext_id);
+                if let Some(key) = RangeKey::from_json(value) {
+                    self.range_index
+                        .entry(field.to_string())
+                        .or_default()
+                        .entry(key)
+                        .or_default()
+                        .push(ext_id);
+                }
+            }
+        }
+    }
+
+    fn remove_value(&mut self, field: &str, value: &serde_json::Value, ext_id: u64) {
+        match value {
+            serde_json::Value::Array(values) => {
+                if let Some(map) = self.array_index.get_mut(field) {
+                    for value in values {
+                        if matches!(
+                            value,
+                            serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                        ) {
+                            continue;
+                        }
+                        let key = IndexKey::from_json(value);
+                        if let Some(ids) = map.get_mut(&key) {
+                            ids.retain(|&id| id != ext_id);
+                            if ids.is_empty() {
+                                map.remove(&key);
+                            }
+                        }
+                    }
+                }
+            }
+            serde_json::Value::Object(_) => {}
+            _ => {
+                let key = IndexKey::from_json(value);
+                self.remove(field, &key, ext_id);
+                if let Some(range_key) = RangeKey::from_json(value) {
+                    if let Some(map) = self.range_index.get_mut(field) {
+                        if let Some(ids) = map.get_mut(&range_key) {
+                            ids.retain(|&id| id != ext_id);
+                            if ids.is_empty() {
+                                map.remove(&range_key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn get(&self, field: &str, key: &IndexKey) -> Option<&Vec<u64>> {
         let idx = self.index.get(field)?;
         // For dense int, need to shift by min
@@ -261,14 +375,37 @@ impl FieldIndex {
         idx.get(key)
     }
 
+    fn get_contains(&self, field: &str, key: &IndexKey) -> Vec<u64> {
+        self.array_index
+            .get(field)
+            .and_then(|map| map.get(key))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn get_range(&self, field: &str, op: RangeOp, key: &RangeKey) -> Option<Vec<u64>> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+
+        let map = self.range_index.get(field)?;
+        let range = match op {
+            RangeOp::Lt => (Unbounded, Excluded(key)),
+            RangeOp::Lte => (Unbounded, Included(key)),
+            RangeOp::Gt => (Excluded(key), Unbounded),
+            RangeOp::Gte => (Included(key), Unbounded),
+        };
+        let mut ids = Vec::new();
+        for value_ids in map.range(range).map(|(_, ids)| ids) {
+            ids.extend(value_ids.iter().copied());
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        Some(ids)
+    }
+
     fn remove(&mut self, field: &str, key: &IndexKey, ext_id: u64) {
         if let Some(idx) = self.index.get_mut(field) {
             idx.remove(field, &self.int_ranges, key, ext_id);
         }
-    }
-
-    fn contains_field(&self, field: &str) -> bool {
-        self.index.contains_key(field)
     }
 }
 
@@ -329,7 +466,17 @@ impl FieldStore {
 
         // Fast path: load apex_id_map from persisted file
         let apex_id_map = if map_path.exists() {
-            Self::load_map_file(&map_path).unwrap_or_default()
+            let map = Self::load_map_file(&map_path).unwrap_or_default();
+            if next_id > 0 && map.iter().any(|&apex_id| apex_id == 0) {
+                // Older map files used 0 as the tombstone sentinel, which
+                // conflicts with ApexBase's first real row id. Rebuild once
+                // from the table and persist using the current sentinel.
+                let vec = Self::rebuild_map_from_db(&db, table_name)?;
+                let _ = Self::save_map_file(&vec, &map_path);
+                vec
+            } else {
+                map
+            }
         } else if next_id > 0 {
             // Slow path (first open after upgrade): rebuild from DB, then save
             let vec = Self::rebuild_map_from_db(&db, table_name)?;
@@ -339,7 +486,7 @@ impl FieldStore {
             Vec::new()
         };
 
-        Ok(Self {
+        let store = Self {
             db_path: db_path.to_path_buf(),
             db,
             table_name: table_name.to_string(),
@@ -348,7 +495,9 @@ impl FieldStore {
             apex_id_map: RwLock::new(apex_id_map),
             map_path,
             field_eq_index: RwLock::new(FieldIndex::default()),
-        })
+        };
+        store.rebuild_in_memory_indexes()?;
+        Ok(store)
     }
 
     /// Store a single record with its fields.
@@ -399,12 +548,7 @@ impl FieldStore {
         {
             let mut idx = self.field_eq_index.write();
             for (field, value) in fields {
-                if !matches!(
-                    value,
-                    serde_json::Value::Array(_) | serde_json::Value::Object(_)
-                ) {
-                    idx.insert(field.clone(), IndexKey::from_json(value), ext_id);
-                }
+                idx.insert_value(field, value, ext_id);
             }
         }
         let _ = self.append_map_records(&[(ext_id, apex_id)]);
@@ -472,12 +616,7 @@ impl FieldStore {
                     cache.insert(ext_id, flds.clone());
                 }
                 for (field, value) in flds {
-                    if !matches!(
-                        value,
-                        serde_json::Value::Array(_) | serde_json::Value::Object(_)
-                    ) {
-                        idx.insert(field.clone(), IndexKey::from_json(value), ext_id);
-                    }
+                    idx.insert_value(field, value, ext_id);
                 }
             }
         }
@@ -564,12 +703,7 @@ impl FieldStore {
                     cache.insert(ext_id, flds.clone());
                 }
                 for (field, value) in flds {
-                    if !matches!(
-                        value,
-                        serde_json::Value::Array(_) | serde_json::Value::Object(_)
-                    ) {
-                        idx.insert(field.clone(), IndexKey::from_json(value), ext_id);
-                    }
+                    idx.insert_value(field, value, ext_id);
                 }
             }
         }
@@ -638,12 +772,7 @@ impl FieldStore {
                 }
                 cache.remove(&ext_id);
                 for (field, value) in old {
-                    if !matches!(
-                        value,
-                        serde_json::Value::Array(_) | serde_json::Value::Object(_)
-                    ) {
-                        idx.remove(field, &IndexKey::from_json(value), ext_id);
-                    }
+                    idx.remove_value(field, value, ext_id);
                 }
             }
         }
@@ -742,7 +871,12 @@ impl FieldStore {
                 Some(apexbase::data::Value::Int64(id)) => *id as u64,
                 _ => continue,
             };
-            if !self.is_current_apex_id(ext_id, apex_id) {
+            let is_current = {
+                let map = self.apex_id_map.read();
+                let i = ext_id as usize;
+                i < map.len() && map[i] == apex_id
+            };
+            if !is_current {
                 continue;
             }
             ids.push(ext_id);
@@ -757,6 +891,48 @@ impl FieldStore {
         }
 
         Ok((ids, fields_list))
+    }
+
+    /// Scan all currently active field rows.
+    ///
+    /// This is intended for query features that need to inspect text metadata
+    /// across rows, such as the baseline BM25 text search path.
+    pub fn scan_current_fields(&self) -> Result<Vec<(u64, HashMap<String, serde_json::Value>)>> {
+        let table = self
+            .db
+            .table(&self.table_name)
+            .map_err(|e| LynseError::ApexBase(format!("Table error: {}", e)))?;
+
+        let sql = format!("SELECT * FROM {}", self.table_name);
+        let rows = table
+            .execute(&sql)
+            .map_err(|e| LynseError::ApexBase(format!("Query error: {}", e)))?
+            .to_rows()
+            .map_err(|e| LynseError::ApexBase(format!("Result conversion error: {}", e)))?;
+
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            let ext_id = match row.get("external_id") {
+                Some(apexbase::data::Value::Int64(id)) => *id as u64,
+                _ => continue,
+            };
+            let apex_id = match row.get("_id") {
+                Some(apexbase::data::Value::Int64(id)) => *id as u64,
+                _ => continue,
+            };
+            if !self.is_current_apex_id(ext_id, apex_id) {
+                continue;
+            }
+
+            let fields = row
+                .iter()
+                .filter(|(key, _)| *key != "external_id" && *key != "_id")
+                .map(|(key, value)| (key.clone(), apex_value_to_json(value)))
+                .collect();
+            records.push((ext_id, fields));
+        }
+
+        Ok(records)
     }
 
     /// Retrieve a single record by external ID.
@@ -1023,24 +1199,42 @@ impl FieldStore {
 
     // ── In-memory field index helpers ────────────────────────────────────────
 
+    fn rebuild_in_memory_indexes(&self) -> Result<()> {
+        let records = self.scan_current_fields()?;
+        let mut idx = FieldIndex::default();
+        let mut cache = self.cache.write();
+        cache.clear();
+
+        for (ext_id, fields) in records {
+            if cache.len() < MAX_CACHE_ENTRIES {
+                cache.insert(ext_id, fields.clone());
+            }
+            for (field, value) in &fields {
+                idx.insert_value(field, value, ext_id);
+            }
+        }
+
+        *self.field_eq_index.write() = idx;
+        Ok(())
+    }
+
     /// Try to answer a WHERE expression from the in-memory equality index.
     /// Returns `Some(ext_ids)` on success, `None` if the index is cold or the
     /// expression is too complex (caller should fall back to ApexBase SQL).
     fn query_from_index(&self, filter_expr: &str) -> Option<Vec<u64>> {
-        let conditions = parse_equality_where(filter_expr)?;
+        let conditions = parse_indexed_where(filter_expr)?;
         let idx = self.field_eq_index.read();
 
-        // Every field in the conditions must be indexed
-        for (field, _) in &conditions {
-            if !idx.contains_field(field) {
-                return None;
-            }
-        }
-
         // Collect result sets
-        let mut sets: Vec<&Vec<u64>> = Vec::with_capacity(conditions.len());
-        for (field, key) in &conditions {
-            let ids = idx.get(field, key)?;
+        let mut sets: Vec<Vec<u64>> = Vec::with_capacity(conditions.len());
+        for condition in &conditions {
+            let mut ids = match condition {
+                IndexedCondition::Eq(field, key) => idx.get(field, key)?.clone(),
+                IndexedCondition::Range(field, op, key) => idx.get_range(field, *op, key)?,
+                IndexedCondition::Contains(field, key) => idx.get_contains(field, key),
+            };
+            ids.sort_unstable();
+            ids.dedup();
             sets.push(ids);
         }
 
@@ -1048,18 +1242,20 @@ impl FieldStore {
         sets.sort_unstable_by_key(|v| v.len());
 
         let result: Vec<u64> = if sets.len() == 1 {
-            sets[0].clone()
+            sets.remove(0)
         } else {
             // Build a HashSet from the smallest set, intersect with the rest
-            let mut current: std::collections::HashSet<u64> = sets[0].iter().copied().collect();
+            let mut current: HashSet<u64> = sets[0].iter().copied().collect();
             for set in &sets[1..] {
-                let other: std::collections::HashSet<u64> = set.iter().copied().collect();
+                let other: HashSet<u64> = set.iter().copied().collect();
                 current.retain(|id| other.contains(id));
                 if current.is_empty() {
                     break;
                 }
             }
-            current.into_iter().collect()
+            let mut result: Vec<u64> = current.into_iter().collect();
+            result.sort_unstable();
+            result
         };
 
         Some(result)
@@ -1166,19 +1362,26 @@ impl FieldStore {
 
 // ── WHERE expression parser ───────────────────────────────────────────────────
 
-/// Parse a WHERE expression as a conjunction of equality conditions.
-/// Supports: `"field" = value` optionally joined by AND (case-insensitive).
-/// Returns `None` if the expression cannot be fully parsed (triggers SQL fallback).
+enum IndexedCondition {
+    Eq(String, IndexKey),
+    Range(String, RangeOp, RangeKey),
+    Contains(String, IndexKey),
+}
+
+/// Parse a WHERE expression as a conjunction of indexed conditions.
 ///
-/// Examples that succeed:
-///   `"order" = 1`
-///   `"test" = "test_1"`
-///   `"order" = 1 AND "test" = "test_1"`
-fn parse_equality_where(expr: &str) -> Option<Vec<(String, IndexKey)>> {
+/// Supports:
+/// - `"field" = value`
+/// - `"field" <|<=|>|>= value`
+/// - `"array_field" CONTAINS value`
+///
+/// Conditions may be joined by AND. Returns `None` for expressions that should
+/// fall back to ApexBase SQL, such as OR, LIKE, and function calls.
+fn parse_indexed_where(expr: &str) -> Option<Vec<IndexedCondition>> {
     let parts = split_on_and(expr);
     let mut conditions = Vec::with_capacity(parts.len());
     for part in parts {
-        conditions.push(parse_single_equality(part.trim())?);
+        conditions.push(parse_single_indexed_condition(part.trim())?);
     }
     if conditions.is_empty() {
         None
@@ -1231,9 +1434,7 @@ fn split_on_and(expr: &str) -> Vec<&str> {
     parts
 }
 
-/// Parse a single equality condition: `"field_name" = value`.
-/// Operator must be plain `=` (not `!=`, `>=`, `<=`).
-fn parse_single_equality(expr: &str) -> Option<(String, IndexKey)> {
+fn parse_single_indexed_condition(expr: &str) -> Option<IndexedCondition> {
     let expr = expr.trim();
 
     // Field name must be double-quoted
@@ -1244,30 +1445,82 @@ fn parse_single_equality(expr: &str) -> Option<(String, IndexKey)> {
     let field = expr[1..1 + close].to_string();
     let rest = expr[1 + close + 1..].trim();
 
-    // Operator must be `=` and not `!=`, `>=`, `<=`
-    if !rest.starts_with('=') || rest.starts_with("!=") {
+    if starts_with_keyword(rest, "CONTAINS") {
+        let value = rest["CONTAINS".len()..].trim();
+        return Some(IndexedCondition::Contains(
+            field,
+            IndexKey::from_token(extract_value_literal(value)?)?,
+        ));
+    }
+
+    for (op_token, op) in [
+        (">=", RangeOp::Gte),
+        ("<=", RangeOp::Lte),
+        (">", RangeOp::Gt),
+        ("<", RangeOp::Lt),
+    ] {
+        if let Some(value) = rest.strip_prefix(op_token) {
+            return Some(IndexedCondition::Range(
+                field,
+                op,
+                RangeKey::from_token(extract_value_literal(value.trim())?)?,
+            ));
+        }
+    }
+
+    // Operator must be plain `=` for equality (not `!=`, `>=`, `<=`)
+    if rest.starts_with('=') && !rest.starts_with("!=") {
+        let value = rest[1..].trim();
+        return Some(IndexedCondition::Eq(
+            field,
+            IndexKey::from_token(extract_value_literal(value)?)?,
+        ));
+    }
+
+    None
+}
+
+fn starts_with_keyword(value: &str, keyword: &str) -> bool {
+    let value = value.trim_start();
+    if value.len() < keyword.len() || !value[..keyword.len()].eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    value[keyword.len()..]
+        .chars()
+        .next()
+        .map(|c| c.is_whitespace())
+        .unwrap_or(true)
+}
+
+fn extract_value_literal(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() {
         return None;
     }
-    let value_str = rest[1..].trim();
+    if value.starts_with('"') {
+        let end = value[1..].find('"')?;
+        return Some(&value[..end + 2]);
+    }
+    if value.starts_with('\'') {
+        let end = value[1..].find('\'')?;
+        return Some(&value[..end + 2]);
+    }
+    let end = value
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(value.len());
+    Some(&value[..end])
+}
 
-    // Parse the value token
-    let key = if value_str.starts_with('"') {
-        // Double-quoted string: find matching close quote
-        let end = value_str[1..].find('"')?;
-        IndexKey::Str(value_str[1..1 + end].to_string())
-    } else if value_str.starts_with('\'') {
-        // Single-quoted string
-        let end = value_str[1..].find('\'')?;
-        IndexKey::Str(value_str[1..1 + end].to_string())
+fn unquote_token(value: &str) -> &str {
+    let value = value.trim();
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        &value[1..value.len() - 1]
     } else {
-        // Bare token (number / bool / null) — ends at first whitespace
-        let end = value_str
-            .find(|c: char| c.is_whitespace())
-            .unwrap_or(value_str.len());
-        IndexKey::from_token(&value_str[..end])?
-    };
-
-    Some((field, key))
+        value
+    }
 }
 
 /// Convert a serde_json::Value to an ApexBase Value.

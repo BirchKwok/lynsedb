@@ -17,16 +17,35 @@ use crate::storage::vector_store::VectorStore;
 use crate::storage::wal::WALStorage;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 const STORAGE_MANIFEST_FILE: &str = "storage_manifest.json";
+const SNAPSHOT_MANIFEST_FILE: &str = "snapshot_manifest.json";
+const DATABASE_SNAPSHOT_MANIFEST_FILE: &str = "database_snapshot_manifest.json";
+const COLLECTION_EXPORT_MANIFEST_FILE: &str = "export_manifest.json";
+const COLLECTION_EXPORT_VECTORS_FILE: &str = "vectors.f32";
+const COLLECTION_EXPORT_METADATA_FILE: &str = "metadata.jsonl";
+const VECTOR_FIELDS_DIR: &str = "vector_fields";
+const VECTOR_FIELDS_MANIFEST_FILE: &str = "manifest.json";
+const DEFAULT_VECTOR_FIELD_NAME: &str = "default";
+const SPARSE_VECTORS_FILE: &str = "sparse_vectors.jsonl";
+const TEXT_INDEX_FILE: &str = "text_index.json";
+const TEXT_INDEX_FORMAT_VERSION: u32 = 1;
 const STORAGE_FORMAT_NAME: &str = "lynsedb-collection";
+const DATABASE_SNAPSHOT_FORMAT_NAME: &str = "lynsedb-database";
+const COLLECTION_EXPORT_FORMAT_NAME: &str = "lynsedb-collection-jsonl-binary-export";
 const STORAGE_FORMAT_VERSION: u32 = 1;
 const WAL_FORMAT_VERSION: u32 = 2;
+
+#[cfg(test)]
+static SNAPSHOT_COPY_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Collection metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +74,9 @@ pub struct Collection {
     rabitq_index: Option<RaBitQIndex>,
     /// PolarVec index for FLAT-*-POLARVEC index modes.
     polarvec_index: Option<PolarVecIndex>,
+    named_vector_fields: HashMap<String, NamedVectorField>,
+    sparse_vectors: SparseVectorStore,
+    text_index: InvertedTextIndex,
     /// Soft-delete tombstone: IDs marked for deletion, filtered from search results.
     tombstone: Arc<RwLock<HashSet<u64>>>,
     /// User-facing ID map: id_map[row_offset] = user_id.
@@ -64,6 +86,7 @@ pub struct Collection {
     reverse_id_map: HashMap<u64, usize>,
     /// Holds the collection-level writer lock until close/drop.
     lock: Option<FileLock>,
+    read_only: bool,
 }
 
 #[cfg(unix)]
@@ -74,6 +97,14 @@ struct FileLock {
 #[cfg(unix)]
 impl FileLock {
     fn exclusive(path: &Path) -> Result<Self> {
+        Self::acquire(path, libc::LOCK_EX)
+    }
+
+    fn shared(path: &Path) -> Result<Self> {
+        Self::acquire(path, libc::LOCK_SH)
+    }
+
+    fn acquire(path: &Path, lock_kind: libc::c_int) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -84,7 +115,7 @@ impl FileLock {
             .create(true)
             .open(path)?;
 
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        let rc = unsafe { libc::flock(file.as_raw_fd(), lock_kind | libc::LOCK_NB) };
         if rc == 0 {
             return Ok(Self { _file: file });
         }
@@ -120,6 +151,16 @@ impl FileLock {
     fn exclusive(_path: &Path) -> Result<Self> {
         Ok(Self)
     }
+
+    fn shared(_path: &Path) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenMode {
+    ReadWrite,
+    ReadOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +174,585 @@ struct StorageManifest {
     id_map_encoding: String,
     wal_version: u32,
     field_store: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CollectionSnapshotManifest {
+    snapshot_type: String,
+    collection_name: String,
+    storage_format: String,
+    storage_version: u32,
+    dimension: usize,
+    chunk_size: usize,
+}
+
+impl CollectionSnapshotManifest {
+    fn current(collection: &Collection) -> Self {
+        Self {
+            snapshot_type: "lynsedb-collection-snapshot".to_string(),
+            collection_name: collection.meta.name.clone(),
+            storage_format: STORAGE_FORMAT_NAME.to_string(),
+            storage_version: STORAGE_FORMAT_VERSION,
+            dimension: collection.meta.dimension,
+            chunk_size: collection.meta.chunk_size,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DatabaseSnapshotManifest {
+    snapshot_type: String,
+    database_name: String,
+    storage_format: String,
+    storage_version: u32,
+    collections: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CollectionExportManifest {
+    export_type: String,
+    collection_name: String,
+    export_format: String,
+    export_version: u32,
+    dimension: usize,
+    chunk_size: usize,
+    count: usize,
+    vector_dtype: String,
+    byte_order: String,
+    vectors_file: String,
+    metadata_file: String,
+}
+
+impl CollectionExportManifest {
+    fn current(collection: &Collection, count: usize) -> Self {
+        Self {
+            export_type: "lynsedb-collection-export".to_string(),
+            collection_name: collection.meta.name.clone(),
+            export_format: COLLECTION_EXPORT_FORMAT_NAME.to_string(),
+            export_version: STORAGE_FORMAT_VERSION,
+            dimension: collection.meta.dimension,
+            chunk_size: collection.meta.chunk_size,
+            count,
+            vector_dtype: "f32".to_string(),
+            byte_order: "little-endian".to_string(),
+            vectors_file: COLLECTION_EXPORT_VECTORS_FILE.to_string(),
+            metadata_file: COLLECTION_EXPORT_METADATA_FILE.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CollectionExportRecord {
+    id: u64,
+    #[serde(default)]
+    field: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorFieldConfig {
+    pub name: String,
+    pub dimension: usize,
+    pub metric: String,
+    pub index_mode: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct VectorFieldsManifest {
+    #[serde(default)]
+    fields: Vec<VectorFieldConfig>,
+}
+
+struct NamedVectorField {
+    config: VectorFieldConfig,
+    vector_store: VectorStore,
+    index: Option<Box<dyn VectorIndex>>,
+    id_map: Vec<u64>,
+    reverse_id_map: HashMap<u64, usize>,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SparseVectorRecord {
+    id: u64,
+    indices: Vec<u32>,
+    values: Vec<f32>,
+}
+
+impl SparseVectorRecord {
+    fn from_entries(id: u64, entries: &[(u32, f32)]) -> Self {
+        Self {
+            id,
+            indices: entries.iter().map(|(idx, _)| *idx).collect(),
+            values: entries.iter().map(|(_, value)| *value).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SparseVectorStore {
+    path: PathBuf,
+    vectors: HashMap<u64, Vec<(u32, f32)>>,
+}
+
+impl SparseVectorStore {
+    fn load(path: PathBuf) -> Result<Self> {
+        let mut store = Self {
+            path,
+            vectors: HashMap::new(),
+        };
+        if !store.path.exists() {
+            return Ok(store);
+        }
+
+        let content = std::fs::read_to_string(&store.path)?;
+        for (line_no, line) in content.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let record: SparseVectorRecord = serde_json::from_str(line).map_err(|e| {
+                LynseError::Serialization(format!(
+                    "failed to parse sparse vector record at line {}: {}",
+                    line_no + 1,
+                    e
+                ))
+            })?;
+            if record.indices.len() != record.values.len() {
+                return Err(LynseError::Storage(format!(
+                    "sparse vector record for id {} has {} indices but {} values",
+                    record.id,
+                    record.indices.len(),
+                    record.values.len()
+                )));
+            }
+            let entries: Vec<(u32, f32)> = record
+                .indices
+                .into_iter()
+                .zip(record.values.into_iter())
+                .collect();
+            let normalized = normalize_sparse_entries(&entries)?;
+            if normalized.is_empty() {
+                store.vectors.remove(&record.id);
+            } else {
+                store.vectors.insert(record.id, normalized);
+            }
+        }
+
+        Ok(store)
+    }
+
+    fn upsert_many(&mut self, ids: &[u64], vectors: &[Vec<(u32, f32)>]) -> Result<()> {
+        if ids.len() != vectors.len() {
+            return Err(LynseError::InvalidArgument(format!(
+                "ids length ({}) must match sparse vector count ({})",
+                ids.len(),
+                vectors.len()
+            )));
+        }
+
+        let mut next = self.vectors.clone();
+        for (&id, vector) in ids.iter().zip(vectors.iter()) {
+            let normalized = normalize_sparse_entries(vector)?;
+            if normalized.is_empty() {
+                next.remove(&id);
+            } else {
+                next.insert(id, normalized);
+            }
+        }
+
+        self.write_records(&next)?;
+        self.vectors = next;
+        Ok(())
+    }
+
+    fn remove_ids(&mut self, ids: &HashSet<u64>) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut next = self.vectors.clone();
+        let before = next.len();
+        next.retain(|id, _| !ids.contains(id));
+        if before == next.len() {
+            return Ok(());
+        }
+
+        self.write_records(&next)?;
+        self.vectors = next;
+        Ok(())
+    }
+
+    fn search(
+        &self,
+        query: &[(u32, f32)],
+        k: usize,
+        allowed_ids: Option<&HashSet<u64>>,
+        tombstones: &HashSet<u64>,
+    ) -> Vec<(u64, f32)> {
+        if query.is_empty() || k == 0 {
+            return Vec::new();
+        }
+
+        let mut scored = Vec::new();
+        for (&id, vector) in &self.vectors {
+            if tombstones.contains(&id) {
+                continue;
+            }
+            if let Some(allowed) = allowed_ids {
+                if !allowed.contains(&id) {
+                    continue;
+                }
+            }
+
+            let score = sparse_inner_product(query, vector);
+            if score != 0.0 {
+                scored.push((id, score));
+            }
+        }
+
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored.truncate(k);
+        scored
+    }
+
+    fn write_records(&self, vectors: &HashMap<u64, Vec<(u32, f32)>>) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut ids: Vec<u64> = vectors.keys().copied().collect();
+        ids.sort_unstable();
+
+        let mut bytes = Vec::new();
+        for id in ids {
+            let Some(entries) = vectors.get(&id) else {
+                continue;
+            };
+            let record = SparseVectorRecord::from_entries(id, entries);
+            serde_json::to_writer(&mut bytes, &record)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?;
+            bytes.push(b'\n');
+        }
+
+        Collection::atomic_write_file(&self.path, &bytes)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InvertedTextIndexData {
+    #[serde(default = "default_text_index_version")]
+    version: u32,
+    #[serde(default)]
+    postings: HashMap<String, HashMap<u64, HashMap<String, u32>>>,
+    #[serde(default)]
+    doc_lengths: HashMap<u64, HashMap<String, usize>>,
+}
+
+fn default_text_index_version() -> u32 {
+    TEXT_INDEX_FORMAT_VERSION
+}
+
+#[derive(Debug, Clone)]
+struct InvertedTextIndex {
+    path: PathBuf,
+    postings: HashMap<String, HashMap<u64, HashMap<String, u32>>>,
+    doc_lengths: HashMap<u64, HashMap<String, usize>>,
+    loaded_from_disk: bool,
+}
+
+impl InvertedTextIndex {
+    fn load(path: PathBuf) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self {
+                path,
+                postings: HashMap::new(),
+                doc_lengths: HashMap::new(),
+                loaded_from_disk: false,
+            });
+        }
+
+        let bytes = std::fs::read(&path)?;
+        let data: InvertedTextIndexData =
+            serde_json::from_slice(&bytes).map_err(|e| LynseError::Serialization(e.to_string()))?;
+        if data.version > TEXT_INDEX_FORMAT_VERSION {
+            return Err(LynseError::Storage(format!(
+                "text index format version {} is newer than supported version {}",
+                data.version, TEXT_INDEX_FORMAT_VERSION
+            )));
+        }
+
+        Ok(Self {
+            path,
+            postings: data.postings,
+            doc_lengths: data.doc_lengths,
+            loaded_from_disk: true,
+        })
+    }
+
+    fn needs_bootstrap(&self) -> bool {
+        !self.loaded_from_disk
+    }
+
+    fn is_empty(&self) -> bool {
+        self.doc_lengths.is_empty()
+    }
+
+    fn rebuild(
+        &mut self,
+        ids: &[u64],
+        fields: &[HashMap<String, serde_json::Value>],
+        persist: bool,
+    ) -> Result<()> {
+        if ids.len() != fields.len() {
+            return Err(LynseError::InvalidArgument(format!(
+                "ids length ({}) must match field count ({})",
+                ids.len(),
+                fields.len()
+            )));
+        }
+
+        self.postings.clear();
+        self.doc_lengths.clear();
+        for (&id, field_map) in ids.iter().zip(fields.iter()) {
+            self.index_document(id, field_map);
+        }
+        if persist {
+            self.write_to_disk()?;
+            self.loaded_from_disk = true;
+        }
+        Ok(())
+    }
+
+    fn upsert_documents(
+        &mut self,
+        ids: &[u64],
+        fields: &[HashMap<String, serde_json::Value>],
+    ) -> Result<()> {
+        if ids.len() != fields.len() {
+            return Err(LynseError::InvalidArgument(format!(
+                "ids length ({}) must match field count ({})",
+                ids.len(),
+                fields.len()
+            )));
+        }
+
+        let mut next = self.clone();
+        for (&id, field_map) in ids.iter().zip(fields.iter()) {
+            next.remove_document(id);
+            next.index_document(id, field_map);
+        }
+        next.write_to_disk()?;
+        next.loaded_from_disk = true;
+        *self = next;
+        Ok(())
+    }
+
+    fn remove_ids(&mut self, ids: &HashSet<u64>) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut next = self.clone();
+        for &id in ids {
+            next.remove_document(id);
+        }
+        next.write_to_disk()?;
+        next.loaded_from_disk = true;
+        *self = next;
+        Ok(())
+    }
+
+    fn search(
+        &self,
+        query_text: &str,
+        text_fields: Option<&[String]>,
+        limit: usize,
+        allowed_ids: Option<&HashSet<u64>>,
+        tombstones: &HashSet<u64>,
+    ) -> Vec<(u64, f32)> {
+        let query_terms = tokenize_text(query_text);
+        if query_terms.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+
+        let field_filter = text_fields
+            .filter(|fields| !fields.is_empty())
+            .map(|fields| fields.iter().cloned().collect::<HashSet<String>>());
+        let field_filter_ref = field_filter.as_ref();
+
+        let mut query_counts: HashMap<String, usize> = HashMap::new();
+        for term in query_terms {
+            *query_counts.entry(term).or_insert(0) += 1;
+        }
+
+        let mut candidate_ids = HashSet::new();
+        for term in query_counts.keys() {
+            let Some(posting) = self.postings.get(term) else {
+                continue;
+            };
+            for (&id, tf_by_field) in posting {
+                if !text_doc_allowed(id, allowed_ids, tombstones) {
+                    continue;
+                }
+                if selected_term_frequency(tf_by_field, field_filter_ref) > 0 {
+                    candidate_ids.insert(id);
+                }
+            }
+        }
+
+        if candidate_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let mut corpus_docs = 0usize;
+        let mut total_doc_len = 0usize;
+        for (&id, lengths) in &self.doc_lengths {
+            if !text_doc_allowed(id, allowed_ids, tombstones) {
+                continue;
+            }
+            let len = selected_doc_length(lengths, field_filter_ref);
+            if len > 0 {
+                corpus_docs += 1;
+                total_doc_len += len;
+            }
+        }
+
+        if corpus_docs == 0 {
+            return Vec::new();
+        }
+
+        let avg_doc_len = (total_doc_len as f32 / corpus_docs as f32).max(1.0);
+        let n_docs = corpus_docs as f32;
+        let k1 = 1.2f32;
+        let b = 0.75f32;
+
+        let mut document_frequencies = HashMap::new();
+        for term in query_counts.keys() {
+            let df = self
+                .postings
+                .get(term)
+                .map(|posting| {
+                    posting
+                        .iter()
+                        .filter(|(id, tf_by_field)| {
+                            text_doc_allowed(**id, allowed_ids, tombstones)
+                                && selected_term_frequency(tf_by_field, field_filter_ref) > 0
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            document_frequencies.insert(term.as_str(), df);
+        }
+
+        let mut scored = Vec::new();
+        for id in candidate_ids {
+            let Some(lengths) = self.doc_lengths.get(&id) else {
+                continue;
+            };
+            let doc_len = selected_doc_length(lengths, field_filter_ref);
+            if doc_len == 0 {
+                continue;
+            }
+
+            let mut score = 0.0f32;
+            for (term, query_count) in &query_counts {
+                let tf = self
+                    .postings
+                    .get(term)
+                    .and_then(|posting| posting.get(&id))
+                    .map(|tf_by_field| selected_term_frequency(tf_by_field, field_filter_ref))
+                    .unwrap_or(0) as f32;
+                if tf == 0.0 {
+                    continue;
+                }
+
+                let df = *document_frequencies.get(term.as_str()).unwrap_or(&0) as f32;
+                let idf = ((n_docs - df + 0.5) / (df + 0.5) + 1.0).ln();
+                let denom = tf + k1 * (1.0 - b + b * doc_len as f32 / avg_doc_len);
+                score += *query_count as f32 * idf * (tf * (k1 + 1.0)) / denom;
+            }
+
+            if score > 0.0 {
+                scored.push((id, score));
+            }
+        }
+
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored.truncate(limit);
+        scored
+    }
+
+    fn index_document(&mut self, id: u64, fields: &HashMap<String, serde_json::Value>) {
+        let field_terms = tokenize_text_fields(fields);
+        if field_terms.is_empty() {
+            return;
+        }
+
+        let mut lengths = HashMap::new();
+        for (field, term_counts) in field_terms {
+            let field_len: usize = term_counts.values().map(|count| *count as usize).sum();
+            if field_len == 0 {
+                continue;
+            }
+
+            lengths.insert(field.clone(), field_len);
+            for (term, tf) in term_counts {
+                self.postings
+                    .entry(term)
+                    .or_default()
+                    .entry(id)
+                    .or_default()
+                    .insert(field.clone(), tf);
+            }
+        }
+
+        if !lengths.is_empty() {
+            self.doc_lengths.insert(id, lengths);
+        }
+    }
+
+    fn remove_document(&mut self, id: u64) {
+        self.doc_lengths.remove(&id);
+        self.postings.retain(|_, posting| {
+            posting.remove(&id);
+            !posting.is_empty()
+        });
+    }
+
+    fn write_to_disk(&self) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let data = InvertedTextIndexData {
+            version: TEXT_INDEX_FORMAT_VERSION,
+            postings: self.postings.clone(),
+            doc_lengths: self.doc_lengths.clone(),
+        };
+        let bytes =
+            serde_json::to_vec(&data).map_err(|e| LynseError::Serialization(e.to_string()))?;
+        Collection::atomic_write_file(&self.path, &bytes)
+    }
+}
+
+impl DatabaseSnapshotManifest {
+    fn current(database_name: &str, collections: Vec<String>) -> Self {
+        Self {
+            snapshot_type: "lynsedb-database-snapshot".to_string(),
+            database_name: database_name.to_string(),
+            storage_format: DATABASE_SNAPSHOT_FORMAT_NAME.to_string(),
+            storage_version: STORAGE_FORMAT_VERSION,
+            collections,
+        }
+    }
 }
 
 impl StorageManifest {
@@ -167,12 +787,58 @@ impl Collection {
 
     /// Create or open a collection.
     pub fn open(path: &Path, name: &str, dimension: usize, chunk_size: usize) -> Result<Self> {
+        Self::open_with_mode(path, name, dimension, chunk_size, OpenMode::ReadWrite)
+    }
+
+    /// Open an existing collection in read-only mode.
+    pub fn open_read_only(
+        path: &Path,
+        name: &str,
+        dimension: usize,
+        chunk_size: usize,
+    ) -> Result<Self> {
+        Self::open_with_mode(path, name, dimension, chunk_size, OpenMode::ReadOnly)
+    }
+
+    fn open_with_mode(
+        path: &Path,
+        name: &str,
+        dimension: usize,
+        chunk_size: usize,
+        mode: OpenMode,
+    ) -> Result<Self> {
         let collection_path = path.join(name);
-        std::fs::create_dir_all(&collection_path)?;
+        if mode == OpenMode::ReadWrite {
+            std::fs::create_dir_all(&collection_path)?;
+        } else if !collection_path.exists() {
+            return Err(LynseError::CollectionNotFound(name.to_string()));
+        }
 
-        let lock = FileLock::exclusive(&collection_path.join(".writer.lock"))?;
+        let lock_path = collection_path.join(".writer.lock");
+        let lock = if mode == OpenMode::ReadWrite {
+            FileLock::exclusive(&lock_path)?
+        } else {
+            FileLock::shared(&lock_path)?
+        };
 
-        Self::ensure_storage_manifest(&collection_path, name, dimension, chunk_size)?;
+        if mode == OpenMode::ReadOnly && !Self::storage_manifest_path(&collection_path).exists() {
+            return Err(LynseError::Storage(
+                "read-only open requires storage_manifest.json; open writable once to create it"
+                    .to_string(),
+            ));
+        }
+        let manifest =
+            Self::ensure_storage_manifest(&collection_path, name, dimension, chunk_size)?;
+        let dimension = if dimension == 0 {
+            manifest.dimension
+        } else {
+            dimension
+        };
+        let chunk_size = if chunk_size == 0 {
+            manifest.chunk_size
+        } else {
+            chunk_size
+        };
 
         let vector_store = VectorStore::new(&collection_path, dimension, chunk_size)?;
 
@@ -203,6 +869,9 @@ impl Collection {
 
         let tombstone_path = collection_path.join("tombstone.bin");
         let tombstone = Arc::new(RwLock::new(Self::load_tombstone_from_disk(&tombstone_path)));
+        let sparse_vectors = SparseVectorStore::load(collection_path.join(SPARSE_VECTORS_FILE))?;
+        let text_index = InvertedTextIndex::load(collection_path.join(TEXT_INDEX_FILE))?;
+        let text_index_needs_bootstrap = text_index.needs_bootstrap();
 
         let mut coll = Self {
             meta,
@@ -216,28 +885,46 @@ impl Collection {
             pq_index: None,
             rabitq_index: None,
             polarvec_index: None,
+            named_vector_fields: HashMap::new(),
+            sparse_vectors,
+            text_index,
             tombstone,
             id_map: Vec::new(),
             reverse_id_map: HashMap::new(),
             lock: Some(lock),
+            read_only: mode == OpenMode::ReadOnly,
         };
 
-        // Establish the durable row boundary before WAL replay. If a previous
-        // process crashed after appending vectors but before appending id_map,
-        // id_map is the authoritative set of fully applied rows.
-        let id_map_repaired = coll.initialize_id_map_for_open()?;
+        if mode == OpenMode::ReadWrite {
+            // Establish the durable row boundary before WAL replay. If a previous
+            // process crashed after appending vectors but before appending id_map,
+            // id_map is the authoritative set of fully applied rows.
+            let id_map_repaired = coll.initialize_id_map_for_open()?;
 
-        // Recover any uncommitted WAL data on startup.
-        let recovered_wal = coll.recover_wal()?;
+            // Recover any uncommitted WAL data on startup.
+            let recovered_wal = coll.recover_wal()?;
 
-        if id_map_repaired || recovered_wal {
-            if let Some(mode) = coll.index_mode.clone() {
-                coll.build_index(&mode)?;
+            if id_map_repaired || recovered_wal {
+                if let Some(mode) = coll.index_mode.clone() {
+                    coll.build_index(&mode)?;
+                }
+            }
+        } else {
+            coll.initialize_id_map_for_read_only()?;
+            if coll.has_uncommitted_data() {
+                return Err(LynseError::Storage(
+                    "collection has uncommitted WAL data; open it writable to recover before using read-only mode".to_string(),
+                ));
             }
         }
 
         // Load quantizer indices from disk if present
         coll.try_load_pq_rabitq()?;
+
+        coll.named_vector_fields = Self::load_named_vector_fields(&coll.path, chunk_size, mode)?;
+        if text_index_needs_bootstrap && !coll.id_map.is_empty() {
+            coll.rebuild_text_index(mode == OpenMode::ReadWrite)?;
+        }
 
         Ok(coll)
     }
@@ -276,19 +963,25 @@ impl Collection {
                     manifest.collection_name, name
                 )));
             }
-            if manifest.dimension != dimension {
+            if dimension != 0 && manifest.dimension != dimension {
                 return Err(LynseError::DimensionMismatch {
                     expected: manifest.dimension,
                     got: dimension,
                 });
             }
-            if manifest.chunk_size != chunk_size {
+            if chunk_size != 0 && manifest.chunk_size != chunk_size {
                 return Err(LynseError::Storage(format!(
                     "collection chunk_size {} does not match requested chunk_size {}",
                     manifest.chunk_size, chunk_size
                 )));
             }
             return Ok(manifest);
+        }
+
+        if dimension == 0 {
+            return Err(LynseError::InvalidArgument(
+                "dimension is required when creating a new collection".to_string(),
+            ));
         }
 
         let manifest = StorageManifest::current(name, dimension, chunk_size);
@@ -300,6 +993,195 @@ impl Collection {
         let json = serde_json::to_vec_pretty(manifest)
             .map_err(|e| LynseError::Serialization(e.to_string()))?;
         Self::atomic_write_file(path, &json)?;
+        Ok(())
+    }
+
+    fn vector_fields_root(collection_path: &Path) -> PathBuf {
+        collection_path.join(VECTOR_FIELDS_DIR)
+    }
+
+    fn vector_fields_manifest_path(collection_path: &Path) -> PathBuf {
+        Self::vector_fields_root(collection_path).join(VECTOR_FIELDS_MANIFEST_FILE)
+    }
+
+    fn validate_vector_field_name(name: &str) -> Result<String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(LynseError::InvalidArgument(
+                "vector field name cannot be empty".to_string(),
+            ));
+        }
+        if trimmed == DEFAULT_VECTOR_FIELD_NAME {
+            return Err(LynseError::InvalidArgument(
+                "'default' is reserved for the primary collection vector".to_string(),
+            ));
+        }
+        if trimmed.len() > 128 {
+            return Err(LynseError::InvalidArgument(
+                "vector field name cannot exceed 128 characters".to_string(),
+            ));
+        }
+        if !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(LynseError::InvalidArgument(
+                "vector field name may only contain ASCII letters, digits, '_' and '-'".to_string(),
+            ));
+        }
+        Ok(trimmed.to_string())
+    }
+
+    fn normalize_field_index_mode(
+        index_mode: Option<&str>,
+        metric: DistanceMetric,
+    ) -> Result<String> {
+        let mode = index_mode
+            .map(|m| m.trim())
+            .filter(|m| !m.is_empty())
+            .map(|m| m.to_uppercase())
+            .unwrap_or_else(|| match metric {
+                DistanceMetric::L2Squared => "FLAT-L2".to_string(),
+                DistanceMetric::Cosine => "FLAT-COS".to_string(),
+                DistanceMetric::InnerProduct => "FLAT".to_string(),
+                DistanceMetric::Hamming => "FLAT-HAMMING".to_string(),
+                DistanceMetric::Jaccard => "FLAT-JACCARD".to_string(),
+            });
+        if index::resolve_index_type(&mode).is_none() {
+            return Err(LynseError::InvalidArgument(format!(
+                "unknown vector field index mode '{}'",
+                mode
+            )));
+        }
+        Ok(mode)
+    }
+
+    fn resolve_named_vector_metric(
+        metric: Option<&str>,
+        index_mode: Option<&str>,
+    ) -> Result<DistanceMetric> {
+        if let Some(index_mode) = index_mode {
+            let index_metric = Self::metric_from_mode_str(index_mode);
+            if let Some(metric) = metric {
+                let parsed = DistanceMetric::from_str(metric).ok_or_else(|| {
+                    LynseError::InvalidArgument(format!(
+                        "unsupported vector field metric '{}'",
+                        metric
+                    ))
+                })?;
+                if parsed != index_metric {
+                    return Err(LynseError::InvalidArgument(format!(
+                        "vector field metric '{}' does not match index mode '{}'",
+                        metric, index_mode
+                    )));
+                }
+            }
+            Ok(index_metric)
+        } else if let Some(metric) = metric {
+            DistanceMetric::from_str(metric).ok_or_else(|| {
+                LynseError::InvalidArgument(format!("unsupported vector field metric '{}'", metric))
+            })
+        } else {
+            Ok(DistanceMetric::InnerProduct)
+        }
+    }
+
+    fn load_vector_fields_manifest(path: &Path) -> Result<VectorFieldsManifest> {
+        if !path.exists() {
+            return Ok(VectorFieldsManifest::default());
+        }
+        let bytes = std::fs::read(path)?;
+        serde_json::from_slice(&bytes).map_err(|e| LynseError::Serialization(e.to_string()))
+    }
+
+    fn load_named_vector_fields(
+        collection_path: &Path,
+        chunk_size: usize,
+        mode: OpenMode,
+    ) -> Result<HashMap<String, NamedVectorField>> {
+        let manifest_path = Self::vector_fields_manifest_path(collection_path);
+        let manifest = Self::load_vector_fields_manifest(&manifest_path)?;
+        let root = Self::vector_fields_root(collection_path);
+        let mut fields = HashMap::new();
+
+        for mut config in manifest.fields {
+            let name = Self::validate_vector_field_name(&config.name)?;
+            let field_path = root.join(&name);
+            let store = VectorStore::new(&field_path, config.dimension, chunk_size)?;
+            let index_path = field_path.join("index");
+            let index_meta_path = field_path.join("index_meta");
+            if mode == OpenMode::ReadWrite {
+                std::fs::create_dir_all(&index_path)?;
+                std::fs::create_dir_all(&index_meta_path)?;
+            }
+            let (index, loaded_index_mode) = Self::try_load_index(&index_meta_path, &index_path)?;
+            if let Some(index_mode) = loaded_index_mode {
+                config.index_mode = index_mode;
+                config.metric = Self::metric_from_mode_str(&config.index_mode)
+                    .name()
+                    .to_string();
+            }
+            let (n_vecs, dim) = store.get_shape()?;
+            if dim != config.dimension {
+                return Err(LynseError::DimensionMismatch {
+                    expected: config.dimension,
+                    got: dim,
+                });
+            }
+
+            let mut id_map = Self::load_id_map_file(&field_path);
+            let n_vecs = n_vecs as usize;
+            if id_map.len() < n_vecs {
+                if mode == OpenMode::ReadOnly {
+                    return Err(LynseError::Storage(format!(
+                        "named vector field '{}' needs writable recovery before read-only open",
+                        name
+                    )));
+                }
+                store.truncate_to_vectors(id_map.len())?;
+            } else if id_map.len() > n_vecs {
+                if mode == OpenMode::ReadOnly {
+                    return Err(LynseError::Storage(format!(
+                        "named vector field '{}' id map exceeds vector rows",
+                        name
+                    )));
+                }
+                id_map.truncate(n_vecs);
+                Self::write_id_map(&field_path, &id_map)?;
+            }
+
+            fields.insert(
+                name.clone(),
+                NamedVectorField {
+                    config: VectorFieldConfig {
+                        name: name.clone(),
+                        ..config
+                    },
+                    vector_store: store,
+                    index,
+                    reverse_id_map: Self::build_reverse_id_map(&id_map),
+                    id_map,
+                    path: field_path,
+                },
+            );
+        }
+
+        Ok(fields)
+    }
+
+    fn save_named_vector_fields_manifest(&self) -> Result<()> {
+        let root = Self::vector_fields_root(&self.path);
+        std::fs::create_dir_all(&root)?;
+        let mut fields: Vec<VectorFieldConfig> = self
+            .named_vector_fields
+            .values()
+            .map(|field| field.config.clone())
+            .collect();
+        fields.sort_by(|a, b| a.name.cmp(&b.name));
+        let manifest = VectorFieldsManifest { fields };
+        let bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|e| LynseError::Serialization(e.to_string()))?;
+        Self::atomic_write_file(&root.join(VECTOR_FIELDS_MANIFEST_FILE), &bytes)?;
         Ok(())
     }
 
@@ -335,6 +1217,114 @@ impl Collection {
         Self::sync_path_recursively(&self.path)
     }
 
+    fn rebuild_text_index(&mut self, persist: bool) -> Result<()> {
+        let row_offsets: Vec<u64> = (0..self.id_map.len() as u64).collect();
+        let fields = self.field_store.retrieve_many(&row_offsets)?;
+        let user_ids = self.id_map.clone();
+        self.text_index.rebuild(&user_ids, &fields, persist)
+    }
+
+    fn make_temp_sibling(path: &Path) -> Result<PathBuf> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("snapshot");
+        Ok(parent.join(format!(
+            ".{}.tmp-{}",
+            name,
+            uuid::Uuid::new_v4().to_string().replace("-", "")
+        )))
+    }
+
+    fn should_skip_snapshot_entry(file_name: &str) -> bool {
+        file_name == ".writer.lock"
+            || file_name == ".database.lock"
+            || file_name == ".manager.lock"
+            || file_name == SNAPSHOT_MANIFEST_FILE
+            || file_name == DATABASE_SNAPSHOT_MANIFEST_FILE
+            || file_name == COLLECTION_EXPORT_MANIFEST_FILE
+            || file_name.ends_with(".wal")
+            || file_name.ends_with(".tmp")
+            || file_name.contains(".tmp-")
+    }
+
+    fn copy_dir_for_snapshot(src: &Path, dst: &Path) -> Result<()> {
+        std::fs::create_dir_all(dst)?;
+        #[cfg(test)]
+        {
+            let delay_ms = SNAPSHOT_COPY_DELAY_MS.load(Ordering::Relaxed);
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+        }
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+            if Self::should_skip_snapshot_entry(&file_name_str) {
+                continue;
+            }
+
+            let src_path = entry.path();
+            let dst_path = dst.join(&file_name);
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                Self::copy_dir_for_snapshot(&src_path, &dst_path)?;
+            } else if metadata.is_file() {
+                std::fs::copy(&src_path, &dst_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn read_storage_manifest_from_dir(path: &Path) -> Result<StorageManifest> {
+        let manifest_path = path.join(STORAGE_MANIFEST_FILE);
+        let bytes = std::fs::read(&manifest_path)?;
+        serde_json::from_slice(&bytes).map_err(|e| LynseError::Serialization(e.to_string()))
+    }
+
+    fn read_snapshot_manifest(path: &Path) -> Result<CollectionSnapshotManifest> {
+        let manifest_path = path.join(SNAPSHOT_MANIFEST_FILE);
+        let bytes = std::fs::read(&manifest_path)?;
+        serde_json::from_slice(&bytes).map_err(|e| LynseError::Serialization(e.to_string()))
+    }
+
+    fn read_export_manifest(path: &Path) -> Result<CollectionExportManifest> {
+        let manifest_path = path.join(COLLECTION_EXPORT_MANIFEST_FILE);
+        let bytes = std::fs::read(&manifest_path)?;
+        serde_json::from_slice(&bytes).map_err(|e| LynseError::Serialization(e.to_string()))
+    }
+
+    fn validate_export_manifest(manifest: &CollectionExportManifest) -> Result<()> {
+        if manifest.export_format != COLLECTION_EXPORT_FORMAT_NAME {
+            return Err(LynseError::Storage(format!(
+                "unsupported collection export format '{}'",
+                manifest.export_format
+            )));
+        }
+        if manifest.export_version > STORAGE_FORMAT_VERSION {
+            return Err(LynseError::Storage(format!(
+                "collection export uses format version {}, but this binary supports up to {}",
+                manifest.export_version, STORAGE_FORMAT_VERSION
+            )));
+        }
+        if manifest.vector_dtype != "f32" {
+            return Err(LynseError::Storage(format!(
+                "unsupported export vector dtype '{}'",
+                manifest.vector_dtype
+            )));
+        }
+        if manifest.byte_order != "little-endian" {
+            return Err(LynseError::Storage(format!(
+                "unsupported export byte order '{}'",
+                manifest.byte_order
+            )));
+        }
+        Ok(())
+    }
+
     /// Recover uncommitted WAL segments into main storage.
     fn recover_wal(&mut self) -> Result<bool> {
         if !self.wal.has_uncommitted_data() {
@@ -361,9 +1351,17 @@ impl Collection {
             let mut missing_vectors = Vec::new();
             let mut missing_ids = Vec::new();
             let mut missing_fields = Vec::new();
+            let mut existing_field_rows = Vec::new();
+            let mut existing_field_user_ids = Vec::new();
+            let mut existing_field_values = Vec::new();
 
             for (i, &user_id) in ids.iter().enumerate() {
-                if self.reverse_id_map.contains_key(&user_id) {
+                if let Some(row) = self.reverse_id_map.get(&user_id).copied() {
+                    if let Some(field) = seg.fields.get(i) {
+                        existing_field_rows.push(row as u64);
+                        existing_field_user_ids.push(user_id);
+                        existing_field_values.push(field.clone());
+                    }
                     continue;
                 }
 
@@ -383,11 +1381,18 @@ impl Collection {
                 self.append_recovered_items(&missing_vectors, &missing_ids, &missing_fields)?;
                 recovered_any = true;
             }
+            if !existing_field_user_ids.is_empty() {
+                self.field_store
+                    .replace_fields_at_ids(&existing_field_rows, &existing_field_values)?;
+                self.text_index
+                    .upsert_documents(&existing_field_user_ids, &existing_field_values)?;
+                recovered_any = true;
+            }
         }
 
         // Clean WAL after successful recovery
         self.wal.cleanup()?;
-        Ok(recovered_any)
+        Ok(recovered_any || !segments.is_empty())
     }
 
     /// Load PQ / RaBitQ / PolarVec indices from disk if the index_mode requires them.
@@ -520,6 +1525,46 @@ impl Collection {
         Ok(repaired)
     }
 
+    fn initialize_id_map_for_read_only(&mut self) -> Result<()> {
+        let id_map_path = self.path.join("id_map.bin");
+        let id_map_exists = id_map_path.exists();
+        let (n_vecs, _) = self.vector_store.get_shape()?;
+        let n_vecs = n_vecs as usize;
+        let mut id_map = Self::load_id_map_file(&self.path);
+
+        if id_map_exists {
+            if id_map.len() < n_vecs {
+                return Err(LynseError::Storage(
+                    "collection needs writable recovery before it can be opened read-only"
+                        .to_string(),
+                ));
+            }
+            id_map.truncate(n_vecs);
+        } else {
+            while id_map.len() < n_vecs {
+                id_map.push(id_map.len() as u64);
+            }
+        }
+
+        self.reverse_id_map = Self::build_reverse_id_map(&id_map);
+        self.id_map = id_map;
+
+        Ok(())
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        if self.read_only {
+            return Err(LynseError::InvalidArgument(
+                "collection is opened read-only".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     /// Append new user IDs to id_map.bin (sequential write, no rewrite).
     fn append_id_map(path: &Path, ids: &[u64]) -> Result<()> {
         use std::io::Write;
@@ -566,6 +1611,7 @@ impl Collection {
 
     /// Mark vectors as soft-deleted. Deleted IDs are excluded from all search results.
     pub fn delete_items(&self, ids: &[u64]) -> Result<()> {
+        self.ensure_writable()?;
         let mut set = self.tombstone.write();
         for &id in ids {
             set.insert(id);
@@ -576,6 +1622,7 @@ impl Collection {
 
     /// Undelete previously soft-deleted vectors.
     pub fn restore_items(&self, ids: &[u64]) -> Result<()> {
+        self.ensure_writable()?;
         let mut set = self.tombstone.write();
         for &id in ids {
             set.remove(&id);
@@ -744,6 +1791,7 @@ impl Collection {
 
         self.vector_store.write(vectors)?;
         self.field_store.batch_store_at_ids(&row_ids, fields)?;
+        self.text_index.upsert_documents(ids, fields)?;
 
         if let Some(ref mut idx) = self.index {
             idx.insert(vectors, n_vectors, dim, &row_ids)?;
@@ -767,6 +1815,7 @@ impl Collection {
         ids: &[u64],
         fields: Option<&[HashMap<String, serde_json::Value>]>,
     ) -> Result<()> {
+        self.ensure_writable()?;
         let dim = self.meta.dimension;
         if vectors.len() != n_vectors * dim {
             return Err(LynseError::DimensionMismatch {
@@ -807,6 +1856,7 @@ impl Collection {
         // Store fields only when provided (skip empty metadata to avoid slow per-row I/O)
         if let Some(field_list) = fields {
             self.field_store.batch_store_at_ids(&row_ids, field_list)?;
+            self.text_index.upsert_documents(ids, field_list)?;
         }
 
         // Insert into index if exists (HNSW/IVF — Flat types use mmap directly)
@@ -824,14 +1874,313 @@ impl Collection {
         Ok(())
     }
 
+    /// Create a named vector field stored independently from the primary vector.
+    pub fn create_vector_field(
+        &mut self,
+        name: &str,
+        dimension: usize,
+        metric: Option<&str>,
+        index_mode: Option<&str>,
+    ) -> Result<VectorFieldConfig> {
+        self.ensure_writable()?;
+        if dimension == 0 {
+            return Err(LynseError::InvalidArgument(
+                "vector field dimension must be greater than zero".to_string(),
+            ));
+        }
+
+        let name = Self::validate_vector_field_name(name)?;
+        let metric = Self::resolve_named_vector_metric(metric, index_mode)?;
+        let index_mode = Self::normalize_field_index_mode(index_mode, metric)?;
+
+        if let Some(existing) = self.named_vector_fields.get(&name) {
+            if existing.config.dimension == dimension
+                && existing.config.metric == metric.name()
+                && existing.config.index_mode == index_mode
+            {
+                return Ok(existing.config.clone());
+            }
+            return Err(LynseError::InvalidArgument(format!(
+                "vector field '{}' already exists with a different configuration",
+                name
+            )));
+        }
+
+        let root = Self::vector_fields_root(&self.path);
+        std::fs::create_dir_all(&root)?;
+        let field_path = root.join(&name);
+        let vector_store = VectorStore::new(&field_path, dimension, self.meta.chunk_size)?;
+        let config = VectorFieldConfig {
+            name: name.clone(),
+            dimension,
+            metric: metric.name().to_string(),
+            index_mode,
+        };
+
+        self.named_vector_fields.insert(
+            name,
+            NamedVectorField {
+                config: config.clone(),
+                vector_store,
+                index: None,
+                id_map: Vec::new(),
+                reverse_id_map: HashMap::new(),
+                path: field_path,
+            },
+        );
+        self.save_named_vector_fields_manifest()?;
+        Ok(config)
+    }
+
+    /// List vector fields. The primary vector is reported as the reserved
+    /// `default` field for API consistency.
+    pub fn list_vector_fields(&self) -> Vec<VectorFieldConfig> {
+        let mut fields = vec![VectorFieldConfig {
+            name: DEFAULT_VECTOR_FIELD_NAME.to_string(),
+            dimension: self.meta.dimension,
+            metric: self.resolve_metric().name().to_string(),
+            index_mode: self
+                .index_mode
+                .clone()
+                .unwrap_or_else(|| "FLAT".to_string()),
+        }];
+        let mut named: Vec<VectorFieldConfig> = self
+            .named_vector_fields
+            .values()
+            .map(|field| field.config.clone())
+            .collect();
+        named.sort_by(|a, b| a.name.cmp(&b.name));
+        fields.extend(named);
+        fields
+    }
+
+    /// Attach vectors to an existing named vector field for existing user IDs.
+    pub fn add_named_vectors(
+        &mut self,
+        field_name: &str,
+        vectors: &[f32],
+        n_vectors: usize,
+        ids: &[u64],
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        let field_name = Self::validate_vector_field_name(field_name)?;
+        let field = self.named_vector_fields.get(&field_name).ok_or_else(|| {
+            LynseError::InvalidArgument(format!("vector field '{}' does not exist", field_name))
+        })?;
+        let dim = field.config.dimension;
+
+        if vectors.len() != n_vectors * dim {
+            return Err(LynseError::DimensionMismatch {
+                expected: dim,
+                got: if n_vectors == 0 {
+                    0
+                } else {
+                    vectors.len() / n_vectors
+                },
+            });
+        }
+        if ids.len() != n_vectors {
+            return Err(LynseError::InvalidArgument(format!(
+                "ids length ({}) must match n_vectors ({})",
+                ids.len(),
+                n_vectors
+            )));
+        }
+
+        let mut seen = HashSet::with_capacity(ids.len());
+        for &id in ids {
+            if !seen.insert(id) {
+                return Err(LynseError::InvalidArgument(format!(
+                    "duplicate id {} within named vector batch",
+                    id
+                )));
+            }
+            if !self.is_id_exists(id) {
+                return Err(LynseError::InvalidArgument(format!(
+                    "cannot add named vector for unknown id {}",
+                    id
+                )));
+            }
+            if field.reverse_id_map.contains_key(&id) {
+                return Err(LynseError::InvalidArgument(format!(
+                    "id {} already has a vector for field '{}'",
+                    id, field_name
+                )));
+            }
+        }
+
+        let field = self.named_vector_fields.get_mut(&field_name).unwrap();
+        let start_row = field.id_map.len();
+        let row_ids: Vec<u64> = (start_row as u64..start_row as u64 + n_vectors as u64).collect();
+        field.vector_store.write(vectors)?;
+        if let Some(ref mut idx) = field.index {
+            idx.insert(vectors, n_vectors, dim, &row_ids)?;
+        }
+        for (i, &id) in ids.iter().enumerate() {
+            field.id_map.push(id);
+            field.reverse_id_map.insert(id, start_row + i);
+        }
+        Self::append_id_map(&field.path, ids)?;
+        Ok(())
+    }
+
+    /// Attach sparse feature vectors to existing user IDs. Sparse vectors are
+    /// searched with inner product and stored independently from dense fields.
+    pub fn add_sparse_vectors(&mut self, ids: &[u64], vectors: &[Vec<(u32, f32)>]) -> Result<()> {
+        self.ensure_writable()?;
+        if ids.len() != vectors.len() {
+            return Err(LynseError::InvalidArgument(format!(
+                "ids length ({}) must match sparse vector count ({})",
+                ids.len(),
+                vectors.len()
+            )));
+        }
+
+        let mut seen = HashSet::with_capacity(ids.len());
+        for &id in ids {
+            if !seen.insert(id) {
+                return Err(LynseError::InvalidArgument(format!(
+                    "duplicate id {} within sparse vector batch",
+                    id
+                )));
+            }
+            if !self.is_id_exists(id) {
+                return Err(LynseError::InvalidArgument(format!(
+                    "cannot add sparse vector for unknown id {}",
+                    id
+                )));
+            }
+        }
+
+        self.sparse_vectors.upsert_many(ids, vectors)
+    }
+
+    /// Build or change the index for a named vector field.
+    pub fn build_vector_field_index(&mut self, field_name: &str, index_type: &str) -> Result<()> {
+        self.ensure_writable()?;
+        if field_name == DEFAULT_VECTOR_FIELD_NAME || field_name.trim().is_empty() {
+            return self.build_index(index_type);
+        }
+
+        let field_name = Self::validate_vector_field_name(field_name)?;
+        let metric = Self::metric_from_mode_str(index_type);
+        let index_type = Self::normalize_field_index_mode(Some(index_type), metric)?;
+        let is_flat = Self::resolve_metric_from_type(&index_type).is_some();
+
+        {
+            let field = self
+                .named_vector_fields
+                .get_mut(&field_name)
+                .ok_or_else(|| {
+                    LynseError::InvalidArgument(format!(
+                        "vector field '{}' does not exist",
+                        field_name
+                    ))
+                })?;
+            let dim = field.config.dimension;
+            let n_vectors = field.vector_store.get_shape()?.0 as usize;
+            field.index = None;
+
+            if is_flat {
+                let index_path = field.path.join("index");
+                if index_path.exists() {
+                    std::fs::remove_dir_all(&index_path)?;
+                }
+                let meta_path = field.path.join("index_meta");
+                let meta = serde_json::json!({
+                    "index_type": index_type,
+                    "n_vectors": n_vectors,
+                    "dimension": dim,
+                });
+                Self::save_index_metadata(&meta_path, &meta)?;
+            } else {
+                let guard = field.vector_store.read_mmap()?;
+                let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
+                let n = fm.len();
+                if n == 0 {
+                    return Err(LynseError::EmptyDatabase);
+                }
+
+                let all_data = fm.as_slice();
+                let row_ids: Vec<u64> = (0..n as u64).collect();
+                let mut idx = index::create_index(&index_type)?;
+                idx.build(all_data, n, dim, Some(&row_ids))?;
+                drop(guard);
+
+                let index_data = idx.serialize()?;
+                let index_path = field.path.join("index");
+                let index_file = Self::write_generation_index(&index_path, &index_data)?;
+                let meta_path = field.path.join("index_meta");
+                let meta = serde_json::json!({
+                    "index_type": index_type,
+                    "n_vectors": n,
+                    "dimension": dim,
+                    "index_file": index_file,
+                });
+                Self::save_index_metadata(&meta_path, &meta)?;
+                field.index = Some(idx);
+            }
+
+            field.config.index_mode = index_type.clone();
+            field.config.metric = metric.name().to_string();
+        }
+
+        self.save_named_vector_fields_manifest()?;
+        Ok(())
+    }
+
+    /// Remove a named vector field index and return it to flat search.
+    pub fn remove_vector_field_index(&mut self, field_name: &str) -> Result<()> {
+        self.ensure_writable()?;
+        if field_name == DEFAULT_VECTOR_FIELD_NAME || field_name.trim().is_empty() {
+            return self.remove_index();
+        }
+
+        let field_name = Self::validate_vector_field_name(field_name)?;
+        {
+            let field = self
+                .named_vector_fields
+                .get_mut(&field_name)
+                .ok_or_else(|| {
+                    LynseError::InvalidArgument(format!(
+                        "vector field '{}' does not exist",
+                        field_name
+                    ))
+                })?;
+            field.index = None;
+            let index_path = field.path.join("index");
+            let meta_path = field.path.join("index_meta");
+            if index_path.exists() {
+                std::fs::remove_dir_all(&index_path)?;
+            }
+            if meta_path.exists() {
+                std::fs::remove_dir_all(&meta_path)?;
+            }
+            field.config.index_mode = match DistanceMetric::from_str(&field.config.metric)
+                .unwrap_or(DistanceMetric::InnerProduct)
+            {
+                DistanceMetric::L2Squared => "FLAT-L2".to_string(),
+                DistanceMetric::Cosine => "FLAT-COS".to_string(),
+                DistanceMetric::Hamming => "FLAT-HAMMING".to_string(),
+                DistanceMetric::Jaccard => "FLAT-JACCARD".to_string(),
+                DistanceMetric::InnerProduct => "FLAT".to_string(),
+            };
+        }
+
+        self.save_named_vector_fields_manifest()?;
+        Ok(())
+    }
+
     /// Flush pending WAL bytes and fsync collection files without clearing WAL.
     pub fn flush(&self) -> Result<()> {
+        self.ensure_writable()?;
         self.wal.flush()?;
         self.sync_collection_files()
     }
 
     /// Checkpoint durable state and clear WAL after data has reached main storage.
     pub fn checkpoint(&self) -> Result<()> {
+        self.ensure_writable()?;
         self.flush()?;
         self.wal.cleanup()?;
         self.sync_collection_files()
@@ -842,6 +2191,10 @@ impl Collection {
     /// The writer lock is released when the `Collection` object itself is
     /// dropped; this method makes outstanding state durable and stops the WAL.
     pub fn close(&mut self) -> Result<()> {
+        if self.read_only {
+            self.lock.take();
+            return Ok(());
+        }
         self.checkpoint()?;
         self.wal.stop()?;
         self.lock.take();
@@ -865,6 +2218,7 @@ impl Collection {
     ///
     /// For HNSW/IVF types: loads data from mmap and builds the index structure.
     pub fn build_index(&mut self, index_type: &str) -> Result<()> {
+        self.ensure_writable()?;
         let dim = self.meta.dimension;
         let upper = index_type.to_uppercase();
 
@@ -1136,6 +2490,456 @@ impl Collection {
             dimension: dim,
             k,
         })
+    }
+
+    /// Search a named vector field. Passing `default` uses the primary vector.
+    pub fn search_vector_field(
+        &self,
+        field_name: &str,
+        query: &[f32],
+        k: usize,
+        where_expr: Option<&str>,
+    ) -> Result<SearchResult> {
+        if field_name == DEFAULT_VECTOR_FIELD_NAME || field_name.trim().is_empty() {
+            return self.search(query, k, where_expr, 10);
+        }
+
+        let field_name = Self::validate_vector_field_name(field_name)?;
+        let field = self.named_vector_fields.get(&field_name).ok_or_else(|| {
+            LynseError::InvalidArgument(format!("vector field '{}' does not exist", field_name))
+        })?;
+        let dim = field.config.dimension;
+        if query.len() != dim {
+            return Err(LynseError::DimensionMismatch {
+                expected: dim,
+                got: query.len(),
+            });
+        }
+
+        let allowed_ids = if let Some(filter) = where_expr {
+            let rows = self.field_store.query(filter)?;
+            Some(
+                rows.iter()
+                    .map(|&row| self.row_to_user_id(row))
+                    .collect::<HashSet<u64>>(),
+            )
+        } else {
+            None
+        };
+
+        let has_tombstones = !self.tombstone.read().is_empty();
+        let use_field_index = field.index.is_some() && allowed_ids.is_none() && !has_tombstones;
+        let search_k = if allowed_ids.is_some() || has_tombstones {
+            field.id_map.len()
+        } else {
+            k
+        };
+
+        let (rows, dists) = if use_field_index {
+            let search_params = SearchParams {
+                k,
+                nprobe: 10,
+                ef_search: None,
+                subset_indices: None,
+            };
+            field
+                .index
+                .as_ref()
+                .unwrap()
+                .search(query, k, &search_params)?
+        } else {
+            let metric = DistanceMetric::from_str(&field.config.metric)
+                .unwrap_or_else(|| Self::metric_from_mode_str(&field.config.index_mode));
+            let use_sq8 = field.config.index_mode.to_uppercase().contains("SQ8");
+            let guard = field.vector_store.read_mmap()?;
+            match guard.as_ref() {
+                None => (Vec::new(), Vec::new()),
+                Some(fm) => {
+                    let (rows, dists) = fm.search(query, search_k, metric, use_sq8);
+                    (rows.into_iter().map(|row| row as u64).collect(), dists)
+                }
+            }
+        };
+
+        let tombstones = self.tombstone.read();
+        let mut ids = Vec::with_capacity(rows.len().min(k));
+        let mut distances = Vec::with_capacity(rows.len().min(k));
+
+        for (row, dist) in rows.into_iter().zip(dists.into_iter()) {
+            let Some(&user_id) = field.id_map.get(row as usize) else {
+                continue;
+            };
+            if tombstones.contains(&user_id) {
+                continue;
+            }
+            if let Some(ref allowed) = allowed_ids {
+                if !allowed.contains(&user_id) {
+                    continue;
+                }
+            }
+            ids.push(user_id);
+            distances.push(dist);
+            if ids.len() >= k {
+                break;
+            }
+        }
+
+        Ok(SearchResult {
+            ids,
+            distances,
+            fields: Vec::new(),
+            index_mode: field.config.index_mode.clone(),
+            dimension: dim,
+            k,
+        })
+    }
+
+    /// Search sparse vectors with inner product. Optional metadata filters use
+    /// the same field expression language as dense vector search.
+    pub fn search_sparse(
+        &self,
+        query: &[(u32, f32)],
+        k: usize,
+        where_expr: Option<&str>,
+    ) -> Result<SearchResult> {
+        let query = normalize_sparse_entries(query)?;
+        if query.is_empty() || k == 0 {
+            return Ok(SearchResult {
+                ids: Vec::new(),
+                distances: Vec::new(),
+                fields: Vec::new(),
+                index_mode: "SPARSE-FLAT-IP".to_string(),
+                dimension: 0,
+                k,
+            });
+        }
+
+        let allowed_ids = if let Some(filter) = where_expr {
+            let rows = self.field_store.query(filter)?;
+            Some(
+                rows.iter()
+                    .map(|&row| self.row_to_user_id(row))
+                    .collect::<HashSet<u64>>(),
+            )
+        } else {
+            None
+        };
+
+        let tombstones = self.tombstone.read();
+        let ranked = self
+            .sparse_vectors
+            .search(&query, k, allowed_ids.as_ref(), &tombstones);
+
+        Ok(SearchResult {
+            ids: ranked.iter().map(|(id, _)| *id).collect(),
+            distances: ranked.iter().map(|(_, score)| *score).collect(),
+            fields: Vec::new(),
+            index_mode: "SPARSE-FLAT-IP".to_string(),
+            dimension: 0,
+            k,
+        })
+    }
+
+    /// Search with lightweight profile information for explain/debug tooling.
+    pub fn search_with_profile(
+        &self,
+        query: &[f32],
+        k: usize,
+        where_expr: Option<&str>,
+        nprobe: usize,
+    ) -> Result<(SearchResult, QueryProfile)> {
+        let started = Instant::now();
+        let mut filter_us = 0u64;
+        let mut filter_matches = None;
+
+        if let Some(expr) = where_expr {
+            let filter_started = Instant::now();
+            let ids = self.field_store.query(expr)?;
+            filter_us = elapsed_micros_u64(filter_started);
+            filter_matches = Some(ids.len());
+        }
+
+        let search_started = Instant::now();
+        let result = self.search(query, k, where_expr, nprobe)?;
+        let search_us = elapsed_micros_u64(search_started);
+        let total_vectors = self.shape()?.0;
+        let filtered = where_expr.is_some();
+        let index_path = self.profile_index_path(filtered);
+        let scanned_vectors = self.estimate_scanned_vectors(total_vectors as usize, filter_matches);
+        let result_count = result.ids.len();
+
+        let profile = QueryProfile {
+            query_kind: "vector".to_string(),
+            vector_field: "default".to_string(),
+            index_path,
+            total_vectors,
+            filter_expression: where_expr.map(|s| s.to_string()),
+            filter_matches,
+            scanned_vectors,
+            result_count,
+            filter_us,
+            search_us,
+            rerank_us: 0,
+            total_us: elapsed_micros_u64(started),
+        };
+
+        Ok((result, profile))
+    }
+
+    /// BM25 text search over stored metadata fields.
+    ///
+    /// Uses the persistent inverted index when available, with a scan fallback
+    /// for legacy collections opened before the text index file exists.
+    pub fn text_search(
+        &self,
+        query_text: &str,
+        text_fields: Option<&[String]>,
+        k: usize,
+        where_expr: Option<&str>,
+    ) -> Result<SearchResult> {
+        let (scores, index_mode) = self.bm25_text_scores(query_text, text_fields, where_expr, k)?;
+        Ok(SearchResult {
+            ids: scores.iter().map(|(id, _)| *id).collect(),
+            distances: scores.iter().map(|(_, score)| *score).collect(),
+            fields: Vec::new(),
+            index_mode: index_mode.to_string(),
+            dimension: self.meta.dimension,
+            k,
+        })
+    }
+
+    /// Hybrid vector + text search with RRF or weighted-score fusion.
+    pub fn hybrid_search(
+        &self,
+        query: Option<&[f32]>,
+        query_text: Option<&str>,
+        k: usize,
+        where_expr: Option<&str>,
+        text_fields: Option<&[String]>,
+        fusion: &str,
+        vector_weight: f32,
+        text_weight: f32,
+        rrf_k: f32,
+        candidate_limit: usize,
+        nprobe: usize,
+    ) -> Result<SearchResult> {
+        if query.is_none() && query_text.map(|s| s.trim().is_empty()).unwrap_or(true) {
+            return Err(LynseError::InvalidArgument(
+                "hybrid_search requires a vector, text, or both".to_string(),
+            ));
+        }
+
+        let candidate_limit = candidate_limit.max(k).max(1);
+        let mut fused: HashMap<u64, f32> = HashMap::new();
+
+        if let Some(vector) = query {
+            let vector_result = self.search(vector, candidate_limit, where_expr, nprobe)?;
+            let vector_scores =
+                normalize_vector_scores(&vector_result.distances, self.resolve_metric());
+            add_fused_scores(
+                &mut fused,
+                &vector_result.ids,
+                &vector_scores,
+                fusion,
+                vector_weight,
+                rrf_k,
+            );
+        }
+
+        if let Some(text) = query_text {
+            if !text.trim().is_empty() {
+                let (text_scores, _) =
+                    self.bm25_text_scores(text, text_fields, where_expr, candidate_limit)?;
+                let ids: Vec<u64> = text_scores.iter().map(|(id, _)| *id).collect();
+                let scores: Vec<f32> = text_scores.iter().map(|(_, score)| *score).collect();
+                let normalized = normalize_scores(&scores, false);
+                add_fused_scores(&mut fused, &ids, &normalized, fusion, text_weight, rrf_k);
+            }
+        }
+
+        let mut ranked: Vec<(u64, f32)> = fused.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(k);
+
+        let normalized_fusion = if fusion.eq_ignore_ascii_case("weighted") {
+            "WEIGHTED"
+        } else {
+            "RRF"
+        };
+
+        Ok(SearchResult {
+            ids: ranked.iter().map(|(id, _)| *id).collect(),
+            distances: ranked.iter().map(|(_, score)| *score).collect(),
+            fields: Vec::new(),
+            index_mode: format!("HYBRID-{}", normalized_fusion),
+            dimension: self.meta.dimension,
+            k,
+        })
+    }
+
+    fn profile_index_path(&self, filtered: bool) -> String {
+        if self.index.is_some() {
+            "ann_index".to_string()
+        } else if self.pq_index.is_some() {
+            "pq_two_pass".to_string()
+        } else if self.rabitq_index.is_some() {
+            "rabitq_two_pass".to_string()
+        } else if self.polarvec_index.is_some() {
+            "polarvec_two_pass".to_string()
+        } else if filtered {
+            "flat_mmap_filtered".to_string()
+        } else {
+            "flat_mmap".to_string()
+        }
+    }
+
+    fn estimate_scanned_vectors(
+        &self,
+        total_vectors: usize,
+        filter_matches: Option<usize>,
+    ) -> usize {
+        if self.index.is_some()
+            || self.pq_index.is_some()
+            || self.rabitq_index.is_some()
+            || self.polarvec_index.is_some()
+        {
+            filter_matches.unwrap_or(total_vectors)
+        } else {
+            filter_matches.unwrap_or(total_vectors)
+        }
+    }
+
+    fn bm25_text_scores(
+        &self,
+        query_text: &str,
+        text_fields: Option<&[String]>,
+        where_expr: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<(u64, f32)>, &'static str)> {
+        if self.text_index.is_empty() {
+            return self
+                .bm25_text_scores_scan(query_text, text_fields, where_expr, limit)
+                .map(|scores| (scores, "BM25-SCAN"));
+        }
+
+        let allowed_ids = if let Some(expr) = where_expr {
+            let rows = self.field_store.query(expr)?;
+            Some(
+                rows.iter()
+                    .map(|&row| self.row_to_user_id(row))
+                    .collect::<HashSet<u64>>(),
+            )
+        } else {
+            None
+        };
+        let tombstones = self.tombstone.read();
+        let scores = self.text_index.search(
+            query_text,
+            text_fields,
+            limit,
+            allowed_ids.as_ref(),
+            &tombstones,
+        );
+        Ok((scores, "BM25-INVERTED"))
+    }
+
+    fn bm25_text_scores_scan(
+        &self,
+        query_text: &str,
+        text_fields: Option<&[String]>,
+        where_expr: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(u64, f32)>> {
+        let query_terms = tokenize_text(query_text);
+        if query_terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let row_ids: Vec<u64> = if let Some(expr) = where_expr {
+            self.field_store.query(expr)?
+        } else {
+            let (n, _) = self.shape()?;
+            (0..n).collect()
+        };
+
+        let field_filter = text_fields
+            .filter(|fields| !fields.is_empty())
+            .map(|fields| fields.iter().cloned().collect::<HashSet<String>>());
+
+        let mut docs: Vec<(u64, Vec<String>)> = Vec::new();
+        let fields_list = self.field_store.retrieve_many(&row_ids)?;
+        for (row_id, fields) in row_ids.iter().copied().zip(fields_list.into_iter()) {
+            let user_id = self.row_to_user_id(row_id);
+            if self.tombstone.read().contains(&user_id) {
+                continue;
+            }
+
+            let text = fields_to_searchable_text(&fields, field_filter.as_ref());
+            let tokens = tokenize_text(&text);
+            if !tokens.is_empty() {
+                docs.push((user_id, tokens));
+            }
+        }
+
+        if docs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut query_counts: HashMap<String, usize> = HashMap::new();
+        for term in query_terms {
+            *query_counts.entry(term).or_insert(0) += 1;
+        }
+
+        let mut document_frequencies: HashMap<&str, usize> = HashMap::new();
+        let mut term_counts_by_doc: Vec<HashMap<&str, usize>> = Vec::with_capacity(docs.len());
+        let mut total_doc_len = 0usize;
+
+        for (_, tokens) in &docs {
+            total_doc_len += tokens.len();
+            let mut counts: HashMap<&str, usize> = HashMap::new();
+            for token in tokens {
+                *counts.entry(token.as_str()).or_insert(0) += 1;
+            }
+            for term in query_counts.keys() {
+                if counts.contains_key(term.as_str()) {
+                    *document_frequencies.entry(term.as_str()).or_insert(0) += 1;
+                }
+            }
+            term_counts_by_doc.push(counts);
+        }
+
+        let avg_doc_len = (total_doc_len as f32 / docs.len() as f32).max(1.0);
+        let n_docs = docs.len() as f32;
+        let k1 = 1.2f32;
+        let b = 0.75f32;
+        let mut scored = Vec::new();
+
+        for ((id, tokens), counts) in docs.iter().zip(term_counts_by_doc.iter()) {
+            let doc_len = tokens.len() as f32;
+            let mut score = 0.0f32;
+
+            for (term, query_count) in &query_counts {
+                let tf = counts.get(term.as_str()).copied().unwrap_or(0) as f32;
+                if tf == 0.0 {
+                    continue;
+                }
+                let df = document_frequencies
+                    .get(term.as_str())
+                    .copied()
+                    .unwrap_or(0) as f32;
+                let idf = ((n_docs - df + 0.5) / (df + 0.5) + 1.0).ln();
+                let denom = tf + k1 * (1.0 - b + b * doc_len / avg_doc_len);
+                score += *query_count as f32 * idf * (tf * (k1 + 1.0)) / denom;
+            }
+
+            if score > 0.0 {
+                scored.push((*id, score));
+            }
+        }
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored)
     }
 
     /// Batch search: search multiple query vectors in parallel.
@@ -1623,6 +3427,7 @@ impl Collection {
         n_vectors: usize,
         fields: Option<&[HashMap<String, serde_json::Value>]>,
     ) -> Result<()> {
+        self.ensure_writable()?;
         let dim = self.meta.dimension;
         if vectors.len() != n_vectors * dim {
             return Err(LynseError::DimensionMismatch {
@@ -1701,6 +3506,7 @@ impl Collection {
         if fields.is_some() {
             self.field_store
                 .replace_fields_at_ids(&field_rows, &field_values)?;
+            self.text_index.upsert_documents(ids, fields.unwrap())?;
         }
         if tombstone_changed {
             let path = self.path.join("tombstone.bin");
@@ -1726,6 +3532,7 @@ impl Collection {
         n_vectors: usize,
         fields: Option<&[HashMap<String, serde_json::Value>]>,
     ) -> Result<()> {
+        self.ensure_writable()?;
         let dim = self.meta.dimension;
         if vectors.len() != n_vectors * dim {
             return Err(LynseError::DimensionMismatch {
@@ -1753,6 +3560,7 @@ impl Collection {
 
     /// Remove the index.
     pub fn remove_index(&mut self) -> Result<()> {
+        self.ensure_writable()?;
         self.index = None;
         self.index_mode = None;
         self.meta.index_mode = None;
@@ -1823,6 +3631,7 @@ impl Collection {
     /// Note: For Flat types, no sync is needed — VectorStore's mmap is always
     /// up-to-date (re-mmap'd after every write). Sync only applies to HNSW/IVF.
     pub fn sync_index(&mut self) -> Result<()> {
+        self.ensure_writable()?;
         if !self.needs_index_sync() {
             return Ok(());
         }
@@ -2078,6 +3887,7 @@ impl Collection {
     ///
     /// Returns the number of vectors physically removed.
     pub fn compact(&mut self) -> Result<usize> {
+        self.ensure_writable()?;
         let dim = self.meta.dimension;
 
         let tombstoned_user_ids: HashSet<u64> = self.tombstone.read().clone();
@@ -2132,6 +3942,49 @@ impl Collection {
             .collect();
         std::fs::write(self.path.join("id_map.bin"), &id_bytes)?;
 
+        let mut field_indexes_to_rebuild = Vec::new();
+        for field in self.named_vector_fields.values_mut() {
+            let field_dim = field.config.dimension;
+            let (field_vectors, field_n_total) = {
+                let guard = field.vector_store.read_mmap()?;
+                match guard.as_ref() {
+                    None => (Vec::new(), 0),
+                    Some(fm) => (fm.as_slice().to_vec(), fm.len()),
+                }
+            };
+
+            if field_n_total == 0 {
+                continue;
+            }
+
+            let mut live_field_vectors = Vec::new();
+            let mut live_field_ids = Vec::new();
+            for row in 0..field_n_total {
+                let Some(&user_id) = field.id_map.get(row) else {
+                    continue;
+                };
+                if tombstoned_user_ids.contains(&user_id) {
+                    continue;
+                }
+                let start = row * field_dim;
+                live_field_vectors.extend_from_slice(&field_vectors[start..start + field_dim]);
+                live_field_ids.push(user_id);
+            }
+
+            field.vector_store.replace_data(&live_field_vectors)?;
+            field.reverse_id_map = Self::build_reverse_id_map(&live_field_ids);
+            field.id_map = live_field_ids.clone();
+            Self::write_id_map(&field.path, &live_field_ids)?;
+            if field.index.is_some() {
+                field.index = None;
+                field_indexes_to_rebuild
+                    .push((field.config.name.clone(), field.config.index_mode.clone()));
+            }
+        }
+
+        self.sparse_vectors.remove_ids(&tombstoned_user_ids)?;
+        self.text_index.remove_ids(&tombstoned_user_ids)?;
+
         // Clear tombstone set and file
         {
             let mut set = self.tombstone.write();
@@ -2147,21 +4000,250 @@ impl Collection {
             let mode = mode.clone();
             self.build_index(&mode)?;
         }
+        for (field_name, index_mode) in field_indexes_to_rebuild {
+            self.build_vector_field_index(&field_name, &index_mode)?;
+        }
 
         Ok(n_removed)
     }
 
     /// Delete the entire collection from disk.
     pub fn delete(self) -> Result<()> {
+        self.ensure_writable()?;
         if self.path.exists() {
             std::fs::remove_dir_all(&self.path)?;
         }
         Ok(())
     }
+
+    /// Export live collection rows to a portable JSONL + binary-vector directory.
+    pub fn export_to(&self, export_path: &Path) -> Result<()> {
+        if export_path.exists() {
+            return Err(LynseError::InvalidArgument(format!(
+                "export target already exists: {}",
+                export_path.display()
+            )));
+        }
+
+        let tmp_path = Self::make_temp_sibling(export_path)?;
+        if tmp_path.exists() {
+            std::fs::remove_dir_all(&tmp_path)?;
+        }
+
+        let export_result = (|| -> Result<()> {
+            use std::io::Write;
+
+            std::fs::create_dir_all(&tmp_path)?;
+            let dim = self.meta.dimension;
+            let guard = self.vector_store.read_mmap()?;
+            let tombstone = self.tombstone.read();
+
+            let (row_offsets, user_ids, exported_count) = match guard.as_ref() {
+                None => (Vec::new(), Vec::new(), 0usize),
+                Some(fm) => {
+                    let mut row_offsets = Vec::new();
+                    let mut user_ids = Vec::new();
+                    for row in 0..fm.len() {
+                        let user_id = self.row_to_user_id(row as u64);
+                        if tombstone.contains(&user_id) {
+                            continue;
+                        }
+                        row_offsets.push(row as u64);
+                        user_ids.push(user_id);
+                    }
+                    let count = row_offsets.len();
+                    (row_offsets, user_ids, count)
+                }
+            };
+
+            let fields = self.field_store.retrieve_many(&row_offsets)?;
+
+            let vectors_path = tmp_path.join(COLLECTION_EXPORT_VECTORS_FILE);
+            let vectors_file = std::fs::File::create(&vectors_path)?;
+            let mut vectors_writer = std::io::BufWriter::new(vectors_file);
+            if let Some(fm) = guard.as_ref() {
+                let all_data = fm.as_slice();
+                for &row in &row_offsets {
+                    let start = row as usize * dim;
+                    let end = start + dim;
+                    for value in &all_data[start..end] {
+                        vectors_writer.write_all(&value.to_le_bytes())?;
+                    }
+                }
+            }
+            vectors_writer.flush()?;
+
+            let metadata_path = tmp_path.join(COLLECTION_EXPORT_METADATA_FILE);
+            let metadata_file = std::fs::File::create(&metadata_path)?;
+            let mut metadata_writer = std::io::BufWriter::new(metadata_file);
+            for (id, field) in user_ids.iter().zip(fields.iter()) {
+                let record = CollectionExportRecord {
+                    id: *id,
+                    field: field.clone(),
+                };
+                serde_json::to_writer(&mut metadata_writer, &record)
+                    .map_err(|e| LynseError::Serialization(e.to_string()))?;
+                metadata_writer.write_all(b"\n")?;
+            }
+            metadata_writer.flush()?;
+
+            let manifest = CollectionExportManifest::current(self, exported_count);
+            let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?;
+            Self::atomic_write_file(
+                &tmp_path.join(COLLECTION_EXPORT_MANIFEST_FILE),
+                &manifest_bytes,
+            )?;
+
+            drop(tombstone);
+            drop(guard);
+
+            Self::sync_path_recursively(&tmp_path)?;
+            std::fs::rename(&tmp_path, export_path)?;
+            if let Some(parent) = export_path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+            Ok(())
+        })();
+
+        if export_result.is_err() {
+            let _ = std::fs::remove_dir_all(&tmp_path);
+        }
+        export_result
+    }
+
+    fn import_from_export(
+        &mut self,
+        export_path: &Path,
+        manifest: &CollectionExportManifest,
+    ) -> Result<()> {
+        use std::io::{BufRead, Read};
+
+        self.ensure_writable()?;
+        Self::validate_export_manifest(manifest)?;
+        if manifest.dimension != self.meta.dimension {
+            return Err(LynseError::DimensionMismatch {
+                expected: self.meta.dimension,
+                got: manifest.dimension,
+            });
+        }
+        if self.shape()?.0 != 0 {
+            return Err(LynseError::InvalidArgument(
+                "import target collection must be empty".to_string(),
+            ));
+        }
+
+        let vectors_path = export_path.join(&manifest.vectors_file);
+        let metadata_path = export_path.join(&manifest.metadata_file);
+        let vectors_file = std::fs::File::open(&vectors_path)?;
+        let metadata_file = std::fs::File::open(&metadata_path)?;
+        let mut vectors_reader = std::io::BufReader::new(vectors_file);
+        let metadata_reader = std::io::BufReader::new(metadata_file);
+
+        let row_byte_len = manifest.dimension.checked_mul(4).ok_or_else(|| {
+            LynseError::InvalidArgument("export dimension is too large".to_string())
+        })?;
+        let mut row_bytes = vec![0u8; row_byte_len];
+        let mut vectors = Vec::with_capacity(manifest.dimension * 1024);
+        let mut ids = Vec::with_capacity(1024);
+        let mut fields = Vec::with_capacity(1024);
+        let mut row_count = 0usize;
+
+        for line in metadata_reader.lines() {
+            let line = line?;
+            let record: CollectionExportRecord = serde_json::from_str(&line)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?;
+            vectors_reader.read_exact(&mut row_bytes)?;
+            for chunk in row_bytes.chunks_exact(4) {
+                vectors.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            }
+            ids.push(record.id);
+            fields.push(record.field);
+            row_count += 1;
+
+            if ids.len() >= 1024 {
+                self.add_items(&vectors, ids.len(), &ids, Some(&fields))?;
+                vectors.clear();
+                ids.clear();
+                fields.clear();
+            }
+        }
+
+        if !ids.is_empty() {
+            self.add_items(&vectors, ids.len(), &ids, Some(&fields))?;
+        }
+
+        if row_count != manifest.count {
+            return Err(LynseError::Storage(format!(
+                "export metadata row count {} does not match manifest count {}",
+                row_count, manifest.count
+            )));
+        }
+
+        let mut extra = [0u8; 1];
+        if vectors_reader.read(&mut extra)? != 0 {
+            return Err(LynseError::Storage(
+                "export vectors file contains more bytes than metadata rows describe".to_string(),
+            ));
+        }
+
+        self.checkpoint()
+    }
+
+    /// Create a filesystem snapshot of this collection.
+    ///
+    /// Writable handles checkpoint first. Read-only handles can snapshot only
+    /// already-clean collections, which read-only open enforces.
+    pub fn snapshot_to(&self, snapshot_path: &Path) -> Result<()> {
+        if snapshot_path.exists() {
+            return Err(LynseError::InvalidArgument(format!(
+                "snapshot target already exists: {}",
+                snapshot_path.display()
+            )));
+        }
+
+        if self.read_only {
+            if self.has_uncommitted_data() {
+                return Err(LynseError::Storage(
+                    "cannot snapshot read-only collection with uncommitted WAL data".to_string(),
+                ));
+            }
+        } else {
+            self.checkpoint()?;
+        }
+
+        let tmp_path = Self::make_temp_sibling(snapshot_path)?;
+        if tmp_path.exists() {
+            std::fs::remove_dir_all(&tmp_path)?;
+        }
+
+        let copy_result = (|| -> Result<()> {
+            Self::copy_dir_for_snapshot(&self.path, &tmp_path)?;
+            let manifest = CollectionSnapshotManifest::current(self);
+            let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?;
+            Self::atomic_write_file(&tmp_path.join(SNAPSHOT_MANIFEST_FILE), &manifest_bytes)?;
+            Self::sync_path_recursively(&tmp_path)?;
+            std::fs::rename(&tmp_path, snapshot_path)?;
+            if let Some(parent) = snapshot_path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+            Ok(())
+        })();
+
+        if copy_result.is_err() {
+            let _ = std::fs::remove_dir_all(&tmp_path);
+        }
+        copy_result
+    }
 }
 
 /// Search result container, maps to Python's `Result` class.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub ids: Vec<u64>,
     pub distances: Vec<f32>,
@@ -2171,29 +4253,296 @@ pub struct SearchResult {
     pub k: usize,
 }
 
+/// Lightweight query profile used by explain/profile endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryProfile {
+    pub query_kind: String,
+    pub vector_field: String,
+    pub index_path: String,
+    pub total_vectors: u64,
+    pub filter_expression: Option<String>,
+    pub filter_matches: Option<usize>,
+    pub scanned_vectors: usize,
+    pub result_count: usize,
+    pub filter_us: u64,
+    pub search_us: u64,
+    pub rerank_us: u64,
+    pub total_us: u64,
+}
+
+fn elapsed_micros_u64(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u64::MAX as u128) as u64
+}
+
+fn normalize_sparse_entries(entries: &[(u32, f32)]) -> Result<Vec<(u32, f32)>> {
+    let mut merged: BTreeMap<u32, f32> = BTreeMap::new();
+    for &(index, value) in entries {
+        if !value.is_finite() {
+            return Err(LynseError::InvalidArgument(
+                "sparse vector values must be finite".to_string(),
+            ));
+        }
+        if value == 0.0 {
+            continue;
+        }
+        *merged.entry(index).or_insert(0.0) += value;
+    }
+
+    Ok(merged
+        .into_iter()
+        .filter(|(_, value)| *value != 0.0)
+        .collect())
+}
+
+fn sparse_inner_product(query: &[(u32, f32)], vector: &[(u32, f32)]) -> f32 {
+    let mut q = 0usize;
+    let mut v = 0usize;
+    let mut score = 0.0f32;
+
+    while q < query.len() && v < vector.len() {
+        let (q_index, q_value) = query[q];
+        let (v_index, v_value) = vector[v];
+        if q_index == v_index {
+            score += q_value * v_value;
+            q += 1;
+            v += 1;
+        } else if q_index < v_index {
+            q += 1;
+        } else {
+            v += 1;
+        }
+    }
+
+    score
+}
+
+fn tokenize_text(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter_map(|token| {
+            let token = token.trim().to_lowercase();
+            if token.is_empty() {
+                None
+            } else {
+                Some(token)
+            }
+        })
+        .collect()
+}
+
+fn tokenize_text_fields(
+    fields: &HashMap<String, serde_json::Value>,
+) -> HashMap<String, HashMap<String, u32>> {
+    let mut field_terms = HashMap::new();
+    for (field, value) in fields {
+        let mut text = String::new();
+        append_json_text(value, &mut text);
+        let mut counts = HashMap::new();
+        for token in tokenize_text(&text) {
+            *counts.entry(token).or_insert(0) += 1;
+        }
+        if !counts.is_empty() {
+            field_terms.insert(field.clone(), counts);
+        }
+    }
+    field_terms
+}
+
+fn text_doc_allowed(
+    id: u64,
+    allowed_ids: Option<&HashSet<u64>>,
+    tombstones: &HashSet<u64>,
+) -> bool {
+    !tombstones.contains(&id)
+        && allowed_ids
+            .map(|allowed| allowed.contains(&id))
+            .unwrap_or(true)
+}
+
+fn selected_doc_length(
+    lengths_by_field: &HashMap<String, usize>,
+    field_filter: Option<&HashSet<String>>,
+) -> usize {
+    match field_filter {
+        Some(filter) => lengths_by_field
+            .iter()
+            .filter(|(field, _)| filter.contains(*field))
+            .map(|(_, len)| *len)
+            .sum(),
+        None => lengths_by_field.values().copied().sum(),
+    }
+}
+
+fn selected_term_frequency(
+    tf_by_field: &HashMap<String, u32>,
+    field_filter: Option<&HashSet<String>>,
+) -> u32 {
+    match field_filter {
+        Some(filter) => tf_by_field
+            .iter()
+            .filter(|(field, _)| filter.contains(*field))
+            .map(|(_, tf)| *tf)
+            .sum(),
+        None => tf_by_field.values().copied().sum(),
+    }
+}
+
+fn fields_to_searchable_text(
+    fields: &HashMap<String, serde_json::Value>,
+    field_filter: Option<&HashSet<String>>,
+) -> String {
+    let mut text = String::new();
+    for (field, value) in fields {
+        if let Some(filter) = field_filter {
+            if !filter.contains(field) {
+                continue;
+            }
+        }
+        append_json_text(value, &mut text);
+        text.push(' ');
+    }
+    text
+}
+
+fn append_json_text(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Null => {}
+        serde_json::Value::Bool(v) => {
+            out.push_str(if *v { "true" } else { "false" });
+        }
+        serde_json::Value::Number(v) => {
+            out.push_str(&v.to_string());
+        }
+        serde_json::Value::String(v) => {
+            out.push_str(v);
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                append_json_text(value, out);
+                out.push(' ');
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                append_json_text(value, out);
+                out.push(' ');
+            }
+        }
+    }
+}
+
+fn normalize_vector_scores(distances: &[f32], metric: DistanceMetric) -> Vec<f32> {
+    normalize_scores(distances, metric.is_ascending())
+}
+
+fn normalize_scores(scores: &[f32], ascending: bool) -> Vec<f32> {
+    if scores.is_empty() {
+        return Vec::new();
+    }
+
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for score in scores {
+        if score.is_finite() {
+            min = min.min(*score);
+            max = max.max(*score);
+        }
+    }
+
+    if !min.is_finite() || !max.is_finite() || (max - min).abs() <= f32::EPSILON {
+        return vec![1.0; scores.len()];
+    }
+
+    scores
+        .iter()
+        .map(|score| {
+            let normalized = ((*score - min) / (max - min)).clamp(0.0, 1.0);
+            if ascending {
+                1.0 - normalized
+            } else {
+                normalized
+            }
+        })
+        .collect()
+}
+
+fn add_fused_scores(
+    fused: &mut HashMap<u64, f32>,
+    ids: &[u64],
+    scores: &[f32],
+    fusion: &str,
+    weight: f32,
+    rrf_k: f32,
+) {
+    let weight = weight.max(0.0);
+    let use_weighted = fusion.eq_ignore_ascii_case("weighted");
+    for (rank, id) in ids.iter().enumerate() {
+        let contribution = if use_weighted {
+            scores.get(rank).copied().unwrap_or(0.0) * weight
+        } else {
+            weight / (rrf_k.max(1.0) + rank as f32 + 1.0)
+        };
+        *fused.entry(*id).or_insert(0.0) += contribution;
+    }
+}
+
 /// Database manager: manages multiple collections within a single database.
 pub struct DatabaseEngine {
     root_path: PathBuf,
     collections: Arc<RwLock<HashMap<String, Arc<RwLock<Collection>>>>>,
     _lock: FileLock,
+    read_only: bool,
 }
 
 impl DatabaseEngine {
     /// Open or create a database at the given root path.
     pub fn open(root_path: &Path) -> Result<Self> {
-        std::fs::create_dir_all(root_path)?;
-        let lock = FileLock::exclusive(&root_path.join(".database.lock"))?;
+        Self::open_with_mode(root_path, OpenMode::ReadWrite)
+    }
+
+    /// Open an existing database in read-only mode.
+    pub fn open_read_only(root_path: &Path) -> Result<Self> {
+        Self::open_with_mode(root_path, OpenMode::ReadOnly)
+    }
+
+    fn open_with_mode(root_path: &Path, mode: OpenMode) -> Result<Self> {
+        if mode == OpenMode::ReadWrite {
+            std::fs::create_dir_all(root_path)?;
+        } else if !root_path.exists() {
+            return Err(LynseError::DatabaseNotFound(
+                root_path.to_string_lossy().to_string(),
+            ));
+        }
+        let lock_path = root_path.join(".database.lock");
+        let lock = if mode == OpenMode::ReadWrite {
+            FileLock::exclusive(&lock_path)?
+        } else {
+            FileLock::shared(&lock_path)?
+        };
 
         let engine = Self {
             root_path: root_path.to_path_buf(),
             collections: Arc::new(RwLock::new(HashMap::new())),
             _lock: lock,
+            read_only: mode == OpenMode::ReadOnly,
         };
 
         // Scan for existing collections
         engine.scan_collections()?;
 
         Ok(engine)
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        if self.read_only {
+            return Err(LynseError::InvalidArgument(
+                "database is opened read-only".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Scan root path for existing collections.
@@ -2211,8 +4560,22 @@ impl DatabaseEngine {
                                     info["total_shape"].get(0).and_then(|v| v.as_u64()),
                                     info["total_shape"].get(1).and_then(|v| v.as_u64()),
                                 ) {
-                                    let _ =
-                                        self.get_or_open_collection(&name, dim as usize, 100_000);
+                                    let _ = self.get_or_open_collection(&name, dim as usize, 0);
+                                }
+                            }
+                        }
+                    } else {
+                        let manifest_path = entry.path().join(STORAGE_MANIFEST_FILE);
+                        if manifest_path.exists() {
+                            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                                if let Ok(manifest) =
+                                    serde_json::from_str::<StorageManifest>(&content)
+                                {
+                                    let _ = self.get_or_open_collection(
+                                        &name,
+                                        manifest.dimension,
+                                        manifest.chunk_size,
+                                    );
                                 }
                             }
                         }
@@ -2236,7 +4599,11 @@ impl DatabaseEngine {
             return Ok(Arc::clone(coll));
         }
 
-        let collection = Collection::open(&self.root_path, name, dimension, chunk_size)?;
+        let collection = if self.read_only {
+            Collection::open_read_only(&self.root_path, name, dimension, chunk_size)?
+        } else {
+            Collection::open(&self.root_path, name, dimension, chunk_size)?
+        };
         let arc = Arc::new(RwLock::new(collection));
         collections.insert(name.to_string(), Arc::clone(&arc));
         Ok(arc)
@@ -2249,6 +4616,7 @@ impl DatabaseEngine {
         dimension: usize,
         chunk_size: usize,
     ) -> Result<Arc<RwLock<Collection>>> {
+        self.ensure_writable()?;
         let coll_path = self.root_path.join(name);
         if coll_path.exists() {
             return Err(LynseError::CollectionAlreadyExists(name.to_string()));
@@ -2258,6 +4626,7 @@ impl DatabaseEngine {
 
     /// Drop a collection.
     pub fn drop_collection(&self, name: &str) -> Result<()> {
+        self.ensure_writable()?;
         let mut collections = self.collections.write();
 
         if let Some(coll) = collections.remove(name) {
@@ -2275,6 +4644,289 @@ impl DatabaseEngine {
     /// List all collection names.
     pub fn list_collections(&self) -> Vec<String> {
         self.collections.read().keys().cloned().collect()
+    }
+
+    /// Number of currently open collection handles in this database engine.
+    pub fn open_collection_count(&self) -> usize {
+        self.collections.read().len()
+    }
+
+    /// Checkpoint all collections currently open in this engine.
+    pub fn checkpoint_open_collections(&self) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
+
+        let collections: Vec<Arc<RwLock<Collection>>> =
+            self.collections.read().values().cloned().collect();
+        for coll in collections {
+            coll.read().checkpoint()?;
+        }
+        Ok(())
+    }
+
+    fn external_collection_handle(&self) -> Option<String> {
+        let collections = self.collections.read();
+        collections.iter().find_map(|(name, coll)| {
+            if Arc::strong_count(coll) > 1 {
+                Some(name.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn close_open_collections(&self) -> Result<()> {
+        let collections: Vec<Arc<RwLock<Collection>>> =
+            self.collections.read().values().cloned().collect();
+        for coll in collections {
+            coll.write().close()?;
+        }
+        Ok(())
+    }
+
+    /// Create a consistent filesystem snapshot of this database directory.
+    ///
+    /// All collection read locks are held from checkpoint through directory
+    /// copy. Searches can continue because they share read locks, while writes
+    /// wait until the snapshot has been atomically moved into place.
+    pub fn snapshot_to(&self, database_name: &str, snapshot_path: &Path) -> Result<()> {
+        if snapshot_path.exists() {
+            return Err(LynseError::InvalidArgument(format!(
+                "snapshot target already exists: {}",
+                snapshot_path.display()
+            )));
+        }
+
+        let tmp_path = Collection::make_temp_sibling(snapshot_path)?;
+        if tmp_path.exists() {
+            std::fs::remove_dir_all(&tmp_path)?;
+        }
+
+        let collections = self.collections.read();
+        let collection_guards: Vec<_> = collections.values().map(|coll| coll.read()).collect();
+        if !self.read_only {
+            for coll in &collection_guards {
+                coll.checkpoint()?;
+            }
+        }
+        let collection_names: Vec<String> = collections.keys().cloned().collect();
+
+        let copy_result = (|| -> Result<()> {
+            Collection::copy_dir_for_snapshot(&self.root_path, &tmp_path)?;
+            let manifest = DatabaseSnapshotManifest::current(database_name, collection_names);
+            let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?;
+            Collection::atomic_write_file(
+                &tmp_path.join(DATABASE_SNAPSHOT_MANIFEST_FILE),
+                &manifest_bytes,
+            )?;
+            Collection::sync_path_recursively(&tmp_path)?;
+            std::fs::rename(&tmp_path, snapshot_path)?;
+            if let Some(parent) = snapshot_path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+            Ok(())
+        })();
+
+        drop(collection_guards);
+        drop(collections);
+
+        if copy_result.is_err() {
+            let _ = std::fs::remove_dir_all(&tmp_path);
+        }
+        copy_result
+    }
+
+    /// Create a snapshot for a collection in this database.
+    pub fn snapshot_collection(&self, name: &str, snapshot_path: &Path) -> Result<()> {
+        let coll = self.get_or_open_collection(name, 0, 0)?;
+        let result = coll.read().snapshot_to(snapshot_path);
+        result
+    }
+
+    /// Export a collection to portable JSONL metadata plus binary vectors.
+    pub fn export_collection(&self, name: &str, export_path: &Path) -> Result<()> {
+        let coll = self.get_or_open_collection(name, 0, 0)?;
+        let result = coll.read().export_to(export_path);
+        result
+    }
+
+    /// Restore a collection from a snapshot directory.
+    pub fn restore_collection_from_snapshot(
+        &self,
+        name: &str,
+        snapshot_path: &Path,
+        overwrite: bool,
+    ) -> Result<CollectionConfig> {
+        self.ensure_writable()?;
+        if !snapshot_path.exists() {
+            return Err(LynseError::InvalidArgument(format!(
+                "snapshot path does not exist: {}",
+                snapshot_path.display()
+            )));
+        }
+
+        let storage_manifest = Collection::read_storage_manifest_from_dir(snapshot_path)?;
+        let snapshot_manifest = Collection::read_snapshot_manifest(snapshot_path).ok();
+        if let Some(snapshot_manifest) = snapshot_manifest.as_ref() {
+            if snapshot_manifest.storage_format != STORAGE_FORMAT_NAME {
+                return Err(LynseError::Storage(format!(
+                    "unsupported snapshot storage format '{}'",
+                    snapshot_manifest.storage_format
+                )));
+            }
+            if snapshot_manifest.storage_version > STORAGE_FORMAT_VERSION {
+                return Err(LynseError::Storage(format!(
+                    "snapshot uses storage format version {}, but this binary supports up to {}",
+                    snapshot_manifest.storage_version, STORAGE_FORMAT_VERSION
+                )));
+            }
+        }
+
+        let target_path = self.root_path.join(name);
+        if target_path.exists() && !overwrite {
+            return Err(LynseError::CollectionAlreadyExists(name.to_string()));
+        }
+
+        let existing = {
+            let mut collections = self.collections.write();
+            collections.remove(name)
+        };
+
+        if let Some(coll) = existing {
+            if Arc::strong_count(&coll) > 1 {
+                let mut collections = self.collections.write();
+                collections.insert(name.to_string(), coll);
+                return Err(LynseError::Storage(format!(
+                    "collection '{}' is still referenced; close active handles before restore",
+                    name
+                )));
+            }
+            coll.write().close()?;
+        }
+
+        if target_path.exists() {
+            std::fs::remove_dir_all(&target_path)?;
+        }
+
+        let tmp_path = Collection::make_temp_sibling(&target_path)?;
+        if tmp_path.exists() {
+            std::fs::remove_dir_all(&tmp_path)?;
+        }
+
+        let restore_result = (|| -> Result<()> {
+            Collection::copy_dir_for_snapshot(snapshot_path, &tmp_path)?;
+
+            if storage_manifest.collection_name != name {
+                let mut remapped = storage_manifest.clone();
+                remapped.collection_name = name.to_string();
+                let manifest_bytes = serde_json::to_vec_pretty(&remapped)
+                    .map_err(|e| LynseError::Serialization(e.to_string()))?;
+                Collection::atomic_write_file(
+                    &tmp_path.join(STORAGE_MANIFEST_FILE),
+                    &manifest_bytes,
+                )?;
+            }
+
+            Collection::sync_path_recursively(&tmp_path)?;
+            std::fs::rename(&tmp_path, &target_path)?;
+            if let Ok(dir) = std::fs::File::open(&self.root_path) {
+                let _ = dir.sync_all();
+            }
+            Ok(())
+        })();
+
+        if let Err(err) = restore_result {
+            let _ = std::fs::remove_dir_all(&tmp_path);
+            return Err(err);
+        }
+
+        let restored = Collection::open(
+            &self.root_path,
+            name,
+            storage_manifest.dimension,
+            storage_manifest.chunk_size,
+        )?;
+        self.collections
+            .write()
+            .insert(name.to_string(), Arc::new(RwLock::new(restored)));
+
+        Ok(CollectionConfig {
+            dim: storage_manifest.dimension,
+            chunk_size: storage_manifest.chunk_size,
+            description: None,
+        })
+    }
+
+    /// Import a collection from portable JSONL metadata plus binary vectors.
+    pub fn import_collection_from_export(
+        &self,
+        name: &str,
+        export_path: &Path,
+        overwrite: bool,
+    ) -> Result<CollectionConfig> {
+        self.ensure_writable()?;
+        if !export_path.exists() {
+            return Err(LynseError::InvalidArgument(format!(
+                "export path does not exist: {}",
+                export_path.display()
+            )));
+        }
+
+        let export_manifest = Collection::read_export_manifest(export_path)?;
+        Collection::validate_export_manifest(&export_manifest)?;
+
+        let target_path = self.root_path.join(name);
+        if target_path.exists() && !overwrite {
+            return Err(LynseError::CollectionAlreadyExists(name.to_string()));
+        }
+
+        let existing = {
+            let mut collections = self.collections.write();
+            collections.remove(name)
+        };
+
+        if let Some(coll) = existing {
+            if Arc::strong_count(&coll) > 1 {
+                let mut collections = self.collections.write();
+                collections.insert(name.to_string(), coll);
+                return Err(LynseError::Storage(format!(
+                    "collection '{}' is still referenced; close active handles before import",
+                    name
+                )));
+            }
+            coll.write().close()?;
+        }
+
+        if target_path.exists() {
+            std::fs::remove_dir_all(&target_path)?;
+        }
+
+        let mut collection = Collection::open(
+            &self.root_path,
+            name,
+            export_manifest.dimension,
+            export_manifest.chunk_size,
+        )?;
+        let import_result = collection.import_from_export(export_path, &export_manifest);
+        if let Err(err) = import_result {
+            drop(collection);
+            let _ = std::fs::remove_dir_all(&target_path);
+            return Err(err);
+        }
+
+        self.collections
+            .write()
+            .insert(name.to_string(), Arc::new(RwLock::new(collection)));
+
+        Ok(CollectionConfig {
+            dim: export_manifest.dimension,
+            chunk_size: export_manifest.chunk_size,
+            description: None,
+        })
     }
 
     /// Check if a collection exists.
@@ -2351,6 +5003,373 @@ mod tests {
     }
 
     #[test]
+    fn database_engine_read_only_rejects_writes() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let engine = DatabaseEngine::open(tmp.path()).unwrap();
+            engine.create_collection("col", 4, 100).unwrap();
+        }
+
+        let ro = DatabaseEngine::open_read_only(tmp.path()).unwrap();
+        let ro2 = DatabaseEngine::open_read_only(tmp.path()).unwrap();
+        assert!(ro.is_read_only());
+        assert!(ro2.is_read_only());
+        assert!(ro.has_collection("col"));
+
+        let err = match ro.create_collection("other", 4, 100) {
+            Ok(_) => panic!("read-only database engine should reject create_collection"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("read-only"));
+    }
+
+    #[test]
+    fn database_manager_read_only_rejects_writes() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let manager = DatabaseManager::new(tmp.path()).unwrap();
+            manager.create_database("db").unwrap();
+            manager
+                .require_collection("db", "col", 4, 100, false, None)
+                .unwrap();
+        }
+
+        let ro = DatabaseManager::new_read_only(tmp.path()).unwrap();
+        let ro2 = DatabaseManager::new_read_only(tmp.path()).unwrap();
+        assert!(ro.is_read_only());
+        assert!(ro2.is_read_only());
+        assert!(ro.database_exists("db"));
+        assert_eq!(ro.show_collections("db").unwrap(), vec!["col".to_string()]);
+
+        let err = ro.create_database("other").unwrap_err();
+        assert!(err.to_string().contains("read-only"));
+    }
+
+    #[test]
+    fn manager_checkpoint_open_collections_clears_wal() {
+        let tmp = TempDir::new().unwrap();
+        let manager = DatabaseManager::new(tmp.path()).unwrap();
+        manager.create_database("db").unwrap();
+        manager
+            .require_collection("db", "col", 4, 100, false, None)
+            .unwrap();
+
+        manager
+            .with_database("db", |engine| {
+                let coll = engine.get_or_open_collection("col", 4, 100)?;
+                let mut coll = coll.write();
+                coll.add_items(&[1.0, 0.0, 0.0, 0.0], 1, &[7], None)?;
+                assert!(coll.has_uncommitted_data());
+                Ok(())
+            })
+            .unwrap();
+
+        manager.checkpoint_open_collections().unwrap();
+
+        manager
+            .with_database("db", |engine| {
+                let coll = engine.get_or_open_collection("col", 4, 100)?;
+                assert!(!coll.read().has_uncommitted_data());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn collection_snapshot_restore_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_path = tmp.path().join("snapshots").join("col_snapshot");
+        let db_path = tmp.path().join("db");
+
+        let engine = DatabaseEngine::open(&db_path).unwrap();
+        {
+            let coll = engine.create_collection("col", 4, 100).unwrap();
+            let fields = vec![HashMap::from([(
+                "tag".to_string(),
+                serde_json::json!("snapshot"),
+            )])];
+            coll.write()
+                .add_items(&[1.0, 0.0, 0.0, 0.0], 1, &[42], Some(&fields))
+                .unwrap();
+        }
+
+        engine.snapshot_collection("col", &snapshot_path).unwrap();
+        engine.drop_collection("col").unwrap();
+        engine
+            .restore_collection_from_snapshot("col", &snapshot_path, false)
+            .unwrap();
+
+        let coll = engine.get_or_open_collection("col", 4, 100).unwrap();
+        let (vectors, fields) = coll.read().read_vectors_by_ids(&[42]).unwrap();
+        assert_eq!(vectors, vec![1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(fields[0].get("tag"), Some(&serde_json::json!("snapshot")));
+        assert!(!snapshot_path.join(".writer.lock").exists());
+        assert!(snapshot_path.join(SNAPSHOT_MANIFEST_FILE).exists());
+    }
+
+    #[test]
+    fn manager_restore_collection_updates_config() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_path = tmp.path().join("snapshots").join("col_snapshot");
+        let manager = DatabaseManager::new(tmp.path()).unwrap();
+        manager.create_database("db").unwrap();
+        manager
+            .require_collection("db", "col", 4, 100, false, Some("old"))
+            .unwrap();
+        manager
+            .with_database("db", |engine| {
+                let coll = engine.get_or_open_collection("col", 4, 100)?;
+                coll.write()
+                    .add_items(&[1.0, 0.0, 0.0, 0.0], 1, &[7], None)?;
+                Ok(())
+            })
+            .unwrap();
+        manager
+            .snapshot_collection("db", "col", &snapshot_path)
+            .unwrap();
+        manager.drop_collection("db", "col").unwrap();
+
+        manager
+            .restore_collection_from_snapshot("db", "restored", &snapshot_path, false)
+            .unwrap();
+
+        let configs = manager.get_collection_configs("db").unwrap();
+        let config = configs.get("restored").unwrap();
+        assert_eq!(config.dim, 4);
+        assert_eq!(config.chunk_size, 100);
+        assert!(manager.collection_exists("db", "restored").unwrap());
+    }
+
+    #[test]
+    fn manager_export_import_collection_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let export_path = tmp.path().join("exports").join("col_export");
+        let manager = DatabaseManager::new(tmp.path()).unwrap();
+        manager.create_database("db").unwrap();
+        manager
+            .require_collection("db", "col", 4, 100, false, Some("source"))
+            .unwrap();
+        manager
+            .with_database("db", |engine| {
+                let coll = engine.get_or_open_collection("col", 4, 100)?;
+                let fields = vec![
+                    HashMap::from([("tag".to_string(), serde_json::json!("keep"))]),
+                    HashMap::from([("tag".to_string(), serde_json::json!("drop"))]),
+                ];
+                let mut coll = coll.write();
+                coll.add_items(
+                    &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                    2,
+                    &[10, 20],
+                    Some(&fields),
+                )?;
+                coll.delete_items(&[20])?;
+                Ok(())
+            })
+            .unwrap();
+
+        manager
+            .export_collection("db", "col", &export_path)
+            .unwrap();
+        assert!(export_path.join(COLLECTION_EXPORT_MANIFEST_FILE).exists());
+        assert!(export_path.join(COLLECTION_EXPORT_VECTORS_FILE).exists());
+        assert!(export_path.join(COLLECTION_EXPORT_METADATA_FILE).exists());
+
+        let manifest = Collection::read_export_manifest(&export_path).unwrap();
+        assert_eq!(manifest.dimension, 4);
+        assert_eq!(manifest.count, 1);
+        assert_eq!(
+            std::fs::metadata(export_path.join(COLLECTION_EXPORT_VECTORS_FILE))
+                .unwrap()
+                .len(),
+            16
+        );
+
+        manager
+            .import_collection_from_export("db", "imported", &export_path, false)
+            .unwrap();
+        assert!(manager.collection_exists("db", "imported").unwrap());
+
+        let configs = manager.get_collection_configs("db").unwrap();
+        assert_eq!(configs.get("imported").unwrap().dim, 4);
+
+        manager
+            .with_database("db", |engine| {
+                let coll = engine.get_or_open_collection("imported", 4, 100)?;
+                let coll = coll.read();
+                assert_eq!(coll.shape()?, (1, 4));
+                assert!(coll.is_id_exists(10));
+                assert!(!coll.is_id_exists(20));
+
+                let (vectors, fields) = coll.read_vectors_by_ids(&[10])?;
+                assert_eq!(vectors, vec![1.0, 0.0, 0.0, 0.0]);
+                assert_eq!(fields[0].get("tag"), Some(&serde_json::json!("keep")));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn manager_snapshot_restore_database_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_path = tmp.path().join("snapshots").join("db_snapshot");
+        let manager = DatabaseManager::new(tmp.path()).unwrap();
+        manager.create_database("db").unwrap();
+        manager
+            .require_collection("db", "col", 4, 100, false, Some("primary"))
+            .unwrap();
+        manager
+            .require_collection("db", "other", 4, 100, false, Some("secondary"))
+            .unwrap();
+
+        manager
+            .with_database("db", |engine| {
+                let fields = vec![HashMap::from([(
+                    "scope".to_string(),
+                    serde_json::json!("database"),
+                )])];
+                let col = engine.get_or_open_collection("col", 4, 100)?;
+                col.write()
+                    .add_items(&[1.0, 0.0, 0.0, 0.0], 1, &[11], Some(&fields))?;
+
+                let other = engine.get_or_open_collection("other", 4, 100)?;
+                other
+                    .write()
+                    .add_items(&[0.0, 1.0, 0.0, 0.0], 1, &[22], None)?;
+                Ok(())
+            })
+            .unwrap();
+
+        manager.snapshot_database("db", &snapshot_path).unwrap();
+        assert!(snapshot_path.join(DATABASE_SNAPSHOT_MANIFEST_FILE).exists());
+        assert!(snapshot_path.join("collections.json").exists());
+        assert!(!snapshot_path.join(".database.lock").exists());
+        assert!(!snapshot_path.join("col").join(".writer.lock").exists());
+
+        manager.drop_database("db").unwrap();
+        assert!(!manager.database_exists("db"));
+
+        manager
+            .restore_database_from_snapshot("db", &snapshot_path, false)
+            .unwrap();
+        assert!(manager.database_exists("db"));
+        assert!(manager.list_databases().contains(&"db".to_string()));
+        assert!(manager.collection_exists("db", "col").unwrap());
+        assert!(manager.collection_exists("db", "other").unwrap());
+
+        let configs = manager.get_collection_configs("db").unwrap();
+        assert_eq!(
+            configs
+                .get("col")
+                .and_then(|cfg| cfg.description.as_deref()),
+            Some("primary")
+        );
+
+        manager
+            .with_database("db", |engine| {
+                let col = engine.get_or_open_collection("col", 4, 100)?;
+                let (vectors, fields) = col.read().read_vectors_by_ids(&[11])?;
+                assert_eq!(vectors, vec![1.0, 0.0, 0.0, 0.0]);
+                assert_eq!(fields[0].get("scope"), Some(&serde_json::json!("database")));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn manager_restore_database_under_new_name_registers_database() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_path = tmp.path().join("snapshots").join("db_snapshot");
+        let manager = DatabaseManager::new(tmp.path()).unwrap();
+        manager.create_database("db").unwrap();
+        manager
+            .require_collection("db", "col", 4, 100, false, None)
+            .unwrap();
+
+        let original_fingerprint =
+            std::fs::read_to_string(tmp.path().join("db/.fingerprint")).unwrap();
+        manager.snapshot_database("db", &snapshot_path).unwrap();
+        manager
+            .restore_database_from_snapshot("clone", &snapshot_path, false)
+            .unwrap();
+
+        assert!(manager.database_exists("db"));
+        assert!(manager.database_exists("clone"));
+        assert!(manager.collection_exists("clone", "col").unwrap());
+        assert!(manager.list_databases().contains(&"clone".to_string()));
+
+        let clone_fingerprint =
+            std::fs::read_to_string(tmp.path().join("clone/.fingerprint")).unwrap();
+        assert_ne!(original_fingerprint, clone_fingerprint);
+    }
+
+    #[test]
+    fn database_snapshot_allows_readers_and_blocks_writers() {
+        struct ResetSnapshotDelay;
+        impl Drop for ResetSnapshotDelay {
+            fn drop(&mut self) {
+                SNAPSHOT_COPY_DELAY_MS.store(0, Ordering::Relaxed);
+            }
+        }
+
+        SNAPSHOT_COPY_DELAY_MS.store(100, Ordering::Relaxed);
+        let _reset = ResetSnapshotDelay;
+
+        let tmp = TempDir::new().unwrap();
+        let snapshot_path = tmp.path().join("snapshots").join("db_snapshot");
+        let manager = Arc::new(DatabaseManager::new(tmp.path()).unwrap());
+        manager.create_database("db").unwrap();
+        manager
+            .require_collection("db", "col", 4, 100, false, None)
+            .unwrap();
+        let coll_arc = manager
+            .with_database("db", |engine| {
+                let coll = engine.get_or_open_collection("col", 4, 100)?;
+                coll.write()
+                    .add_items(&[1.0, 0.0, 0.0, 0.0], 1, &[1], None)?;
+                Ok(coll)
+            })
+            .unwrap();
+
+        let snapshot_for_thread = snapshot_path.clone();
+        let manager_for_thread = Arc::clone(&manager);
+        let handle = std::thread::spawn(move || {
+            manager_for_thread
+                .snapshot_database("db", &snapshot_for_thread)
+                .unwrap();
+        });
+
+        let parent = snapshot_path.parent().unwrap();
+        let prefix = format!(
+            ".{}.tmp-",
+            snapshot_path.file_name().unwrap().to_string_lossy()
+        );
+        let mut saw_temp_snapshot = false;
+        for _ in 0..1000 {
+            if parent.exists()
+                && std::fs::read_dir(parent)
+                    .unwrap()
+                    .flatten()
+                    .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            {
+                saw_temp_snapshot = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(saw_temp_snapshot);
+
+        let result = coll_arc
+            .read()
+            .search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10)
+            .unwrap();
+        assert_eq!(result.ids, vec![1]);
+        assert!(coll_arc.try_write().is_none());
+
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn checkpoint_clears_wal_and_reopen_preserves_rows() {
         let tmp = TempDir::new().unwrap();
         {
@@ -2366,6 +5385,51 @@ mod tests {
         assert_eq!(coll.shape().unwrap(), (1, 4));
         assert!(coll.is_id_exists(7));
         assert!(!coll.has_uncommitted_data());
+    }
+
+    #[test]
+    fn collection_read_only_open_allows_reads_and_rejects_writes() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+            coll.add_items(&[1.0, 0.0, 0.0, 0.0], 1, &[7], None)
+                .unwrap();
+            coll.commit().unwrap();
+        }
+
+        let mut ro = Collection::open_read_only(tmp.path(), "col", 4, 100).unwrap();
+        let ro2 = Collection::open_read_only(tmp.path(), "col", 4, 100).unwrap();
+        assert!(ro.is_read_only());
+        assert!(ro2.is_read_only());
+
+        let result = ro.search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10).unwrap();
+        assert_eq!(result.ids, vec![7]);
+
+        let err = ro
+            .add_items(&[0.0, 1.0, 0.0, 0.0], 1, &[8], None)
+            .unwrap_err();
+        assert!(err.to_string().contains("read-only"));
+
+        drop(ro2);
+        ro.close().unwrap();
+        Collection::open(tmp.path(), "col", 4, 100).unwrap();
+    }
+
+    #[test]
+    fn collection_read_only_open_rejects_uncommitted_wal() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+            coll.add_items(&[1.0, 0.0, 0.0, 0.0], 1, &[7], None)
+                .unwrap();
+            assert!(coll.has_uncommitted_data());
+        }
+
+        let err = match Collection::open_read_only(tmp.path(), "col", 4, 100) {
+            Ok(_) => panic!("read-only open should reject collections needing recovery"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("uncommitted WAL"));
     }
 
     #[test]
@@ -2550,6 +5614,278 @@ mod tests {
     }
 
     #[test]
+    fn query_profile_reports_filter_and_search_path() {
+        let tmp = TempDir::new().unwrap();
+        let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        let fields = vec![
+            HashMap::from([("category".to_string(), serde_json::json!("doc"))]),
+            HashMap::from([("category".to_string(), serde_json::json!("code"))]),
+        ];
+        coll.add_items(
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            2,
+            &[10, 20],
+            Some(&fields),
+        )
+        .unwrap();
+
+        let (result, profile) = coll
+            .search_with_profile(&[1.0, 0.0, 0.0, 0.0], 1, Some("\"category\" = 'doc'"), 10)
+            .unwrap();
+        assert_eq!(result.ids, vec![10]);
+        assert_eq!(profile.query_kind, "vector");
+        assert_eq!(profile.filter_matches, Some(1));
+        assert_eq!(profile.result_count, 1);
+        assert!(profile.index_path.contains("flat"));
+    }
+
+    #[test]
+    fn text_and_hybrid_search_rank_metadata_matches() {
+        let tmp = TempDir::new().unwrap();
+        let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        let fields = vec![
+            HashMap::from([(
+                "body".to_string(),
+                serde_json::json!("rust vector database"),
+            )]),
+            HashMap::from([(
+                "body".to_string(),
+                serde_json::json!("python web framework"),
+            )]),
+            HashMap::from([(
+                "body".to_string(),
+                serde_json::json!("hybrid vector search"),
+            )]),
+        ];
+        coll.add_items(
+            &[
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0,
+            ],
+            3,
+            &[10, 20, 30],
+            Some(&fields),
+        )
+        .unwrap();
+
+        let text_fields = vec!["body".to_string()];
+        let text_result = coll
+            .text_search("vector database", Some(&text_fields), 2, None)
+            .unwrap();
+        assert!(text_result.ids.contains(&10));
+        assert!(text_result.distances[0] > 0.0);
+        assert_eq!(text_result.index_mode, "BM25-INVERTED");
+
+        let hybrid = coll
+            .hybrid_search(
+                Some(&[0.0, 1.0, 0.0, 0.0]),
+                Some("vector"),
+                3,
+                None,
+                Some(&text_fields),
+                "rrf",
+                1.0,
+                1.0,
+                60.0,
+                6,
+                10,
+            )
+            .unwrap();
+        assert_eq!(hybrid.ids.len(), 3);
+        assert!(hybrid.ids.contains(&20));
+        assert!(hybrid.ids.iter().any(|id| *id == 10 || *id == 30));
+    }
+
+    #[test]
+    fn text_index_survives_reopen_and_tracks_field_updates() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+            let fields = vec![
+                HashMap::from([("body".to_string(), serde_json::json!("alpha source"))]),
+                HashMap::from([("body".to_string(), serde_json::json!("beta target"))]),
+            ];
+            coll.add_items(
+                &[
+                    1.0, 0.0, 0.0, 0.0, //
+                    0.0, 1.0, 0.0, 0.0,
+                ],
+                2,
+                &[10, 20],
+                Some(&fields),
+            )
+            .unwrap();
+            coll.checkpoint().unwrap();
+        }
+
+        let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        let text_fields = vec!["body".to_string()];
+        let result = coll
+            .text_search("target", Some(&text_fields), 5, None)
+            .unwrap();
+        assert_eq!(result.index_mode, "BM25-INVERTED");
+        assert_eq!(result.ids, vec![20]);
+
+        let updated_fields = vec![HashMap::from([(
+            "body".to_string(),
+            serde_json::json!("alpha target"),
+        )])];
+        coll.update_items(&[10], &[0.5, 0.0, 0.0, 0.0], 1, Some(&updated_fields))
+            .unwrap();
+
+        let updated = coll
+            .text_search("target", Some(&text_fields), 5, None)
+            .unwrap();
+        assert!(updated.ids.contains(&10));
+        assert!(updated.ids.contains(&20));
+
+        coll.delete_items(&[20]).unwrap();
+        let filtered = coll
+            .text_search("target", Some(&text_fields), 5, None)
+            .unwrap();
+        assert_eq!(filtered.ids, vec![10]);
+    }
+
+    #[test]
+    fn metadata_indexes_cover_range_bool_array_datetime_and_reopen() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+            let fields: Vec<HashMap<String, serde_json::Value>> = (0..5)
+                .map(|i| {
+                    HashMap::from([
+                        ("order".to_string(), serde_json::json!(i)),
+                        ("active".to_string(), serde_json::json!(i % 2 == 0)),
+                        (
+                            "tags".to_string(),
+                            serde_json::json!(if i % 2 == 0 {
+                                vec!["rust", "vector"]
+                            } else {
+                                vec!["python"]
+                            }),
+                        ),
+                        (
+                            "created_at".to_string(),
+                            serde_json::json!(format!("2026-04-{:02}", i + 1)),
+                        ),
+                    ])
+                })
+                .collect();
+            let vectors: Vec<f32> = (0..5).flat_map(|i| [i as f32, 0.0, 0.0, 0.0]).collect();
+            coll.add_items(&vectors, 5, &[10, 11, 12, 13, 14], Some(&fields))
+                .unwrap();
+            coll.checkpoint().unwrap();
+        }
+
+        let coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        assert_eq!(
+            coll.query_fields("\"order\" >= 2 AND \"order\" < 4")
+                .unwrap(),
+            vec![12, 13]
+        );
+        assert_eq!(
+            coll.query_fields("\"active\" = true").unwrap(),
+            vec![10, 12, 14]
+        );
+        assert_eq!(
+            coll.query_fields("\"tags\" CONTAINS 'rust'").unwrap(),
+            vec![10, 12, 14]
+        );
+        assert_eq!(
+            coll.query_fields("\"created_at\" >= '2026-04-03' AND \"created_at\" <= '2026-04-04'")
+                .unwrap(),
+            vec![12, 13]
+        );
+    }
+
+    #[test]
+    fn named_vector_field_survives_reopen_and_searches_independently() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+            coll.add_items(
+                &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                2,
+                &[10, 20],
+                None,
+            )
+            .unwrap();
+            coll.create_vector_field("image", 3, Some("l2"), None)
+                .unwrap();
+            coll.add_named_vectors("image", &[0.0, 0.0, 0.0, 5.0, 0.0, 0.0], 2, &[10, 20])
+                .unwrap();
+            coll.build_vector_field_index("image", "HNSW-L2").unwrap();
+            coll.checkpoint().unwrap();
+        }
+
+        let coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        let vector_fields = coll.list_vector_fields();
+        assert!(vector_fields.iter().any(|field| field.name == "image"
+            && field.dimension == 3
+            && field.metric == "l2"
+            && field.index_mode == "HNSW-L2"));
+
+        let result = coll
+            .search_vector_field("image", &[4.9, 0.0, 0.0], 1, None)
+            .unwrap();
+        assert_eq!(result.ids, vec![20]);
+
+        let default_result = coll.search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10).unwrap();
+        assert_eq!(default_result.ids, vec![10]);
+    }
+
+    #[test]
+    fn sparse_vectors_survive_reopen_filter_and_compact() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+            let fields = vec![
+                HashMap::from([("group".to_string(), serde_json::json!("a"))]),
+                HashMap::from([("group".to_string(), serde_json::json!("b"))]),
+                HashMap::from([("group".to_string(), serde_json::json!("a"))]),
+            ];
+            coll.add_items(
+                &[
+                    1.0, 0.0, 0.0, 0.0, //
+                    0.0, 1.0, 0.0, 0.0, //
+                    0.0, 0.0, 1.0, 0.0,
+                ],
+                3,
+                &[10, 20, 30],
+                Some(&fields),
+            )
+            .unwrap();
+            coll.add_sparse_vectors(
+                &[10, 20, 30],
+                &[
+                    vec![(1, 1.0), (5, 0.5)],
+                    vec![(2, 2.0), (5, 1.0)],
+                    vec![(2, 0.5), (7, 1.0)],
+                ],
+            )
+            .unwrap();
+            coll.checkpoint().unwrap();
+        }
+
+        let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        let result = coll.search_sparse(&[(2, 1.0)], 2, None).unwrap();
+        assert_eq!(result.ids, vec![20, 30]);
+        assert_eq!(result.index_mode, "SPARSE-FLAT-IP");
+
+        let filtered = coll
+            .search_sparse(&[(5, 1.0)], 5, Some("\"group\" = 'b'"))
+            .unwrap();
+        assert_eq!(filtered.ids, vec![20]);
+
+        coll.delete_items(&[20]).unwrap();
+        coll.compact().unwrap();
+
+        let after_compact = coll.search_sparse(&[(2, 1.0)], 5, None).unwrap();
+        assert_eq!(after_compact.ids, vec![30]);
+    }
+
+    #[test]
     fn storage_manifest_is_created_and_validated_on_open() {
         let tmp = TempDir::new().unwrap();
         Collection::open(tmp.path(), "col", 4, 100).unwrap();
@@ -2654,21 +5990,56 @@ pub struct DatabaseManager {
     root_path: PathBuf,
     databases: RwLock<HashMap<String, DatabaseEngine>>,
     _lock: FileLock,
+    read_only: bool,
 }
 
 impl DatabaseManager {
     /// Open the database manager at the given root path.
     pub fn new(root_path: &Path) -> Result<Self> {
-        std::fs::create_dir_all(root_path)?;
-        let lock = FileLock::exclusive(&root_path.join(".manager.lock"))?;
+        Self::open_with_mode(root_path, OpenMode::ReadWrite)
+    }
+
+    /// Open the database manager in read-only mode.
+    pub fn new_read_only(root_path: &Path) -> Result<Self> {
+        Self::open_with_mode(root_path, OpenMode::ReadOnly)
+    }
+
+    fn open_with_mode(root_path: &Path, mode: OpenMode) -> Result<Self> {
+        if mode == OpenMode::ReadWrite {
+            std::fs::create_dir_all(root_path)?;
+        } else if !root_path.exists() {
+            return Err(LynseError::DatabaseNotFound(
+                root_path.to_string_lossy().to_string(),
+            ));
+        }
+        let lock_path = root_path.join(".manager.lock");
+        let lock = if mode == OpenMode::ReadWrite {
+            FileLock::exclusive(&lock_path)?
+        } else {
+            FileLock::shared(&lock_path)?
+        };
         let mgr = Self {
             root_path: root_path.to_path_buf(),
             databases: RwLock::new(HashMap::new()),
             _lock: lock,
+            read_only: mode == OpenMode::ReadOnly,
         };
         // Scan for existing databases
         mgr.scan_databases();
         Ok(mgr)
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        if self.read_only {
+            return Err(LynseError::InvalidArgument(
+                "database manager is opened read-only".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Scan root path for existing databases (directories with .fingerprint).
@@ -2687,6 +6058,7 @@ impl DatabaseManager {
 
     /// Create a new database.
     pub fn create_database(&self, name: &str) -> Result<()> {
+        self.ensure_writable()?;
         let db_path = self.root_path.join(name);
         std::fs::create_dir_all(&db_path)?;
 
@@ -2707,6 +6079,7 @@ impl DatabaseManager {
 
     /// Drop a database and all its collections.
     pub fn drop_database(&self, name: &str) -> Result<()> {
+        self.ensure_writable()?;
         let mut dbs = self.databases.write();
         dbs.remove(name);
 
@@ -2750,15 +6123,27 @@ impl DatabaseManager {
 
     /// Get or open a DatabaseEngine for a specific database.
     pub fn get_or_open_database(&self, name: &str) -> Result<()> {
+        {
+            let dbs = self.databases.read();
+            if dbs.contains_key(name) {
+                return Ok(());
+            }
+        }
+
         let mut dbs = self.databases.write();
         if dbs.contains_key(name) {
             return Ok(());
         }
+
         let db_path = self.root_path.join(name);
         if !db_path.exists() {
             return Err(LynseError::DatabaseNotFound(name.to_string()));
         }
-        let engine = DatabaseEngine::open(&db_path)?;
+        let engine = if self.read_only {
+            DatabaseEngine::open_read_only(&db_path)?
+        } else {
+            DatabaseEngine::open(&db_path)?
+        };
         dbs.insert(name.to_string(), engine);
         Ok(())
     }
@@ -2780,6 +6165,7 @@ impl DatabaseManager {
     where
         F: FnOnce(&DatabaseEngine) -> Result<T>,
     {
+        self.ensure_writable()?;
         let dbs = self.databases.read();
         let engine = dbs
             .get(name)
@@ -2832,6 +6218,7 @@ impl DatabaseManager {
         drop_if_exists: bool,
         description: Option<&str>,
     ) -> Result<()> {
+        self.ensure_writable()?;
         // Ensure database is open
         self.get_or_open_database(db_name)?;
 
@@ -2909,6 +6296,14 @@ impl DatabaseManager {
         collection_name: &str,
         description: Option<&str>,
     ) -> Result<()> {
+        self.ensure_writable()?;
+        self.get_or_open_database(db_name)?;
+        let dbs = self.databases.read();
+        let engine = dbs
+            .get(db_name)
+            .ok_or_else(|| LynseError::DatabaseNotFound(db_name.to_string()))?;
+        let _collections = engine.collections.write();
+
         let config_path = self.root_path.join(db_name).join("collections.json");
         let mut configs: HashMap<String, CollectionConfig> =
             if let Ok(content) = std::fs::read_to_string(&config_path) {
@@ -2933,8 +6328,219 @@ impl DatabaseManager {
         self.with_database(db_name, |engine| Ok(engine.list_collections()))
     }
 
+    /// Number of currently open database engines in this manager.
+    pub fn open_database_count(&self) -> usize {
+        self.databases.read().len()
+    }
+
+    /// Number of currently open collection handles across open databases.
+    pub fn open_collection_count(&self) -> usize {
+        let dbs = self.databases.read();
+        dbs.values()
+            .map(DatabaseEngine::open_collection_count)
+            .sum()
+    }
+
+    /// Checkpoint all currently open collections across all open databases.
+    pub fn checkpoint_open_collections(&self) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
+
+        let dbs = self.databases.read();
+        for engine in dbs.values() {
+            engine.checkpoint_open_collections()?;
+        }
+        Ok(())
+    }
+
+    fn read_database_snapshot_manifest(path: &Path) -> Result<DatabaseSnapshotManifest> {
+        let manifest_path = path.join(DATABASE_SNAPSHOT_MANIFEST_FILE);
+        let bytes = std::fs::read(&manifest_path)?;
+        serde_json::from_slice(&bytes).map_err(|e| LynseError::Serialization(e.to_string()))
+    }
+
+    fn validate_database_snapshot_manifest(manifest: &DatabaseSnapshotManifest) -> Result<()> {
+        if manifest.storage_format != DATABASE_SNAPSHOT_FORMAT_NAME {
+            return Err(LynseError::Storage(format!(
+                "unsupported database snapshot format '{}'",
+                manifest.storage_format
+            )));
+        }
+        if manifest.storage_version > STORAGE_FORMAT_VERSION {
+            return Err(LynseError::Storage(format!(
+                "database snapshot uses storage format version {}, but this binary supports up to {}",
+                manifest.storage_version, STORAGE_FORMAT_VERSION
+            )));
+        }
+        Ok(())
+    }
+
+    /// Create a filesystem snapshot for a whole database.
+    pub fn snapshot_database(&self, db_name: &str, snapshot_path: &Path) -> Result<()> {
+        self.get_or_open_database(db_name)?;
+        let dbs = self.databases.read();
+        let engine = dbs
+            .get(db_name)
+            .ok_or_else(|| LynseError::DatabaseNotFound(db_name.to_string()))?;
+        engine.snapshot_to(db_name, snapshot_path)
+    }
+
+    /// Restore a whole database from a filesystem snapshot.
+    pub fn restore_database_from_snapshot(
+        &self,
+        db_name: &str,
+        snapshot_path: &Path,
+        overwrite: bool,
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        if !snapshot_path.exists() {
+            return Err(LynseError::InvalidArgument(format!(
+                "snapshot path does not exist: {}",
+                snapshot_path.display()
+            )));
+        }
+
+        let snapshot_manifest = Self::read_database_snapshot_manifest(snapshot_path)?;
+        Self::validate_database_snapshot_manifest(&snapshot_manifest)?;
+
+        let target_path = self.root_path.join(db_name);
+        if target_path.exists() && !overwrite {
+            return Err(LynseError::InvalidArgument(format!(
+                "database already exists: {}",
+                db_name
+            )));
+        }
+
+        let existing = {
+            let mut dbs = self.databases.write();
+            dbs.remove(db_name)
+        };
+
+        if let Some(engine) = existing {
+            if let Some(collection_name) = engine.external_collection_handle() {
+                let mut dbs = self.databases.write();
+                dbs.insert(db_name.to_string(), engine);
+                return Err(LynseError::Storage(format!(
+                    "collection '{}.{}' is still referenced; close active handles before restore",
+                    db_name, collection_name
+                )));
+            }
+            if let Err(err) = engine.close_open_collections() {
+                let mut dbs = self.databases.write();
+                dbs.insert(db_name.to_string(), engine);
+                return Err(err);
+            }
+        }
+
+        if target_path.exists() {
+            std::fs::remove_dir_all(&target_path)?;
+        }
+
+        let tmp_path = Collection::make_temp_sibling(&target_path)?;
+        if tmp_path.exists() {
+            std::fs::remove_dir_all(&tmp_path)?;
+        }
+
+        let restore_result = (|| -> Result<()> {
+            Collection::copy_dir_for_snapshot(snapshot_path, &tmp_path)?;
+
+            let fingerprint_path = tmp_path.join(".fingerprint");
+            if snapshot_manifest.database_name != db_name || !fingerprint_path.exists() {
+                let fp = uuid::Uuid::new_v4().to_string().replace("-", "");
+                Collection::atomic_write_file(&fingerprint_path, fp.as_bytes())?;
+            }
+
+            Collection::sync_path_recursively(&tmp_path)?;
+            std::fs::rename(&tmp_path, &target_path)?;
+            if let Ok(dir) = std::fs::File::open(&self.root_path) {
+                let _ = dir.sync_all();
+            }
+            Ok(())
+        })();
+
+        if let Err(err) = restore_result {
+            let _ = std::fs::remove_dir_all(&tmp_path);
+            return Err(err);
+        }
+
+        self.get_or_open_database(db_name)?;
+        self.register_database(db_name)
+    }
+
+    /// Create a snapshot for a collection within a database.
+    pub fn snapshot_collection(
+        &self,
+        db_name: &str,
+        collection_name: &str,
+        snapshot_path: &Path,
+    ) -> Result<()> {
+        self.get_or_open_database(db_name)?;
+        self.with_database(db_name, |engine| {
+            engine.snapshot_collection(collection_name, snapshot_path)
+        })
+    }
+
+    /// Export a collection to portable JSONL metadata plus binary vectors.
+    pub fn export_collection(
+        &self,
+        db_name: &str,
+        collection_name: &str,
+        export_path: &Path,
+    ) -> Result<()> {
+        self.get_or_open_database(db_name)?;
+        self.with_database(db_name, |engine| {
+            engine.export_collection(collection_name, export_path)
+        })
+    }
+
+    /// Restore a collection from a snapshot directory.
+    pub fn restore_collection_from_snapshot(
+        &self,
+        db_name: &str,
+        collection_name: &str,
+        snapshot_path: &Path,
+        overwrite: bool,
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        self.get_or_open_database(db_name)?;
+        let config = self.with_database(db_name, |engine| {
+            engine.restore_collection_from_snapshot(collection_name, snapshot_path, overwrite)
+        })?;
+        self.save_collection_config(
+            db_name,
+            collection_name,
+            config.dim,
+            config.chunk_size,
+            config.description.as_deref(),
+        )
+    }
+
+    /// Import a collection from portable JSONL metadata plus binary vectors.
+    pub fn import_collection_from_export(
+        &self,
+        db_name: &str,
+        collection_name: &str,
+        export_path: &Path,
+        overwrite: bool,
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        self.get_or_open_database(db_name)?;
+        let config = self.with_database(db_name, |engine| {
+            engine.import_collection_from_export(collection_name, export_path, overwrite)
+        })?;
+        self.save_collection_config(
+            db_name,
+            collection_name,
+            config.dim,
+            config.chunk_size,
+            config.description.as_deref(),
+        )
+    }
+
     /// Drop a collection from a database.
     pub fn drop_collection(&self, db_name: &str, collection_name: &str) -> Result<()> {
+        self.ensure_writable()?;
         self.get_or_open_database(db_name)?;
         self.with_database(db_name, |engine| engine.drop_collection(collection_name))?;
 

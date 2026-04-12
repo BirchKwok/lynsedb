@@ -102,6 +102,175 @@ class TestSearch:
         assert len(distances) == 3
         assert len(fields) == 3
 
+    def test_search_profile_reports_filter_metadata(self, populated_collection, query_vec):
+        result = populated_collection.search_profile(
+            query_vec, k=3, where='"group" = 0'
+        )
+        assert "items" in result
+        assert "profile" in result
+        assert result["profile"]["filter_matches"] > 0
+        assert result["profile"]["index_path"]
+
+    def test_text_search_returns_result_view(self, populated_collection):
+        result = populated_collection.text_search(
+            "item_3", k=3, text_fields=["tag"], return_fields=True
+        )
+        assert isinstance(result, ResultView)
+        assert len(result.ids) >= 1
+        assert 3 in result.ids.tolist()
+        assert result.index_type == "BM25-INVERTED"
+
+    def test_hybrid_search_returns_fused_results(self, populated_collection, query_vec):
+        result = populated_collection.hybrid_search(
+            vector=query_vec,
+            text="item_3",
+            text_fields=["tag"],
+            k=5,
+            fusion="rrf",
+            return_fields=True,
+        )
+        assert isinstance(result, ResultView)
+        assert len(result.ids) == 5
+        assert np.all(np.isfinite(result.distances))
+
+    def test_search_reranker_reorders_results(self, populated_collection, query_vec):
+        baseline = populated_collection.search(query_vec, k=5)
+
+        def reranker(payload):
+            return [item["id"] for item in reversed(payload["items"])]
+
+        reranked = populated_collection.search(
+            query_vec,
+            k=5,
+            reranker=reranker,
+            rerank_k=3,
+        )
+        assert reranked.ids.tolist() == list(reversed(baseline.ids.tolist()))[:3]
+        assert len(reranked.distances) == 3
+
+    def test_search_reranker_can_read_fields_without_returning_them(
+        self, populated_collection, query_vec
+    ):
+        observed = {"has_field": False}
+
+        def reranker(payload):
+            observed["has_field"] = payload["items"][0]["field"] is not None
+            return [item["id"] for item in payload["items"]]
+
+        result = populated_collection.search(
+            query_vec,
+            k=5,
+            return_fields=False,
+            reranker=reranker,
+            rerank_with_fields=True,
+        )
+        assert observed["has_field"] is True
+        assert result.fields == [] or result.fields is None or len(result.fields) == 0
+
+    def test_text_search_reranker_accepts_scores(self, populated_collection):
+        baseline = populated_collection.text_search("item", k=6, text_fields=["tag"])
+
+        def reranker(payload):
+            return np.array([item["id"] for item in payload["items"]], dtype=np.float32)
+
+        reranked = populated_collection.text_search(
+            "item",
+            k=6,
+            text_fields=["tag"],
+            reranker=reranker,
+            rerank_k=1,
+        )
+        assert len(reranked.ids) == 1
+        assert int(reranked.ids[0]) == max(baseline.ids.tolist())
+
+    def test_hybrid_search_reranker_can_return_id_score_pairs(
+        self, populated_collection, query_vec
+    ):
+        result = populated_collection.hybrid_search(
+            vector=query_vec,
+            text="item",
+            text_fields=["tag"],
+            k=8,
+            return_fields=True,
+            reranker=lambda payload: [
+                (item["id"], float(item["field"]["group"]))
+                for item in payload["items"]
+            ],
+            rerank_k=4,
+        )
+        groups = [int(field["group"]) for field in result.fields]
+        assert groups == sorted(groups, reverse=True)
+
+    def test_named_vector_field_search(self, populated_collection):
+        populated_collection.create_vector_field("image", dim=3, metric="l2")
+        ids = list(range(N))
+        image_vectors = np.array([[float(i), 0.0, 0.0] for i in ids], dtype=np.float32)
+        populated_collection.add_named_vectors("image", image_vectors, ids)
+        populated_collection.build_vector_field_index("image", "HNSW-L2")
+
+        result = populated_collection.search([4.1, 0.0, 0.0], k=3, vector_field="image")
+        assert int(result.ids[0]) == 4
+        assert len(result.ids) == 3
+
+        fields = populated_collection.list_vector_fields()
+        image_field = next(field for field in fields if field["name"] == "image")
+        assert image_field["dimension"] == 3
+        assert image_field["metric"] == "l2"
+        assert image_field["index_mode"] == "HNSW-L2"
+
+        populated_collection.remove_vector_field_index("image")
+        image_field = next(
+            field for field in populated_collection.list_vector_fields()
+            if field["name"] == "image"
+        )
+        assert image_field["index_mode"] == "FLAT-L2"
+
+    def test_named_vector_field_search_with_filter_and_fields(self, populated_collection):
+        populated_collection.create_vector_field("text_vec", dim=2, metric="ip")
+        ids = list(range(N))
+        text_vectors = np.array(
+            [[1.0 if i % 3 == 2 else 0.0, float(i)] for i in ids],
+            dtype=np.float32,
+        )
+        populated_collection.add_named_vectors("text_vec", text_vectors, ids)
+
+        result = populated_collection.search(
+            [1.0, 0.0],
+            k=5,
+            vector_field="text_vec",
+            where='"group" = 2',
+            return_fields=True,
+        )
+        assert len(result.ids) == 5
+        for field in result.fields:
+            assert field["group"] == 2
+
+    def test_sparse_search_returns_inner_product_results(self, populated_collection):
+        ids = list(range(N))
+        sparse_vectors = [{i: 1.0, 100: float(i % 3)} for i in ids]
+        populated_collection.add_sparse_vectors(sparse_vectors, ids)
+
+        result = populated_collection.search_sparse({4: 1.0}, k=3)
+        assert isinstance(result, ResultView)
+        assert int(result.ids[0]) == 4
+        assert result.distance_metric == "IP"
+        assert result.index_type == "SPARSE-FLAT-IP"
+
+    def test_sparse_search_with_filter_and_fields(self, populated_collection):
+        ids = list(range(N))
+        sparse_vectors = [[(42, 1.0), (100 + i, 1.0)] for i in ids]
+        populated_collection.add_sparse_vectors(sparse_vectors, ids)
+
+        result = populated_collection.search_sparse(
+            {42: 1.0},
+            k=5,
+            where='"group" = 2',
+            return_fields=True,
+        )
+        assert len(result.ids) == 5
+        for field in result.fields:
+            assert field["group"] == 2
+
 
 class TestBatchSearch:
     def test_batch_search_returns_list(self, populated_collection, query_vec):
@@ -141,6 +310,25 @@ class TestBatchSearch:
         queries = np.stack([query_vec] * 2)
         results = populated_collection.batch_search(queries, k=3, nprobe=2)
         assert len(results) == 2
+
+    def test_batch_search_reranker_applies_per_query(self, populated_collection, query_vec):
+        queries = np.stack([query_vec, np.roll(query_vec, 1)])
+        calls = []
+
+        def reranker(payload):
+            calls.append(payload["query"]["query_index"])
+            return [item["id"] for item in payload["items"]]
+
+        results = populated_collection.batch_search(
+            queries,
+            k=5,
+            reranker=reranker,
+            rerank_k=2,
+        )
+        assert calls == [0, 1]
+        assert len(results) == 2
+        assert len(results[0].ids) == 2
+        assert len(results[1].ids) == 2
 
 
 class TestSearchRange:

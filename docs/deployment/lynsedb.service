@@ -1,0 +1,23 @@
+[Unit]
+Description=LynseDB vector database
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lynsedb
+Group=lynsedb
+Environment=LYNSE_API_KEY=change-me
+Environment=LYNSE_SERVER_WORKERS=4
+Environment=LYNSE_JSON_LIMIT_MB=256
+Environment=LYNSE_PAYLOAD_LIMIT_MB=512
+Environment=LYNSE_CLIENT_REQUEST_TIMEOUT_SECS=300
+Environment=LYNSE_KEEP_ALIVE_SECS=75
+ExecStart=/usr/local/bin/lynse serve --host 0.0.0.0 --port 7637 --data-dir /var/lib/lynsedb
+WorkingDirectory=/var/lib/lynsedb
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

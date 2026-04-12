@@ -6,7 +6,9 @@
 use std::collections::{HashMap, HashSet};
 use std::future::{ready, Future, Ready};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use actix_web::body::EitherBody;
 use actix_web::dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform};
@@ -18,17 +20,231 @@ use crate::error::LynseError;
 
 // ─── Shared application state ────────────────────────────────────────────────
 
-pub struct AppState {
-    pub manager: Arc<DatabaseManager>,
-    pub api_key: Option<String>,
+struct AppState {
+    manager: Arc<DatabaseManager>,
+    start_time_unix_seconds: u64,
+    metrics: Arc<HttpMetrics>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ServerRuntimeConfig {
+    workers: usize,
+    keep_alive_secs: u64,
+    client_request_timeout_secs: u64,
+    json_limit_bytes: usize,
+    payload_limit_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RequestOutcome {
+    Normal,
+    Unauthorized,
+    HandlerFailure,
+}
+
+struct HttpMetrics {
+    request_total: AtomicU64,
+    request_error_total: AtomicU64,
+    request_duration_sum_nanos: AtomicU64,
+    status_2xx: AtomicU64,
+    status_3xx: AtomicU64,
+    status_4xx: AtomicU64,
+    status_5xx: AtomicU64,
+    status_other: AtomicU64,
+    error_client_4xx_total: AtomicU64,
+    error_server_5xx_total: AtomicU64,
+    error_unauthorized_total: AtomicU64,
+    error_handler_failure_total: AtomicU64,
+    histogram_bucket_bounds: Vec<f64>,
+    histogram_bucket_counts: Vec<AtomicU64>,
+}
+
+impl HttpMetrics {
+    fn new() -> Self {
+        // Bucket boundaries in seconds for Prometheus-style latency histogram.
+        let bounds = vec![
+            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+        ];
+        let mut bucket_counts = Vec::with_capacity(bounds.len() + 1);
+        for _ in 0..=bounds.len() {
+            bucket_counts.push(AtomicU64::new(0));
+        }
+
+        Self {
+            request_total: AtomicU64::new(0),
+            request_error_total: AtomicU64::new(0),
+            request_duration_sum_nanos: AtomicU64::new(0),
+            status_2xx: AtomicU64::new(0),
+            status_3xx: AtomicU64::new(0),
+            status_4xx: AtomicU64::new(0),
+            status_5xx: AtomicU64::new(0),
+            status_other: AtomicU64::new(0),
+            error_client_4xx_total: AtomicU64::new(0),
+            error_server_5xx_total: AtomicU64::new(0),
+            error_unauthorized_total: AtomicU64::new(0),
+            error_handler_failure_total: AtomicU64::new(0),
+            histogram_bucket_bounds: bounds,
+            histogram_bucket_counts: bucket_counts,
+        }
+    }
+
+    fn observe(&self, status_code: u16, elapsed: Duration, outcome: RequestOutcome) {
+        self.request_total.fetch_add(1, Ordering::Relaxed);
+
+        let nanos_u64 = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+        self.request_duration_sum_nanos
+            .fetch_add(nanos_u64, Ordering::Relaxed);
+
+        match status_code {
+            200..=299 => {
+                self.status_2xx.fetch_add(1, Ordering::Relaxed);
+            }
+            300..=399 => {
+                self.status_3xx.fetch_add(1, Ordering::Relaxed);
+            }
+            400..=499 => {
+                self.status_4xx.fetch_add(1, Ordering::Relaxed);
+            }
+            500..=599 => {
+                self.status_5xx.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                self.status_other.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        if status_code >= 400 {
+            self.request_error_total.fetch_add(1, Ordering::Relaxed);
+        }
+        if (400..=499).contains(&status_code) {
+            self.error_client_4xx_total.fetch_add(1, Ordering::Relaxed);
+        }
+        if (500..=599).contains(&status_code) {
+            self.error_server_5xx_total.fetch_add(1, Ordering::Relaxed);
+        }
+
+        match outcome {
+            RequestOutcome::Normal => {}
+            RequestOutcome::Unauthorized => {
+                self.error_unauthorized_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            RequestOutcome::HandlerFailure => {
+                self.error_handler_failure_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let elapsed_secs = elapsed.as_secs_f64();
+        let mut bucket_index = self.histogram_bucket_bounds.len();
+        for (idx, bound) in self.histogram_bucket_bounds.iter().enumerate() {
+            if elapsed_secs <= *bound {
+                bucket_index = idx;
+                break;
+            }
+        }
+        self.histogram_bucket_counts[bucket_index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn request_total(&self) -> u64 {
+        self.request_total.load(Ordering::Relaxed)
+    }
+
+    fn request_duration_sum_seconds(&self) -> f64 {
+        self.request_duration_sum_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+    }
+
+    fn request_latency_quantile_seconds(&self, quantile: f64) -> f64 {
+        if !(0.0..=1.0).contains(&quantile) {
+            return 0.0;
+        }
+
+        let total = self.request_total();
+        if total == 0 {
+            return 0.0;
+        }
+
+        let target_rank = (quantile * total as f64).ceil().max(1.0);
+        let mut cumulative = 0u64;
+
+        for idx in 0..self.histogram_bucket_counts.len() {
+            let bucket_count = self.histogram_bucket_counts[idx].load(Ordering::Relaxed);
+            cumulative += bucket_count;
+
+            if (cumulative as f64) < target_rank {
+                continue;
+            }
+
+            let lower_bound = if idx == 0 {
+                0.0
+            } else {
+                self.histogram_bucket_bounds[idx - 1]
+            };
+
+            if idx >= self.histogram_bucket_bounds.len() {
+                return lower_bound;
+            }
+
+            let upper_bound = self.histogram_bucket_bounds[idx];
+            if bucket_count == 0 {
+                return upper_bound;
+            }
+
+            let prev_cumulative = cumulative - bucket_count;
+            let in_bucket_rank =
+                (target_rank - prev_cumulative as f64).clamp(0.0, bucket_count as f64);
+            let fraction = in_bucket_rank / bucket_count as f64;
+            return lower_bound + (upper_bound - lower_bound) * fraction;
+        }
+
+        self.histogram_bucket_bounds.last().copied().unwrap_or(0.0)
+    }
+}
+
+fn parse_positive_usize_env(name: &str) -> Option<usize> {
+    let raw = std::env::var(name).ok()?;
+    match raw.parse::<usize>() {
+        Ok(v) if v > 0 => Some(v),
+        _ => {
+            log::warn!(
+                "Ignoring invalid {}='{}' (must be a positive integer)",
+                name,
+                raw
+            );
+            None
+        }
+    }
+}
+
+fn load_server_runtime_config() -> ServerRuntimeConfig {
+    let workers =
+        parse_positive_usize_env("LYNSE_SERVER_WORKERS").unwrap_or_else(|| num_cpus::get().max(2));
+    let keep_alive_secs = parse_positive_usize_env("LYNSE_KEEP_ALIVE_SECS")
+        .map(|v| v as u64)
+        .unwrap_or(75);
+    let client_request_timeout_secs = parse_positive_usize_env("LYNSE_CLIENT_REQUEST_TIMEOUT_SECS")
+        .map(|v| v as u64)
+        .unwrap_or(300);
+
+    let json_limit_mb = parse_positive_usize_env("LYNSE_JSON_LIMIT_MB").unwrap_or(256);
+    let payload_limit_mb = parse_positive_usize_env("LYNSE_PAYLOAD_LIMIT_MB").unwrap_or(512);
+
+    ServerRuntimeConfig {
+        workers,
+        keep_alive_secs,
+        client_request_timeout_secs,
+        json_limit_bytes: json_limit_mb.saturating_mul(1024 * 1024),
+        payload_limit_bytes: payload_limit_mb.saturating_mul(1024 * 1024),
+    }
 }
 
 // ─── Basic Auth / Bearer Token Middleware ─────────────────────────────────────
 
 /// Middleware factory. Wraps every request with an optional API key check.
 /// Accepts both `Authorization: Bearer <key>` and `Authorization: Basic base64(:key)` headers.
-pub struct ApiKeyAuth {
-    pub api_key: Option<String>,
+struct ApiKeyAuth {
+    api_key: Option<String>,
+    metrics: Arc<HttpMetrics>,
 }
 
 impl<S, B> Transform<S, ServiceRequest> for ApiKeyAuth
@@ -47,13 +263,15 @@ where
         ready(Ok(ApiKeyAuthMiddleware {
             service,
             api_key: self.api_key.clone(),
+            metrics: Arc::clone(&self.metrics),
         }))
     }
 }
 
-pub struct ApiKeyAuthMiddleware<S> {
+struct ApiKeyAuthMiddleware<S> {
     service: S,
     api_key: Option<String>,
+    metrics: Arc<HttpMetrics>,
 }
 
 fn decode_basic(b64: &str) -> Option<String> {
@@ -80,6 +298,10 @@ fn is_authorized(req: &ServiceRequest, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn is_public_endpoint(path: &str) -> bool {
+    matches!(path, "/" | "/healthz" | "/readyz")
+}
+
 impl<S, B> Service<ServiceRequest> for ApiKeyAuthMiddleware<S>
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error> + 'static,
@@ -93,20 +315,37 @@ where
     forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
+        let started = Instant::now();
         if let Some(ref key) = self.api_key {
-            if !is_authorized(&req, key) {
+            if !is_public_endpoint(req.path()) && !is_authorized(&req, key) {
+                let metrics = Arc::clone(&self.metrics);
                 return Box::pin(async move {
                     let response = HttpResponse::Unauthorized()
                         .insert_header(("WWW-Authenticate", "Basic realm=\"LynseDB\""))
                         .json(serde_json::json!({"error": "Unauthorized"}));
+                    metrics.observe(401, started.elapsed(), RequestOutcome::Unauthorized);
                     Ok(req.into_response(response.map_into_right_body()))
                 });
             }
         }
+
+        let metrics = Arc::clone(&self.metrics);
         let fut = self.service.call(req);
         Box::pin(async move {
-            let res = fut.await?;
-            Ok(res.map_into_left_body())
+            match fut.await {
+                Ok(res) => {
+                    metrics.observe(
+                        res.status().as_u16(),
+                        started.elapsed(),
+                        RequestOutcome::Normal,
+                    );
+                    Ok(res.map_into_left_body())
+                }
+                Err(err) => {
+                    metrics.observe(500, started.elapsed(), RequestOutcome::HandlerFailure);
+                    Err(err)
+                }
+            }
         })
     }
 }
@@ -135,6 +374,19 @@ struct DatabaseExistsRequest {
 }
 
 #[derive(Deserialize)]
+struct SnapshotDatabaseRequest {
+    database_name: String,
+    snapshot_path: String,
+}
+
+#[derive(Deserialize)]
+struct RestoreDatabaseRequest {
+    database_name: String,
+    snapshot_path: String,
+    overwrite: Option<bool>,
+}
+
+#[derive(Deserialize)]
 #[allow(dead_code)]
 struct RequireCollectionRequest {
     database_name: String,
@@ -153,6 +405,36 @@ struct RequireCollectionRequest {
 struct CollectionRequest {
     database_name: String,
     collection_name: String,
+}
+
+#[derive(Deserialize)]
+struct SnapshotCollectionRequest {
+    database_name: String,
+    collection_name: String,
+    snapshot_path: String,
+}
+
+#[derive(Deserialize)]
+struct ExportCollectionRequest {
+    database_name: String,
+    collection_name: String,
+    export_path: String,
+}
+
+#[derive(Deserialize)]
+struct RestoreCollectionRequest {
+    database_name: String,
+    collection_name: String,
+    snapshot_path: String,
+    overwrite: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ImportCollectionRequest {
+    database_name: String,
+    collection_name: String,
+    export_path: String,
+    overwrite: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -184,13 +466,109 @@ struct BulkItemData {
 }
 
 #[derive(Deserialize)]
+struct CreateVectorFieldRequest {
+    database_name: String,
+    collection_name: String,
+    field_name: String,
+    dim: usize,
+    metric: Option<String>,
+    index_mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AddNamedVectorsRequest {
+    database_name: String,
+    collection_name: String,
+    field_name: String,
+    vectors: Vec<Vec<f32>>,
+    ids: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+struct SparseVectorData {
+    indices: Vec<u32>,
+    values: Vec<f32>,
+}
+
+#[derive(Deserialize)]
+struct AddSparseVectorsRequest {
+    database_name: String,
+    collection_name: String,
+    vectors: Vec<SparseVectorData>,
+    ids: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+struct BuildVectorFieldIndexRequest {
+    database_name: String,
+    collection_name: String,
+    field_name: String,
+    index_mode: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct SearchRequest {
+    database_name: String,
+    collection_name: String,
+    vector: Vec<f32>,
+    vector_field: Option<String>,
+    k: Option<usize>,
+    #[serde(rename = "where")]
+    where_expr: Option<String>,
+    return_fields: Option<bool>,
+    nprobe: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct SearchProfileRequest {
     database_name: String,
     collection_name: String,
     vector: Vec<f32>,
     k: Option<usize>,
     #[serde(rename = "where")]
     where_expr: Option<String>,
+    return_fields: Option<bool>,
+    nprobe: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct TextSearchRequest {
+    database_name: String,
+    collection_name: String,
+    text: String,
+    text_fields: Option<Vec<String>>,
+    k: Option<usize>,
+    #[serde(rename = "where")]
+    where_expr: Option<String>,
+    return_fields: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct SparseSearchRequest {
+    database_name: String,
+    collection_name: String,
+    vector: SparseVectorData,
+    k: Option<usize>,
+    #[serde(rename = "where")]
+    where_expr: Option<String>,
+    return_fields: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct HybridSearchRequest {
+    database_name: String,
+    collection_name: String,
+    vector: Option<Vec<f32>>,
+    text: Option<String>,
+    text_fields: Option<Vec<String>>,
+    k: Option<usize>,
+    #[serde(rename = "where")]
+    where_expr: Option<String>,
+    fusion: Option<String>,
+    vector_weight: Option<f32>,
+    text_weight: Option<f32>,
+    rrf_k: Option<f32>,
+    candidate_limit: Option<usize>,
     return_fields: Option<bool>,
     nprobe: Option<usize>,
 }
@@ -288,6 +666,7 @@ struct SearchBinaryQuery {
     database_name: String,
     collection_name: String,
     dim: usize,
+    vector_field: Option<String>,
     k: Option<usize>,
     #[serde(rename = "where")]
     where_expr: Option<String>,
@@ -398,6 +777,22 @@ where
     })
 }
 
+fn sparse_vector_entries(vector: &SparseVectorData) -> Result<Vec<(u32, f32)>, LynseError> {
+    if vector.indices.len() != vector.values.len() {
+        return Err(LynseError::InvalidArgument(format!(
+            "sparse vector has {} indices but {} values",
+            vector.indices.len(),
+            vector.values.len()
+        )));
+    }
+    Ok(vector
+        .indices
+        .iter()
+        .copied()
+        .zip(vector.values.iter().copied())
+        .collect())
+}
+
 // ─── Database operation handlers ─────────────────────────────────────────────
 
 async fn index() -> HttpResponse {
@@ -405,6 +800,766 @@ async fn index() -> HttpResponse {
         "status": "success",
         "message": "LynseDB HTTP API"
     }))
+}
+
+async fn healthz() -> HttpResponse {
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "ok"
+    }))
+}
+
+async fn readyz(state: web::Data<AppState>) -> HttpResponse {
+    let root_exists = state.manager.root_path().exists();
+    let ready = root_exists;
+    if ready {
+        HttpResponse::Ok().json(serde_json::json!({
+            "status": "ready",
+            "root_path": state.manager.root_path().to_string_lossy().to_string()
+        }))
+    } else {
+        HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "status": "not_ready",
+            "root_path": state.manager.root_path().to_string_lossy().to_string()
+        }))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OpenApiRoute {
+    method: &'static str,
+    path: &'static str,
+    tag: &'static str,
+    summary: &'static str,
+    request_schema: Option<&'static str>,
+}
+
+fn openapi_routes() -> &'static [OpenApiRoute] {
+    &[
+        OpenApiRoute {
+            method: "get",
+            path: "/",
+            tag: "system",
+            summary: "API root",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "get",
+            path: "/healthz",
+            tag: "system",
+            summary: "Liveness probe",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "get",
+            path: "/readyz",
+            tag: "system",
+            summary: "Readiness probe",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "get",
+            path: "/metrics",
+            tag: "system",
+            summary: "Prometheus metrics",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "get",
+            path: "/openapi.json",
+            tag: "system",
+            summary: "OpenAPI specification",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/create_database",
+            tag: "database",
+            summary: "Create database",
+            request_schema: Some("CreateDatabaseRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/drop_database",
+            tag: "database",
+            summary: "Drop database",
+            request_schema: Some("DropDatabaseRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/snapshot_database",
+            tag: "database",
+            summary: "Snapshot database",
+            request_schema: Some("SnapshotDatabaseRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/restore_database",
+            tag: "database",
+            summary: "Restore database",
+            request_schema: Some("RestoreDatabaseRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/database_exists",
+            tag: "database",
+            summary: "Check database existence",
+            request_schema: Some("DatabaseExistsRequest"),
+        },
+        OpenApiRoute {
+            method: "get",
+            path: "/list_databases",
+            tag: "database",
+            summary: "List databases",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/delete_database",
+            tag: "database",
+            summary: "Delete database",
+            request_schema: Some("DropDatabaseRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/required_collection",
+            tag: "collection",
+            summary: "Create or require collection",
+            request_schema: Some("RequireCollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/drop_collection",
+            tag: "collection",
+            summary: "Drop collection",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/snapshot_collection",
+            tag: "collection",
+            summary: "Snapshot collection",
+            request_schema: Some("SnapshotCollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/export_collection",
+            tag: "collection",
+            summary: "Export collection",
+            request_schema: Some("ExportCollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/restore_collection",
+            tag: "collection",
+            summary: "Restore collection",
+            request_schema: Some("RestoreCollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/import_collection",
+            tag: "collection",
+            summary: "Import collection",
+            request_schema: Some("ImportCollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/show_collections",
+            tag: "collection",
+            summary: "Show collections",
+            request_schema: Some("DatabaseRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/add_item",
+            tag: "vectors",
+            summary: "Add one vector",
+            request_schema: Some("AddItemRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/bulk_add_items",
+            tag: "vectors",
+            summary: "Add vectors in bulk",
+            request_schema: Some("BulkAddItemsRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/create_vector_field",
+            tag: "vectors",
+            summary: "Create named vector field",
+            request_schema: Some("CreateVectorFieldRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/list_vector_fields",
+            tag: "vectors",
+            summary: "List vector fields",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/add_named_vectors",
+            tag: "vectors",
+            summary: "Add named vectors",
+            request_schema: Some("AddNamedVectorsRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/add_sparse_vectors",
+            tag: "vectors",
+            summary: "Add sparse vectors",
+            request_schema: Some("AddSparseVectorsRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/build_vector_field_index",
+            tag: "vectors",
+            summary: "Build named vector field index",
+            request_schema: Some("BuildVectorFieldIndexRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/remove_vector_field_index",
+            tag: "vectors",
+            summary: "Remove named vector field index",
+            request_schema: Some("BuildVectorFieldIndexRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/upsert_items",
+            tag: "vectors",
+            summary: "Upsert vectors",
+            request_schema: Some("BulkAddItemsRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/bulk_add_binary",
+            tag: "vectors",
+            summary: "Add vectors with binary body",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/search",
+            tag: "query",
+            summary: "Vector search",
+            request_schema: Some("SearchRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/search_profile",
+            tag: "query",
+            summary: "Vector search with query profile",
+            request_schema: Some("SearchProfileRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/text_search",
+            tag: "query",
+            summary: "BM25 metadata text search",
+            request_schema: Some("TextSearchRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/sparse_search",
+            tag: "query",
+            summary: "Sparse vector inner-product search",
+            request_schema: Some("SparseSearchRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/hybrid_search",
+            tag: "query",
+            summary: "Hybrid vector and text search",
+            request_schema: Some("HybridSearchRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/search_binary",
+            tag: "query",
+            summary: "Vector search with binary body",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/batch_search",
+            tag: "query",
+            summary: "Batch vector search",
+            request_schema: Some("BatchSearchRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/batch_search_binary",
+            tag: "query",
+            summary: "Batch vector search with binary body",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/commit",
+            tag: "collection",
+            summary: "Commit collection WAL",
+            request_schema: Some("CommitRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/flush",
+            tag: "collection",
+            summary: "Flush collection",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/checkpoint",
+            tag: "collection",
+            summary: "Checkpoint collection",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/close_collection",
+            tag: "collection",
+            summary: "Close collection handle",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/collection_shape",
+            tag: "collection",
+            summary: "Get collection shape",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/is_collection_exists",
+            tag: "collection",
+            summary: "Check collection existence",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/get_collection_config",
+            tag: "collection",
+            summary: "Get collection config",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/update_collection_description",
+            tag: "collection",
+            summary: "Update collection description",
+            request_schema: Some("UpdateDescriptionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/update_description",
+            tag: "collection",
+            summary: "Update collection description",
+            request_schema: Some("UpdateDescriptionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/show_collections_details",
+            tag: "collection",
+            summary: "Show collection details",
+            request_schema: Some("DatabaseRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/build_index",
+            tag: "index",
+            summary: "Build index",
+            request_schema: Some("BuildIndexRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/remove_index",
+            tag: "index",
+            summary: "Remove index",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/head",
+            tag: "vectors",
+            summary: "Read first vectors",
+            request_schema: Some("HeadTailRequest"),
+        },
+        OpenApiRoute {
+            method: "get",
+            path: "/head_binary",
+            tag: "vectors",
+            summary: "Read first vectors as binary",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/tail",
+            tag: "vectors",
+            summary: "Read last vectors",
+            request_schema: Some("HeadTailRequest"),
+        },
+        OpenApiRoute {
+            method: "get",
+            path: "/tail_binary",
+            tag: "vectors",
+            summary: "Read last vectors as binary",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/get_collection_path",
+            tag: "collection",
+            summary: "Get collection path",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/query",
+            tag: "query",
+            summary: "Query metadata fields",
+            request_schema: Some("QueryRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/query_vectors",
+            tag: "query",
+            summary: "Query vectors by metadata or IDs",
+            request_schema: Some("QueryVectorsRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/list_fields",
+            tag: "collection",
+            summary: "List metadata fields",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/index_mode",
+            tag: "index",
+            summary: "Get index mode",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/is_id_exists",
+            tag: "vectors",
+            summary: "Check vector ID existence",
+            request_schema: Some("IsIdExistsRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/max_id",
+            tag: "vectors",
+            summary: "Get maximum vector ID",
+            request_schema: Some("MaxIdRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/read_by_only_id",
+            tag: "vectors",
+            summary: "Read vectors by ID",
+            request_schema: Some("ReadByIdRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/delete_items",
+            tag: "vectors",
+            summary: "Delete vectors",
+            request_schema: Some("DeleteItemsRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/restore_items",
+            tag: "vectors",
+            summary: "Restore deleted vectors",
+            request_schema: Some("DeleteItemsRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/list_deleted_ids",
+            tag: "vectors",
+            summary: "List deleted vector IDs",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/search_range",
+            tag: "query",
+            summary: "Range search",
+            request_schema: Some("SearchRangeRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/compact",
+            tag: "collection",
+            summary: "Compact collection",
+            request_schema: Some("CollectionRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/stats",
+            tag: "collection",
+            summary: "Collection stats",
+            request_schema: Some("CollectionRequest"),
+        },
+    ]
+}
+
+fn openapi_spec() -> serde_json::Value {
+    let mut paths = serde_json::Map::new();
+    for route in openapi_routes() {
+        let mut operation = serde_json::json!({
+            "tags": [route.tag],
+            "summary": route.summary,
+            "responses": {
+                "200": { "description": "Success" },
+                "400": { "description": "Bad request" },
+                "401": { "description": "Unauthorized" },
+                "500": { "description": "Server error" }
+            }
+        });
+
+        if let Some(schema_name) = route.request_schema {
+            operation["requestBody"] = serde_json::json!({
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": { "$ref": format!("#/components/schemas/{schema_name}") }
+                    }
+                }
+            });
+        }
+
+        let entry = paths
+            .entry(route.path.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(route.method.to_string(), operation);
+        }
+    }
+
+    serde_json::json!({
+        "openapi": "3.0.3",
+        "info": {
+            "title": "LynseDB HTTP API",
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": "Embedded-first vector database HTTP API."
+        },
+        "servers": [{"url": "http://127.0.0.1:7637"}],
+        "security": [{"ApiKeyAuth": []}],
+        "paths": paths,
+        "components": {
+            "securitySchemes": {
+                "ApiKeyAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "API key"
+                }
+            },
+            "schemas": openapi_schemas()
+        }
+    })
+}
+
+fn openapi_schemas() -> serde_json::Value {
+    serde_json::json!({
+        "ApiResponse": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "params": {"type": "object", "additionalProperties": true},
+                "error": {"type": "string"}
+            }
+        },
+        "DatabaseRequest": object_schema(&["database_name"]),
+        "CreateDatabaseRequest": object_schema(&["database_name", "drop_if_exists"]),
+        "DropDatabaseRequest": object_schema(&["database_name"]),
+        "DatabaseExistsRequest": object_schema(&["database_name"]),
+        "SnapshotDatabaseRequest": object_schema(&["database_name", "snapshot_path"]),
+        "RestoreDatabaseRequest": object_schema(&["database_name", "snapshot_path", "overwrite"]),
+        "RequireCollectionRequest": object_schema(&["database_name", "collection_name", "dim", "drop_if_exists", "description"]),
+        "CollectionRequest": object_schema(&["database_name", "collection_name"]),
+        "SnapshotCollectionRequest": object_schema(&["database_name", "collection_name", "snapshot_path"]),
+        "ExportCollectionRequest": object_schema(&["database_name", "collection_name", "export_path"]),
+        "RestoreCollectionRequest": object_schema(&["database_name", "collection_name", "snapshot_path", "overwrite"]),
+        "ImportCollectionRequest": object_schema(&["database_name", "collection_name", "export_path", "overwrite"]),
+        "AddItemRequest": object_schema(&["database_name", "collection_name", "item"]),
+        "BulkAddItemsRequest": object_schema(&["database_name", "collection_name", "items"]),
+        "CreateVectorFieldRequest": object_schema(&["database_name", "collection_name", "field_name", "dim", "metric", "index_mode"]),
+        "AddNamedVectorsRequest": object_schema(&["database_name", "collection_name", "field_name", "vectors", "ids"]),
+        "AddSparseVectorsRequest": object_schema(&["database_name", "collection_name", "vectors", "ids"]),
+        "BuildVectorFieldIndexRequest": object_schema(&["database_name", "collection_name", "field_name", "index_mode"]),
+        "SearchRequest": object_schema(&["database_name", "collection_name", "vector", "vector_field", "k", "where", "return_fields", "nprobe"]),
+        "SearchProfileRequest": object_schema(&["database_name", "collection_name", "vector", "k", "where", "return_fields", "nprobe"]),
+        "TextSearchRequest": object_schema(&["database_name", "collection_name", "text", "text_fields", "k", "where", "return_fields"]),
+        "SparseSearchRequest": object_schema(&["database_name", "collection_name", "vector", "k", "where", "return_fields"]),
+        "HybridSearchRequest": object_schema(&["database_name", "collection_name", "vector", "text", "text_fields", "k", "where", "fusion", "vector_weight", "text_weight", "rrf_k", "candidate_limit", "return_fields", "nprobe"]),
+        "BatchSearchRequest": object_schema(&["database_name", "collection_name", "vectors", "k", "where", "return_fields", "nprobe"]),
+        "CommitRequest": object_schema(&["database_name", "collection_name", "items"]),
+        "UpdateDescriptionRequest": object_schema(&["database_name", "collection_name", "description"]),
+        "BuildIndexRequest": object_schema(&["database_name", "collection_name", "index_mode"]),
+        "HeadTailRequest": object_schema(&["database_name", "collection_name", "n"]),
+        "QueryRequest": object_schema(&["database_name", "collection_name", "where", "filter_ids", "return_ids_only"]),
+        "QueryVectorsRequest": object_schema(&["database_name", "collection_name", "where", "filter_ids"]),
+        "IsIdExistsRequest": object_schema(&["database_name", "collection_name", "id"]),
+        "MaxIdRequest": object_schema(&["database_name", "collection_name"]),
+        "ReadByIdRequest": object_schema(&["database_name", "collection_name", "id"]),
+        "DeleteItemsRequest": object_schema(&["database_name", "collection_name", "ids"]),
+        "SearchRangeRequest": object_schema(&["database_name", "collection_name", "vector", "threshold", "max_results"])
+    })
+}
+
+fn object_schema(properties: &[&str]) -> serde_json::Value {
+    let props: serde_json::Map<String, serde_json::Value> = properties
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_string(),
+                serde_json::json!({
+                    "description": format!("{name} field"),
+                }),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "type": "object",
+        "properties": props,
+        "additionalProperties": true
+    })
+}
+
+async fn openapi_json() -> HttpResponse {
+    HttpResponse::Ok().json(openapi_spec())
+}
+
+async fn metrics(state: web::Data<AppState>) -> HttpResponse {
+    let database_names = state.manager.list_databases();
+    let databases_total = database_names.len();
+    let collections_total: usize = database_names
+        .iter()
+        .filter_map(|db| state.manager.show_collections(db).ok())
+        .map(|collections| collections.len())
+        .sum();
+
+    let open_databases_total = state.manager.open_database_count();
+    let open_collections_total = state.manager.open_collection_count();
+    let request_total = state.metrics.request_total();
+    let request_duration_sum_seconds = state.metrics.request_duration_sum_seconds();
+    let request_error_total = state.metrics.request_error_total.load(Ordering::Relaxed);
+    let status_2xx = state.metrics.status_2xx.load(Ordering::Relaxed);
+    let status_3xx = state.metrics.status_3xx.load(Ordering::Relaxed);
+    let status_4xx = state.metrics.status_4xx.load(Ordering::Relaxed);
+    let status_5xx = state.metrics.status_5xx.load(Ordering::Relaxed);
+    let status_other = state.metrics.status_other.load(Ordering::Relaxed);
+    let error_client_4xx_total = state.metrics.error_client_4xx_total.load(Ordering::Relaxed);
+    let error_server_5xx_total = state.metrics.error_server_5xx_total.load(Ordering::Relaxed);
+    let error_unauthorized_total = state
+        .metrics
+        .error_unauthorized_total
+        .load(Ordering::Relaxed);
+    let error_handler_failure_total = state
+        .metrics
+        .error_handler_failure_total
+        .load(Ordering::Relaxed);
+    let p50 = state.metrics.request_latency_quantile_seconds(0.50);
+    let p90 = state.metrics.request_latency_quantile_seconds(0.90);
+    let p99 = state.metrics.request_latency_quantile_seconds(0.99);
+
+    let mut histogram = String::new();
+    let mut cumulative = 0u64;
+    for (idx, bound) in state.metrics.histogram_bucket_bounds.iter().enumerate() {
+        cumulative += state.metrics.histogram_bucket_counts[idx].load(Ordering::Relaxed);
+        histogram.push_str(&format!(
+            "lynsedb_http_request_duration_seconds_bucket{{le=\"{}\"}} {}\n",
+            bound, cumulative
+        ));
+    }
+    cumulative += state.metrics.histogram_bucket_counts
+        [state.metrics.histogram_bucket_bounds.len()]
+    .load(Ordering::Relaxed);
+    histogram.push_str(&format!(
+        "lynsedb_http_request_duration_seconds_bucket{{le=\"+Inf\"}} {}\n",
+        cumulative
+    ));
+
+    let body = format!(
+        concat!(
+            "# HELP lynsedb_up LynseDB server availability.\n",
+            "# TYPE lynsedb_up gauge\n",
+            "lynsedb_up 1\n",
+            "# HELP lynsedb_server_start_time_seconds LynseDB server start time in unix seconds.\n",
+            "# TYPE lynsedb_server_start_time_seconds gauge\n",
+            "lynsedb_server_start_time_seconds {start_time}\n",
+            "# HELP lynsedb_databases_total Number of databases visible on disk.\n",
+            "# TYPE lynsedb_databases_total gauge\n",
+            "lynsedb_databases_total {db_total}\n",
+            "# HELP lynsedb_collections_total Number of collections visible on disk across databases.\n",
+            "# TYPE lynsedb_collections_total gauge\n",
+            "lynsedb_collections_total {coll_total}\n",
+            "# HELP lynsedb_open_databases_total Number of currently opened database engines.\n",
+            "# TYPE lynsedb_open_databases_total gauge\n",
+            "lynsedb_open_databases_total {open_db_total}\n",
+            "# HELP lynsedb_open_collections_total Number of currently opened collection handles.\n",
+            "# TYPE lynsedb_open_collections_total gauge\n",
+            "lynsedb_open_collections_total {open_coll_total}\n",
+            "# HELP lynsedb_http_requests_total Total number of HTTP requests handled by LynseDB.\n",
+            "# TYPE lynsedb_http_requests_total counter\n",
+            "lynsedb_http_requests_total {request_total}\n",
+            "# HELP lynsedb_http_requests_by_status_total Total number of HTTP requests by status class.\n",
+            "# TYPE lynsedb_http_requests_by_status_total counter\n",
+            "lynsedb_http_requests_by_status_total{{status_class=\"2xx\"}} {status_2xx}\n",
+            "lynsedb_http_requests_by_status_total{{status_class=\"3xx\"}} {status_3xx}\n",
+            "lynsedb_http_requests_by_status_total{{status_class=\"4xx\"}} {status_4xx}\n",
+            "lynsedb_http_requests_by_status_total{{status_class=\"5xx\"}} {status_5xx}\n",
+            "lynsedb_http_requests_by_status_total{{status_class=\"other\"}} {status_other}\n",
+            "# HELP lynsedb_http_request_errors_total Total number of HTTP requests resulting in error responses.\n",
+            "# TYPE lynsedb_http_request_errors_total counter\n",
+            "lynsedb_http_request_errors_total {request_error_total}\n",
+            "# HELP lynsedb_http_request_errors_by_kind_total Error counters split by semantic reason.\n",
+            "# TYPE lynsedb_http_request_errors_by_kind_total counter\n",
+            "lynsedb_http_request_errors_by_kind_total{{kind=\"client_4xx\"}} {error_client_4xx_total}\n",
+            "lynsedb_http_request_errors_by_kind_total{{kind=\"server_5xx\"}} {error_server_5xx_total}\n",
+            "lynsedb_http_request_errors_by_kind_total{{kind=\"unauthorized\"}} {error_unauthorized_total}\n",
+            "lynsedb_http_request_errors_by_kind_total{{kind=\"handler_failure\"}} {error_handler_failure_total}\n",
+            "# HELP lynsedb_http_request_duration_seconds HTTP request latency histogram in seconds.\n",
+            "# TYPE lynsedb_http_request_duration_seconds histogram\n",
+            "{histogram}",
+            "lynsedb_http_request_duration_seconds_sum {request_duration_sum_seconds}\n",
+            "lynsedb_http_request_duration_seconds_count {request_total}\n",
+            "# HELP lynsedb_http_request_duration_seconds_quantile Estimated HTTP request latency quantiles.\n",
+            "# TYPE lynsedb_http_request_duration_seconds_quantile gauge\n",
+            "lynsedb_http_request_duration_seconds_quantile{{quantile=\"0.5\"}} {p50}\n",
+            "lynsedb_http_request_duration_seconds_quantile{{quantile=\"0.9\"}} {p90}\n",
+            "lynsedb_http_request_duration_seconds_quantile{{quantile=\"0.99\"}} {p99}\n"
+        ),
+        start_time = state.start_time_unix_seconds,
+        db_total = databases_total,
+        coll_total = collections_total,
+        open_db_total = open_databases_total,
+        open_coll_total = open_collections_total,
+        request_total = request_total,
+        request_error_total = request_error_total,
+        status_2xx = status_2xx,
+        status_3xx = status_3xx,
+        status_4xx = status_4xx,
+        status_5xx = status_5xx,
+        status_other = status_other,
+        error_client_4xx_total = error_client_4xx_total,
+        error_server_5xx_total = error_server_5xx_total,
+        error_unauthorized_total = error_unauthorized_total,
+        error_handler_failure_total = error_handler_failure_total,
+        histogram = histogram,
+        request_duration_sum_seconds = request_duration_sum_seconds,
+        p50 = p50,
+        p90 = p90,
+        p99 = p99
+    );
+
+    HttpResponse::Ok()
+        .content_type("text/plain; version=0.0.4; charset=utf-8")
+        .body(body)
 }
 
 async fn create_database(
@@ -434,6 +1589,39 @@ async fn drop_database(
     match state.manager.drop_database(&body.database_name) {
         Ok(()) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn snapshot_database(
+    state: web::Data<AppState>,
+    body: web::Json<SnapshotDatabaseRequest>,
+) -> HttpResponse {
+    match state.manager.snapshot_database(
+        &body.database_name,
+        std::path::Path::new(&body.snapshot_path),
+    ) {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "snapshot_path": body.snapshot_path
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn restore_database(
+    state: web::Data<AppState>,
+    body: web::Json<RestoreDatabaseRequest>,
+) -> HttpResponse {
+    match state.manager.restore_database_from_snapshot(
+        &body.database_name,
+        std::path::Path::new(&body.snapshot_path),
+        body.overwrite.unwrap_or(false),
+    ) {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "snapshot_path": body.snapshot_path
         })),
         Err(e) => error_response(&e.to_string()),
     }
@@ -504,6 +1692,80 @@ async fn drop_collection(
         Ok(()) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name,
             "collection_name": body.collection_name
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn snapshot_collection(
+    state: web::Data<AppState>,
+    body: web::Json<SnapshotCollectionRequest>,
+) -> HttpResponse {
+    match state.manager.snapshot_collection(
+        &body.database_name,
+        &body.collection_name,
+        std::path::Path::new(&body.snapshot_path),
+    ) {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "snapshot_path": body.snapshot_path
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn export_collection(
+    state: web::Data<AppState>,
+    body: web::Json<ExportCollectionRequest>,
+) -> HttpResponse {
+    match state.manager.export_collection(
+        &body.database_name,
+        &body.collection_name,
+        std::path::Path::new(&body.export_path),
+    ) {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "export_path": body.export_path
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn restore_collection(
+    state: web::Data<AppState>,
+    body: web::Json<RestoreCollectionRequest>,
+) -> HttpResponse {
+    match state.manager.restore_collection_from_snapshot(
+        &body.database_name,
+        &body.collection_name,
+        std::path::Path::new(&body.snapshot_path),
+        body.overwrite.unwrap_or(false),
+    ) {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "snapshot_path": body.snapshot_path
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn import_collection(
+    state: web::Data<AppState>,
+    body: web::Json<ImportCollectionRequest>,
+) -> HttpResponse {
+    match state.manager.import_collection_from_export(
+        &body.database_name,
+        &body.collection_name,
+        std::path::Path::new(&body.export_path),
+        body.overwrite.unwrap_or(false),
+    ) {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "export_path": body.export_path
         })),
         Err(e) => error_response(&e.to_string()),
     }
@@ -668,6 +1930,186 @@ async fn bulk_add_items(
     }
 }
 
+async fn create_vector_field(
+    state: web::Data<AppState>,
+    body: web::Json<CreateVectorFieldRequest>,
+) -> HttpResponse {
+    if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
+        return error_response(&e.to_string());
+    }
+
+    let result = state.manager.with_database(&body.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
+        let mut coll = coll_arc.write();
+        coll.create_vector_field(
+            &body.field_name,
+            body.dim,
+            body.metric.as_deref(),
+            body.index_mode.as_deref(),
+        )
+    });
+
+    match result {
+        Ok(config) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "field": config
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn list_vector_fields(
+    state: web::Data<AppState>,
+    body: web::Json<CollectionRequest>,
+) -> HttpResponse {
+    if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
+        return error_response(&e.to_string());
+    }
+
+    let result = state.manager.with_database(&body.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
+        let coll = coll_arc.read();
+        Ok(coll.list_vector_fields())
+    });
+
+    match result {
+        Ok(fields) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "fields": fields
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn add_named_vectors(
+    state: web::Data<AppState>,
+    body: web::Json<AddNamedVectorsRequest>,
+) -> HttpResponse {
+    if body.vectors.is_empty() {
+        return bad_request("No vectors provided");
+    }
+    if body.vectors.len() != body.ids.len() {
+        return bad_request("vectors length must match ids length");
+    }
+
+    let dim = body.vectors[0].len();
+    let n_vectors = body.vectors.len();
+    let mut flat_vectors = Vec::with_capacity(n_vectors * dim);
+    for vector in &body.vectors {
+        if vector.len() != dim {
+            return bad_request("all named vectors in a batch must have the same dimension");
+        }
+        flat_vectors.extend_from_slice(vector);
+    }
+
+    if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
+        return error_response(&e.to_string());
+    }
+
+    let result = state.manager.with_database(&body.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
+        let mut coll = coll_arc.write();
+        coll.add_named_vectors(&body.field_name, &flat_vectors, n_vectors, &body.ids)
+    });
+
+    match result {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "field_name": body.field_name,
+            "ids": body.ids,
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn add_sparse_vectors(
+    state: web::Data<AppState>,
+    body: web::Json<AddSparseVectorsRequest>,
+) -> HttpResponse {
+    if body.vectors.len() != body.ids.len() {
+        return bad_request("vectors length must match ids length");
+    }
+
+    let vectors = match body
+        .vectors
+        .iter()
+        .map(sparse_vector_entries)
+        .collect::<std::result::Result<Vec<_>, LynseError>>()
+    {
+        Ok(vectors) => vectors,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+
+    let result = with_collection_mut(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| coll.add_sparse_vectors(&body.ids, &vectors),
+    );
+
+    match result {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "ids": body.ids,
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn build_vector_field_index(
+    state: web::Data<AppState>,
+    body: web::Json<BuildVectorFieldIndexRequest>,
+) -> HttpResponse {
+    let index_mode = body.index_mode.as_deref().unwrap_or("FLAT");
+    if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
+        return error_response(&e.to_string());
+    }
+
+    let result = state.manager.with_database(&body.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
+        let mut coll = coll_arc.write();
+        coll.build_vector_field_index(&body.field_name, index_mode)
+    });
+
+    match result {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "field_name": body.field_name,
+            "index_mode": index_mode,
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn remove_vector_field_index(
+    state: web::Data<AppState>,
+    body: web::Json<BuildVectorFieldIndexRequest>,
+) -> HttpResponse {
+    if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
+        return error_response(&e.to_string());
+    }
+
+    let result = state.manager.with_database(&body.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
+        let mut coll = coll_arc.write();
+        coll.remove_vector_field_index(&body.field_name)
+    });
+
+    match result {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "field_name": body.field_name,
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
 async fn upsert_items(
     state: web::Data<AppState>,
     body: web::Json<BulkAddItemsRequest>,
@@ -750,6 +2192,7 @@ async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> H
     let nprobe = body.nprobe.unwrap_or(10);
     let return_fields = body.return_fields.unwrap_or(false);
     let filter = body.where_expr.as_deref();
+    let vector_field = body.vector_field.as_deref().unwrap_or("default");
 
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
         return error_response(&e.to_string());
@@ -757,7 +2200,11 @@ async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> H
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
         let coll = coll_arc.read();
-        let sr = coll.search(&body.vector, k, filter, nprobe)?;
+        let sr = if vector_field == "default" {
+            coll.search(&body.vector, k, filter, nprobe)?
+        } else {
+            coll.search_vector_field(vector_field, &body.vector, k, filter)?
+        };
 
         let fields_data = if return_fields && !sr.ids.is_empty() {
             let retrieved = coll.retrieve_fields(&sr.ids)?;
@@ -786,7 +2233,200 @@ async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> H
                     "k": k,
                     "ids": ids,
                     "scores": scores,
+                    "vector_field": vector_field,
                     "fields": fields,
+                }
+            }))
+        }
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn search_profile(
+    state: web::Data<AppState>,
+    body: web::Json<SearchProfileRequest>,
+) -> HttpResponse {
+    let k = body.k.unwrap_or(10);
+    let nprobe = body.nprobe.unwrap_or(10);
+    let return_fields = body.return_fields.unwrap_or(false);
+    let filter = body.where_expr.as_deref();
+
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| {
+            let (sr, profile) = coll.search_with_profile(&body.vector, k, filter, nprobe)?;
+            let fields_data = if return_fields && !sr.ids.is_empty() {
+                coll.retrieve_fields(&sr.ids)?
+            } else {
+                Vec::new()
+            };
+            Ok((sr, fields_data, profile))
+        },
+    );
+
+    match result {
+        Ok((sr, fields_data, profile)) => {
+            let ids: Vec<i64> = sr.ids.iter().map(|&id| id as i64).collect();
+            ApiResponse::success(serde_json::json!({
+                "database_name": body.database_name,
+                "collection_name": body.collection_name,
+                "items": {
+                    "k": k,
+                    "ids": ids,
+                    "scores": sr.distances,
+                    "fields": if return_fields { fields_data } else { Vec::new() },
+                    "index": sr.index_mode,
+                },
+                "profile": profile,
+            }))
+        }
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn text_search(
+    state: web::Data<AppState>,
+    body: web::Json<TextSearchRequest>,
+) -> HttpResponse {
+    let k = body.k.unwrap_or(10);
+    let return_fields = body.return_fields.unwrap_or(false);
+    let filter = body.where_expr.as_deref();
+
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| {
+            let sr = coll.text_search(&body.text, body.text_fields.as_deref(), k, filter)?;
+            let fields_data = if return_fields && !sr.ids.is_empty() {
+                coll.retrieve_fields(&sr.ids)?
+            } else {
+                Vec::new()
+            };
+            Ok((sr, fields_data))
+        },
+    );
+
+    match result {
+        Ok((sr, fields_data)) => {
+            let ids: Vec<i64> = sr.ids.iter().map(|&id| id as i64).collect();
+            ApiResponse::success(serde_json::json!({
+                "database_name": body.database_name,
+                "collection_name": body.collection_name,
+                "items": {
+                    "k": k,
+                    "ids": ids,
+                    "scores": sr.distances,
+                    "fields": if return_fields { fields_data } else { Vec::new() },
+                    "index": sr.index_mode,
+                }
+            }))
+        }
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn sparse_search(
+    state: web::Data<AppState>,
+    body: web::Json<SparseSearchRequest>,
+) -> HttpResponse {
+    let k = body.k.unwrap_or(10);
+    let return_fields = body.return_fields.unwrap_or(false);
+    let filter = body.where_expr.as_deref();
+    let query = match sparse_vector_entries(&body.vector) {
+        Ok(query) => query,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| {
+            let sr = coll.search_sparse(&query, k, filter)?;
+            let fields_data = if return_fields && !sr.ids.is_empty() {
+                coll.retrieve_fields(&sr.ids)?
+            } else {
+                Vec::new()
+            };
+            Ok((sr, fields_data))
+        },
+    );
+
+    match result {
+        Ok((sr, fields_data)) => {
+            let ids: Vec<i64> = sr.ids.iter().map(|&id| id as i64).collect();
+            ApiResponse::success(serde_json::json!({
+                "database_name": body.database_name,
+                "collection_name": body.collection_name,
+                "items": {
+                    "k": k,
+                    "ids": ids,
+                    "scores": sr.distances,
+                    "fields": if return_fields { fields_data } else { Vec::new() },
+                    "index": sr.index_mode,
+                }
+            }))
+        }
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn hybrid_search(
+    state: web::Data<AppState>,
+    body: web::Json<HybridSearchRequest>,
+) -> HttpResponse {
+    let k = body.k.unwrap_or(10);
+    let nprobe = body.nprobe.unwrap_or(10);
+    let return_fields = body.return_fields.unwrap_or(false);
+    let filter = body.where_expr.as_deref();
+    let fusion = body.fusion.as_deref().unwrap_or("rrf");
+    let candidate_limit = body
+        .candidate_limit
+        .unwrap_or_else(|| k.saturating_mul(4).max(k));
+
+    let result = with_collection(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| {
+            let sr = coll.hybrid_search(
+                body.vector.as_deref(),
+                body.text.as_deref(),
+                k,
+                filter,
+                body.text_fields.as_deref(),
+                fusion,
+                body.vector_weight.unwrap_or(1.0),
+                body.text_weight.unwrap_or(1.0),
+                body.rrf_k.unwrap_or(60.0),
+                candidate_limit,
+                nprobe,
+            )?;
+            let fields_data = if return_fields && !sr.ids.is_empty() {
+                coll.retrieve_fields(&sr.ids)?
+            } else {
+                Vec::new()
+            };
+            Ok((sr, fields_data))
+        },
+    );
+
+    match result {
+        Ok((sr, fields_data)) => {
+            let ids: Vec<i64> = sr.ids.iter().map(|&id| id as i64).collect();
+            ApiResponse::success(serde_json::json!({
+                "database_name": body.database_name,
+                "collection_name": body.collection_name,
+                "items": {
+                    "k": k,
+                    "ids": ids,
+                    "scores": sr.distances,
+                    "fields": if return_fields { fields_data } else { Vec::new() },
+                    "index": sr.index_mode,
+                    "fusion": fusion,
                 }
             }))
         }
@@ -1735,6 +3375,7 @@ async fn search_binary(
     let nprobe = query.nprobe.unwrap_or(10);
     let return_fields = query.return_fields.unwrap_or(false);
     let filter = query.where_expr.as_deref();
+    let vector_field = query.vector_field.as_deref().unwrap_or("default");
 
     if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
         return binary_error(&e.to_string());
@@ -1742,7 +3383,11 @@ async fn search_binary(
     let result = state.manager.with_database(&query.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&query.collection_name, 0, 100_000)?;
         let coll = coll_arc.read();
-        let sr = coll.search(vector, k, filter, nprobe)?;
+        let sr = if vector_field == "default" {
+            coll.search(vector, k, filter, nprobe)?
+        } else {
+            coll.search_vector_field(vector_field, vector, k, filter)?
+        };
 
         let fields_data = if return_fields && !sr.ids.is_empty() {
             coll.retrieve_fields(&sr.ids)?
@@ -1886,21 +3531,47 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg
         // Root
         .route("/", web::get().to(index))
+        .route("/healthz", web::get().to(healthz))
+        .route("/readyz", web::get().to(readyz))
+        .route("/metrics", web::get().to(metrics))
+        .route("/openapi.json", web::get().to(openapi_json))
         // Database operations
         .route("/create_database", web::post().to(create_database))
         .route("/drop_database", web::post().to(drop_database))
+        .route("/snapshot_database", web::post().to(snapshot_database))
+        .route("/restore_database", web::post().to(restore_database))
         .route("/database_exists", web::post().to(database_exists))
         .route("/list_databases", web::get().to(list_databases))
         .route("/delete_database", web::post().to(delete_database))
         // Collection operations
         .route("/required_collection", web::post().to(required_collection))
         .route("/drop_collection", web::post().to(drop_collection))
+        .route("/snapshot_collection", web::post().to(snapshot_collection))
+        .route("/export_collection", web::post().to(export_collection))
+        .route("/restore_collection", web::post().to(restore_collection))
+        .route("/import_collection", web::post().to(import_collection))
         .route("/show_collections", web::post().to(show_collections))
         .route("/add_item", web::post().to(add_item))
         .route("/bulk_add_items", web::post().to(bulk_add_items))
+        .route("/create_vector_field", web::post().to(create_vector_field))
+        .route("/list_vector_fields", web::post().to(list_vector_fields))
+        .route("/add_named_vectors", web::post().to(add_named_vectors))
+        .route("/add_sparse_vectors", web::post().to(add_sparse_vectors))
+        .route(
+            "/build_vector_field_index",
+            web::post().to(build_vector_field_index),
+        )
+        .route(
+            "/remove_vector_field_index",
+            web::post().to(remove_vector_field_index),
+        )
         .route("/upsert_items", web::post().to(upsert_items))
         .route("/bulk_add_binary", web::post().to(bulk_add_binary))
         .route("/search", web::post().to(search))
+        .route("/search_profile", web::post().to(search_profile))
+        .route("/text_search", web::post().to(text_search))
+        .route("/sparse_search", web::post().to(sparse_search))
+        .route("/hybrid_search", web::post().to(hybrid_search))
         .route("/search_binary", web::post().to(search_binary))
         .route("/batch_search", web::post().to(batch_search))
         .route("/batch_search_binary", web::post().to(batch_search_binary))
@@ -1961,30 +3632,95 @@ pub fn run_server(
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?,
     );
     let api_key = Arc::new(api_key);
+    let metrics = Arc::new(HttpMetrics::new());
+    let start_time_unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let runtime_cfg = load_server_runtime_config();
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        log::info!("Starting LynseDB server on {}:{}", host, port);
+        log::info!(
+            "Starting LynseDB server on {}:{} (workers={}, keep_alive={}s, request_timeout={}s, json_limit={}B, payload_limit={}B)",
+            host,
+            port,
+            runtime_cfg.workers,
+            runtime_cfg.keep_alive_secs,
+            runtime_cfg.client_request_timeout_secs,
+            runtime_cfg.json_limit_bytes,
+            runtime_cfg.payload_limit_bytes
+        );
 
-        HttpServer::new(move || {
+        let app_manager = Arc::clone(&manager);
+        let app_metrics = Arc::clone(&metrics);
+        let app_runtime_cfg = runtime_cfg;
+        let server = HttpServer::new(move || {
             let key_clone: Option<String> = (*api_key).clone();
+            let metrics_clone = Arc::clone(&app_metrics);
             App::new()
                 .app_data(web::Data::new(AppState {
-                    manager: Arc::clone(&manager),
-                    api_key: key_clone.clone(),
+                    manager: Arc::clone(&app_manager),
+                    start_time_unix_seconds,
+                    metrics: Arc::clone(&metrics_clone),
                 }))
-                .app_data(web::JsonConfig::default().limit(1024 * 1024 * 256)) // 256MB JSON limit
-                .app_data(web::PayloadConfig::default().limit(1024 * 1024 * 512)) // 512MB raw payload limit
-                .wrap(ApiKeyAuth { api_key: key_clone })
+                .app_data(web::JsonConfig::default().limit(app_runtime_cfg.json_limit_bytes))
+                .app_data(web::PayloadConfig::default().limit(app_runtime_cfg.payload_limit_bytes))
+                .wrap(ApiKeyAuth {
+                    api_key: key_clone,
+                    metrics: metrics_clone,
+                })
                 .configure(configure_routes)
         })
-        .workers(num_cpus::get().max(2))
-        .keep_alive(std::time::Duration::from_secs(75))
-        .client_request_timeout(std::time::Duration::from_secs(300))
+        .workers(runtime_cfg.workers)
+        .keep_alive(std::time::Duration::from_secs(runtime_cfg.keep_alive_secs))
+        .client_request_timeout(std::time::Duration::from_secs(
+            runtime_cfg.client_request_timeout_secs,
+        ))
         .bind((host, port))?
-        .run()
-        .await
+        .disable_signals()
+        .run();
+
+        let handle = server.handle();
+        tokio::spawn(async move {
+            wait_for_shutdown_signal().await;
+            handle.stop(true).await;
+        });
+
+        let result = server.await;
+        if let Err(e) = manager.checkpoint_open_collections() {
+            log::error!("Failed to checkpoint collections during shutdown: {}", e);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ));
+        }
+        result
     })
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut sigterm = signal(SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                if let Some(signal) = sigterm.as_mut() {
+                    signal.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Start the HTTP server in a background thread. Returns the thread handle.
@@ -1995,4 +3731,68 @@ pub fn start_server_background(
     api_key: Option<String>,
 ) -> std::thread::JoinHandle<std::io::Result<()>> {
     std::thread::spawn(move || run_server(&host, port, &root_path, api_key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_public_endpoint, openapi_spec, HttpMetrics, RequestOutcome};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    #[test]
+    fn public_endpoint_whitelist_matches_probe_routes() {
+        assert!(is_public_endpoint("/"));
+        assert!(is_public_endpoint("/healthz"));
+        assert!(is_public_endpoint("/readyz"));
+        assert!(!is_public_endpoint("/metrics"));
+        assert!(!is_public_endpoint("/openapi.json"));
+        assert!(!is_public_endpoint("/search"));
+    }
+
+    #[test]
+    fn openapi_spec_includes_server_and_query_routes() {
+        let spec = openapi_spec();
+        let paths = spec["paths"].as_object().expect("paths object");
+        assert!(paths.contains_key("/openapi.json"));
+        assert!(paths.contains_key("/search"));
+        assert!(paths.contains_key("/search_profile"));
+        assert!(paths.contains_key("/text_search"));
+        assert!(paths.contains_key("/sparse_search"));
+        assert!(paths.contains_key("/hybrid_search"));
+        assert!(paths.contains_key("/add_sparse_vectors"));
+    }
+
+    #[test]
+    fn http_metrics_records_request_counts_and_latency() {
+        let metrics = HttpMetrics::new();
+        metrics.observe(200, Duration::from_millis(10), RequestOutcome::Normal);
+        metrics.observe(401, Duration::from_millis(20), RequestOutcome::Unauthorized);
+        metrics.observe(404, Duration::from_millis(50), RequestOutcome::Normal);
+        metrics.observe(
+            503,
+            Duration::from_millis(200),
+            RequestOutcome::HandlerFailure,
+        );
+
+        assert_eq!(metrics.request_total(), 4);
+        assert_eq!(metrics.request_error_total.load(Ordering::Relaxed), 3);
+        assert_eq!(metrics.status_2xx.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.status_4xx.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.status_5xx.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.error_client_4xx_total.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.error_server_5xx_total.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.error_unauthorized_total.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics.error_handler_failure_total.load(Ordering::Relaxed),
+            1
+        );
+        assert!(metrics.request_duration_sum_seconds() >= 0.28);
+
+        let p50 = metrics.request_latency_quantile_seconds(0.50);
+        let p90 = metrics.request_latency_quantile_seconds(0.90);
+        let p99 = metrics.request_latency_quantile_seconds(0.99);
+        assert!(p50 > 0.0);
+        assert!(p90 >= p50);
+        assert!(p99 >= p90);
+    }
 }

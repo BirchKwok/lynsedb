@@ -27,6 +27,21 @@ logger = logging.getLogger(__name__)
 from . import _core as _lynse
 
 
+def _normalize_sparse_vector(vector: Any) -> List[Tuple[int, float]]:
+    """Normalize a sparse vector from {dim: value} or [(dim, value), ...]."""
+    items = vector.items() if isinstance(vector, dict) else vector
+    normalized: List[Tuple[int, float]] = []
+    for item in items:
+        if len(item) != 2:
+            raise ValueError("sparse vector entries must be (index, value) pairs")
+        index, value = item
+        index = int(index)
+        if index < 0:
+            raise ValueError("sparse vector indices must be non-negative")
+        normalized.append((index, float(value)))
+    return normalized
+
+
 # ─── Server management ──────────────────────────────────────────────────────
 
 _server_thread = None
@@ -67,14 +82,28 @@ class DatabaseManager:
     Manages multiple databases, each containing multiple collections.
     """
 
-    def __init__(self, root_path: str):
-        self._manager = _lynse.DatabaseManager(root_path)
+    def __init__(self, root_path: str, read_only: bool = False):
+        if read_only:
+            self._manager = _lynse.DatabaseManager.open_read_only(root_path)
+        else:
+            self._manager = _lynse.DatabaseManager(root_path)
 
     def create_database(self, name: str) -> None:
         self._manager.create_database(name)
 
     def drop_database(self, name: str) -> None:
         self._manager.drop_database(name)
+
+    def snapshot_database(self, name: str, snapshot_path: str) -> None:
+        self._manager.snapshot_database(name, snapshot_path)
+
+    def restore_database(
+        self,
+        name: str,
+        snapshot_path: str,
+        overwrite: bool = False,
+    ) -> None:
+        self._manager.restore_database(name, snapshot_path, overwrite)
 
     def list_databases(self) -> List[str]:
         return self._manager.list_databases()
@@ -99,6 +128,30 @@ class DatabaseManager:
 
     def drop_collection(self, db_name: str, collection_name: str) -> None:
         self._manager.drop_collection(db_name, collection_name)
+
+    def snapshot_collection(self, db_name: str, collection_name: str, snapshot_path: str) -> None:
+        self._manager.snapshot_collection(db_name, collection_name, snapshot_path)
+
+    def export_collection(self, db_name: str, collection_name: str, export_path: str) -> None:
+        self._manager.export_collection(db_name, collection_name, export_path)
+
+    def restore_collection(
+        self,
+        db_name: str,
+        collection_name: str,
+        snapshot_path: str,
+        overwrite: bool = False,
+    ) -> None:
+        self._manager.restore_collection(db_name, collection_name, snapshot_path, overwrite)
+
+    def import_collection(
+        self,
+        db_name: str,
+        collection_name: str,
+        export_path: str,
+        overwrite: bool = False,
+    ) -> None:
+        self._manager.import_collection(db_name, collection_name, export_path, overwrite)
 
     def collection_exists(self, db_name: str, collection_name: str) -> bool:
         return self._manager.collection_exists(db_name, collection_name)
@@ -133,6 +186,10 @@ class DatabaseManager:
     @property
     def root_path(self) -> str:
         return self._manager.root_path()
+
+    @property
+    def is_read_only(self) -> bool:
+        return self._manager.is_read_only()
 
 
 # ─── Distance computation bridge ─────────────────────────────────────────────
@@ -174,8 +231,11 @@ class RustEngine:
     but delegates entirely to Rust for performance.
     """
 
-    def __init__(self, root_path: str):
-        self._engine = _lynse.DatabaseEngine(root_path)
+    def __init__(self, root_path: str, read_only: bool = False):
+        if read_only:
+            self._engine = _lynse.DatabaseEngine.open_read_only(root_path)
+        else:
+            self._engine = _lynse.DatabaseEngine(root_path)
 
     # ── Collection management ──
 
@@ -194,6 +254,28 @@ class RustEngine:
     def drop_collection(self, name: str) -> None:
         self._engine.drop_collection(name)
 
+    def snapshot_collection(self, name: str, snapshot_path: str) -> None:
+        self._engine.snapshot_collection(name, snapshot_path)
+
+    def export_collection(self, name: str, export_path: str) -> None:
+        self._engine.export_collection(name, export_path)
+
+    def restore_collection(
+        self,
+        name: str,
+        snapshot_path: str,
+        overwrite: bool = False,
+    ) -> None:
+        self._engine.restore_collection(name, snapshot_path, overwrite)
+
+    def import_collection(
+        self,
+        name: str,
+        export_path: str,
+        overwrite: bool = False,
+    ) -> None:
+        self._engine.import_collection(name, export_path, overwrite)
+
     def list_collections(self) -> List[str]:
         return self._engine.list_collections()
 
@@ -204,12 +286,20 @@ class RustEngine:
     def root_path(self) -> str:
         return self._engine.root_path()
 
+    @property
+    def is_read_only(self) -> bool:
+        return self._engine.is_read_only()
+
 
 class Collection:
     """Wrapper around a single Rust Collection."""
 
     def __init__(self, inner):
         self._inner = inner
+
+    @property
+    def is_read_only(self) -> bool:
+        return self._inner.is_read_only()
 
     def add_items(
         self,
@@ -298,6 +388,49 @@ class Collection:
     def remove_index(self) -> None:
         self._inner.remove_index()
 
+    def create_vector_field(
+        self,
+        name: str,
+        dimension: int,
+        metric: Optional[str] = None,
+        index_mode: Optional[str] = None,
+    ) -> None:
+        """Create a named vector field with its own dimension and metric."""
+        self._inner.create_vector_field(name, int(dimension), metric, index_mode)
+
+    def list_vector_fields(self) -> List[Dict[str, Any]]:
+        """List vector fields, including the reserved default primary vector."""
+        return [dict(field) for field in self._inner.list_vector_fields()]
+
+    def add_named_vectors(
+        self,
+        field_name: str,
+        vectors: np.ndarray,
+        ids: List[int],
+    ) -> None:
+        """Attach vectors to a named vector field for existing IDs."""
+        vectors = np.ascontiguousarray(vectors, dtype=np.float32)
+        if vectors.ndim == 1:
+            vectors = vectors.reshape(1, -1)
+        self._inner.add_named_vectors(field_name, vectors, [int(i) for i in ids])
+
+    def build_vector_field_index(self, field_name: str, index_mode: str) -> None:
+        """Build or change the index for a named vector field."""
+        self._inner.build_vector_field_index(field_name, index_mode)
+
+    def remove_vector_field_index(self, field_name: str) -> None:
+        """Remove a named vector field index and return it to flat search."""
+        self._inner.remove_vector_field_index(field_name)
+
+    def add_sparse_vectors(
+        self,
+        vectors: List[Union[Dict[int, float], List[Tuple[int, float]]]],
+        ids: List[int],
+    ) -> None:
+        """Attach sparse feature vectors to existing IDs."""
+        normalized = [_normalize_sparse_vector(vector) for vector in vectors]
+        self._inner.add_sparse_vectors(normalized, [int(i) for i in ids])
+
     def search(
         self,
         vector: np.ndarray,
@@ -327,6 +460,99 @@ class Collection:
         return ResultView(
             ids=ids, distances=distances,
             k=k, distance=metric, index=idx_type,
+            result_type="search",
+        )
+
+    def search_vector_field(
+        self,
+        field_name: str,
+        vector: np.ndarray,
+        k: int = 10,
+        where: Optional[str] = None,
+    ) -> ResultView:
+        """Search a named vector field. Use field_name='default' for primary vectors."""
+        vector = np.ascontiguousarray(vector, dtype=np.float32).ravel()
+        result = self._inner.search_vector_field(field_name, vector, k, where)
+        ids = result.ids()
+        distances = result.distances()
+        idx_type, metric = _parse_index_mode(result.index_mode())
+        return ResultView(
+            ids=ids, distances=distances,
+            k=k, distance=metric, index=idx_type,
+            result_type="search",
+        )
+
+    def search_sparse(
+        self,
+        vector: Union[Dict[int, float], List[Tuple[int, float]]],
+        k: int = 10,
+        where: Optional[str] = None,
+    ) -> ResultView:
+        """Search sparse vectors with inner product."""
+        normalized = _normalize_sparse_vector(vector)
+        result = self._inner.search_sparse(normalized, k, where)
+        return ResultView(
+            ids=result.ids(),
+            distances=result.distances(),
+            k=k,
+            distance="IP",
+            index=result.index_mode(),
+            result_type="search",
+        )
+
+    def search_profile(
+        self,
+        vector: np.ndarray,
+        k: int = 10,
+        where: Optional[str] = None,
+        nprobe: int = 10,
+    ) -> Dict[str, Any]:
+        """Search and return profile/explain metadata."""
+        vector = np.ascontiguousarray(vector, dtype=np.float32).ravel()
+        return self._inner.search_profile(vector, k, where, nprobe)
+
+    def text_search(
+        self,
+        text: str,
+        text_fields: Optional[List[str]] = None,
+        k: int = 10,
+        where: Optional[str] = None,
+    ) -> ResultView:
+        """BM25 text search over metadata fields."""
+        result = self._inner.text_search(text, text_fields, k, where)
+        ids = result.ids()
+        distances = result.distances()
+        return ResultView(
+            ids=ids, distances=distances,
+            k=k, distance="bm25", index=result.index_mode(),
+            result_type="search",
+        )
+
+    def hybrid_search(
+        self,
+        vector: Optional[np.ndarray] = None,
+        text: Optional[str] = None,
+        k: int = 10,
+        where: Optional[str] = None,
+        text_fields: Optional[List[str]] = None,
+        fusion: str = "rrf",
+        vector_weight: float = 1.0,
+        text_weight: float = 1.0,
+        rrf_k: float = 60.0,
+        candidate_limit: Optional[int] = None,
+        nprobe: int = 10,
+    ) -> ResultView:
+        """Hybrid vector + BM25 text search with RRF or weighted fusion."""
+        vec = None if vector is None else np.ascontiguousarray(vector, dtype=np.float32).ravel()
+        result = self._inner.hybrid_search(
+            vec, text, k, where, text_fields, fusion,
+            float(vector_weight), float(text_weight), float(rrf_k), candidate_limit, nprobe,
+        )
+        ids = result.ids()
+        distances = result.distances()
+        return ResultView(
+            ids=ids, distances=distances,
+            k=k, distance="fusion", index=result.index_mode(),
             result_type="search",
         )
 
@@ -538,6 +764,12 @@ class Collection:
 
     def delete(self) -> None:
         self._inner.delete()
+
+    def snapshot_to(self, snapshot_path: str) -> None:
+        self._inner.snapshot_to(snapshot_path)
+
+    def export_to(self, export_path: str) -> None:
+        self._inner.export_to(export_path)
 
 
 # SearchResult is replaced by ResultView from result_view.py.
