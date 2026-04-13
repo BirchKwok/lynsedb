@@ -40,6 +40,12 @@ lynse serve --host localhost --port 7637 --data-dir ./data
 # lynse serve --host localhost --port 7637 --data-dir ./data \
 #   --json-limit-mb 256 --payload-limit-mb 512 \
 #   --request-timeout-secs 300 --keep-alive-secs 75
+# slow query warnings default to 1000 ms; set to 0 to disable:
+# LYNSE_SLOW_QUERY_WARN_MS=250 lynse serve --host localhost --port 7637 --data-dir ./data
+# production guards can cap result size, request batch size, collection size,
+# estimated dense vector bytes, and audit logging:
+# lynse serve --max-top-k 1000 --max-batch-vectors 50000 --max-collection-vectors 10000000 \
+#   --max-collection-vector-bytes 1099511627776 --audit-log
 # or via Docker:
 docker run -p 7637:7637 birchkwok/lynsedb:latest
 # docker run -p 7637:7637 -e LYNSE_API_KEY=your_key birchkwok/lynsedb:latest
@@ -59,6 +65,12 @@ curl http://127.0.0.1:7637/readyz
 curl http://127.0.0.1:7637/metrics
 curl http://127.0.0.1:7637/openapi.json
 ```
+
+`/metrics` exposes Prometheus text for request counts and latency, WAL bytes, total
+data directory bytes, vector index bytes, process resident memory, and live index
+build counters/progress. HTTP server logs are structured JSON and include
+`request_id`; slow search/query requests emit `slow_query` warnings. Mutating
+server requests emit `audit` events unless `LYNSE_AUDIT_LOG=false`.
 
 Deployment examples live in `docs/deployment/` for Docker Compose, systemd, and Kubernetes.
 

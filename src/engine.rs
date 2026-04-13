@@ -1954,6 +1954,40 @@ impl Collection {
         fields
     }
 
+    /// Return the stored vector count and dimension for a vector field.
+    pub fn vector_field_shape(&self, field_name: &str) -> Result<(u64, usize)> {
+        if field_name == DEFAULT_VECTOR_FIELD_NAME || field_name.trim().is_empty() {
+            return self.shape();
+        }
+
+        let field_name = Self::validate_vector_field_name(field_name)?;
+        let field = self.named_vector_fields.get(&field_name).ok_or_else(|| {
+            LynseError::InvalidArgument(format!("vector field '{}' does not exist", field_name))
+        })?;
+        field.vector_store.get_shape()
+    }
+
+    /// Estimate dense vector bytes stored by the primary and named vector fields.
+    pub fn estimated_vector_bytes(&self) -> Result<u64> {
+        fn field_bytes(n_vectors: u64, dim: usize) -> Result<u64> {
+            n_vectors
+                .checked_mul(dim as u64)
+                .and_then(|floats| floats.checked_mul(std::mem::size_of::<f32>() as u64))
+                .ok_or_else(|| LynseError::Storage("vector byte estimate overflows".to_string()))
+        }
+
+        let (primary_n, primary_dim) = self.shape()?;
+        let mut total = field_bytes(primary_n, primary_dim)?;
+        for field in self.named_vector_fields.values() {
+            let (n, dim) = field.vector_store.get_shape()?;
+            let bytes = field_bytes(n, dim)?;
+            total = total
+                .checked_add(bytes)
+                .ok_or_else(|| LynseError::Storage("vector byte estimate overflows".to_string()))?;
+        }
+        Ok(total)
+    }
+
     /// Attach vectors to an existing named vector field for existing user IDs.
     pub fn add_named_vectors(
         &mut self,

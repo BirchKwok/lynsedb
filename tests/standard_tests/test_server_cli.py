@@ -57,6 +57,12 @@ def test_parse_json_config_file(tmp_path):
                 "request_timeout_secs": 120,
                 "json_limit_mb": 64,
                 "payload_limit_mb": 128,
+                "slow_query_warn_ms": 250,
+                "max_top_k": 500,
+                "max_batch_vectors": 1000,
+                "max_collection_vectors": 2000,
+                "max_collection_vector_bytes": 4096,
+                "audit_log": False,
             }
         ),
         encoding="utf-8",
@@ -72,20 +78,28 @@ def test_parse_json_config_file(tmp_path):
     assert args.request_timeout_secs == 120
     assert args.json_limit_mb == 64
     assert args.payload_limit_mb == 128
+    assert args.slow_query_warn_ms == 250
+    assert args.max_top_k == 500
+    assert args.max_batch_vectors == 1000
+    assert args.max_collection_vectors == 2000
+    assert args.max_collection_vector_bytes == 4096
+    assert args.audit_log is False
 
 
 def test_env_overrides_config(tmp_path, monkeypatch):
     config_path = tmp_path / "server.json"
     config_path.write_text(
-        json.dumps({"port": 9002, "json_limit_mb": 64}),
+        json.dumps({"port": 9002, "json_limit_mb": 64, "audit_log": False}),
         encoding="utf-8",
     )
     monkeypatch.setenv("LYNSE_PORT", "9011")
     monkeypatch.setenv("LYNSE_JSON_LIMIT_MB", "96")
+    monkeypatch.setenv("LYNSE_AUDIT_LOG", "true")
 
     args = _parse_args(["--config", str(config_path)])
     assert args.port == 9011
     assert args.json_limit_mb == 96
+    assert args.audit_log is True
 
 
 def test_cli_overrides_env_and_config(tmp_path, monkeypatch):
@@ -95,3 +109,27 @@ def test_cli_overrides_env_and_config(tmp_path, monkeypatch):
 
     args = _parse_args(["--config", str(config_path), "--port", "9020"])
     assert args.port == 9020
+
+
+def test_parse_server_governance_limits_from_cli():
+    args = _parse_args(
+        [
+            "--slow-query-warn-ms",
+            "0",
+            "--max-top-k",
+            "12",
+            "--max-batch-vectors",
+            "34",
+            "--max-collection-vectors",
+            "56",
+            "--max-collection-vector-bytes",
+            "789",
+            "--no-audit-log",
+        ]
+    )
+    assert args.slow_query_warn_ms == 0
+    assert args.max_top_k == 12
+    assert args.max_batch_vectors == 34
+    assert args.max_collection_vectors == 56
+    assert args.max_collection_vector_bytes == 789
+    assert args.audit_log is False

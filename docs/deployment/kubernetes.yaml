@@ -59,6 +59,18 @@ spec:
               value: "300"
             - name: LYNSE_KEEP_ALIVE_SECS
               value: "75"
+            - name: LYNSE_SLOW_QUERY_WARN_MS
+              value: "1000"
+            - name: LYNSE_MAX_TOP_K
+              value: "10000"
+            - name: LYNSE_MAX_BATCH_VECTORS
+              value: "100000"
+            - name: LYNSE_MAX_COLLECTION_VECTORS
+              value: "10000000"
+            - name: LYNSE_MAX_COLLECTION_VECTOR_BYTES
+              value: "1099511627776"
+            - name: LYNSE_AUDIT_LOG
+              value: "true"
           ports:
             - containerPort: 7637
           livenessProbe:

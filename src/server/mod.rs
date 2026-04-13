@@ -5,13 +5,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::{ready, Future, Ready};
+use std::io::Write;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use actix_web::body::EitherBody;
 use actix_web::dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform};
+use actix_web::http::header::{HeaderMap, HeaderName, HeaderValue};
 use actix_web::{web, App, HttpResponse, HttpServer};
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +27,16 @@ struct AppState {
     manager: Arc<DatabaseManager>,
     start_time_unix_seconds: u64,
     metrics: Arc<HttpMetrics>,
+    limits: ServerLimits,
 }
+
+const DEFAULT_SLOW_QUERY_WARN_MS: u64 = 1000;
+const REQUEST_ID_HEADER: &str = "x-request-id";
+static LOGGER_INIT: Once = Once::new();
+const DEFAULT_MAX_TOP_K: usize = 10_000;
+const DEFAULT_MAX_BATCH_VECTORS: usize = 100_000;
+const DEFAULT_MAX_COLLECTION_VECTORS: u64 = 10_000_000;
+const DEFAULT_MAX_COLLECTION_VECTOR_BYTES: u64 = 1_099_511_627_776; // 1 TiB
 
 #[derive(Clone, Copy, Debug)]
 struct ServerRuntimeConfig {
@@ -33,6 +45,21 @@ struct ServerRuntimeConfig {
     client_request_timeout_secs: u64,
     json_limit_bytes: usize,
     payload_limit_bytes: usize,
+    slow_query_warn_ms: u64,
+    limits: ServerLimits,
+    audit_log_enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ServerLimits {
+    /// 0 disables this guard.
+    max_top_k: usize,
+    /// 0 disables this guard.
+    max_batch_vectors: usize,
+    /// 0 disables this guard.
+    max_collection_vectors: u64,
+    /// 0 disables this guard.
+    max_collection_vector_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -43,6 +70,7 @@ enum RequestOutcome {
 }
 
 struct HttpMetrics {
+    request_id_seq: AtomicU64,
     request_total: AtomicU64,
     request_error_total: AtomicU64,
     request_duration_sum_nanos: AtomicU64,
@@ -57,6 +85,16 @@ struct HttpMetrics {
     error_handler_failure_total: AtomicU64,
     histogram_bucket_bounds: Vec<f64>,
     histogram_bucket_counts: Vec<AtomicU64>,
+    index_build_started_total: AtomicU64,
+    index_build_completed_total: AtomicU64,
+    index_build_failed_total: AtomicU64,
+    index_build_in_progress: AtomicU64,
+    index_build_current_vectors: AtomicU64,
+    index_build_last_vectors: AtomicU64,
+    index_build_duration_sum_nanos: AtomicU64,
+    index_build_last_duration_nanos: AtomicU64,
+    index_build_current_progress_ppm: AtomicU64,
+    index_build_last_progress_ppm: AtomicU64,
 }
 
 impl HttpMetrics {
@@ -71,6 +109,7 @@ impl HttpMetrics {
         }
 
         Self {
+            request_id_seq: AtomicU64::new(0),
             request_total: AtomicU64::new(0),
             request_error_total: AtomicU64::new(0),
             request_duration_sum_nanos: AtomicU64::new(0),
@@ -85,7 +124,21 @@ impl HttpMetrics {
             error_handler_failure_total: AtomicU64::new(0),
             histogram_bucket_bounds: bounds,
             histogram_bucket_counts: bucket_counts,
+            index_build_started_total: AtomicU64::new(0),
+            index_build_completed_total: AtomicU64::new(0),
+            index_build_failed_total: AtomicU64::new(0),
+            index_build_in_progress: AtomicU64::new(0),
+            index_build_current_vectors: AtomicU64::new(0),
+            index_build_last_vectors: AtomicU64::new(0),
+            index_build_duration_sum_nanos: AtomicU64::new(0),
+            index_build_last_duration_nanos: AtomicU64::new(0),
+            index_build_current_progress_ppm: AtomicU64::new(0),
+            index_build_last_progress_ppm: AtomicU64::new(0),
         }
+    }
+
+    fn next_request_id(&self) -> u64 {
+        self.request_id_seq.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     fn observe(&self, status_code: u16, elapsed: Duration, outcome: RequestOutcome) {
@@ -199,6 +252,70 @@ impl HttpMetrics {
 
         self.histogram_bucket_bounds.last().copied().unwrap_or(0.0)
     }
+
+    fn track_index_build<T, E, F>(&self, total_vectors: u64, build: F) -> std::result::Result<T, E>
+    where
+        F: FnOnce() -> std::result::Result<T, E>,
+    {
+        self.index_build_started_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.index_build_in_progress.fetch_add(1, Ordering::Relaxed);
+        self.index_build_current_vectors
+            .fetch_add(total_vectors, Ordering::Relaxed);
+        self.index_build_current_progress_ppm
+            .store(0, Ordering::Relaxed);
+
+        let started = Instant::now();
+        let result = build();
+        let elapsed = started.elapsed();
+        let elapsed_nanos = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+
+        atomic_saturating_sub(&self.index_build_in_progress, 1);
+        atomic_saturating_sub(&self.index_build_current_vectors, total_vectors);
+        self.index_build_last_vectors
+            .store(total_vectors, Ordering::Relaxed);
+        self.index_build_duration_sum_nanos
+            .fetch_add(elapsed_nanos, Ordering::Relaxed);
+        self.index_build_last_duration_nanos
+            .store(elapsed_nanos, Ordering::Relaxed);
+
+        if result.is_ok() {
+            self.index_build_completed_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.index_build_current_progress_ppm
+                .store(0, Ordering::Relaxed);
+            self.index_build_last_progress_ppm
+                .store(1_000_000, Ordering::Relaxed);
+        } else {
+            self.index_build_failed_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.index_build_current_progress_ppm
+                .store(0, Ordering::Relaxed);
+            self.index_build_last_progress_ppm
+                .store(0, Ordering::Relaxed);
+        }
+
+        result
+    }
+
+    fn index_build_duration_sum_seconds(&self) -> f64 {
+        self.index_build_duration_sum_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+    }
+
+    fn index_build_last_duration_seconds(&self) -> f64 {
+        self.index_build_last_duration_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+    }
+}
+
+fn atomic_saturating_sub(counter: &AtomicU64, amount: u64) {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_sub(amount);
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(value) => current = value,
+        }
+    }
 }
 
 fn parse_positive_usize_env(name: &str) -> Option<usize> {
@@ -208,6 +325,37 @@ fn parse_positive_usize_env(name: &str) -> Option<usize> {
         _ => {
             log::warn!(
                 "Ignoring invalid {}='{}' (must be a positive integer)",
+                name,
+                raw
+            );
+            None
+        }
+    }
+}
+
+fn parse_u64_env(name: &str) -> Option<u64> {
+    let raw = std::env::var(name).ok()?;
+    match raw.parse::<u64>() {
+        Ok(v) => Some(v),
+        _ => {
+            log::warn!(
+                "Ignoring invalid {}='{}' (must be a non-negative integer)",
+                name,
+                raw
+            );
+            None
+        }
+    }
+}
+
+fn parse_bool_env(name: &str) -> Option<bool> {
+    let raw = std::env::var(name).ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => {
+            log::warn!(
+                "Ignoring invalid {}='{}' (must be true/false or 1/0)",
                 name,
                 raw
             );
@@ -228,6 +376,21 @@ fn load_server_runtime_config() -> ServerRuntimeConfig {
 
     let json_limit_mb = parse_positive_usize_env("LYNSE_JSON_LIMIT_MB").unwrap_or(256);
     let payload_limit_mb = parse_positive_usize_env("LYNSE_PAYLOAD_LIMIT_MB").unwrap_or(512);
+    let slow_query_warn_ms =
+        parse_u64_env("LYNSE_SLOW_QUERY_WARN_MS").unwrap_or(DEFAULT_SLOW_QUERY_WARN_MS);
+    let limits = ServerLimits {
+        max_top_k: parse_u64_env("LYNSE_MAX_TOP_K")
+            .map(|v| v.min(usize::MAX as u64) as usize)
+            .unwrap_or(DEFAULT_MAX_TOP_K),
+        max_batch_vectors: parse_u64_env("LYNSE_MAX_BATCH_VECTORS")
+            .map(|v| v.min(usize::MAX as u64) as usize)
+            .unwrap_or(DEFAULT_MAX_BATCH_VECTORS),
+        max_collection_vectors: parse_u64_env("LYNSE_MAX_COLLECTION_VECTORS")
+            .unwrap_or(DEFAULT_MAX_COLLECTION_VECTORS),
+        max_collection_vector_bytes: parse_u64_env("LYNSE_MAX_COLLECTION_VECTOR_BYTES")
+            .unwrap_or(DEFAULT_MAX_COLLECTION_VECTOR_BYTES),
+    };
+    let audit_log_enabled = parse_bool_env("LYNSE_AUDIT_LOG").unwrap_or(true);
 
     ServerRuntimeConfig {
         workers,
@@ -235,7 +398,409 @@ fn load_server_runtime_config() -> ServerRuntimeConfig {
         client_request_timeout_secs,
         json_limit_bytes: json_limit_mb.saturating_mul(1024 * 1024),
         payload_limit_bytes: payload_limit_mb.saturating_mul(1024 * 1024),
+        slow_query_warn_ms,
+        limits,
+        audit_log_enabled,
     }
+}
+
+fn checked_vector_bytes(n_vectors: usize, dim: usize) -> Result<u64, LynseError> {
+    let floats = n_vectors
+        .checked_mul(dim)
+        .ok_or_else(|| LynseError::InvalidArgument("vector count × dimension overflows".into()))?;
+    let bytes = floats
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| LynseError::InvalidArgument("vector byte estimate overflows".into()))?;
+    Ok(bytes as u64)
+}
+
+fn validate_top_k(limits: &ServerLimits, value: usize, field: &str) -> Result<(), LynseError> {
+    if limits.max_top_k > 0 && value > limits.max_top_k {
+        return Err(LynseError::InvalidArgument(format!(
+            "{} {} exceeds server max_top_k {}",
+            field, value, limits.max_top_k
+        )));
+    }
+    Ok(())
+}
+
+fn validate_batch_vectors(
+    limits: &ServerLimits,
+    n_vectors: usize,
+    field: &str,
+) -> Result<(), LynseError> {
+    if limits.max_batch_vectors > 0 && n_vectors > limits.max_batch_vectors {
+        return Err(LynseError::InvalidArgument(format!(
+            "{} {} exceeds server max_batch_vectors {}",
+            field, n_vectors, limits.max_batch_vectors
+        )));
+    }
+    Ok(())
+}
+
+fn validate_request_vector_bytes(
+    limits: &ServerLimits,
+    n_vectors: usize,
+    dim: usize,
+    field: &str,
+) -> Result<(), LynseError> {
+    let bytes = checked_vector_bytes(n_vectors, dim)?;
+    if limits.max_collection_vector_bytes > 0 && bytes > limits.max_collection_vector_bytes {
+        return Err(LynseError::InvalidArgument(format!(
+            "{} estimated vector bytes {} exceed server max_collection_vector_bytes {}",
+            field, bytes, limits.max_collection_vector_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn validate_collection_vector_count(
+    limits: &ServerLimits,
+    current_vectors: u64,
+    additional_vectors: u64,
+) -> Result<(), LynseError> {
+    if limits.max_collection_vectors == 0 {
+        return Ok(());
+    }
+
+    let target = current_vectors
+        .checked_add(additional_vectors)
+        .ok_or_else(|| LynseError::InvalidArgument("collection vector count overflows".into()))?;
+    if target > limits.max_collection_vectors {
+        return Err(LynseError::InvalidArgument(format!(
+            "collection vector count {} would exceed server max_collection_vectors {}",
+            target, limits.max_collection_vectors
+        )));
+    }
+    Ok(())
+}
+
+fn validate_collection_vector_bytes(
+    limits: &ServerLimits,
+    current_bytes: u64,
+    additional_bytes: u64,
+) -> Result<(), LynseError> {
+    if limits.max_collection_vector_bytes == 0 {
+        return Ok(());
+    }
+
+    let target = current_bytes
+        .checked_add(additional_bytes)
+        .ok_or_else(|| LynseError::InvalidArgument("collection vector bytes overflow".into()))?;
+    if target > limits.max_collection_vector_bytes {
+        return Err(LynseError::InvalidArgument(format!(
+            "collection vector bytes {} would exceed server max_collection_vector_bytes {}",
+            target, limits.max_collection_vector_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn validate_collection_insert(
+    limits: &ServerLimits,
+    coll: &crate::engine::Collection,
+    additional_vectors: u64,
+    additional_vector_bytes: u64,
+) -> Result<(), LynseError> {
+    let (current_vectors, _) = coll.shape()?;
+    validate_collection_vector_count(limits, current_vectors, additional_vectors)?;
+    validate_collection_vector_bytes(
+        limits,
+        coll.estimated_vector_bytes()?,
+        additional_vector_bytes,
+    )
+}
+
+#[derive(Debug, Default)]
+struct StorageUsage {
+    disk_bytes: u64,
+    wal_bytes: u64,
+    index_bytes: u64,
+}
+
+fn collect_storage_usage(root: &Path) -> StorageUsage {
+    let mut usage = StorageUsage::default();
+    collect_storage_usage_inner(root, &mut usage);
+    usage
+}
+
+fn collect_storage_usage_inner(path: &Path, usage: &mut StorageUsage) {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+
+    if metadata.is_file() {
+        let len = metadata.len();
+        usage.disk_bytes = usage.disk_bytes.saturating_add(len);
+
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.ends_with(".wal"))
+            .unwrap_or(false)
+        {
+            usage.wal_bytes = usage.wal_bytes.saturating_add(len);
+        }
+        if is_index_file(path) {
+            usage.index_bytes = usage.index_bytes.saturating_add(len);
+        }
+        return;
+    }
+
+    if metadata.is_dir() {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            collect_storage_usage_inner(&entry.path(), usage);
+        }
+    }
+}
+
+fn is_index_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    matches!(
+        name,
+        "pq_index.bin" | "rabitq_index.bin" | "polarvec_index.bin" | "index_metadata.json"
+    ) || (name.starts_with("index-") && name.ends_with(".bin"))
+}
+
+#[cfg(target_os = "linux")]
+fn process_resident_memory_bytes() -> u64 {
+    if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+        if let Some(rss_pages) = statm
+            .split_whitespace()
+            .nth(1)
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            if page_size > 0 {
+                return rss_pages.saturating_mul(page_size as u64);
+            }
+        }
+    }
+    process_resident_memory_bytes_from_rusage()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_resident_memory_bytes() -> u64 {
+    process_resident_memory_bytes_from_rusage()
+}
+
+#[cfg(unix)]
+fn process_resident_memory_bytes_from_rusage() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if rc != 0 {
+        return 0;
+    }
+    let usage = unsafe { usage.assume_init() };
+    let raw = usage.ru_maxrss.max(0) as u64;
+    #[cfg(target_os = "macos")]
+    {
+        raw
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        raw.saturating_mul(1024)
+    }
+}
+
+#[cfg(not(unix))]
+fn process_resident_memory_bytes() -> u64 {
+    0
+}
+
+fn request_elapsed_ms(elapsed: Duration) -> f64 {
+    elapsed.as_secs_f64() * 1000.0
+}
+
+fn is_query_endpoint(path: &str) -> bool {
+    matches!(
+        path,
+        "/search"
+            | "/search_profile"
+            | "/text_search"
+            | "/sparse_search"
+            | "/hybrid_search"
+            | "/search_binary"
+            | "/batch_search"
+            | "/batch_search_binary"
+            | "/query"
+            | "/query_vectors"
+            | "/search_range"
+    )
+}
+
+fn audit_action_for_path(path: &str) -> Option<&'static str> {
+    match path {
+        "/create_database" => Some("create_database"),
+        "/drop_database" | "/delete_database" => Some("drop_database"),
+        "/snapshot_database" => Some("snapshot_database"),
+        "/restore_database" => Some("restore_database"),
+        "/required_collection" => Some("require_collection"),
+        "/drop_collection" => Some("drop_collection"),
+        "/snapshot_collection" => Some("snapshot_collection"),
+        "/export_collection" => Some("export_collection"),
+        "/restore_collection" => Some("restore_collection"),
+        "/import_collection" => Some("import_collection"),
+        "/add_item" => Some("add_item"),
+        "/bulk_add_items" => Some("bulk_add_items"),
+        "/upsert_items" => Some("upsert_items"),
+        "/bulk_add_binary" => Some("bulk_add_binary"),
+        "/create_vector_field" => Some("create_vector_field"),
+        "/add_named_vectors" => Some("add_named_vectors"),
+        "/add_sparse_vectors" => Some("add_sparse_vectors"),
+        "/build_vector_field_index" => Some("build_vector_field_index"),
+        "/remove_vector_field_index" => Some("remove_vector_field_index"),
+        "/commit" => Some("commit"),
+        "/flush" => Some("flush"),
+        "/checkpoint" => Some("checkpoint"),
+        "/close" => Some("close_collection"),
+        "/update_collection_description" | "/update_description" => Some("update_description"),
+        "/build_index" => Some("build_index"),
+        "/remove_index" => Some("remove_index"),
+        "/delete_items" => Some("delete_items"),
+        "/restore_items" => Some("restore_items"),
+        "/compact" => Some("compact"),
+        _ => None,
+    }
+}
+
+fn log_request_event(
+    request_id: u64,
+    method: &str,
+    path: &str,
+    status_code: u16,
+    elapsed: Duration,
+    outcome: &str,
+) {
+    log::info!(
+        "{}",
+        serde_json::json!({
+            "event": "http_request",
+            "request_id": request_id,
+            "method": method,
+            "path": path,
+            "status_code": status_code,
+            "elapsed_ms": request_elapsed_ms(elapsed),
+            "outcome": outcome,
+        })
+    );
+}
+
+fn attach_request_id_header(headers: &mut HeaderMap, request_id: u64) {
+    if let Ok(value) = HeaderValue::from_str(&request_id.to_string()) {
+        headers.insert(HeaderName::from_static(REQUEST_ID_HEADER), value);
+    }
+}
+
+fn maybe_log_audit_event(
+    audit_log_enabled: bool,
+    request_id: u64,
+    method: &str,
+    path: &str,
+    status_code: u16,
+    outcome: &str,
+) {
+    if !audit_log_enabled {
+        return;
+    }
+
+    let action = audit_action_for_path(path).or_else(|| {
+        if outcome == "unauthorized" && !is_public_endpoint(path) {
+            Some("unauthorized_request")
+        } else {
+            None
+        }
+    });
+    let Some(action) = action else {
+        return;
+    };
+
+    log::info!(
+        "{}",
+        serde_json::json!({
+            "event": "audit",
+            "request_id": request_id,
+            "action": action,
+            "method": method,
+            "path": path,
+            "status_code": status_code,
+            "outcome": outcome,
+        })
+    );
+}
+
+fn maybe_warn_slow_query(
+    request_id: u64,
+    method: &str,
+    path: &str,
+    status_code: u16,
+    elapsed: Duration,
+    threshold_ms: u64,
+) {
+    if threshold_ms == 0 || !is_query_endpoint(path) {
+        return;
+    }
+
+    let elapsed_ms = request_elapsed_ms(elapsed);
+    if elapsed_ms < threshold_ms as f64 {
+        return;
+    }
+
+    log::warn!(
+        "{}",
+        serde_json::json!({
+            "event": "slow_query",
+            "request_id": request_id,
+            "method": method,
+            "path": path,
+            "status_code": status_code,
+            "elapsed_ms": elapsed_ms,
+            "threshold_ms": threshold_ms,
+        })
+    );
+}
+
+fn init_rust_logger() {
+    LOGGER_INIT.call_once(|| {
+        let default_filter = std::env::var("LYNSE_LOG_LEVEL")
+            .unwrap_or_else(|_| "info".to_string())
+            .to_lowercase();
+        let env = env_logger::Env::default().default_filter_or(default_filter);
+        let _ = env_logger::Builder::from_env(env)
+            .format(|buf, record| {
+                let mut event = serde_json::Map::new();
+                event.insert(
+                    "timestamp".to_string(),
+                    serde_json::json!(buf.timestamp_millis().to_string()),
+                );
+                event.insert(
+                    "level".to_string(),
+                    serde_json::json!(record.level().to_string()),
+                );
+                event.insert("target".to_string(), serde_json::json!(record.target()));
+
+                let message = record.args().to_string();
+                match serde_json::from_str::<serde_json::Value>(&message) {
+                    Ok(serde_json::Value::Object(fields)) => {
+                        for (key, value) in fields {
+                            event.insert(key, value);
+                        }
+                    }
+                    _ => {
+                        event.insert("message".to_string(), serde_json::json!(message));
+                    }
+                }
+
+                writeln!(buf, "{}", serde_json::Value::Object(event))
+            })
+            .try_init();
+    });
 }
 
 // ─── Basic Auth / Bearer Token Middleware ─────────────────────────────────────
@@ -245,6 +810,8 @@ fn load_server_runtime_config() -> ServerRuntimeConfig {
 struct ApiKeyAuth {
     api_key: Option<String>,
     metrics: Arc<HttpMetrics>,
+    slow_query_warn_ms: u64,
+    audit_log_enabled: bool,
 }
 
 impl<S, B> Transform<S, ServiceRequest> for ApiKeyAuth
@@ -264,6 +831,8 @@ where
             service,
             api_key: self.api_key.clone(),
             metrics: Arc::clone(&self.metrics),
+            slow_query_warn_ms: self.slow_query_warn_ms,
+            audit_log_enabled: self.audit_log_enabled,
         }))
     }
 }
@@ -272,6 +841,8 @@ struct ApiKeyAuthMiddleware<S> {
     service: S,
     api_key: Option<String>,
     metrics: Arc<HttpMetrics>,
+    slow_query_warn_ms: u64,
+    audit_log_enabled: bool,
 }
 
 fn decode_basic(b64: &str) -> Option<String> {
@@ -316,14 +887,38 @@ where
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let started = Instant::now();
+        let request_id = self.metrics.next_request_id();
+        let method = req.method().as_str().to_string();
+        let path = req.path().to_string();
+        let slow_query_warn_ms = self.slow_query_warn_ms;
+        let audit_log_enabled = self.audit_log_enabled;
         if let Some(ref key) = self.api_key {
             if !is_public_endpoint(req.path()) && !is_authorized(&req, key) {
                 let metrics = Arc::clone(&self.metrics);
                 return Box::pin(async move {
-                    let response = HttpResponse::Unauthorized()
+                    let mut response = HttpResponse::Unauthorized()
                         .insert_header(("WWW-Authenticate", "Basic realm=\"LynseDB\""))
                         .json(serde_json::json!({"error": "Unauthorized"}));
-                    metrics.observe(401, started.elapsed(), RequestOutcome::Unauthorized);
+                    attach_request_id_header(response.headers_mut(), request_id);
+                    let elapsed = started.elapsed();
+                    metrics.observe(401, elapsed, RequestOutcome::Unauthorized);
+                    log_request_event(request_id, &method, &path, 401, elapsed, "unauthorized");
+                    maybe_log_audit_event(
+                        audit_log_enabled,
+                        request_id,
+                        &method,
+                        &path,
+                        401,
+                        "unauthorized",
+                    );
+                    maybe_warn_slow_query(
+                        request_id,
+                        &method,
+                        &path,
+                        401,
+                        elapsed,
+                        slow_query_warn_ms,
+                    );
                     Ok(req.into_response(response.map_into_right_body()))
                 });
             }
@@ -334,15 +929,50 @@ where
         Box::pin(async move {
             match fut.await {
                 Ok(res) => {
-                    metrics.observe(
-                        res.status().as_u16(),
-                        started.elapsed(),
-                        RequestOutcome::Normal,
+                    let mut res = res;
+                    let status_code = res.status().as_u16();
+                    let elapsed = started.elapsed();
+                    metrics.observe(status_code, elapsed, RequestOutcome::Normal);
+                    attach_request_id_header(res.headers_mut(), request_id);
+                    log_request_event(request_id, &method, &path, status_code, elapsed, "normal");
+                    maybe_log_audit_event(
+                        audit_log_enabled,
+                        request_id,
+                        &method,
+                        &path,
+                        status_code,
+                        "normal",
+                    );
+                    maybe_warn_slow_query(
+                        request_id,
+                        &method,
+                        &path,
+                        status_code,
+                        elapsed,
+                        slow_query_warn_ms,
                     );
                     Ok(res.map_into_left_body())
                 }
                 Err(err) => {
-                    metrics.observe(500, started.elapsed(), RequestOutcome::HandlerFailure);
+                    let elapsed = started.elapsed();
+                    metrics.observe(500, elapsed, RequestOutcome::HandlerFailure);
+                    log_request_event(request_id, &method, &path, 500, elapsed, "handler_failure");
+                    maybe_log_audit_event(
+                        audit_log_enabled,
+                        request_id,
+                        &method,
+                        &path,
+                        500,
+                        "handler_failure",
+                    );
+                    maybe_warn_slow_query(
+                        request_id,
+                        &method,
+                        &path,
+                        500,
+                        elapsed,
+                        slow_query_warn_ms,
+                    );
                     Err(err)
                 }
             }
@@ -739,6 +1369,10 @@ fn error_response(msg: &str) -> HttpResponse {
 
 fn bad_request(msg: &str) -> HttpResponse {
     HttpResponse::BadRequest().json(serde_json::json!({"error": msg}))
+}
+
+fn limit_bad_request(err: LynseError) -> HttpResponse {
+    bad_request(&err.to_string())
 }
 
 // ─── Helper: get collection from manager ─────────────────────────────────────
@@ -1445,6 +2079,8 @@ async fn metrics(state: web::Data<AppState>) -> HttpResponse {
 
     let open_databases_total = state.manager.open_database_count();
     let open_collections_total = state.manager.open_collection_count();
+    let storage_usage = collect_storage_usage(state.manager.root_path());
+    let process_memory_bytes = process_resident_memory_bytes();
     let request_total = state.metrics.request_total();
     let request_duration_sum_seconds = state.metrics.request_duration_sum_seconds();
     let request_error_total = state.metrics.request_error_total.load(Ordering::Relaxed);
@@ -1466,6 +2102,44 @@ async fn metrics(state: web::Data<AppState>) -> HttpResponse {
     let p50 = state.metrics.request_latency_quantile_seconds(0.50);
     let p90 = state.metrics.request_latency_quantile_seconds(0.90);
     let p99 = state.metrics.request_latency_quantile_seconds(0.99);
+    let index_build_started_total = state
+        .metrics
+        .index_build_started_total
+        .load(Ordering::Relaxed);
+    let index_build_completed_total = state
+        .metrics
+        .index_build_completed_total
+        .load(Ordering::Relaxed);
+    let index_build_failed_total = state
+        .metrics
+        .index_build_failed_total
+        .load(Ordering::Relaxed);
+    let index_build_in_progress = state
+        .metrics
+        .index_build_in_progress
+        .load(Ordering::Relaxed);
+    let index_build_current_vectors = state
+        .metrics
+        .index_build_current_vectors
+        .load(Ordering::Relaxed);
+    let index_build_last_vectors = state
+        .metrics
+        .index_build_last_vectors
+        .load(Ordering::Relaxed);
+    let index_build_duration_sum_seconds = state.metrics.index_build_duration_sum_seconds();
+    let index_build_last_duration_seconds = state.metrics.index_build_last_duration_seconds();
+    let index_build_current_progress = state
+        .metrics
+        .index_build_current_progress_ppm
+        .load(Ordering::Relaxed) as f64
+        / 1_000_000.0;
+    let index_build_last_progress = state
+        .metrics
+        .index_build_last_progress_ppm
+        .load(Ordering::Relaxed) as f64
+        / 1_000_000.0;
+    let index_build_finished_total =
+        index_build_completed_total.saturating_add(index_build_failed_total);
 
     let mut histogram = String::new();
     let mut cumulative = 0u64;
@@ -1504,6 +2178,43 @@ async fn metrics(state: web::Data<AppState>) -> HttpResponse {
             "# HELP lynsedb_open_collections_total Number of currently opened collection handles.\n",
             "# TYPE lynsedb_open_collections_total gauge\n",
             "lynsedb_open_collections_total {open_coll_total}\n",
+            "# HELP lynsedb_storage_disk_bytes Total bytes used by the LynseDB data directory.\n",
+            "# TYPE lynsedb_storage_disk_bytes gauge\n",
+            "lynsedb_storage_disk_bytes {disk_usage_bytes}\n",
+            "# HELP lynsedb_storage_wal_bytes Total bytes used by WAL files under the LynseDB data directory.\n",
+            "# TYPE lynsedb_storage_wal_bytes gauge\n",
+            "lynsedb_storage_wal_bytes {wal_bytes}\n",
+            "# HELP lynsedb_storage_index_bytes Total bytes used by vector index files under the LynseDB data directory.\n",
+            "# TYPE lynsedb_storage_index_bytes gauge\n",
+            "lynsedb_storage_index_bytes {index_bytes}\n",
+            "# HELP lynsedb_process_resident_memory_bytes Resident memory currently attributable to the LynseDB process when available.\n",
+            "# TYPE lynsedb_process_resident_memory_bytes gauge\n",
+            "lynsedb_process_resident_memory_bytes {process_memory_bytes}\n",
+            "# HELP lynsedb_index_builds_total Total number of vector index build attempts by status.\n",
+            "# TYPE lynsedb_index_builds_total counter\n",
+            "lynsedb_index_builds_total{{status=\"started\"}} {index_build_started_total}\n",
+            "lynsedb_index_builds_total{{status=\"completed\"}} {index_build_completed_total}\n",
+            "lynsedb_index_builds_total{{status=\"failed\"}} {index_build_failed_total}\n",
+            "# HELP lynsedb_index_builds_in_progress Number of vector index builds currently running.\n",
+            "# TYPE lynsedb_index_builds_in_progress gauge\n",
+            "lynsedb_index_builds_in_progress {index_build_in_progress}\n",
+            "# HELP lynsedb_index_build_current_vectors Number of vectors in currently running index builds.\n",
+            "# TYPE lynsedb_index_build_current_vectors gauge\n",
+            "lynsedb_index_build_current_vectors {index_build_current_vectors}\n",
+            "# HELP lynsedb_index_build_last_vectors Number of vectors processed by the most recent index build.\n",
+            "# TYPE lynsedb_index_build_last_vectors gauge\n",
+            "lynsedb_index_build_last_vectors {index_build_last_vectors}\n",
+            "# HELP lynsedb_index_build_progress_ratio Current and last vector index build progress ratio.\n",
+            "# TYPE lynsedb_index_build_progress_ratio gauge\n",
+            "lynsedb_index_build_progress_ratio{{scope=\"current\"}} {index_build_current_progress}\n",
+            "lynsedb_index_build_progress_ratio{{scope=\"last\"}} {index_build_last_progress}\n",
+            "# HELP lynsedb_index_build_duration_seconds Duration of vector index builds in seconds.\n",
+            "# TYPE lynsedb_index_build_duration_seconds summary\n",
+            "lynsedb_index_build_duration_seconds_sum {index_build_duration_sum_seconds}\n",
+            "lynsedb_index_build_duration_seconds_count {index_build_finished_total}\n",
+            "# HELP lynsedb_index_build_last_duration_seconds Duration of the most recent vector index build in seconds.\n",
+            "# TYPE lynsedb_index_build_last_duration_seconds gauge\n",
+            "lynsedb_index_build_last_duration_seconds {index_build_last_duration_seconds}\n",
             "# HELP lynsedb_http_requests_total Total number of HTTP requests handled by LynseDB.\n",
             "# TYPE lynsedb_http_requests_total counter\n",
             "lynsedb_http_requests_total {request_total}\n",
@@ -1539,6 +2250,21 @@ async fn metrics(state: web::Data<AppState>) -> HttpResponse {
         coll_total = collections_total,
         open_db_total = open_databases_total,
         open_coll_total = open_collections_total,
+        disk_usage_bytes = storage_usage.disk_bytes,
+        wal_bytes = storage_usage.wal_bytes,
+        index_bytes = storage_usage.index_bytes,
+        process_memory_bytes = process_memory_bytes,
+        index_build_started_total = index_build_started_total,
+        index_build_completed_total = index_build_completed_total,
+        index_build_failed_total = index_build_failed_total,
+        index_build_finished_total = index_build_finished_total,
+        index_build_in_progress = index_build_in_progress,
+        index_build_current_vectors = index_build_current_vectors,
+        index_build_last_vectors = index_build_last_vectors,
+        index_build_current_progress = index_build_current_progress,
+        index_build_last_progress = index_build_last_progress,
+        index_build_duration_sum_seconds = index_build_duration_sum_seconds,
+        index_build_last_duration_seconds = index_build_last_duration_seconds,
         request_total = request_total,
         request_error_total = request_error_total,
         status_2xx = status_2xx,
@@ -1793,6 +2519,11 @@ async fn add_item(state: web::Data<AppState>, body: web::Json<AddItemRequest>) -
     let dim = body.item.vector.len();
     let vectors = body.item.vector.clone();
     let fields = body.item.field.clone().map(|f| vec![f]);
+    let limits = state.limits;
+    let vector_bytes = match checked_vector_bytes(1, dim) {
+        Ok(bytes) => bytes,
+        Err(e) => return limit_bad_request(e),
+    };
 
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
         return error_response(&e.to_string());
@@ -1805,6 +2536,7 @@ async fn add_item(state: web::Data<AppState>, body: web::Json<AddItemRequest>) -
                 .map(|max_id| max_id + 1)
                 .unwrap_or_else(|| coll.shape().map(|(n, _)| n).unwrap_or(0))
         });
+        validate_collection_insert(&limits, &coll, 1, vector_bytes)?;
         coll.add_items(&vectors, 1, &[user_id], fields.as_deref())?;
         Ok(user_id)
     });
@@ -1826,7 +2558,20 @@ async fn bulk_add_binary(
 ) -> HttpResponse {
     let dim = query.dim;
     let n_vectors = query.n_vectors;
-    let expected_bytes = n_vectors * dim * 4;
+    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "n_vectors") {
+        return limit_bad_request(e);
+    }
+    let expected_bytes_u64 = match checked_vector_bytes(n_vectors, dim) {
+        Ok(bytes) => bytes,
+        Err(e) => return limit_bad_request(e),
+    };
+    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "binary payload") {
+        return limit_bad_request(e);
+    }
+    let expected_bytes = match usize::try_from(expected_bytes_u64) {
+        Ok(bytes) => bytes,
+        Err(_) => return bad_request("Expected binary payload size exceeds usize"),
+    };
 
     if body.len() != expected_bytes {
         return bad_request(&format!(
@@ -1845,6 +2590,7 @@ async fn bulk_add_binary(
     if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
         return error_response(&e.to_string());
     }
+    let limits = state.limits;
     // bulk_add_binary has no user IDs in the binary protocol — assign sequential from current max
     let result = state.manager.with_database(&query.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&query.collection_name, dim, 100_000)?;
@@ -1854,6 +2600,7 @@ async fn bulk_add_binary(
             .map(|m| m + 1)
             .unwrap_or_else(|| coll.shape().map(|(n, _)| n).unwrap_or(0));
         let seq_ids: Vec<u64> = (start_id..start_id + n_vectors as u64).collect();
+        validate_collection_insert(&limits, &coll, n_vectors as u64, expected_bytes_u64)?;
         coll.add_items(float_slice, n_vectors, &seq_ids, None)?;
         Ok(())
     });
@@ -1878,11 +2625,24 @@ async fn bulk_add_items(
 
     let dim = body.items[0].vector.len();
     let n_vectors = body.items.len();
+    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "items") {
+        return limit_bad_request(e);
+    }
+    let vector_bytes = match checked_vector_bytes(n_vectors, dim) {
+        Ok(bytes) => bytes,
+        Err(e) => return limit_bad_request(e),
+    };
+    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "items") {
+        return limit_bad_request(e);
+    }
     let mut flat_vectors: Vec<f32> = Vec::with_capacity(n_vectors * dim);
     let mut fields: Vec<HashMap<String, serde_json::Value>> = Vec::with_capacity(n_vectors);
     let mut ids: Vec<Option<u64>> = Vec::with_capacity(n_vectors);
 
     for item in &body.items {
+        if item.vector.len() != dim {
+            return bad_request("all vectors in a batch must have the same dimension");
+        }
         flat_vectors.extend_from_slice(&item.vector);
         fields.push(item.field.clone().unwrap_or_default());
         ids.push(item.id);
@@ -1893,6 +2653,7 @@ async fn bulk_add_items(
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
         return error_response(&e.to_string());
     }
+    let limits = state.limits;
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, dim, 100_000)?;
         let mut coll = coll_arc.write();
@@ -1912,6 +2673,7 @@ async fn bulk_add_items(
                 next_id += 1;
             }
         }
+        validate_collection_insert(&limits, &coll, n_vectors as u64, vector_bytes)?;
         if has_fields {
             coll.add_items(&flat_vectors, n_vectors, &resolved_ids, Some(&fields))?;
         } else {
@@ -1996,6 +2758,16 @@ async fn add_named_vectors(
 
     let dim = body.vectors[0].len();
     let n_vectors = body.vectors.len();
+    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "vectors") {
+        return limit_bad_request(e);
+    }
+    let vector_bytes = match checked_vector_bytes(n_vectors, dim) {
+        Ok(bytes) => bytes,
+        Err(e) => return limit_bad_request(e),
+    };
+    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "vectors") {
+        return limit_bad_request(e);
+    }
     let mut flat_vectors = Vec::with_capacity(n_vectors * dim);
     for vector in &body.vectors {
         if vector.len() != dim {
@@ -2008,9 +2780,11 @@ async fn add_named_vectors(
         return error_response(&e.to_string());
     }
 
+    let limits = state.limits;
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
         let mut coll = coll_arc.write();
+        validate_collection_vector_bytes(&limits, coll.estimated_vector_bytes()?, vector_bytes)?;
         coll.add_named_vectors(&body.field_name, &flat_vectors, n_vectors, &body.ids)
     });
 
@@ -2031,6 +2805,9 @@ async fn add_sparse_vectors(
 ) -> HttpResponse {
     if body.vectors.len() != body.ids.len() {
         return bad_request("vectors length must match ids length");
+    }
+    if let Err(e) = validate_batch_vectors(&state.limits, body.vectors.len(), "vectors") {
+        return limit_bad_request(e);
     }
 
     let vectors = match body
@@ -2069,10 +2846,17 @@ async fn build_vector_field_index(
         return error_response(&e.to_string());
     }
 
+    let metrics = Arc::clone(&state.metrics);
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
         let mut coll = coll_arc.write();
-        coll.build_vector_field_index(&body.field_name, index_mode)
+        let n_vectors = coll
+            .vector_field_shape(&body.field_name)
+            .map(|(n, _)| n)
+            .unwrap_or(0);
+        metrics.track_index_build(n_vectors, || {
+            coll.build_vector_field_index(&body.field_name, index_mode)
+        })
     });
 
     match result {
@@ -2119,11 +2903,24 @@ async fn upsert_items(
     }
 
     let dim = body.items[0].vector.len();
+    let n_vectors = body.items.len();
+    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "items") {
+        return limit_bad_request(e);
+    }
+    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "items") {
+        return limit_bad_request(e);
+    }
+    for item in &body.items {
+        if item.vector.len() != dim {
+            return bad_request("all vectors in a batch must have the same dimension");
+        }
+    }
 
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
         return error_response(&e.to_string());
     }
 
+    let limits = state.limits;
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, dim, 100_000)?;
         let mut coll = coll_arc.write();
@@ -2157,6 +2954,13 @@ async fn upsert_items(
             }
         }
 
+        let additional_vectors = returned_ids
+            .iter()
+            .filter(|&&id| !coll.is_id_exists(id))
+            .count() as u64;
+        let additional_bytes = checked_vector_bytes(additional_vectors as usize, dim)?;
+        validate_collection_insert(&limits, &coll, additional_vectors, additional_bytes)?;
+
         if !ids_without_fields.is_empty() {
             coll.upsert_items(
                 &ids_without_fields,
@@ -2189,6 +2993,12 @@ async fn upsert_items(
 
 async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> HttpResponse {
     let k = body.k.unwrap_or(10);
+    if let Err(e) = validate_top_k(&state.limits, k, "k") {
+        return limit_bad_request(e);
+    }
+    if let Err(e) = validate_request_vector_bytes(&state.limits, 1, body.vector.len(), "vector") {
+        return limit_bad_request(e);
+    }
     let nprobe = body.nprobe.unwrap_or(10);
     let return_fields = body.return_fields.unwrap_or(false);
     let filter = body.where_expr.as_deref();
@@ -2247,6 +3057,12 @@ async fn search_profile(
     body: web::Json<SearchProfileRequest>,
 ) -> HttpResponse {
     let k = body.k.unwrap_or(10);
+    if let Err(e) = validate_top_k(&state.limits, k, "k") {
+        return limit_bad_request(e);
+    }
+    if let Err(e) = validate_request_vector_bytes(&state.limits, 1, body.vector.len(), "vector") {
+        return limit_bad_request(e);
+    }
     let nprobe = body.nprobe.unwrap_or(10);
     let return_fields = body.return_fields.unwrap_or(false);
     let filter = body.where_expr.as_deref();
@@ -2291,6 +3107,9 @@ async fn text_search(
     body: web::Json<TextSearchRequest>,
 ) -> HttpResponse {
     let k = body.k.unwrap_or(10);
+    if let Err(e) = validate_top_k(&state.limits, k, "k") {
+        return limit_bad_request(e);
+    }
     let return_fields = body.return_fields.unwrap_or(false);
     let filter = body.where_expr.as_deref();
 
@@ -2333,6 +3152,9 @@ async fn sparse_search(
     body: web::Json<SparseSearchRequest>,
 ) -> HttpResponse {
     let k = body.k.unwrap_or(10);
+    if let Err(e) = validate_top_k(&state.limits, k, "k") {
+        return limit_bad_request(e);
+    }
     let return_fields = body.return_fields.unwrap_or(false);
     let filter = body.where_expr.as_deref();
     let query = match sparse_vector_entries(&body.vector) {
@@ -2379,6 +3201,9 @@ async fn hybrid_search(
     body: web::Json<HybridSearchRequest>,
 ) -> HttpResponse {
     let k = body.k.unwrap_or(10);
+    if let Err(e) = validate_top_k(&state.limits, k, "k") {
+        return limit_bad_request(e);
+    }
     let nprobe = body.nprobe.unwrap_or(10);
     let return_fields = body.return_fields.unwrap_or(false);
     let filter = body.where_expr.as_deref();
@@ -2386,6 +3211,14 @@ async fn hybrid_search(
     let candidate_limit = body
         .candidate_limit
         .unwrap_or_else(|| k.saturating_mul(4).max(k));
+    if let Err(e) = validate_top_k(&state.limits, candidate_limit, "candidate_limit") {
+        return limit_bad_request(e);
+    }
+    if let Some(ref vector) = body.vector {
+        if let Err(e) = validate_request_vector_bytes(&state.limits, 1, vector.len(), "vector") {
+            return limit_bad_request(e);
+        }
+    }
 
     let result = with_collection(
         &state.manager,
@@ -2439,6 +3272,23 @@ async fn batch_search(
     body: web::Json<BatchSearchRequest>,
 ) -> HttpResponse {
     let k = body.k.unwrap_or(10);
+    if let Err(e) = validate_top_k(&state.limits, k, "k") {
+        return limit_bad_request(e);
+    }
+    if let Err(e) = validate_batch_vectors(&state.limits, body.vectors.len(), "queries") {
+        return limit_bad_request(e);
+    }
+    let query_dim = body.vectors.first().map(|v| v.len()).unwrap_or(0);
+    for vector in &body.vectors {
+        if vector.len() != query_dim {
+            return bad_request("all batch query vectors must have the same dimension");
+        }
+    }
+    if let Err(e) =
+        validate_request_vector_bytes(&state.limits, body.vectors.len(), query_dim, "queries")
+    {
+        return limit_bad_request(e);
+    }
     let nprobe = body.nprobe.unwrap_or(10);
     let return_fields = body.return_fields.unwrap_or(false);
     let filter = body.where_expr.clone();
@@ -2451,11 +3301,7 @@ async fn batch_search(
         let coll = coll_arc.read();
 
         // Flatten vectors for batch_search
-        let dim = if body.vectors.is_empty() {
-            0
-        } else {
-            body.vectors[0].len()
-        };
+        let dim = query_dim;
         let mut flat: Vec<f32> = Vec::with_capacity(body.vectors.len() * dim);
         for v in &body.vectors {
             flat.extend_from_slice(v);
@@ -2492,9 +3338,28 @@ async fn batch_search(
 }
 
 async fn commit(state: web::Data<AppState>, body: web::Json<CommitRequest>) -> HttpResponse {
+    if let Some(ref items) = body.items {
+        if let Err(e) = validate_batch_vectors(&state.limits, items.len(), "items") {
+            return limit_bad_request(e);
+        }
+        if let Some(first) = items.first() {
+            let dim = first.vector.len();
+            if let Err(e) = validate_request_vector_bytes(&state.limits, items.len(), dim, "items")
+            {
+                return limit_bad_request(e);
+            }
+            for item in items {
+                if item.vector.len() != dim {
+                    return bad_request("all vectors in a batch must have the same dimension");
+                }
+            }
+        }
+    }
+
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
         return error_response(&e.to_string());
     }
+    let limits = state.limits;
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
 
@@ -2503,6 +3368,7 @@ async fn commit(state: web::Data<AppState>, body: web::Json<CommitRequest>) -> H
             if !items.is_empty() {
                 let dim = items[0].vector.len();
                 let n_vectors = items.len();
+                let vector_bytes = checked_vector_bytes(n_vectors, dim)?;
                 let mut flat_vectors: Vec<f32> = Vec::with_capacity(n_vectors * dim);
                 let mut fields: Vec<HashMap<String, serde_json::Value>> =
                     Vec::with_capacity(n_vectors);
@@ -2532,6 +3398,7 @@ async fn commit(state: web::Data<AppState>, body: web::Json<CommitRequest>) -> H
                         next_id += 1;
                     }
                 }
+                validate_collection_insert(&limits, &coll, n_vectors as u64, vector_bytes)?;
                 if has_fields {
                     coll.add_items(&flat_vectors, n_vectors, &item_ids, Some(&fields))?;
                 } else {
@@ -2775,12 +3642,16 @@ async fn build_index(
     body: web::Json<BuildIndexRequest>,
 ) -> HttpResponse {
     let index_mode = body.index_mode.as_deref().unwrap_or("FLAT");
+    let metrics = Arc::clone(&state.metrics);
 
     let result = with_collection_mut(
         &state.manager,
         &body.database_name,
         &body.collection_name,
-        |coll| coll.build_index(index_mode),
+        |coll| {
+            let n_vectors = coll.shape().map(|(n, _)| n).unwrap_or(0);
+            metrics.track_index_build(n_vectors, || coll.build_index(index_mode))
+        },
     );
 
     match result {
@@ -2815,6 +3686,9 @@ async fn remove_index(
 
 async fn head(state: web::Data<AppState>, body: web::Json<HeadTailRequest>) -> HttpResponse {
     let n = body.n.unwrap_or(5);
+    if let Err(e) = validate_top_k(&state.limits, n, "n") {
+        return limit_bad_request(e);
+    }
 
     let result = with_collection(
         &state.manager,
@@ -2846,6 +3720,9 @@ async fn head(state: web::Data<AppState>, body: web::Json<HeadTailRequest>) -> H
 
 async fn tail(state: web::Data<AppState>, body: web::Json<HeadTailRequest>) -> HttpResponse {
     let n = body.n.unwrap_or(5);
+    if let Err(e) = validate_top_k(&state.limits, n, "n") {
+        return limit_bad_request(e);
+    }
 
     let result = with_collection(
         &state.manager,
@@ -2894,6 +3771,11 @@ async fn get_collection_path(
 
 async fn query(state: web::Data<AppState>, body: web::Json<QueryRequest>) -> HttpResponse {
     let return_ids_only = body.return_ids_only.unwrap_or(false);
+    if let Some(ref filter_ids) = body.filter_ids {
+        if let Err(e) = validate_batch_vectors(&state.limits, filter_ids.len(), "filter_ids") {
+            return limit_bad_request(e);
+        }
+    }
 
     let result = with_collection(
         &state.manager,
@@ -2967,6 +3849,12 @@ async fn query_vectors(
     state: web::Data<AppState>,
     body: web::Json<QueryVectorsRequest>,
 ) -> HttpResponse {
+    if let Some(ref filter_ids) = body.filter_ids {
+        if let Err(e) = validate_batch_vectors(&state.limits, filter_ids.len(), "filter_ids") {
+            return limit_bad_request(e);
+        }
+    }
+
     let result = with_collection(
         &state.manager,
         &body.database_name,
@@ -3031,6 +3919,9 @@ async fn read_by_only_id(
         }
         _ => return bad_request("id must be an integer or list of integers"),
     };
+    if let Err(e) = validate_batch_vectors(&state.limits, ids.len(), "ids") {
+        return limit_bad_request(e);
+    }
 
     let result = with_collection(
         &state.manager,
@@ -3062,6 +3953,9 @@ async fn delete_items(
     state: web::Data<AppState>,
     body: web::Json<DeleteItemsRequest>,
 ) -> HttpResponse {
+    if let Err(e) = validate_batch_vectors(&state.limits, body.ids.len(), "ids") {
+        return limit_bad_request(e);
+    }
     let result = with_collection(
         &state.manager,
         &body.database_name,
@@ -3082,6 +3976,9 @@ async fn restore_items(
     state: web::Data<AppState>,
     body: web::Json<DeleteItemsRequest>,
 ) -> HttpResponse {
+    if let Err(e) = validate_batch_vectors(&state.limits, body.ids.len(), "ids") {
+        return limit_bad_request(e);
+    }
     let result = with_collection(
         &state.manager,
         &body.database_name,
@@ -3122,6 +4019,12 @@ async fn search_range(
     state: web::Data<AppState>,
     body: web::Json<SearchRangeRequest>,
 ) -> HttpResponse {
+    if let Err(e) = validate_top_k(&state.limits, body.max_results, "max_results") {
+        return limit_bad_request(e);
+    }
+    if let Err(e) = validate_request_vector_bytes(&state.limits, 1, body.vector.len(), "vector") {
+        return limit_bad_request(e);
+    }
     let result = with_collection(
         &state.manager,
         &body.database_name,
@@ -3354,6 +4257,12 @@ fn binary_error(msg: &str) -> HttpResponse {
         .body(msg.to_string())
 }
 
+fn binary_bad_request(msg: &str) -> HttpResponse {
+    HttpResponse::BadRequest()
+        .content_type("text/plain")
+        .body(msg.to_string())
+}
+
 // ─── Binary search endpoint ─────────────────────────────────────────────────
 
 async fn search_binary(
@@ -3362,16 +4271,27 @@ async fn search_binary(
     body: web::Bytes,
 ) -> HttpResponse {
     let dim = query.dim;
-    let expected = dim * 4;
+    let expected = match checked_vector_bytes(1, dim).and_then(|bytes| {
+        usize::try_from(bytes).map_err(|_| {
+            LynseError::InvalidArgument("Expected binary query size exceeds usize".into())
+        })
+    }) {
+        Ok(bytes) => bytes,
+        Err(e) => return binary_bad_request(&e.to_string()),
+    };
     if body.len() != expected {
-        return HttpResponse::BadRequest()
-            .content_type("text/plain")
-            .body(format!("Expected {} bytes, got {}", expected, body.len()));
+        return binary_bad_request(&format!("Expected {} bytes, got {}", expected, body.len()));
     }
 
     let vector: &[f32] = unsafe { std::slice::from_raw_parts(body.as_ptr() as *const f32, dim) };
 
     let k = query.k.unwrap_or(10);
+    if let Err(e) = validate_top_k(&state.limits, k, "k") {
+        return binary_bad_request(&e.to_string());
+    }
+    if let Err(e) = validate_request_vector_bytes(&state.limits, 1, dim, "query") {
+        return binary_bad_request(&e.to_string());
+    }
     let nprobe = query.nprobe.unwrap_or(10);
     let return_fields = query.return_fields.unwrap_or(false);
     let filter = query.where_expr.as_deref();
@@ -3419,22 +4339,36 @@ async fn batch_search_binary(
 ) -> HttpResponse {
     let dim = query.dim;
     let nq = query.n_queries;
-    let expected = nq * dim * 4;
+    if let Err(e) = validate_batch_vectors(&state.limits, nq, "n_queries") {
+        return binary_bad_request(&e.to_string());
+    }
+    let expected = match checked_vector_bytes(nq, dim).and_then(|bytes| {
+        usize::try_from(bytes).map_err(|_| {
+            LynseError::InvalidArgument("Expected binary payload size exceeds usize".into())
+        })
+    }) {
+        Ok(bytes) => bytes,
+        Err(e) => return binary_bad_request(&e.to_string()),
+    };
     if body.len() != expected {
-        return HttpResponse::BadRequest()
-            .content_type("text/plain")
-            .body(format!(
-                "Expected {} bytes ({} queries × {} dim × 4), got {}",
-                expected,
-                nq,
-                dim,
-                body.len()
-            ));
+        return binary_bad_request(&format!(
+            "Expected {} bytes ({} queries × {} dim × 4), got {}",
+            expected,
+            nq,
+            dim,
+            body.len()
+        ));
     }
 
     let flat: &[f32] = unsafe { std::slice::from_raw_parts(body.as_ptr() as *const f32, nq * dim) };
 
     let k = query.k.unwrap_or(10);
+    if let Err(e) = validate_top_k(&state.limits, k, "k") {
+        return binary_bad_request(&e.to_string());
+    }
+    if let Err(e) = validate_request_vector_bytes(&state.limits, nq, dim, "queries") {
+        return binary_bad_request(&e.to_string());
+    }
     let nprobe = query.nprobe.unwrap_or(10);
     let return_fields = query.return_fields.unwrap_or(false);
     let filter = query.where_expr.clone();
@@ -3480,6 +4414,9 @@ async fn head_binary(
     query: web::Query<HeadTailBinaryQuery>,
 ) -> HttpResponse {
     let n = query.n.unwrap_or(5);
+    if let Err(e) = validate_top_k(&state.limits, n, "n") {
+        return binary_bad_request(&e.to_string());
+    }
 
     let result = with_collection(
         &state.manager,
@@ -3505,6 +4442,9 @@ async fn tail_binary(
     query: web::Query<HeadTailBinaryQuery>,
 ) -> HttpResponse {
     let n = query.n.unwrap_or(5);
+    if let Err(e) = validate_top_k(&state.limits, n, "n") {
+        return binary_bad_request(&e.to_string());
+    }
 
     let result = with_collection(
         &state.manager,
@@ -3627,6 +4567,8 @@ pub fn run_server(
     root_path: &str,
     api_key: Option<String>,
 ) -> std::io::Result<()> {
+    init_rust_logger();
+
     let manager = Arc::new(
         DatabaseManager::new(std::path::Path::new(root_path))
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?,
@@ -3642,14 +4584,20 @@ pub fn run_server(
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         log::info!(
-            "Starting LynseDB server on {}:{} (workers={}, keep_alive={}s, request_timeout={}s, json_limit={}B, payload_limit={}B)",
+            "Starting LynseDB server on {}:{} (workers={}, keep_alive={}s, request_timeout={}s, json_limit={}B, payload_limit={}B, slow_query_warn={}ms, max_top_k={}, max_batch_vectors={}, max_collection_vectors={}, max_collection_vector_bytes={}, audit_log={})",
             host,
             port,
             runtime_cfg.workers,
             runtime_cfg.keep_alive_secs,
             runtime_cfg.client_request_timeout_secs,
             runtime_cfg.json_limit_bytes,
-            runtime_cfg.payload_limit_bytes
+            runtime_cfg.payload_limit_bytes,
+            runtime_cfg.slow_query_warn_ms,
+            runtime_cfg.limits.max_top_k,
+            runtime_cfg.limits.max_batch_vectors,
+            runtime_cfg.limits.max_collection_vectors,
+            runtime_cfg.limits.max_collection_vector_bytes,
+            runtime_cfg.audit_log_enabled
         );
 
         let app_manager = Arc::clone(&manager);
@@ -3663,12 +4611,15 @@ pub fn run_server(
                     manager: Arc::clone(&app_manager),
                     start_time_unix_seconds,
                     metrics: Arc::clone(&metrics_clone),
+                    limits: app_runtime_cfg.limits,
                 }))
                 .app_data(web::JsonConfig::default().limit(app_runtime_cfg.json_limit_bytes))
                 .app_data(web::PayloadConfig::default().limit(app_runtime_cfg.payload_limit_bytes))
                 .wrap(ApiKeyAuth {
                     api_key: key_clone,
                     metrics: metrics_clone,
+                    slow_query_warn_ms: app_runtime_cfg.slow_query_warn_ms,
+                    audit_log_enabled: app_runtime_cfg.audit_log_enabled,
                 })
                 .configure(configure_routes)
         })
@@ -3735,9 +4686,28 @@ pub fn start_server_background(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_public_endpoint, openapi_spec, HttpMetrics, RequestOutcome};
+    use super::{
+        audit_action_for_path, collect_storage_usage, is_public_endpoint, is_query_endpoint,
+        openapi_spec, validate_batch_vectors, validate_collection_insert, validate_top_k, AppState,
+        HttpMetrics, RequestOutcome, ServerLimits,
+    };
+    use actix_web::{body::to_bytes, http::StatusCode, web};
+    use std::fs;
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
     use std::time::Duration;
+    use tempfile::TempDir;
+
+    use crate::engine::DatabaseManager;
+
+    fn test_limits() -> ServerLimits {
+        ServerLimits {
+            max_top_k: 10,
+            max_batch_vectors: 10,
+            max_collection_vectors: 10,
+            max_collection_vector_bytes: 1024,
+        }
+    }
 
     #[test]
     fn public_endpoint_whitelist_matches_probe_routes() {
@@ -3794,5 +4764,154 @@ mod tests {
         assert!(p50 > 0.0);
         assert!(p90 >= p50);
         assert!(p99 >= p90);
+    }
+
+    #[test]
+    fn storage_usage_counts_disk_wal_and_index_bytes() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("plain.bin"), vec![1u8; 3]).unwrap();
+        fs::create_dir_all(tmp.path().join("db").join("col").join("wal")).unwrap();
+        fs::write(
+            tmp.path()
+                .join("db")
+                .join("col")
+                .join("wal")
+                .join("col.000000.wal"),
+            vec![2u8; 5],
+        )
+        .unwrap();
+        fs::create_dir_all(tmp.path().join("db").join("col").join("index")).unwrap();
+        fs::write(
+            tmp.path()
+                .join("db")
+                .join("col")
+                .join("index")
+                .join("index-test.bin"),
+            vec![3u8; 7],
+        )
+        .unwrap();
+
+        let usage = collect_storage_usage(tmp.path());
+        assert!(usage.disk_bytes >= 15);
+        assert_eq!(usage.wal_bytes, 5);
+        assert_eq!(usage.index_bytes, 7);
+    }
+
+    #[test]
+    fn http_metrics_track_index_builds() {
+        let metrics = HttpMetrics::new();
+        let ok: std::result::Result<(), ()> =
+            metrics.track_index_build(42, || std::result::Result::Ok(()));
+        assert!(ok.is_ok());
+        assert_eq!(metrics.index_build_started_total.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics.index_build_completed_total.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(metrics.index_build_in_progress.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            metrics.index_build_current_vectors.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(metrics.index_build_last_vectors.load(Ordering::Relaxed), 42);
+        assert_eq!(
+            metrics
+                .index_build_last_progress_ppm
+                .load(Ordering::Relaxed),
+            1_000_000
+        );
+
+        let err: std::result::Result<(), ()> =
+            metrics.track_index_build(7, || std::result::Result::Err(()));
+        assert!(err.is_err());
+        assert_eq!(metrics.index_build_started_total.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.index_build_failed_total.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.index_build_in_progress.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.index_build_last_vectors.load(Ordering::Relaxed), 7);
+    }
+
+    #[test]
+    fn query_endpoint_classifier_covers_search_routes() {
+        assert!(is_query_endpoint("/search"));
+        assert!(is_query_endpoint("/batch_search_binary"));
+        assert!(is_query_endpoint("/query_vectors"));
+        assert!(!is_query_endpoint("/metrics"));
+        assert!(!is_query_endpoint("/build_index"));
+    }
+
+    #[actix_rt::test]
+    async fn metrics_endpoint_exports_resource_and_index_build_metrics() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("db").join("col").join("wal")).unwrap();
+        fs::write(
+            tmp.path()
+                .join("db")
+                .join("col")
+                .join("wal")
+                .join("col.000000.wal"),
+            vec![4u8; 5],
+        )
+        .unwrap();
+
+        let manager = Arc::new(DatabaseManager::new(tmp.path()).unwrap());
+        let http_metrics = Arc::new(HttpMetrics::new());
+        let ok: std::result::Result<(), ()> =
+            http_metrics.track_index_build(3, || std::result::Result::Ok(()));
+        assert!(ok.is_ok());
+
+        let response = super::metrics(web::Data::new(AppState {
+            manager,
+            start_time_unix_seconds: 123,
+            metrics: http_metrics,
+            limits: test_limits(),
+        }))
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body()).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert!(body.contains("lynsedb_storage_wal_bytes 5"));
+        assert!(body.contains("lynsedb_process_resident_memory_bytes"));
+        assert!(body.contains("lynsedb_index_builds_total{status=\"started\"} 1"));
+        assert!(body.contains("lynsedb_index_build_last_vectors 3"));
+        assert!(body.contains("lynsedb_index_build_progress_ratio{scope=\"last\"} 1"));
+    }
+
+    #[test]
+    fn server_limits_reject_oversized_top_k_batch_and_collection_growth() {
+        let limits = ServerLimits {
+            max_top_k: 2,
+            max_batch_vectors: 3,
+            max_collection_vectors: 2,
+            max_collection_vector_bytes: 32,
+        };
+
+        assert!(validate_top_k(&limits, 3, "k").is_err());
+        assert!(validate_top_k(&limits, 2, "k").is_ok());
+        assert!(validate_batch_vectors(&limits, 4, "items").is_err());
+        assert!(validate_batch_vectors(&limits, 3, "items").is_ok());
+
+        let tmp = TempDir::new().unwrap();
+        let mut coll = crate::engine::Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        coll.add_items(
+            &[
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0,
+            ],
+            2,
+            &[1, 2],
+            None,
+        )
+        .unwrap();
+
+        assert!(validate_collection_insert(&limits, &coll, 1, 16).is_err());
+    }
+
+    #[test]
+    fn audit_action_classifier_only_marks_mutations() {
+        assert_eq!(audit_action_for_path("/build_index"), Some("build_index"));
+        assert_eq!(audit_action_for_path("/add_item"), Some("add_item"));
+        assert_eq!(audit_action_for_path("/search"), None);
+        assert_eq!(audit_action_for_path("/metrics"), None);
     }
 }

@@ -104,14 +104,14 @@ After the storage core is trustworthy, broaden retrieval quality.
 
 Production users need to understand and control resource usage.
 
-- Add structured logs.
-- Add Prometheus metrics for latency, QPS, WAL size, memory, disk, and index
+- [x] Add structured logs.
+- [x] Add Prometheus metrics for latency, QPS, WAL size, memory, disk, and index
   build progress.
-- Add query profiling: filter matches, scanned vectors, index path, and rerank
+- [x] Add query profiling: filter matches, scanned vectors, index path, and rerank
   cost.
-- Add collection-level limits for `top_k`, batch size, vector count, and memory.
-- Add slow-query warnings.
-- Add audit log for server mode.
+- [x] Add collection-level limits for `top_k`, batch size, vector count, and memory.
+- [x] Add slow-query warnings.
+- [x] Add audit log for server mode.
 
 ## Milestone 7: Ecosystem
 
@@ -200,5 +200,5 @@ Distributed work should wait until single-node semantics are stable.
 ## Milestone 6 Immediate Coding Queue
 
 - [x] Extend `/metrics` with error counters by kind and estimated p50/p90/p99 latency gauges.
-- [ ] Add Prometheus metrics for WAL size, memory usage, disk usage, and index build progress.
-- [ ] Add structured request logging with request IDs and slow-query warnings.
+- [x] Add Prometheus metrics for WAL size, memory usage, disk usage, and index build progress.
+- [x] Add structured request logging with request IDs and slow-query warnings.

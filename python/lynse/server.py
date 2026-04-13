@@ -130,6 +130,78 @@ def _resolve_int(
     return default
 
 
+def _resolve_non_negative_int(
+        option_name: str,
+        env_names: tuple[str, ...],
+        config: dict | None,
+        default: int,
+) -> int:
+    for env_name in env_names:
+        raw = os.environ.get(env_name)
+        if raw is None or raw == "":
+            continue
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid {env_name} value: {raw!r}") from exc
+        if value < 0:
+            raise SystemExit(f"Invalid {env_name} value: {raw!r} (must be >= 0)")
+        return value
+
+    cfg_value = _get_config_value(config or {}, option_name)
+    if cfg_value is not None:
+        try:
+            value = int(cfg_value)
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(
+                f"Invalid config value for {option_name!r}: {cfg_value!r}"
+            ) from exc
+        if value < 0:
+            raise SystemExit(
+                f"Invalid config value for {option_name!r}: {cfg_value!r} (must be >= 0)"
+            )
+        return value
+
+    return default
+
+
+def _resolve_bool(
+        option_name: str,
+        env_names: tuple[str, ...],
+        config: dict | None,
+        default: bool,
+) -> bool:
+    def parse_bool(raw):
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(raw)
+
+    for env_name in env_names:
+        raw = os.environ.get(env_name)
+        if raw is None or raw == "":
+            continue
+        try:
+            return parse_bool(raw)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid {env_name} value: {raw!r}") from exc
+
+    cfg_value = _get_config_value(config or {}, option_name)
+    if cfg_value is not None:
+        try:
+            return parse_bool(cfg_value)
+        except ValueError as exc:
+            raise SystemExit(
+                f"Invalid config value for {option_name!r}: {cfg_value!r}"
+            ) from exc
+
+    return default
+
+
 def _positive_int(value: str) -> int:
     try:
         parsed = int(value)
@@ -137,6 +209,16 @@ def _positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError("must be an integer") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be > 0")
+    return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
     return parsed
 
 
@@ -221,6 +303,62 @@ def _parse_args(argv=None):
         default=_resolve_int("payload_limit_mb", ("LYNSE_PAYLOAD_LIMIT_MB",), config, 512),
         help="Max raw payload size in MB",
     )
+    parser.add_argument(
+        "--slow-query-warn-ms",
+        type=_non_negative_int,
+        default=_resolve_non_negative_int(
+            "slow_query_warn_ms",
+            ("LYNSE_SLOW_QUERY_WARN_MS",),
+            config,
+            1000,
+        ),
+        help="Emit slow_query warnings for search/query requests at or above this latency in ms; 0 disables",
+    )
+    parser.add_argument(
+        "--max-top-k",
+        type=_non_negative_int,
+        default=_resolve_non_negative_int("max_top_k", ("LYNSE_MAX_TOP_K",), config, 10000),
+        help="Maximum k/max_results/head/tail result size accepted by the server; 0 disables",
+    )
+    parser.add_argument(
+        "--max-batch-vectors",
+        type=_non_negative_int,
+        default=_resolve_non_negative_int(
+            "max_batch_vectors",
+            ("LYNSE_MAX_BATCH_VECTORS",),
+            config,
+            100000,
+        ),
+        help="Maximum vectors/IDs/queries accepted in one server request; 0 disables",
+    )
+    parser.add_argument(
+        "--max-collection-vectors",
+        type=_non_negative_int,
+        default=_resolve_non_negative_int(
+            "max_collection_vectors",
+            ("LYNSE_MAX_COLLECTION_VECTORS",),
+            config,
+            10000000,
+        ),
+        help="Maximum primary vectors allowed per collection in server mode; 0 disables",
+    )
+    parser.add_argument(
+        "--max-collection-vector-bytes",
+        type=_non_negative_int,
+        default=_resolve_non_negative_int(
+            "max_collection_vector_bytes",
+            ("LYNSE_MAX_COLLECTION_VECTOR_BYTES",),
+            config,
+            1099511627776,
+        ),
+        help="Maximum estimated dense vector bytes per collection, including named vector fields; 0 disables",
+    )
+    parser.add_argument(
+        "--audit-log",
+        action=argparse.BooleanOptionalAction,
+        default=_resolve_bool("audit_log", ("LYNSE_AUDIT_LOG",), config, True),
+        help="Emit structured audit events for mutating server requests",
+    )
     return parser.parse_args(argv)
 
 
@@ -239,6 +377,12 @@ def main(argv=None):
     os.environ["LYNSE_CLIENT_REQUEST_TIMEOUT_SECS"] = str(args.request_timeout_secs)
     os.environ["LYNSE_JSON_LIMIT_MB"] = str(args.json_limit_mb)
     os.environ["LYNSE_PAYLOAD_LIMIT_MB"] = str(args.payload_limit_mb)
+    os.environ["LYNSE_SLOW_QUERY_WARN_MS"] = str(args.slow_query_warn_ms)
+    os.environ["LYNSE_MAX_TOP_K"] = str(args.max_top_k)
+    os.environ["LYNSE_MAX_BATCH_VECTORS"] = str(args.max_batch_vectors)
+    os.environ["LYNSE_MAX_COLLECTION_VECTORS"] = str(args.max_collection_vectors)
+    os.environ["LYNSE_MAX_COLLECTION_VECTOR_BYTES"] = str(args.max_collection_vector_bytes)
+    os.environ["LYNSE_AUDIT_LOG"] = "true" if args.audit_log else "false"
     if args.workers is not None:
         os.environ["LYNSE_SERVER_WORKERS"] = str(args.workers)
 
