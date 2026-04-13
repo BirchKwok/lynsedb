@@ -1096,7 +1096,7 @@ class Collection:
         else:
             raise_error_response(response)
 
-    def build_index(self, index_mode: str = 'FLAT', **kwargs):
+    def build_index(self, index_mode: str = 'FLAT', field_name: str = 'default', **kwargs):
         """
         Build the index for the collection.
 
@@ -1166,6 +1166,8 @@ class Collection:
                 - 'IVF-COS-SQ8': IVF index with cosine similarity and SQ8 quantizer.
                 - 'IVF-JACCARD-BINARY': IVF index with Jaccard distance (binary vectors).
                 - 'IVF-HAMMING-BINARY': IVF index with Hamming distance (binary vectors).
+            field_name (str): Named vector field to build index for.
+                Defaults to "default" (the primary collection vector).
             kwargs: Additional keyword arguments. The following are available:
 
                 - 'n_clusters' (int): The number of clusters. Only available for IVF modes.
@@ -1181,6 +1183,7 @@ class Collection:
             "database_name": self._database_name,
             "collection_name": self._collection_name,
             "index_mode": index_mode,
+            "field_name": field_name,
         }
         if 'n_clusters' in kwargs:
             data['n_clusters'] = kwargs['n_clusters']
@@ -1192,9 +1195,13 @@ class Collection:
         else:
             raise_error_response(response)
 
-    def remove_index(self):
+    def remove_index(self, field_name: str = 'default'):
         """
         Remove the index of the collection.
+
+        Parameters:
+            field_name (str): Named vector field to remove index for.
+                Defaults to "default" (the primary collection index).
 
         Returns:
             dict: The response from the server.
@@ -1203,7 +1210,11 @@ class Collection:
             ExecutionError: If the server returns an error.
         """
         uri = f'{self._uri}/remove_index'
-        data = {"database_name": self._database_name, "collection_name": self._collection_name}
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "field_name": field_name,
+        }
         response = self._session.post(uri, json=data)
 
         if response.status_code == 200:
@@ -1263,33 +1274,6 @@ class Collection:
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
             self.COMMIT_FLAG = False
-            return response.json()
-        raise_error_response(response)
-
-    def build_vector_field_index(self, field_name: str, index_mode: str = 'FLAT'):
-        """Build or change the index for a named vector field."""
-        uri = f'{self._uri}/build_vector_field_index'
-        data = {
-            "database_name": self._database_name,
-            "collection_name": self._collection_name,
-            "field_name": field_name,
-            "index_mode": index_mode,
-        }
-        response = self._session.post(uri, json=data)
-        if response.status_code == 200:
-            return response.json()
-        raise_error_response(response)
-
-    def remove_vector_field_index(self, field_name: str):
-        """Remove a named vector field index and return it to flat search."""
-        uri = f'{self._uri}/remove_vector_field_index'
-        data = {
-            "database_name": self._database_name,
-            "collection_name": self._collection_name,
-            "field_name": field_name,
-        }
-        response = self._session.post(uri, json=data)
-        if response.status_code == 200:
             return response.json()
         raise_error_response(response)
 

@@ -206,7 +206,7 @@ class TestSearch:
         ids = list(range(N))
         image_vectors = np.array([[float(i), 0.0, 0.0] for i in ids], dtype=np.float32)
         populated_collection.add_named_vectors("image", image_vectors, ids)
-        populated_collection.build_vector_field_index("image", "HNSW-L2")
+        populated_collection.build_index("HNSW-L2", field_name="image")
 
         result = populated_collection.search([4.1, 0.0, 0.0], k=3, vector_field="image")
         assert int(result.ids[0]) == 4
@@ -218,7 +218,7 @@ class TestSearch:
         assert image_field["metric"] == "l2"
         assert image_field["index_mode"] == "HNSW-L2"
 
-        populated_collection.remove_vector_field_index("image")
+        populated_collection.remove_index(field_name="image")
         image_field = next(
             field for field in populated_collection.list_vector_fields()
             if field["name"] == "image"

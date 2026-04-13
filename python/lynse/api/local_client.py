@@ -602,7 +602,7 @@ class LocalCollection:
             'max_id': self._rust_coll.max_id(),
         }
 
-    def build_index(self, index_mode: str = 'FLAT', **kwargs):
+    def build_index(self, index_mode: str = 'FLAT', field_name: str = 'default', **kwargs):
         """
         Build the index for the collection.
 
@@ -672,6 +672,8 @@ class LocalCollection:
                 - 'IVF-COS-SQ8': IVF index with cosine similarity and SQ8 quantizer.
                 - 'IVF-JACCARD-BINARY': IVF index with Jaccard distance (binary vectors).
                 - 'IVF-HAMMING-BINARY': IVF index with Hamming distance (binary vectors).
+            field_name (str): Named vector field to build index for.
+                Defaults to "default" (the primary collection vector).
             kwargs: Additional keyword arguments. The following are available:
 
                 - 'n_clusters' (int): The number of clusters. Only available for IVF modes.
@@ -679,12 +681,17 @@ class LocalCollection:
         Returns:
             dict: Status message.
         """
-        self._rust_coll.build_index(index_mode)
+        self._rust_coll.build_index(index_mode, field_name=field_name)
         return {'status': 'success'}
 
-    def remove_index(self):
-        """Remove the index of the collection."""
-        self._rust_coll.remove_index()
+    def remove_index(self, field_name: str = 'default'):
+        """Remove the index of the collection.
+
+        Parameters:
+            field_name (str): Named vector field to remove index for.
+                Defaults to "default" (the primary collection index).
+        """
+        self._rust_coll.remove_index(field_name=field_name)
         return {'status': 'success'}
 
     def create_vector_field(
@@ -716,16 +723,6 @@ class LocalCollection:
             vecs = vecs.reshape(1, -1)
         self._rust_coll.add_named_vectors(field_name, vecs, [int(i) for i in ids])
         self.COMMIT_FLAG = False
-        return {'status': 'success'}
-
-    def build_vector_field_index(self, field_name: str, index_mode: str = 'FLAT'):
-        """Build or change the index for a named vector field."""
-        self._rust_coll.build_vector_field_index(field_name, index_mode)
-        return {'status': 'success'}
-
-    def remove_vector_field_index(self, field_name: str):
-        """Remove a named vector field index and return it to flat search."""
-        self._rust_coll.remove_vector_field_index(field_name)
         return {'status': 'success'}
 
     def add_sparse_vectors(
@@ -784,20 +781,13 @@ class LocalCollection:
         """
         nprobe = kwargs.get('nprobe', 10)
         vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
-        if vector_field == "default":
-            result = self._rust_coll.search(
-                vec,
-                k=k,
-                where=where,
-                nprobe=nprobe,
-            )
-        else:
-            result = self._rust_coll.search_vector_field(
-                vector_field,
-                vec,
-                k=k,
-                where=where,
-            )
+        result = self._rust_coll.search(
+            vec,
+            k=k,
+            where=where,
+            field_name=vector_field,
+            nprobe=nprobe,
+        )
         need_fields = should_fetch_fields(
             return_fields=return_fields,
             reranker=reranker,

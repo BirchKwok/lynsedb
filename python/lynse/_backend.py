@@ -255,6 +255,16 @@ class RustEngine:
         self._engine.drop_collection(name)
 
     def snapshot_collection(self, name: str, snapshot_path: str) -> None:
+        """Snapshot a collection to a file path.
+        
+        The snapshot is a point-in-time copy of the collection's data and index files,
+        which can be used for backup or restore. The snapshot is stored as a single file
+        that contains the collection's state at the time of snapshotting.
+        Args:
+            name: The name of the collection to snapshot.
+            snapshot_path: The file path where the snapshot will be saved.
+        
+        """
         self._engine.snapshot_collection(name, snapshot_path)
 
     def export_collection(self, name: str, export_path: str) -> None:
@@ -319,7 +329,7 @@ class Collection:
             vectors = vectors.reshape(1, -1)
         self._inner.add_items(vectors, [int(i) for i in ids], fields)
 
-    def build_index(self, index_mode: str, **kwargs) -> None:
+    def build_index(self, index_mode: str, field_name: str = "default", **kwargs) -> None:
         """Build or rebuild the index.
 
         Args:
@@ -380,13 +390,27 @@ class Collection:
                 - 'IVF-Jaccard-Binary': IVF index with Jaccard distance (binary vectors).
                 - 'IVF-Hamming-Binary': IVF index with Hamming distance (binary vectors).
 
+            field_name (str): Named vector field to build index for.
+                Defaults to "default" (the primary collection vector).
             **kwargs: Additional keyword arguments:
                 - 'n_clusters' (int): Number of clusters (IVF modes only).
         """
-        self._inner.build_index(index_mode)
+        if field_name == "default":
+            self._inner.build_index(index_mode)
+        else:
+            self._inner.build_vector_field_index(field_name, index_mode)
 
-    def remove_index(self) -> None:
-        self._inner.remove_index()
+    def remove_index(self, field_name: str = "default") -> None:
+        """Remove the index.
+
+        Args:
+            field_name (str): Named vector field to remove index for.
+                Defaults to "default" (the primary collection index).
+        """
+        if field_name == "default":
+            self._inner.remove_index()
+        else:
+            self._inner.remove_vector_field_index(field_name)
 
     def create_vector_field(
         self,
@@ -414,14 +438,6 @@ class Collection:
             vectors = vectors.reshape(1, -1)
         self._inner.add_named_vectors(field_name, vectors, [int(i) for i in ids])
 
-    def build_vector_field_index(self, field_name: str, index_mode: str) -> None:
-        """Build or change the index for a named vector field."""
-        self._inner.build_vector_field_index(field_name, index_mode)
-
-    def remove_vector_field_index(self, field_name: str) -> None:
-        """Remove a named vector field index and return it to flat search."""
-        self._inner.remove_vector_field_index(field_name)
-
     def add_sparse_vectors(
         self,
         vectors: List[Union[Dict[int, float], List[Tuple[int, float]]]],
@@ -436,6 +452,7 @@ class Collection:
         vector: np.ndarray,
         k: int = 10,
         where: Optional[str] = None,
+        field_name: str = "default",
         nprobe: int = 10,
     ) -> ResultView:
         """Search for nearest neighbors.
@@ -444,6 +461,8 @@ class Collection:
             vector: query vector, shape (dim,), dtype float32.
             k: number of results.
             where: optional SQL-like filter.
+            field_name: named vector field to search. Defaults to "default"
+                (the primary collection vector).
             nprobe: controls search breadth by index type (default: 10).
                 - **IVF**: number of partitions to probe — higher = better recall, slower.
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
@@ -453,26 +472,10 @@ class Collection:
             ResultView with ids, distances.
         """
         vector = np.ascontiguousarray(vector, dtype=np.float32).ravel()
-        result = self._inner.search(vector, k, where, nprobe)
-        ids = result.ids()
-        distances = result.distances()
-        idx_type, metric = _parse_index_mode(result.index_mode())
-        return ResultView(
-            ids=ids, distances=distances,
-            k=k, distance=metric, index=idx_type,
-            result_type="search",
-        )
-
-    def search_vector_field(
-        self,
-        field_name: str,
-        vector: np.ndarray,
-        k: int = 10,
-        where: Optional[str] = None,
-    ) -> ResultView:
-        """Search a named vector field. Use field_name='default' for primary vectors."""
-        vector = np.ascontiguousarray(vector, dtype=np.float32).ravel()
-        result = self._inner.search_vector_field(field_name, vector, k, where)
+        if field_name == "default":
+            result = self._inner.search(vector, k, where, nprobe)
+        else:
+            result = self._inner.search_vector_field(field_name, vector, k, where)
         ids = result.ids()
         distances = result.distances()
         idx_type, metric = _parse_index_mode(result.index_mode())
