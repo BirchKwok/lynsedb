@@ -109,6 +109,13 @@ class TestEdgeCases:
         c = lynse.VectorDBClient(uri=tmp_root)
         assert isinstance(str(c), str)
 
+    def test_reopen_same_root_path_in_process(self, tmp_root):
+        """Notebook-style re-assignment must not hit the writer lock."""
+        c1 = lynse.VectorDBClient(uri=tmp_root)
+        c1.create_database("db_reopen", drop_if_exists=True)
+        c2 = lynse.VectorDBClient(uri=tmp_root)
+        assert "db_reopen" in c2.list_databases()
+
     def test_db_repr(self, db):
         r = repr(db)
         assert isinstance(r, str)

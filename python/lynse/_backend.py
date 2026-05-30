@@ -16,6 +16,7 @@ Usage:
 import json
 import logging
 import threading
+from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Union
 
 import numpy as np
@@ -76,6 +77,18 @@ def start_server_background(host: str = "127.0.0.1", port: int = 7637, root_path
 
 # ─── DatabaseManager bridge ─────────────────────────────────────────────────
 
+# One Rust DatabaseManager (and its flock) per resolved root path per process.
+# Re-opening the same path in notebooks / REPLs reuses the handle instead of
+# failing with "path is already open by another writer".
+_MANAGER_CACHE: Dict[Tuple[str, bool], Any] = {}
+_MANAGER_REFS: Dict[Tuple[str, bool], int] = {}
+_MANAGER_CACHE_LOCK = threading.Lock()
+
+
+def _manager_cache_key(root_path: str, read_only: bool) -> Tuple[str, bool]:
+    return (str(Path(root_path).resolve()), read_only)
+
+
 class DatabaseManager:
     """High-level wrapper around the Rust DatabaseManager.
 
@@ -83,10 +96,37 @@ class DatabaseManager:
     """
 
     def __init__(self, root_path: str, read_only: bool = False):
-        if read_only:
-            self._manager = _lynse.DatabaseManager.open_read_only(root_path)
-        else:
-            self._manager = _lynse.DatabaseManager(root_path)
+        self._root_path = str(Path(root_path).resolve())
+        self._read_only = read_only
+        key = _manager_cache_key(self._root_path, read_only)
+
+        with _MANAGER_CACHE_LOCK:
+            cached_inner = _MANAGER_CACHE.get(key)
+            if cached_inner is not None:
+                self._manager = cached_inner
+                _MANAGER_REFS[key] = _MANAGER_REFS.get(key, 0) + 1
+                return
+
+            if read_only:
+                self._manager = _lynse.DatabaseManager.open_read_only(self._root_path)
+            else:
+                self._manager = _lynse.DatabaseManager(self._root_path)
+            _MANAGER_CACHE[key] = self._manager
+            _MANAGER_REFS[key] = 1
+
+    def close(self) -> None:
+        """Release this handle; drop the process lock when the last handle closes."""
+        if self._manager is None:
+            return
+        key = _manager_cache_key(self._root_path, self._read_only)
+        with _MANAGER_CACHE_LOCK:
+            refs = _MANAGER_REFS.get(key, 0) - 1
+            if refs <= 0:
+                _MANAGER_CACHE.pop(key, None)
+                _MANAGER_REFS.pop(key, None)
+            else:
+                _MANAGER_REFS[key] = refs
+        self._manager = None
 
     def create_database(self, name: str) -> None:
         self._manager.create_database(name)

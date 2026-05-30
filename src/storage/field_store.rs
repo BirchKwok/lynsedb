@@ -422,6 +422,14 @@ impl FieldIndex {
     }
 
     fn maybe_blacklist_field(&mut self, field: &str) {
+        // DenseInt indexes are already bounded by the 2M range cap and provide O(1)
+        // equality lookups for contiguous integer fields (e.g. row counters). Do not
+        // blacklist them based on range/cardinality — that would force every query onto
+        // ApexBase SQL and regress filtered search performance by ~2x.
+        if matches!(self.index.get(field), Some(FieldIndexType::DenseInt(_))) {
+            return;
+        }
+
         if self.field_unique_count(field) <= MAX_INDEX_UNIQUE_VALUES {
             return;
         }
@@ -1795,5 +1803,38 @@ fn apex_value_to_json(v: &apexbase::data::Value) -> serde_json::Value {
             serde_json::Value::String(s.clone())
         }
         _ => serde_json::Value::String(format!("{:?}", v)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dense_int_index_is_not_blacklisted_at_high_cardinality() {
+        let mut idx = FieldIndex::default();
+        for i in 0..150_000u64 {
+            idx.insert_value("order", &serde_json::json!(i), i);
+        }
+
+        let key = IndexKey::Int(1);
+        assert_eq!(idx.get("order", &key).map(|ids| ids.as_slice()), Some(&[1][..]));
+
+        let high = IndexKey::Int(149_999);
+        assert_eq!(
+            idx.get("order", &high).map(|ids| ids.as_slice()),
+            Some(&[149_999][..])
+        );
+    }
+
+    #[test]
+    fn sparse_index_is_blacklisted_at_high_cardinality() {
+        let mut idx = FieldIndex::default();
+        for i in 0..=MAX_INDEX_UNIQUE_VALUES as u64 {
+            idx.insert_value("uuid", &serde_json::json!(format!("value_{i}")), i);
+        }
+
+        assert!(idx.blacklisted.contains("uuid"));
+        assert!(idx.get("uuid", &IndexKey::Str("value_0".to_string())).is_none());
     }
 }

@@ -246,6 +246,19 @@ class VectorDBClient:
         else:
             self._manager.restore_database(database_name, str(snapshot_path), overwrite)
 
+    def close(self):
+        """Release the local storage handle (writer lock) for this root path."""
+        if not self._is_remote and self._manager is not None:
+            self._manager.close()
+            self._manager = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     def __repr__(self):
         if self._is_remote:
             return f'{self.__class__.__name__}(uri={self._uri})'
