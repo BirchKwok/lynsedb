@@ -449,6 +449,15 @@ impl ApexExecutor {
                                     Self::try_fast_mmap_in_filter(&backend, &stmt, storage_path)?
                                 {
                                     return Ok(result);
+                                // FAST PATH 5b: Mmap IN / OR-of-equalities on numeric column
+                                } else if let Some(result) =
+                                    Self::try_fast_mmap_numeric_in_filter(
+                                        &backend,
+                                        &stmt,
+                                        storage_path,
+                                    )?
+                                {
+                                    return Ok(result);
                                 } else if backend.is_mmap_only()
                                     && !backend.has_pending_deltas()
                                     && !backend.has_delta()
@@ -534,7 +543,7 @@ impl ApexExecutor {
                                                         &nums,
                                                         _limit_with_off,
                                                     )?,
-                                                    true,
+                                                    false,
                                                 )
                                             } else if let Some(leaves) =
                                                 Self::extract_or_leaf_predicates(where_clause)
@@ -3676,6 +3685,58 @@ impl ApexExecutor {
         Ok(Some(ApexResult::Data(batch)))
     }
 
+    /// MMAP fast path for numeric IN and OR-of-equalities on the same column.
+    fn try_fast_mmap_numeric_in_filter(
+        backend: &TableStorageBackend,
+        stmt: &SelectStatement,
+        storage_path: &Path,
+    ) -> io::Result<Option<ApexResult>> {
+        if !backend.is_mmap_only() || backend.has_pending_deltas() || backend.has_delta() {
+            return Ok(None);
+        }
+
+        let where_clause = match &stmt.where_clause {
+            Some(w) => w,
+            None => return Ok(None),
+        };
+
+        let (col, nums) = match Self::extract_in_numeric_filter(where_clause)
+            .or_else(|| Self::extract_or_numeric_equalities(where_clause))
+        {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let limit_with_off = stmt.limit.map(|l| l + stmt.offset.unwrap_or(0));
+        let mut all_indices = match backend.scan_numeric_in_mmap(&col, &nums, limit_with_off)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let offset = stmt.offset.unwrap_or(0);
+        if offset > 0 {
+            if offset >= all_indices.len() {
+                return Ok(Some(ApexResult::Empty(Arc::new(Schema::empty()))));
+            }
+            all_indices = all_indices[offset..].to_vec();
+        }
+        if let Some(lim) = stmt.limit {
+            all_indices.truncate(lim);
+        }
+
+        if all_indices.is_empty() {
+            return Ok(Some(ApexResult::Empty(Arc::new(Schema::empty()))));
+        }
+
+        let batch = Self::read_matching_rows_adaptive(backend, stmt, &all_indices)?;
+        if !stmt.is_pure_star() {
+            let projected =
+                Self::apply_projection_with_storage(&batch, &stmt.columns, Some(storage_path))?;
+            return Ok(Some(ApexResult::Data(projected)));
+        }
+        Ok(Some(ApexResult::Data(batch)))
+    }
+
     /// Helper to extract boolean equality: col = true/false
     fn extract_bool_equality(expr: &SqlExpr) -> Option<(String, bool)> {
         use crate::query::sql_parser::BinaryOperator;
@@ -3811,9 +3872,34 @@ impl ApexExecutor {
         let need_count = stmt.limit.map(|l| l + stmt.offset.unwrap_or(0));
 
         // FAST PATH: no LIMIT.
-        // Fall back to full sequential read + vectorized Arrow filter.
-        // Highly selective shapes are handled by dedicated mmap fast paths above.
+        // Try mmap numeric IN / OR-of-equalities before full sequential read.
         if need_count.is_none() {
+            if !backend.has_pending_deltas()
+                && !backend.has_delta()
+                && backend.is_mmap_only()
+            {
+                if let Some((col, nums)) = Self::extract_in_numeric_filter(where_clause)
+                    .or_else(|| Self::extract_or_numeric_equalities(where_clause))
+                {
+                    if let Some(indices) = backend.scan_numeric_in_mmap(&col, &nums, None)? {
+                        if indices.is_empty() {
+                            let schema = backend.read_columns_to_arrow(None, 0, Some(0))?;
+                            return Ok(schema);
+                        }
+                        return Self::read_matching_rows_adaptive(backend, stmt, &indices);
+                    }
+                }
+                if let Some(leaves) = Self::extract_or_leaf_predicates(where_clause) {
+                    if let Some(indices) = Self::scan_or_leaves_mmap(backend, &leaves, None)? {
+                        if indices.is_empty() {
+                            let schema = backend.read_columns_to_arrow(None, 0, Some(0))?;
+                            return Ok(schema);
+                        }
+                        return Self::read_matching_rows_adaptive(backend, stmt, &indices);
+                    }
+                }
+            }
+
             // Fallback: full sequential read + vectorized Arrow filter
             // Need both SELECT columns and WHERE columns (WHERE is applied on this batch)
             // For SELECT *, required_columns() returns None → read all columns

@@ -78,6 +78,20 @@ pub enum QuerySignature {
         value: String,
     },
 
+    /// `SELECT * FROM <table> WHERE numeric_col = N` — mmap numeric equality scan
+    NumericEqualityFilter {
+        table: Option<String>,
+        column: String,
+        value: i64,
+    },
+
+    /// `SELECT * FROM <table> WHERE numeric_col IN (N1, N2, ...)` — mmap numeric IN scan
+    NumericInFilter {
+        table: Option<String>,
+        column: String,
+        values: Vec<i64>,
+    },
+
     /// `SELECT * FROM <table> WHERE col = 'val' LIMIT N [OFFSET M]` — early-terminating string equality scan
     StringEqualityFilterLimit {
         table: Option<String>,
@@ -188,6 +202,8 @@ impl QuerySignature {
                 | QuerySignature::ProjectedScanLimit { .. }
                 | QuerySignature::StringEqualityFilter { .. }
                 | QuerySignature::StringEqualityFilterLimit { .. }
+                | QuerySignature::NumericEqualityFilter { .. }
+                | QuerySignature::NumericInFilter { .. }
                 | QuerySignature::ProjectedStringEqualityFilter { .. }
                 | QuerySignature::ProjectedStringEqualityFilterLimit { .. }
                 | QuerySignature::NumericRangeFilterLimit { .. }
@@ -236,6 +252,8 @@ impl QuerySignature {
                 | QuerySignature::ProjectedScanLimit { .. }
                 | QuerySignature::StringEqualityFilter { .. }
                 | QuerySignature::StringEqualityFilterLimit { .. }
+                | QuerySignature::NumericEqualityFilter { .. }
+                | QuerySignature::NumericInFilter { .. }
                 | QuerySignature::ProjectedStringEqualityFilter { .. }
                 | QuerySignature::ProjectedStringEqualityFilterLimit { .. }
                 | QuerySignature::NumericRangeFilterLimit { .. }
@@ -357,7 +375,7 @@ pub fn classify(sql: &str) -> QuerySignature {
     let has_group = su.contains("GROUP");
     let has_having = su.contains("HAVING");
     let has_join = su.contains("JOIN");
-    let has_order = su.contains("ORDER");
+    let has_order = contains_unquoted_keyword(s, "ORDER BY");
     let has_limit = su.contains("LIMIT");
     let has_distinct = su.contains("DISTINCT");
 
@@ -562,6 +580,52 @@ pub fn classify(sql: &str) -> QuerySignature {
                 table: extract_from_table(s, su),
                 column: col,
                 value: val,
+            };
+        }
+    }
+
+    // ── Numeric equality: SELECT * ... WHERE col = N (simple, no AND/OR/IN/LIMIT) ──
+    if is_exact_star_select
+        && has_where
+        && !has_order
+        && !has_group
+        && !has_join
+        && !su.contains("BETWEEN")
+        && !su.contains(" IN ")
+        && !su.contains(" LIKE ")
+        && !su.contains(" AND ")
+        && !su.contains(" OR ")
+        && !s.contains('\'')
+        && !su.contains('>')
+        && !su.contains('<')
+    {
+        if let Some((col, value)) = extract_numeric_equality(s, su) {
+            return QuerySignature::NumericEqualityFilter {
+                table: extract_from_table(s, su),
+                column: col,
+                value,
+            };
+        }
+    }
+
+    // ── Numeric IN: SELECT * ... WHERE col IN (N1, N2, ...) ──
+    if is_exact_star_select
+        && has_where
+        && su.contains(" IN ")
+        && !has_order
+        && !has_group
+        && !has_join
+        && !su.contains("BETWEEN")
+        && !su.contains(" LIKE ")
+        && !su.contains(" AND ")
+        && !su.contains(" OR ")
+        && !s.contains('\'')
+    {
+        if let Some((col, values)) = extract_numeric_in_list(s, su) {
+            return QuerySignature::NumericInFilter {
+                table: extract_from_table(s, su),
+                column: col,
+                values,
             };
         }
     }
@@ -885,7 +949,7 @@ fn parse_numeric_comparison_clause(clause: &str) -> Option<(String, f64, f64)> {
     let (op, op_pos) = [">=", "<=", ">", "<", "="]
         .iter()
         .find_map(|op| clause.find(op).map(|pos| (*op, pos)))?;
-    let col = clause[..op_pos].trim().trim_matches('"');
+    let col = trim_column_ident(clause[..op_pos].trim());
     if col.is_empty() || col.contains(' ') || col.contains('(') {
         return None;
     }
@@ -899,7 +963,69 @@ fn parse_numeric_comparison_clause(clause: &str) -> Option<(String, f64, f64)> {
         "<=" => (f64::NEG_INFINITY, value),
         _ => return None,
     };
-    Some((col.to_string(), low, high))
+    Some((col, low, high))
+}
+
+fn trim_column_ident(name: &str) -> String {
+    let name = name.trim();
+    if name.starts_with('`') && name.ends_with('`') && name.len() >= 2 {
+        return name[1..name.len() - 1].to_string();
+    }
+    name.trim_matches('"').to_string()
+}
+
+/// Extract `WHERE col = N` when the clause is a single numeric equality.
+fn extract_numeric_equality(sql: &str, su: &str) -> Option<(String, i64)> {
+    let where_pos = su.find("WHERE")?;
+    let after_where = sql[where_pos + 5..].trim().trim_end_matches(';').trim();
+    let after_upper = after_where.to_ascii_uppercase();
+    if after_upper.contains(" AND ") || after_upper.contains(" OR ") {
+        return None;
+    }
+    let (column, low, high) = parse_numeric_comparison_clause(after_where)?;
+    if (low - high).abs() > f64::EPSILON {
+        return None;
+    }
+    if !low.is_finite() || low.fract().abs() > f64::EPSILON {
+        return None;
+    }
+    Some((column, low as i64))
+}
+
+/// Extract `WHERE col IN (N1, N2, ...)` for integer lists.
+fn extract_numeric_in_list(sql: &str, su: &str) -> Option<(String, Vec<i64>)> {
+    let where_pos = su.find("WHERE")?;
+    let after_where = sql[where_pos + 5..].trim().trim_end_matches(';').trim();
+    let after_upper = after_where.to_ascii_uppercase();
+    if after_upper.contains(" AND ") || after_upper.contains(" OR ") {
+        return None;
+    }
+    let in_pos = after_upper.find(" IN ")?;
+    let col_part = after_where[..in_pos].trim();
+    let column = trim_column_ident(col_part);
+    if column.is_empty() {
+        return None;
+    }
+    let rhs = after_where[in_pos + 4..].trim();
+    if !rhs.starts_with('(') {
+        return None;
+    }
+    let end_pos = rhs.find(')')?;
+    let list = rhs[1..end_pos].trim();
+    let rest = rhs[end_pos + 1..].trim();
+    if !rest.is_empty() || list.is_empty() {
+        return None;
+    }
+    let mut values = Vec::new();
+    for part in list.split(',') {
+        let token = part.trim();
+        let value = token.parse::<i64>().ok()?;
+        values.push(value);
+    }
+    if values.is_empty() {
+        return None;
+    }
+    Some((column, values))
 }
 
 #[inline]
@@ -1042,10 +1168,16 @@ fn contains_unquoted_keyword(sql: &str, keyword: &str) -> bool {
     let kw_len = keyword_bytes.len();
     let mut i = 0usize;
     let mut in_single_quote = false;
+    let mut in_backtick = false;
 
     while i < bytes.len() {
         let b = bytes[i];
-        if b == b'\'' {
+        if b == b'`' && !in_single_quote {
+            in_backtick = !in_backtick;
+            i += 1;
+            continue;
+        }
+        if b == b'\'' && !in_backtick {
             if in_single_quote && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
                 i += 2;
                 continue;
@@ -1056,6 +1188,7 @@ fn contains_unquoted_keyword(sql: &str, keyword: &str) -> bool {
         }
 
         if !in_single_quote
+            && !in_backtick
             && i + kw_len <= bytes.len()
             && bytes[i..i + kw_len].eq_ignore_ascii_case(keyword_bytes)
         {
@@ -1291,6 +1424,30 @@ mod tests {
                 limit: 5,
                 offset: 2,
             }
+        );
+    }
+
+    #[test]
+    fn test_numeric_equality_and_in() {
+        assert_eq!(
+            classify("SELECT * FROM users WHERE `order` = 1"),
+            QuerySignature::NumericEqualityFilter {
+                table: Some("users".to_string()),
+                column: "order".to_string(),
+                value: 1,
+            }
+        );
+        assert_eq!(
+            classify("SELECT * FROM users WHERE `order` IN (1, 2)"),
+            QuerySignature::NumericInFilter {
+                table: Some("users".to_string()),
+                column: "order".to_string(),
+                values: vec![1, 2],
+            }
+        );
+        assert_eq!(
+            classify("SELECT * FROM users WHERE `order` = 1 OR `order` = 2"),
+            QuerySignature::Complex
         );
     }
 

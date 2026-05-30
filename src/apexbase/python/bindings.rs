@@ -2888,6 +2888,116 @@ impl ApexStorageImpl {
             }
         }
 
+        // ── FAST PATH: SELECT * ... WHERE numeric_col = N ──
+        if let QuerySignature::NumericEqualityFilter {
+            ref table,
+            column,
+            value,
+        } = &sig
+        {
+            if self.current_txn_id.read().is_none() {
+                let (_, target_path) = self.resolve_signature_table(
+                    table.as_deref(),
+                    &table_name,
+                    &table_path,
+                    &base_dir,
+                );
+                if let Ok(backend) = crate::query::get_cached_backend_pub(&target_path) {
+                    if backend.pending_v4_in_memory_rows() == 0
+                        && !backend.has_pending_deltas()
+                        && !backend.has_delta()
+                        && backend.is_mmap_only()
+                    {
+                        let low = *value as f64;
+                        let batch_result = py.allow_threads(|| -> PyResult<Option<RecordBatch>> {
+                            let Some(indices) =
+                                backend.scan_numeric_range_mmap(column, low, low, None)?
+                            else {
+                                return Ok(None);
+                            };
+                            if indices.is_empty() {
+                                return Ok(Some(
+                                    backend.read_columns_to_arrow(None, 0, Some(0))?,
+                                ));
+                            }
+                            Ok(Some(
+                                backend.read_columns_by_indices_to_arrow(&indices, None)?,
+                            ))
+                        });
+                        if let Ok(Some(batch)) = batch_result {
+                            let out = PyDict::new_bound(py);
+                            let columns_dict = PyDict::new_bound(py);
+                            let schema = batch.schema();
+                            for col_idx in 0..batch.num_columns() {
+                                let col_name = schema.field(col_idx).name();
+                                let arr = batch.column(col_idx);
+                                let col_list = arrow_col_to_pylist(py, arr)?;
+                                columns_dict.set_item(col_name, col_list)?;
+                            }
+                            out.set_item("columns_dict", columns_dict)?;
+                            out.set_item("rows_affected", 0i64)?;
+                            return Ok(out.into());
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── FAST PATH: SELECT * ... WHERE numeric_col IN (N1, N2, ...) ──
+        if let QuerySignature::NumericInFilter {
+            ref table,
+            column,
+            values,
+        } = &sig
+        {
+            if self.current_txn_id.read().is_none() {
+                let (_, target_path) = self.resolve_signature_table(
+                    table.as_deref(),
+                    &table_name,
+                    &table_path,
+                    &base_dir,
+                );
+                if let Ok(backend) = crate::query::get_cached_backend_pub(&target_path) {
+                    if backend.pending_v4_in_memory_rows() == 0
+                        && !backend.has_pending_deltas()
+                        && !backend.has_delta()
+                        && backend.is_mmap_only()
+                    {
+                        let nums = values.clone();
+                        let batch_result = py.allow_threads(|| -> PyResult<Option<RecordBatch>> {
+                            let Some(indices) =
+                                backend.scan_numeric_in_mmap(column, &nums, None)?
+                            else {
+                                return Ok(None);
+                            };
+                            if indices.is_empty() {
+                                return Ok(Some(
+                                    backend.read_columns_to_arrow(None, 0, Some(0))?,
+                                ));
+                            }
+                            Ok(Some(
+                                backend.read_columns_by_indices_to_arrow(&indices, None)?,
+                            ))
+                        });
+                        if let Ok(Some(batch)) = batch_result {
+                            let out = PyDict::new_bound(py);
+                            let columns_dict = PyDict::new_bound(py);
+                            let schema = batch.schema();
+                            for col_idx in 0..batch.num_columns() {
+                                let col_name = schema.field(col_idx).name();
+                                let arr = batch.column(col_idx);
+                                let col_list = arrow_col_to_pylist(py, arr)?;
+                                columns_dict.set_item(col_name, col_list)?;
+                            }
+                            out.set_item("columns_dict", columns_dict)?;
+                            out.set_item("rows_affected", 0i64)?;
+                            return Ok(out.into());
+                        }
+                    }
+                }
+            }
+        }
+
         // ── FAST PATH: SELECT * ... WHERE numeric_col <op> value LIMIT N [OFFSET M] ──
         if let QuerySignature::NumericRangeFilterLimit {
             ref table,
@@ -3533,6 +3643,8 @@ impl ApexStorageImpl {
                     | QuerySignature::ProjectedFullScan { .. }
                     | QuerySignature::StringEqualityFilter { .. }
                     | QuerySignature::StringEqualityFilterLimit { .. }
+                    | QuerySignature::NumericEqualityFilter { .. }
+                    | QuerySignature::NumericInFilter { .. }
                     | QuerySignature::ProjectedStringEqualityFilter { .. }
                     | QuerySignature::ProjectedStringEqualityFilterLimit { .. }
                     | QuerySignature::NumericRangeFilterLimit { .. }

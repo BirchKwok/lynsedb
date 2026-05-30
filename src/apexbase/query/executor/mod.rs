@@ -1583,6 +1583,69 @@ impl ApexExecutor {
                 }
                 // Fall through to full parse if fast path unavailable
             }
+            QuerySignature::NumericEqualityFilter {
+                ref table,
+                column,
+                value,
+            } => {
+                let table_path = table
+                    .as_ref()
+                    .map(|tname| Self::resolve_table_path(tname, base_dir, default_table_path))
+                    .unwrap_or_else(|| default_table_path.to_path_buf());
+                if let Ok(backend) = get_cached_backend(&table_path) {
+                    if backend.pending_v4_in_memory_rows() == 0
+                        && !backend.has_pending_deltas()
+                        && !backend.has_delta()
+                        && backend.is_mmap_only()
+                    {
+                        let low = *value as f64;
+                        if let Ok(Some(indices)) =
+                            backend.scan_numeric_range_mmap(column, low, low, None)
+                        {
+                            if indices.is_empty() {
+                                let schema = backend.read_columns_to_arrow(None, 0, Some(0))?;
+                                return Ok(ApexResult::Empty(schema.schema().clone().into()));
+                            }
+                            if let Ok(batch) =
+                                backend.read_columns_by_indices_to_arrow(&indices, None)
+                            {
+                                return Ok(ApexResult::Data(batch));
+                            }
+                        }
+                    }
+                }
+            }
+            QuerySignature::NumericInFilter {
+                ref table,
+                column,
+                values,
+            } => {
+                let table_path = table
+                    .as_ref()
+                    .map(|tname| Self::resolve_table_path(tname, base_dir, default_table_path))
+                    .unwrap_or_else(|| default_table_path.to_path_buf());
+                if let Ok(backend) = get_cached_backend(&table_path) {
+                    if backend.pending_v4_in_memory_rows() == 0
+                        && !backend.has_pending_deltas()
+                        && !backend.has_delta()
+                        && backend.is_mmap_only()
+                    {
+                        if let Ok(Some(indices)) =
+                            backend.scan_numeric_in_mmap(column, values, None)
+                        {
+                            if indices.is_empty() {
+                                let schema = backend.read_columns_to_arrow(None, 0, Some(0))?;
+                                return Ok(ApexResult::Empty(schema.schema().clone().into()));
+                            }
+                            if let Ok(batch) =
+                                backend.read_columns_by_indices_to_arrow(&indices, None)
+                            {
+                                return Ok(ApexResult::Data(batch));
+                            }
+                        }
+                    }
+                }
+            }
             QuerySignature::StringEqualityFilterLimit {
                 ref table,
                 column,

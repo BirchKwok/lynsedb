@@ -1014,6 +1014,29 @@ fn test_olap_limit_on_filter() {
 }
 
 #[test]
+fn test_olap_numeric_in_and_or_equalities() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("olap_num_in.apex");
+    create_olap_storage(&path);
+
+    let result = ApexExecutor::execute(
+        "SELECT * FROM default WHERE emp_id IN (1, 2)",
+        &path,
+    )
+    .unwrap();
+    let batch = result.to_record_batch().unwrap();
+    assert_eq!(batch.num_rows(), 2);
+
+    let result = ApexExecutor::execute(
+        "SELECT * FROM default WHERE emp_id = 1 OR emp_id = 2",
+        &path,
+    )
+    .unwrap();
+    let batch = result.to_record_batch().unwrap();
+    assert_eq!(batch.num_rows(), 2);
+}
+
+#[test]
 fn test_olap_in_list() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("olap_in.apex");

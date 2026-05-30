@@ -5848,6 +5848,14 @@ mod tests {
                 .unwrap(),
             vec![12, 13]
         );
+        assert_eq!(
+            coll.query_fields("\"order\" IN (1, 2)").unwrap(),
+            vec![11, 12]
+        );
+        assert_eq!(
+            coll.query_fields("\"order\" = 1 OR \"order\" = 2").unwrap(),
+            vec![11, 12]
+        );
     }
 
     #[test]

@@ -1078,12 +1078,15 @@ class LocalCollection:
             ResultView: Query result with ids and optional fields.
         """
         if where is not None:
-            # Single-call: get both IDs and fields in one ApexBase query
-            ids, fields = self._rust_coll.query_with_fields(where)
+            ids = self._rust_coll.query_fields(where)
             ids_arr = np.array(ids, dtype=np.int64) if ids else np.array([], dtype=np.int64)
             if return_ids_only:
                 return ResultView(ids=ids_arr, result_type="query")
-            return ResultView(ids=ids_arr, fields=list(fields), result_type="query")
+            if ids:
+                fields = [dict(f) for f in self._rust_coll.retrieve_fields([int(i) for i in ids])]
+            else:
+                fields = []
+            return ResultView(ids=ids_arr, fields=fields, result_type="query")
         elif filter_ids is not None:
             ids = filter_ids
         else:

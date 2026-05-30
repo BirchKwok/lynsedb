@@ -1175,6 +1175,25 @@ impl FieldStore {
     /// Returns `Some(ext_ids)` on success, `None` if the index is cold or the
     /// expression is too complex (caller should fall back to ApexBase SQL).
     fn query_from_index(&self, filter_expr: &str) -> Option<Vec<u64>> {
+        if let Some((field, keys)) = parse_indexed_in(filter_expr)
+            .or_else(|| parse_indexed_or_equalities(filter_expr))
+        {
+            return Some(self.query_index_values(&field, &keys));
+        }
+        if let Some(leaves) = parse_indexed_or_leaves(filter_expr) {
+            let mut ids: HashSet<u64> = HashSet::new();
+            for (field, key) in leaves {
+                if let Some(set) = self.query_index_single(&field, &key) {
+                    ids.extend(set);
+                } else {
+                    return None;
+                }
+            }
+            let mut result: Vec<u64> = ids.into_iter().collect();
+            result.sort_unstable();
+            return Some(self.filter_current_external_ids(result));
+        }
+
         let conditions = parse_indexed_where(filter_expr)?;
         let idx = self.field_eq_index.read();
 
@@ -1212,6 +1231,24 @@ impl FieldStore {
         };
 
         Some(self.filter_current_external_ids(result))
+    }
+
+    fn query_index_single(&self, field: &str, key: &IndexKey) -> Option<Vec<u64>> {
+        let idx = self.field_eq_index.read();
+        idx.get(field, key).cloned()
+    }
+
+    fn query_index_values(&self, field: &str, keys: &[IndexKey]) -> Vec<u64> {
+        let idx = self.field_eq_index.read();
+        let mut ids: HashSet<u64> = HashSet::new();
+        for key in keys {
+            if let Some(set) = idx.get(field, key) {
+                ids.extend(set.iter().copied());
+            }
+        }
+        let mut result: Vec<u64> = ids.into_iter().collect();
+        result.sort_unstable();
+        self.filter_current_external_ids(result)
     }
 
     fn filter_current_external_ids(&self, ids: Vec<u64>) -> Vec<u64> {
@@ -1614,6 +1651,155 @@ enum IndexedCondition {
 ///
 /// Conditions may be joined by AND. Returns `None` for expressions that should
 /// fall back to ApexBase SQL, such as OR, LIKE, and function calls.
+fn parse_indexed_in(expr: &str) -> Option<(String, Vec<IndexKey>)> {
+    let expr = expr.trim();
+    if !expr.starts_with('"') {
+        return None;
+    }
+    let close = expr[1..].find('"')?;
+    let field = expr[1..1 + close].to_string();
+    let rest = expr[1 + close + 1..].trim();
+    if !starts_with_keyword(rest, "IN") {
+        return None;
+    }
+    let values = rest["IN".len()..].trim();
+    if !values.starts_with('(') || !values.ends_with(')') {
+        return None;
+    }
+    let inner = values[1..values.len() - 1].trim();
+    if inner.is_empty() {
+        return None;
+    }
+    let mut keys = Vec::new();
+    for token in split_csv_tokens(inner) {
+        keys.push(IndexKey::from_token(token.trim())?);
+    }
+    Some((field, keys))
+}
+
+/// Parse `"field" = v1 OR "field" = v2 OR ...` into a value list.
+fn parse_indexed_or_equalities(expr: &str) -> Option<(String, Vec<IndexKey>)> {
+    let parts = split_on_or(expr);
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut field_name: Option<String> = None;
+    let mut keys = Vec::new();
+    for part in parts {
+        let (field, key) = parse_equality_condition(part.trim())?;
+        match &field_name {
+            Some(existing) if existing != &field => return None,
+            None => field_name = Some(field),
+            _ => {}
+        }
+        keys.push(key);
+    }
+    Some((field_name?, keys))
+}
+
+/// Parse a top-level OR of simple equality predicates on different fields.
+fn parse_indexed_or_leaves(expr: &str) -> Option<Vec<(String, IndexKey)>> {
+    let parts = split_on_or(expr);
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut leaves = Vec::with_capacity(parts.len());
+    for part in parts {
+        leaves.push(parse_equality_condition(part.trim())?);
+    }
+    Some(leaves)
+}
+
+fn parse_equality_condition(expr: &str) -> Option<(String, IndexKey)> {
+    let expr = expr.trim();
+    if !expr.starts_with('"') {
+        return None;
+    }
+    let close = expr[1..].find('"')?;
+    let field = expr[1..1 + close].to_string();
+    let rest = expr[1 + close + 1..].trim();
+    if !rest.starts_with('=') || rest.starts_with("!=") {
+        return None;
+    }
+    let value = rest[1..].trim();
+    Some((field, IndexKey::from_token(extract_value_literal(value)?)?))
+}
+
+fn split_on_or(expr: &str) -> Vec<&str> {
+    let bytes = expr.as_bytes();
+    let mut parts: Vec<&str> = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_dquote = false;
+    let mut in_squote = false;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' if !in_squote => {
+                in_dquote = !in_dquote;
+                i += 1;
+            }
+            b'\'' if !in_dquote => {
+                in_squote = !in_squote;
+                i += 1;
+            }
+            _ if !in_dquote && !in_squote => {
+                if i + 4 <= bytes.len()
+                    && bytes[i] == b' '
+                    && bytes[i + 1].to_ascii_uppercase() == b'O'
+                    && bytes[i + 2].to_ascii_uppercase() == b'R'
+                    && bytes[i + 3] == b' '
+                {
+                    parts.push(expr[start..i].trim());
+                    i += 4;
+                    start = i;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    parts.push(expr[start..].trim());
+    parts
+}
+
+fn split_csv_tokens(values: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut start = 0usize;
+    let bytes = values.as_bytes();
+    let mut i = 0usize;
+    let mut in_dquote = false;
+    let mut in_squote = false;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' if !in_squote => {
+                in_dquote = !in_dquote;
+                i += 1;
+            }
+            b'\'' if !in_dquote => {
+                in_squote = !in_squote;
+                i += 1;
+            }
+            b',' if !in_dquote && !in_squote => {
+                let token = values[start..i].trim();
+                if !token.is_empty() {
+                    tokens.push(token);
+                }
+                i += 1;
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    let token = values[start..].trim();
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
+}
+
 fn parse_indexed_where(expr: &str) -> Option<Vec<IndexedCondition>> {
     let parts = split_on_and(expr);
     let mut conditions = Vec::with_capacity(parts.len());
@@ -1836,5 +2022,38 @@ mod tests {
 
         assert!(idx.blacklisted.contains("uuid"));
         assert!(idx.get("uuid", &IndexKey::Str("value_0".to_string())).is_none());
+    }
+
+    #[test]
+    fn parse_indexed_in_and_or_equalities() {
+        let (field, keys) = parse_indexed_in("\"order\" IN (1, 2)").unwrap();
+        assert_eq!(field, "order");
+        assert_eq!(keys.len(), 2);
+
+        let (field, keys) = parse_indexed_or_equalities("\"order\" = 1 OR \"order\" = 2").unwrap();
+        assert_eq!(field, "order");
+        assert_eq!(keys.len(), 2);
+
+        let leaves =
+            parse_indexed_or_leaves("\"order\" = 1 OR test = 'test_1'").unwrap();
+        assert_eq!(leaves.len(), 2);
+    }
+
+    #[test]
+    fn query_from_index_supports_in_and_or() {
+        let mut idx = FieldIndex::default();
+        for i in 0..10u64 {
+            idx.insert_value("order", &serde_json::json!(i), i);
+        }
+
+        let mut ids_in = HashSet::new();
+        for key in [IndexKey::Int(1), IndexKey::Int(2)] {
+            if let Some(set) = idx.get("order", &key) {
+                ids_in.extend(set.iter().copied());
+            }
+        }
+        let mut expected_in: Vec<u64> = ids_in.into_iter().collect();
+        expected_in.sort_unstable();
+        assert_eq!(expected_in, vec![1, 2]);
     }
 }
