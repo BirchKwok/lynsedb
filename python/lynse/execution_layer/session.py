@@ -44,11 +44,9 @@ class DataInsertionSession:
             id (int): The ID of the vector.
             field (dict, optional, keyword-only): The field of the vector. Default is None.
                 If None, the field will be set to an empty string.
-            buffer_size (int or bool or None): The buffer size for the storage worker. Default is True.
+            buffer_size (int or bool): The buffer size for the storage worker. Default is True.
 
-                - If None, the vector will be directly written to the disk.
-                - If True, the buffer_size will be set to chunk_size,
-                    and the vectors will be written to the disk when the buffer is full.
+                - If True, the client default batch size (10000 for local collections) will be used.
                 - If False, the vector will be directly written to the disk.
                 - If int, when the buffer is full, the vectors will be written to the disk.
 

@@ -7,6 +7,13 @@
 //! - Schema inference from first insert
 
 use crate::error::{LynseError, Result};
+use arrow::array::{
+    Array, BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
+    Int64Array, Int8Array, LargeBinaryArray, LargeStringArray, StringArray, UInt16Array,
+    UInt32Array, UInt64Array, UInt8Array,
+};
+use arrow::datatypes::DataType as ArrowDataType;
+use arrow::record_batch::RecordBatch;
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
@@ -288,6 +295,10 @@ impl FieldIndex {
     }
 
     fn insert_value(&mut self, field: &str, value: &serde_json::Value, ext_id: u64) {
+        if self.blacklisted.contains(field) {
+            return;
+        }
+
         match value {
             serde_json::Value::Array(values) => {
                 for value in values {
@@ -318,6 +329,8 @@ impl FieldIndex {
                 }
             }
         }
+
+        self.maybe_blacklist_field(field);
     }
 
     fn remove_value(&mut self, field: &str, value: &serde_json::Value, ext_id: u64) {
@@ -407,6 +420,36 @@ impl FieldIndex {
             idx.remove(field, &self.int_ranges, key, ext_id);
         }
     }
+
+    fn maybe_blacklist_field(&mut self, field: &str) {
+        if self.field_unique_count(field) <= MAX_INDEX_UNIQUE_VALUES {
+            return;
+        }
+
+        self.index.remove(field);
+        self.range_index.remove(field);
+        self.array_index.remove(field);
+        self.int_ranges.remove(field);
+        self.blacklisted.insert(field.to_string());
+    }
+
+    fn field_unique_count(&self, field: &str) -> usize {
+        let equality_count = match self.index.get(field) {
+            Some(FieldIndexType::DenseInt(_)) => self
+                .int_ranges
+                .get(field)
+                .and_then(|(min, max, _)| max.checked_sub(*min))
+                .and_then(|range| range.checked_add(1))
+                .map(|range| range as usize)
+                .unwrap_or(0),
+            Some(FieldIndexType::Sparse(map)) => map.len(),
+            None => 0,
+        };
+        let range_count = self.range_index.get(field).map(|map| map.len()).unwrap_or(0);
+        let array_count = self.array_index.get(field).map(|map| map.len()).unwrap_or(0);
+
+        equality_count.max(range_count).max(array_count)
+    }
 }
 
 /// Maximum number of entries to keep in the in-memory field cache.
@@ -448,8 +491,12 @@ impl FieldStore {
         let db = apexbase::embedded::ApexDB::open(db_path)
             .map_err(|e| LynseError::ApexBase(format!("Failed to open ApexBase: {}", e)))?;
 
-        // Try to open existing table or create new one
-        let _ = db.create_table(table_name);
+        // Try to open existing table or create new one. Seed the reserved
+        // external_id column so scans against an empty table have a stable schema.
+        let _ = db.create_table_with_schema(
+            table_name,
+            &[("external_id".to_string(), apexbase::ColumnType::Int64)],
+        );
 
         // Determine next_id from existing data
         let next_id = {
@@ -809,25 +856,11 @@ impl FieldStore {
             .execute(&sql)
             .map_err(|e| LynseError::ApexBase(format!("Query error: {}", e)))?;
 
-        let rows = result_set
-            .to_rows()
+        let batch = result_set
+            .to_record_batch()
             .map_err(|e| LynseError::ApexBase(format!("Result conversion error: {}", e)))?;
 
-        let mut ids = Vec::new();
-        for row in rows {
-            if let Some(apexbase::data::Value::Int64(id)) = row.get("external_id") {
-                let ext_id = *id as u64;
-                let apex_id = match row.get("_id") {
-                    Some(apexbase::data::Value::Int64(apex_id)) => *apex_id as u64,
-                    _ => continue,
-                };
-                if self.is_current_apex_id(ext_id, apex_id) {
-                    ids.push(ext_id);
-                }
-            }
-        }
-
-        Ok(ids)
+        self.current_external_ids_from_batch(&batch)
     }
 
     /// Query fields and return both IDs and field data in a single SQL query.
@@ -854,43 +887,11 @@ impl FieldStore {
             .execute(&sql)
             .map_err(|e| LynseError::ApexBase(format!("Query error: {}", e)))?;
 
-        let rows = result_set
-            .to_rows()
+        let batch = result_set
+            .to_record_batch()
             .map_err(|e| LynseError::ApexBase(format!("Result conversion error: {}", e)))?;
 
-        let mut ids = Vec::with_capacity(rows.len());
-        let mut fields_list = Vec::with_capacity(rows.len());
-
-        for row in rows {
-            let ext_id = if let Some(apexbase::data::Value::Int64(id)) = row.get("external_id") {
-                *id as u64
-            } else {
-                continue;
-            };
-            let apex_id = match row.get("_id") {
-                Some(apexbase::data::Value::Int64(id)) => *id as u64,
-                _ => continue,
-            };
-            let is_current = {
-                let map = self.apex_id_map.read();
-                let i = ext_id as usize;
-                i < map.len() && map[i] == apex_id
-            };
-            if !is_current {
-                continue;
-            }
-            ids.push(ext_id);
-
-            let mut fields = HashMap::new();
-            for (key, value) in row.iter() {
-                if key != "external_id" && key != "_id" {
-                    fields.insert(key.clone(), apex_value_to_json(value));
-                }
-            }
-            fields_list.push(fields);
-        }
-
-        Ok((ids, fields_list))
+        self.current_fields_from_batch(&batch)
     }
 
     /// Scan all currently active field rows.
@@ -904,35 +905,14 @@ impl FieldStore {
             .map_err(|e| LynseError::ApexBase(format!("Table error: {}", e)))?;
 
         let sql = format!("SELECT * FROM {}", self.table_name);
-        let rows = table
+        let batch = table
             .execute(&sql)
             .map_err(|e| LynseError::ApexBase(format!("Query error: {}", e)))?
-            .to_rows()
+            .to_record_batch()
             .map_err(|e| LynseError::ApexBase(format!("Result conversion error: {}", e)))?;
 
-        let mut records = Vec::with_capacity(rows.len());
-        for row in rows {
-            let ext_id = match row.get("external_id") {
-                Some(apexbase::data::Value::Int64(id)) => *id as u64,
-                _ => continue,
-            };
-            let apex_id = match row.get("_id") {
-                Some(apexbase::data::Value::Int64(id)) => *id as u64,
-                _ => continue,
-            };
-            if !self.is_current_apex_id(ext_id, apex_id) {
-                continue;
-            }
-
-            let fields = row
-                .iter()
-                .filter(|(key, _)| *key != "external_id" && *key != "_id")
-                .map(|(key, value)| (key.clone(), apex_value_to_json(value)))
-                .collect();
-            records.push((ext_id, fields));
-        }
-
-        Ok(records)
+        let (ids, fields_list) = self.current_fields_from_batch(&batch)?;
+        Ok(ids.into_iter().zip(fields_list).collect())
     }
 
     /// Retrieve a single record by external ID.
@@ -998,12 +978,6 @@ impl FieldStore {
         }
     }
 
-    fn is_current_apex_id(&self, external_id: u64, apex_id: u64) -> bool {
-        let map = self.apex_id_map.read();
-        let i = external_id as usize;
-        i < map.len() && map[i] == apex_id && map[i] != TOMBSTONE
-    }
-
     /// Retrieve multiple records by external IDs.
     /// Uses in-memory cache for O(1) lookups; falls back to batched SQL for cache misses.
     pub fn retrieve_many(
@@ -1065,24 +1039,13 @@ impl FieldStore {
             let batch = table
                 .retrieve_many(&apex_ids)
                 .map_err(|e| LynseError::ApexBase(format!("retrieve_many error: {}", e)))?;
-            let rows = apexbase::embedded::record_batch_to_rows(&batch)
-                .map_err(|e| LynseError::ApexBase(format!("Row conversion error: {}", e)))?;
             // Build apex_id→ext_id lookup for O(1) result mapping
             let apex_to_ext: HashMap<u64, u64> = mapped
                 .iter()
                 .map(|&(_, ext_id, apex_id)| (apex_id, ext_id))
                 .collect();
-            for row in rows {
-                let apex_id = match row.get("_id") {
-                    Some(apexbase::data::Value::Int64(id)) => *id as u64,
-                    _ => continue,
-                };
+            for (apex_id, fields) in fields_by_apex_id_from_batch(&batch)? {
                 if let Some(&ext_id) = apex_to_ext.get(&apex_id) {
-                    let fields: HashMap<String, serde_json::Value> = row
-                        .iter()
-                        .filter(|(k, _)| *k != "external_id" && *k != "_id")
-                        .map(|(k, v)| (k.clone(), apex_value_to_json(v)))
-                        .collect();
                     id_to_fields.insert(ext_id, fields);
                 }
             }
@@ -1096,21 +1059,12 @@ impl FieldStore {
                 self.table_name,
                 id_list.join(", ")
             );
-            let rows = table
+            let batch = table
                 .execute(&sql)
                 .map_err(|e| LynseError::ApexBase(format!("Query error: {}", e)))?
-                .to_rows()
+                .to_record_batch()
                 .map_err(|e| LynseError::ApexBase(format!("Result conversion error: {}", e)))?;
-            for row in rows {
-                let ext_id = match row.get("external_id") {
-                    Some(apexbase::data::Value::Int64(id)) => *id as u64,
-                    _ => continue,
-                };
-                let fields: HashMap<String, serde_json::Value> = row
-                    .iter()
-                    .filter(|(k, _)| *k != "external_id" && *k != "_id")
-                    .map(|(k, v)| (k.clone(), apex_value_to_json(v)))
-                    .collect();
+            for (ext_id, fields) in fields_by_external_id_from_batch(&batch)? {
                 id_to_fields.insert(ext_id, fields);
             }
         }
@@ -1134,23 +1088,14 @@ impl FieldStore {
             .table(&self.table_name)
             .map_err(|e| LynseError::ApexBase(format!("Table error: {}", e)))?;
 
-        let result_set = table
-            .execute(&format!("SELECT * FROM {} LIMIT 1", self.table_name))
-            .map_err(|e| LynseError::ApexBase(format!("Query error: {}", e)))?;
+        let columns = table
+            .columns()
+            .map_err(|e| LynseError::ApexBase(format!("Schema error: {}", e)))?;
 
-        let rows = result_set
-            .to_rows()
-            .map_err(|e| LynseError::ApexBase(format!("Result conversion error: {}", e)))?;
-
-        if let Some(row) = rows.into_iter().next() {
-            Ok(row
-                .keys()
-                .filter(|k| *k != "_id" && *k != "external_id")
-                .cloned()
-                .collect())
-        } else {
-            Ok(vec![])
-        }
+        Ok(columns
+            .into_iter()
+            .filter(|k| *k != "_id" && *k != "external_id")
+            .collect())
     }
 
     /// Get total record count.
@@ -1258,7 +1203,65 @@ impl FieldStore {
             result
         };
 
-        Some(result)
+        Some(self.filter_current_external_ids(result))
+    }
+
+    fn filter_current_external_ids(&self, ids: Vec<u64>) -> Vec<u64> {
+        let map = self.apex_id_map.read();
+        ids.into_iter()
+            .filter(|&ext_id| {
+                let i = ext_id as usize;
+                i < map.len() && map[i] != TOMBSTONE
+            })
+            .collect()
+    }
+
+    fn current_external_ids_from_batch(&self, batch: &RecordBatch) -> Result<Vec<u64>> {
+        if batch.num_rows() == 0 && !record_batch_has_column(batch, "external_id") {
+            return Ok(Vec::new());
+        }
+        let apex_ids = u64_column_values(batch, "_id")?;
+        let ext_ids = u64_column_values(batch, "external_id")?;
+        let map = self.apex_id_map.read();
+        let mut ids = Vec::with_capacity(batch.num_rows());
+
+        for (apex_id, ext_id) in apex_ids.into_iter().zip(ext_ids.into_iter()) {
+            let i = ext_id as usize;
+            if i < map.len() && map[i] == apex_id && map[i] != TOMBSTONE {
+                ids.push(ext_id);
+            }
+        }
+
+        Ok(ids)
+    }
+
+    fn current_fields_from_batch(
+        &self,
+        batch: &RecordBatch,
+    ) -> Result<(Vec<u64>, Vec<HashMap<String, serde_json::Value>>)> {
+        if batch.num_rows() == 0 && !record_batch_has_column(batch, "external_id") {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let apex_ids = u64_column_values(batch, "_id")?;
+        let ext_ids = u64_column_values(batch, "external_id")?;
+        let field_columns = field_column_indices(batch);
+        let map = self.apex_id_map.read();
+
+        let mut ids = Vec::with_capacity(batch.num_rows());
+        let mut fields_list = Vec::with_capacity(batch.num_rows());
+        for row_idx in 0..batch.num_rows() {
+            let apex_id = apex_ids[row_idx];
+            let ext_id = ext_ids[row_idx];
+            let i = ext_id as usize;
+            if i >= map.len() || map[i] != apex_id || map[i] == TOMBSTONE {
+                continue;
+            }
+
+            ids.push(ext_id);
+            fields_list.push(fields_from_batch_row(batch, &field_columns, row_idx));
+        }
+
+        Ok((ids, fields_list))
     }
 
     // ── File I/O helpers ─────────────────────────────────────────────────────
@@ -1335,16 +1338,12 @@ impl FieldStore {
         let sql = format!("SELECT _id, external_id FROM {}", table_name);
         let mut pairs: Vec<(u64, u64)> = Vec::new();
         if let Ok(rs) = table.execute(&sql) {
-            if let Ok(rows) = rs.to_rows() {
-                pairs = Vec::with_capacity(rows.len());
-                for row in rows {
-                    if let (
-                        Some(apexbase::data::Value::Int64(apex_id)),
-                        Some(apexbase::data::Value::Int64(ext_id)),
-                    ) = (row.get("_id"), row.get("external_id"))
-                    {
-                        pairs.push((*ext_id as u64, *apex_id as u64));
-                    }
+            if let Ok(batch) = rs.to_record_batch() {
+                let apex_ids = u64_column_values(&batch, "_id").unwrap_or_default();
+                let ext_ids = u64_column_values(&batch, "external_id").unwrap_or_default();
+                pairs = Vec::with_capacity(apex_ids.len().min(ext_ids.len()));
+                for (apex_id, ext_id) in apex_ids.into_iter().zip(ext_ids.into_iter()) {
+                    pairs.push((ext_id, apex_id));
                 }
             }
         }
@@ -1358,6 +1357,236 @@ impl FieldStore {
         }
         Ok(vec)
     }
+}
+
+fn field_column_indices(batch: &RecordBatch) -> Vec<(usize, String)> {
+    batch
+        .schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, field)| {
+            let name = field.name();
+            if name == "_id" || name == "external_id" {
+                None
+            } else {
+                Some((idx, name.clone()))
+            }
+        })
+        .collect()
+}
+
+fn column_index(batch: &RecordBatch, name: &str) -> Result<usize> {
+    batch
+        .schema()
+        .fields()
+        .iter()
+        .position(|field| field.name() == name)
+        .ok_or_else(|| LynseError::ApexBase(format!("Missing ApexBase column: {}", name)))
+}
+
+fn record_batch_has_column(batch: &RecordBatch, name: &str) -> bool {
+    batch
+        .schema()
+        .fields()
+        .iter()
+        .any(|field| field.name() == name)
+}
+
+fn u64_column_values(batch: &RecordBatch, name: &str) -> Result<Vec<u64>> {
+    let idx = column_index(batch, name)?;
+    let array = batch.column(idx);
+    let mut values = Vec::with_capacity(batch.num_rows());
+    for row_idx in 0..batch.num_rows() {
+        if let Some(value) = arrow_u64_at(array.as_ref(), row_idx) {
+            values.push(value);
+        } else {
+            return Err(LynseError::ApexBase(format!(
+                "ApexBase column {} contains a non-integer value",
+                name
+            )));
+        }
+    }
+    Ok(values)
+}
+
+fn fields_by_apex_id_from_batch(
+    batch: &RecordBatch,
+) -> Result<Vec<(u64, HashMap<String, serde_json::Value>)>> {
+    let apex_ids = u64_column_values(batch, "_id")?;
+    let field_columns = field_column_indices(batch);
+    let mut rows = Vec::with_capacity(batch.num_rows());
+    for (row_idx, apex_id) in apex_ids.into_iter().enumerate() {
+        rows.push((
+            apex_id,
+            fields_from_batch_row(batch, &field_columns, row_idx),
+        ));
+    }
+    Ok(rows)
+}
+
+fn fields_by_external_id_from_batch(
+    batch: &RecordBatch,
+) -> Result<Vec<(u64, HashMap<String, serde_json::Value>)>> {
+    let ext_ids = u64_column_values(batch, "external_id")?;
+    let field_columns = field_column_indices(batch);
+    let mut rows = Vec::with_capacity(batch.num_rows());
+    for (row_idx, ext_id) in ext_ids.into_iter().enumerate() {
+        rows.push((
+            ext_id,
+            fields_from_batch_row(batch, &field_columns, row_idx),
+        ));
+    }
+    Ok(rows)
+}
+
+fn fields_from_batch_row(
+    batch: &RecordBatch,
+    field_columns: &[(usize, String)],
+    row_idx: usize,
+) -> HashMap<String, serde_json::Value> {
+    let mut fields = HashMap::with_capacity(field_columns.len());
+    for (col_idx, name) in field_columns {
+        fields.insert(
+            name.clone(),
+            arrow_json_at(batch.column(*col_idx).as_ref(), row_idx),
+        );
+    }
+    fields
+}
+
+fn arrow_u64_at(array: &dyn Array, row_idx: usize) -> Option<u64> {
+    if array.is_null(row_idx) {
+        return None;
+    }
+    match array.data_type() {
+        ArrowDataType::Int64 => array
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .map(|arr| arr.value(row_idx) as u64),
+        ArrowDataType::Int32 => array
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .map(|arr| arr.value(row_idx) as u64),
+        ArrowDataType::Int16 => array
+            .as_any()
+            .downcast_ref::<Int16Array>()
+            .map(|arr| arr.value(row_idx) as u64),
+        ArrowDataType::Int8 => array
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .map(|arr| arr.value(row_idx) as u64),
+        ArrowDataType::UInt64 => array
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .map(|arr| arr.value(row_idx)),
+        ArrowDataType::UInt32 => array
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .map(|arr| arr.value(row_idx) as u64),
+        ArrowDataType::UInt16 => array
+            .as_any()
+            .downcast_ref::<UInt16Array>()
+            .map(|arr| arr.value(row_idx) as u64),
+        ArrowDataType::UInt8 => array
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .map(|arr| arr.value(row_idx) as u64),
+        _ => None,
+    }
+}
+
+fn arrow_json_at(array: &dyn Array, row_idx: usize) -> serde_json::Value {
+    if array.is_null(row_idx) {
+        return serde_json::Value::Null;
+    }
+    match array.data_type() {
+        ArrowDataType::Boolean => array
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .map(|arr| serde_json::Value::Bool(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::Int64 => array
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .map(|arr| serde_json::json!(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::Int32 => array
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .map(|arr| serde_json::json!(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::Int16 => array
+            .as_any()
+            .downcast_ref::<Int16Array>()
+            .map(|arr| serde_json::json!(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::Int8 => array
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .map(|arr| serde_json::json!(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::UInt64 => array
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .map(|arr| serde_json::json!(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::UInt32 => array
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .map(|arr| serde_json::json!(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::UInt16 => array
+            .as_any()
+            .downcast_ref::<UInt16Array>()
+            .map(|arr| serde_json::json!(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::UInt8 => array
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .map(|arr| serde_json::json!(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::Float64 => array
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .map(|arr| serde_json::json!(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::Float32 => array
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .map(|arr| serde_json::json!(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::Utf8 => array
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .map(|arr| string_to_json(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::LargeUtf8 => array
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .map(|arr| string_to_json(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::Binary => array
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .map(|arr| serde_json::json!(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        ArrowDataType::LargeBinary => array
+            .as_any()
+            .downcast_ref::<LargeBinaryArray>()
+            .map(|arr| serde_json::json!(arr.value(row_idx)))
+            .unwrap_or(serde_json::Value::Null),
+        _ => serde_json::Value::String(format!("{:?}", array.data_type())),
+    }
+}
+
+fn string_to_json(value: &str) -> serde_json::Value {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) {
+        if parsed.is_array() || parsed.is_object() {
+            return parsed;
+        }
+    }
+    serde_json::Value::String(value.to_string())
 }
 
 // ── WHERE expression parser ───────────────────────────────────────────────────

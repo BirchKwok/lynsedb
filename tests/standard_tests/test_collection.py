@@ -27,6 +27,13 @@ class TestAddItem:
         collection.commit()
         assert collection.shape[0] == 5
 
+    def test_add_item_default_buffer_flushes_periodically(self, collection):
+        for i in range(10_000):
+            collection.add_item(np.random.rand(DIM).astype(np.float32), id=i)
+
+        assert collection.shape[0] == 10_000
+        assert collection._mesosphere_list.empty()
+
     def test_insert_session_commits_automatically(self, collection):
         with collection.insert_session() as session:
             session.add_item(np.random.rand(DIM).astype(np.float32), id=99)

@@ -452,6 +452,13 @@ struct InvertedTextIndexData {
     doc_lengths: HashMap<u64, HashMap<String, usize>>,
 }
 
+#[derive(Serialize)]
+struct InvertedTextIndexDataRef<'a> {
+    version: u32,
+    postings: &'a HashMap<String, HashMap<u64, HashMap<String, u32>>>,
+    doc_lengths: &'a HashMap<u64, HashMap<String, usize>>,
+}
+
 fn default_text_index_version() -> u32 {
     TEXT_INDEX_FORMAT_VERSION
 }
@@ -531,6 +538,7 @@ impl InvertedTextIndex {
         &mut self,
         ids: &[u64],
         fields: &[HashMap<String, serde_json::Value>],
+        persist: bool,
     ) -> Result<()> {
         if ids.len() != fields.len() {
             return Err(LynseError::InvalidArgument(format!(
@@ -540,29 +548,33 @@ impl InvertedTextIndex {
             )));
         }
 
-        let mut next = self.clone();
         for (&id, field_map) in ids.iter().zip(fields.iter()) {
-            next.remove_document(id);
-            next.index_document(id, field_map);
+            if self.doc_lengths.contains_key(&id) {
+                self.remove_document(id);
+            }
+            self.index_document(id, field_map);
         }
-        next.write_to_disk()?;
-        next.loaded_from_disk = true;
-        *self = next;
+
+        if persist {
+            self.write_to_disk()?;
+            self.loaded_from_disk = true;
+        }
         Ok(())
     }
 
-    fn remove_ids(&mut self, ids: &HashSet<u64>) -> Result<()> {
+    fn remove_ids(&mut self, ids: &HashSet<u64>, persist: bool) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
         }
 
-        let mut next = self.clone();
         for &id in ids {
-            next.remove_document(id);
+            self.remove_document(id);
         }
-        next.write_to_disk()?;
-        next.loaded_from_disk = true;
-        *self = next;
+
+        if persist {
+            self.write_to_disk()?;
+            self.loaded_from_disk = true;
+        }
         Ok(())
     }
 
@@ -732,14 +744,21 @@ impl InvertedTextIndex {
             std::fs::create_dir_all(parent)?;
         }
 
-        let data = InvertedTextIndexData {
+        let data = InvertedTextIndexDataRef {
             version: TEXT_INDEX_FORMAT_VERSION,
-            postings: self.postings.clone(),
-            doc_lengths: self.doc_lengths.clone(),
+            postings: &self.postings,
+            doc_lengths: &self.doc_lengths,
         };
         let bytes =
             serde_json::to_vec(&data).map_err(|e| LynseError::Serialization(e.to_string()))?;
         Collection::atomic_write_file(&self.path, &bytes)
+    }
+
+    fn write_to_disk_if_present(&self) -> Result<()> {
+        if self.is_empty() && !self.path.exists() {
+            return Ok(());
+        }
+        self.write_to_disk()
     }
 }
 
@@ -1385,12 +1404,15 @@ impl Collection {
                 self.field_store
                     .replace_fields_at_ids(&existing_field_rows, &existing_field_values)?;
                 self.text_index
-                    .upsert_documents(&existing_field_user_ids, &existing_field_values)?;
+                    .upsert_documents(&existing_field_user_ids, &existing_field_values, false)?;
                 recovered_any = true;
             }
         }
 
         // Clean WAL after successful recovery
+        if recovered_any {
+            self.text_index.write_to_disk_if_present()?;
+        }
         self.wal.cleanup()?;
         Ok(recovered_any || !segments.is_empty())
     }
@@ -1791,7 +1813,7 @@ impl Collection {
 
         self.vector_store.write(vectors)?;
         self.field_store.batch_store_at_ids(&row_ids, fields)?;
-        self.text_index.upsert_documents(ids, fields)?;
+        self.text_index.upsert_documents(ids, fields, false)?;
 
         if let Some(ref mut idx) = self.index {
             idx.insert(vectors, n_vectors, dim, &row_ids)?;
@@ -1856,7 +1878,7 @@ impl Collection {
         // Store fields only when provided (skip empty metadata to avoid slow per-row I/O)
         if let Some(field_list) = fields {
             self.field_store.batch_store_at_ids(&row_ids, field_list)?;
-            self.text_index.upsert_documents(ids, field_list)?;
+            self.text_index.upsert_documents(ids, field_list, false)?;
         }
 
         // Insert into index if exists (HNSW/IVF — Flat types use mmap directly)
@@ -2215,6 +2237,7 @@ impl Collection {
     /// Checkpoint durable state and clear WAL after data has reached main storage.
     pub fn checkpoint(&self) -> Result<()> {
         self.ensure_writable()?;
+        self.text_index.write_to_disk_if_present()?;
         self.flush()?;
         self.wal.cleanup()?;
         self.sync_collection_files()
@@ -3540,7 +3563,7 @@ impl Collection {
         if fields.is_some() {
             self.field_store
                 .replace_fields_at_ids(&field_rows, &field_values)?;
-            self.text_index.upsert_documents(ids, fields.unwrap())?;
+            self.text_index.upsert_documents(ids, fields.unwrap(), true)?;
         }
         if tombstone_changed {
             let path = self.path.join("tombstone.bin");
@@ -4017,7 +4040,7 @@ impl Collection {
         }
 
         self.sparse_vectors.remove_ids(&tombstoned_user_ids)?;
-        self.text_index.remove_ids(&tombstoned_user_ids)?;
+        self.text_index.remove_ids(&tombstoned_user_ids, true)?;
 
         // Clear tombstone set and file
         {
@@ -4369,7 +4392,7 @@ fn tokenize_text_fields(
     let mut field_terms = HashMap::new();
     for (field, value) in fields {
         let mut text = String::new();
-        append_json_text(value, &mut text);
+        append_searchable_json_text(value, &mut text);
         let mut counts = HashMap::new();
         for token in tokenize_text(&text) {
             *counts.entry(token).or_insert(0) += 1;
@@ -4431,33 +4454,27 @@ fn fields_to_searchable_text(
                 continue;
             }
         }
-        append_json_text(value, &mut text);
+        append_searchable_json_text(value, &mut text);
         text.push(' ');
     }
     text
 }
 
-fn append_json_text(value: &serde_json::Value, out: &mut String) {
+fn append_searchable_json_text(value: &serde_json::Value, out: &mut String) {
     match value {
-        serde_json::Value::Null => {}
-        serde_json::Value::Bool(v) => {
-            out.push_str(if *v { "true" } else { "false" });
-        }
-        serde_json::Value::Number(v) => {
-            out.push_str(&v.to_string());
-        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
         serde_json::Value::String(v) => {
             out.push_str(v);
         }
         serde_json::Value::Array(values) => {
             for value in values {
-                append_json_text(value, out);
+                append_searchable_json_text(value, out);
                 out.push(' ');
             }
         }
         serde_json::Value::Object(values) => {
             for value in values.values() {
-                append_json_text(value, out);
+                append_searchable_json_text(value, out);
                 out.push(' ');
             }
         }

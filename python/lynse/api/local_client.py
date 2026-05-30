@@ -19,6 +19,9 @@ from ..result_view import ResultView, _parse_index_mode
 from .rerank import apply_external_rerank, should_fetch_fields
 
 
+DEFAULT_INSERT_BUFFER_SIZE = 10_000
+
+
 class LocalClient:
     """
     Local database client — direct Rust backend, no HTTP.
@@ -289,9 +292,10 @@ class LocalCollection:
             id (int): The ID of the item.
             field (dict, optional): The fields of the item.
             buffer_size (int or bool): The buffer size.
+                If True, the default buffered batch size (10000) is used.
         """
         if buffer_size is True:
-            buffer_size = 2**31
+            buffer_size = DEFAULT_INSERT_BUFFER_SIZE
         else:
             if buffer_size is False:
                 buffer_size = 0
@@ -305,9 +309,10 @@ class LocalCollection:
             self.COMMIT_FLAG = False
             return id
         else:
+            vec = np.ascontiguousarray(vector, dtype=np.float32).reshape(-1)
             with self._lock:
                 self._mesosphere_list.put({
-                    "vector": vector if isinstance(vector, list) else vector.tolist(),
+                    "vector": vec,
                     "id": id,
                     "field": field if field is not None else {},
                 })
@@ -319,16 +324,17 @@ class LocalCollection:
 
     def _flush_buffer(self):
         """Flush the internal buffer to the Rust collection."""
-        items = list(self._mesosphere_list.queue)
-        if not items:
-            return
-        vectors = np.array([item['vector'] for item in items], dtype=np.float32)
-        ids = [int(item['id']) for item in items]
-        fields = [item.get('field', {}) for item in items]
-        has_fields = any(f for f in fields)
-        self._rust_coll.add_items(vectors, ids, fields if has_fields else None)
-        self.COMMIT_FLAG = False
-        self._mesosphere_list = queue.Queue()
+        with self._lock:
+            items = list(self._mesosphere_list.queue)
+            if not items:
+                return
+            vectors = np.array([item['vector'] for item in items], dtype=np.float32)
+            ids = [int(item['id']) for item in items]
+            fields = [item.get('field', {}) for item in items]
+            has_fields = any(f for f in fields)
+            self._rust_coll.add_items(vectors, ids, fields if has_fields else None)
+            self.COMMIT_FLAG = False
+            self._mesosphere_list = queue.Queue()
 
     def bulk_add_items(
             self,
