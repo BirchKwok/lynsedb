@@ -25,6 +25,72 @@ pub fn inner_product_f32(a: &[f32], b: &[f32]) -> f32 {
     inner_product_scalar(a, b)
 }
 
+/// Batch inner product: one query against four candidate vectors.
+///
+/// Shares query loads across four dot products — critical for bandwidth-bound
+/// brute-force scans (e.g. 1M × 128 flat search).
+#[inline(always)]
+pub fn inner_product_batch4_f32(
+    query: &[f32],
+    v0: &[f32],
+    v1: &[f32],
+    v2: &[f32],
+    v3: &[f32],
+) -> [f32; 4] {
+    debug_assert_eq!(query.len(), v0.len());
+    debug_assert_eq!(query.len(), v1.len());
+    debug_assert_eq!(query.len(), v2.len());
+    debug_assert_eq!(query.len(), v3.len());
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return unsafe { inner_product_batch4_avx2_fma(query, v0, v1, v2, v3) };
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        return inner_product_batch4_neon(query, v0, v1, v2, v3);
+    }
+
+    #[allow(unreachable_code)]
+    inner_product_batch4_scalar(query, v0, v1, v2, v3)
+}
+
+/// Batch inner product: one query against eight candidate vectors.
+#[inline(always)]
+pub fn inner_product_batch8_f32(
+    query: &[f32],
+    v0: &[f32],
+    v1: &[f32],
+    v2: &[f32],
+    v3: &[f32],
+    v4: &[f32],
+    v5: &[f32],
+    v6: &[f32],
+    v7: &[f32],
+) -> [f32; 8] {
+    debug_assert_eq!(query.len(), v0.len());
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return unsafe {
+                inner_product_batch8_avx2_fma(query, v0, v1, v2, v3, v4, v5, v6, v7)
+            };
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        return inner_product_batch8_neon(query, v0, v1, v2, v3, v4, v5, v6, v7);
+    }
+
+    #[allow(unreachable_code)]
+    inner_product_batch8_scalar(query, v0, v1, v2, v3, v4, v5, v6, v7)
+}
+
 /// Squared Euclidean distance (L2²).
 /// Lower value = more similar.
 #[inline(always)]
@@ -149,6 +215,47 @@ fn inner_product_scalar(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[inline]
+fn inner_product_batch4_scalar(
+    query: &[f32],
+    v0: &[f32],
+    v1: &[f32],
+    v2: &[f32],
+    v3: &[f32],
+) -> [f32; 4] {
+    let mut s0 = 0.0f64;
+    let mut s1 = 0.0f64;
+    let mut s2 = 0.0f64;
+    let mut s3 = 0.0f64;
+    for i in 0..query.len() {
+        let q = query[i] as f64;
+        s0 += q * (v0[i] as f64);
+        s1 += q * (v1[i] as f64);
+        s2 += q * (v2[i] as f64);
+        s3 += q * (v3[i] as f64);
+    }
+    [s0 as f32, s1 as f32, s2 as f32, s3 as f32]
+}
+
+#[inline]
+fn inner_product_batch8_scalar(
+    query: &[f32],
+    v0: &[f32],
+    v1: &[f32],
+    v2: &[f32],
+    v3: &[f32],
+    v4: &[f32],
+    v5: &[f32],
+    v6: &[f32],
+    v7: &[f32],
+) -> [f32; 8] {
+    let b4a = inner_product_batch4_scalar(query, v0, v1, v2, v3);
+    let b4b = inner_product_batch4_scalar(query, v4, v5, v6, v7);
+    [
+        b4a[0], b4a[1], b4a[2], b4a[3], b4b[0], b4b[1], b4b[2], b4b[3],
+    ]
+}
+
+#[inline]
 fn l2_squared_scalar(a: &[f32], b: &[f32]) -> f32 {
     let mut sum = 0.0f64;
     let chunks = a.len() / 8;
@@ -252,6 +359,135 @@ unsafe fn inner_product_avx2_fma(a: &[f32], b: &[f32]) -> f32 {
     }
 
     sum
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn inner_product_batch4_avx2_fma(
+    query: &[f32],
+    v0: &[f32],
+    v1: &[f32],
+    v2: &[f32],
+    v3: &[f32],
+) -> [f32; 4] {
+    use std::arch::x86_64::*;
+
+    let n = query.len();
+    let chunks = n / 8;
+    let remainder = n % 8;
+
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut acc2 = _mm256_setzero_ps();
+    let mut acc3 = _mm256_setzero_ps();
+
+    for i in 0..chunks {
+        let base = i * 8;
+        let qv = _mm256_loadu_ps(query.as_ptr().add(base));
+        acc0 = _mm256_fmadd_ps(qv, _mm256_loadu_ps(v0.as_ptr().add(base)), acc0);
+        acc1 = _mm256_fmadd_ps(qv, _mm256_loadu_ps(v1.as_ptr().add(base)), acc1);
+        acc2 = _mm256_fmadd_ps(qv, _mm256_loadu_ps(v2.as_ptr().add(base)), acc2);
+        acc3 = _mm256_fmadd_ps(qv, _mm256_loadu_ps(v3.as_ptr().add(base)), acc3);
+    }
+
+    let hsum = |acc: __m256| -> f32 {
+        let hi = _mm256_extractf128_ps(acc, 1);
+        let lo = _mm256_castps256_ps128(acc);
+        let sum128 = _mm_add_ps(lo, hi);
+        let shuf = _mm_movehdup_ps(sum128);
+        let sums = _mm_add_ps(sum128, shuf);
+        let shuf2 = _mm_movehl_ps(sums, sums);
+        let result = _mm_add_ss(sums, shuf2);
+        _mm_cvtss_f32(result)
+    };
+
+    let mut out = [hsum(acc0), hsum(acc1), hsum(acc2), hsum(acc3)];
+    let base = chunks * 8;
+    for i in 0..remainder {
+        let q = query[base + i];
+        out[0] += q * v0[base + i];
+        out[1] += q * v1[base + i];
+        out[2] += q * v2[base + i];
+        out[3] += q * v3[base + i];
+    }
+    out
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn inner_product_batch8_avx2_fma(
+    query: &[f32],
+    v0: &[f32],
+    v1: &[f32],
+    v2: &[f32],
+    v3: &[f32],
+    v4: &[f32],
+    v5: &[f32],
+    v6: &[f32],
+    v7: &[f32],
+) -> [f32; 8] {
+    use std::arch::x86_64::*;
+
+    let n = query.len();
+    let chunks = n / 8;
+    let remainder = n % 8;
+
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut acc2 = _mm256_setzero_ps();
+    let mut acc3 = _mm256_setzero_ps();
+    let mut acc4 = _mm256_setzero_ps();
+    let mut acc5 = _mm256_setzero_ps();
+    let mut acc6 = _mm256_setzero_ps();
+    let mut acc7 = _mm256_setzero_ps();
+
+    for i in 0..chunks {
+        let base = i * 8;
+        let qv = _mm256_loadu_ps(query.as_ptr().add(base));
+        acc0 = _mm256_fmadd_ps(qv, _mm256_loadu_ps(v0.as_ptr().add(base)), acc0);
+        acc1 = _mm256_fmadd_ps(qv, _mm256_loadu_ps(v1.as_ptr().add(base)), acc1);
+        acc2 = _mm256_fmadd_ps(qv, _mm256_loadu_ps(v2.as_ptr().add(base)), acc2);
+        acc3 = _mm256_fmadd_ps(qv, _mm256_loadu_ps(v3.as_ptr().add(base)), acc3);
+        acc4 = _mm256_fmadd_ps(qv, _mm256_loadu_ps(v4.as_ptr().add(base)), acc4);
+        acc5 = _mm256_fmadd_ps(qv, _mm256_loadu_ps(v5.as_ptr().add(base)), acc5);
+        acc6 = _mm256_fmadd_ps(qv, _mm256_loadu_ps(v6.as_ptr().add(base)), acc6);
+        acc7 = _mm256_fmadd_ps(qv, _mm256_loadu_ps(v7.as_ptr().add(base)), acc7);
+    }
+
+    let hsum = |acc: __m256| -> f32 {
+        let hi = _mm256_extractf128_ps(acc, 1);
+        let lo = _mm256_castps256_ps128(acc);
+        let sum128 = _mm_add_ps(lo, hi);
+        let shuf = _mm_movehdup_ps(sum128);
+        let sums = _mm_add_ps(sum128, shuf);
+        let shuf2 = _mm_movehl_ps(sums, sums);
+        let result = _mm_add_ss(sums, shuf2);
+        _mm_cvtss_f32(result)
+    };
+
+    let mut out = [
+        hsum(acc0),
+        hsum(acc1),
+        hsum(acc2),
+        hsum(acc3),
+        hsum(acc4),
+        hsum(acc5),
+        hsum(acc6),
+        hsum(acc7),
+    ];
+    let base = chunks * 8;
+    for i in 0..remainder {
+        let q = query[base + i];
+        out[0] += q * v0[base + i];
+        out[1] += q * v1[base + i];
+        out[2] += q * v2[base + i];
+        out[3] += q * v3[base + i];
+        out[4] += q * v4[base + i];
+        out[5] += q * v5[base + i];
+        out[6] += q * v6[base + i];
+        out[7] += q * v7[base + i];
+    }
+    out
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -436,6 +672,195 @@ fn inner_product_neon(a: &[f32], b: &[f32]) -> f32 {
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
+fn inner_product_batch4_neon(
+    query: &[f32],
+    v0: &[f32],
+    v1: &[f32],
+    v2: &[f32],
+    v3: &[f32],
+) -> [f32; 4] {
+    use std::arch::aarch64::*;
+
+    let n = query.len();
+    let chunks16 = n / 16;
+    let remainder = n % 16;
+
+    let mut out;
+    unsafe {
+        let mut acc0 = vdupq_n_f32(0.0);
+        let mut acc1 = vdupq_n_f32(0.0);
+        let mut acc2 = vdupq_n_f32(0.0);
+        let mut acc3 = vdupq_n_f32(0.0);
+
+        let qp = query.as_ptr();
+        let p0 = v0.as_ptr();
+        let p1 = v1.as_ptr();
+        let p2 = v2.as_ptr();
+        let p3 = v3.as_ptr();
+
+        for i in 0..chunks16 {
+            let base = i * 16;
+            let qa0 = vld1q_f32(qp.add(base));
+            let qa1 = vld1q_f32(qp.add(base + 4));
+            let qa2 = vld1q_f32(qp.add(base + 8));
+            let qa3 = vld1q_f32(qp.add(base + 12));
+
+            macro_rules! accumulate {
+                ($acc:ident, $bp:ident) => {{
+                    let (vb0, vb1, vb2, vb3): (
+                        float32x4_t,
+                        float32x4_t,
+                        float32x4_t,
+                        float32x4_t,
+                    );
+                    core::arch::asm!(
+                        "ldnp {0:q}, {1:q}, [{4}]",
+                        "ldnp {2:q}, {3:q}, [{4}, #32]",
+                        out(vreg) vb0,
+                        out(vreg) vb1,
+                        out(vreg) vb2,
+                        out(vreg) vb3,
+                        in(reg) $bp.add(base),
+                        options(nostack, preserves_flags),
+                    );
+                    $acc = vfmaq_f32($acc, qa0, vb0);
+                    $acc = vfmaq_f32($acc, qa1, vb1);
+                    $acc = vfmaq_f32($acc, qa2, vb2);
+                    $acc = vfmaq_f32($acc, qa3, vb3);
+                }};
+            }
+
+            accumulate!(acc0, p0);
+            accumulate!(acc1, p1);
+            accumulate!(acc2, p2);
+            accumulate!(acc3, p3);
+        }
+
+        out = [vaddvq_f32(acc0), vaddvq_f32(acc1), vaddvq_f32(acc2), vaddvq_f32(acc3)];
+    }
+
+    let base = chunks16 * 16;
+    for i in 0..remainder {
+        let q = query[base + i];
+        out[0] += q * v0[base + i];
+        out[1] += q * v1[base + i];
+        out[2] += q * v2[base + i];
+        out[3] += q * v3[base + i];
+    }
+    out
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn inner_product_batch8_neon(
+    query: &[f32],
+    v0: &[f32],
+    v1: &[f32],
+    v2: &[f32],
+    v3: &[f32],
+    v4: &[f32],
+    v5: &[f32],
+    v6: &[f32],
+    v7: &[f32],
+) -> [f32; 8] {
+    use std::arch::aarch64::*;
+
+    let n = query.len();
+    let chunks16 = n / 16;
+    let remainder = n % 16;
+
+    let mut out;
+    unsafe {
+        let mut acc0 = vdupq_n_f32(0.0);
+        let mut acc1 = vdupq_n_f32(0.0);
+        let mut acc2 = vdupq_n_f32(0.0);
+        let mut acc3 = vdupq_n_f32(0.0);
+        let mut acc4 = vdupq_n_f32(0.0);
+        let mut acc5 = vdupq_n_f32(0.0);
+        let mut acc6 = vdupq_n_f32(0.0);
+        let mut acc7 = vdupq_n_f32(0.0);
+
+        let qp = query.as_ptr();
+        let p0 = v0.as_ptr();
+        let p1 = v1.as_ptr();
+        let p2 = v2.as_ptr();
+        let p3 = v3.as_ptr();
+        let p4 = v4.as_ptr();
+        let p5 = v5.as_ptr();
+        let p6 = v6.as_ptr();
+        let p7 = v7.as_ptr();
+
+        for i in 0..chunks16 {
+            let base = i * 16;
+            let qa0 = vld1q_f32(qp.add(base));
+            let qa1 = vld1q_f32(qp.add(base + 4));
+            let qa2 = vld1q_f32(qp.add(base + 8));
+            let qa3 = vld1q_f32(qp.add(base + 12));
+
+            macro_rules! accumulate8 {
+                ($acc:ident, $bp:ident) => {{
+                    let (vb0, vb1, vb2, vb3): (
+                        float32x4_t,
+                        float32x4_t,
+                        float32x4_t,
+                        float32x4_t,
+                    );
+                    core::arch::asm!(
+                        "ldnp {0:q}, {1:q}, [{4}]",
+                        "ldnp {2:q}, {3:q}, [{4}, #32]",
+                        out(vreg) vb0,
+                        out(vreg) vb1,
+                        out(vreg) vb2,
+                        out(vreg) vb3,
+                        in(reg) $bp.add(base),
+                        options(nostack, preserves_flags),
+                    );
+                    $acc = vfmaq_f32($acc, qa0, vb0);
+                    $acc = vfmaq_f32($acc, qa1, vb1);
+                    $acc = vfmaq_f32($acc, qa2, vb2);
+                    $acc = vfmaq_f32($acc, qa3, vb3);
+                }};
+            }
+
+            accumulate8!(acc0, p0);
+            accumulate8!(acc1, p1);
+            accumulate8!(acc2, p2);
+            accumulate8!(acc3, p3);
+            accumulate8!(acc4, p4);
+            accumulate8!(acc5, p5);
+            accumulate8!(acc6, p6);
+            accumulate8!(acc7, p7);
+        }
+
+        out = [
+            vaddvq_f32(acc0),
+            vaddvq_f32(acc1),
+            vaddvq_f32(acc2),
+            vaddvq_f32(acc3),
+            vaddvq_f32(acc4),
+            vaddvq_f32(acc5),
+            vaddvq_f32(acc6),
+            vaddvq_f32(acc7),
+        ];
+    }
+
+    let base = chunks16 * 16;
+    for i in 0..remainder {
+        let q = query[base + i];
+        out[0] += q * v0[base + i];
+        out[1] += q * v1[base + i];
+        out[2] += q * v2[base + i];
+        out[3] += q * v3[base + i];
+        out[4] += q * v4[base + i];
+        out[5] += q * v5[base + i];
+        out[6] += q * v6[base + i];
+        out[7] += q * v7[base + i];
+    }
+    out
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
 fn l2_squared_neon(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::aarch64::*;
 
@@ -603,5 +1028,20 @@ mod tests {
         let result = inner_product_f32(&a, &b);
         let expected = inner_product_scalar(&a, &b);
         assert!((result - expected).abs() < 1e-2);
+    }
+
+    #[test]
+    fn test_inner_product_batch4() {
+        let dim = 128;
+        let query: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.01).collect();
+        let v0: Vec<f32> = (0..dim).map(|i| ((i + 1) as f32) * 0.01).collect();
+        let v1: Vec<f32> = (0..dim).map(|i| ((i + 2) as f32) * 0.01).collect();
+        let v2: Vec<f32> = (0..dim).map(|i| ((i + 3) as f32) * 0.01).collect();
+        let v3: Vec<f32> = (0..dim).map(|i| ((i + 4) as f32) * 0.01).collect();
+        let batch = inner_product_batch4_f32(&query, &v0, &v1, &v2, &v3);
+        assert!((batch[0] - inner_product_f32(&query, &v0)).abs() < 1e-3);
+        assert!((batch[1] - inner_product_f32(&query, &v1)).abs() < 1e-3);
+        assert!((batch[2] - inner_product_f32(&query, &v2)).abs() < 1e-3);
+        assert!((batch[3] - inner_product_f32(&query, &v3)).abs() < 1e-3);
     }
 }

@@ -1147,6 +1147,8 @@ struct SearchRequest {
     where_expr: Option<String>,
     return_fields: Option<bool>,
     nprobe: Option<usize>,
+    approx: Option<bool>,
+    eps: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -1159,6 +1161,8 @@ struct SearchProfileRequest {
     where_expr: Option<String>,
     return_fields: Option<bool>,
     nprobe: Option<usize>,
+    approx: Option<bool>,
+    eps: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -1302,6 +1306,8 @@ struct SearchBinaryQuery {
     where_expr: Option<String>,
     return_fields: Option<bool>,
     nprobe: Option<usize>,
+    approx: Option<bool>,
+    eps: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -3000,6 +3006,8 @@ async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> H
         return limit_bad_request(e);
     }
     let nprobe = body.nprobe.unwrap_or(10);
+    let approx = body.approx.unwrap_or(false);
+    let eps = body.eps.unwrap_or(1e-4);
     let return_fields = body.return_fields.unwrap_or(false);
     let filter = body.where_expr.as_deref();
     let vector_field = body.vector_field.as_deref().unwrap_or("default");
@@ -3011,7 +3019,7 @@ async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> H
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
         let coll = coll_arc.read();
         let sr = if vector_field == "default" {
-            coll.search(&body.vector, k, filter, nprobe)?
+            coll.search(&body.vector, k, filter, nprobe, approx, eps)?
         } else {
             coll.search_vector_field(vector_field, &body.vector, k, filter)?
         };
@@ -3064,6 +3072,8 @@ async fn search_profile(
         return limit_bad_request(e);
     }
     let nprobe = body.nprobe.unwrap_or(10);
+    let approx = body.approx.unwrap_or(false);
+    let eps = body.eps.unwrap_or(1e-4);
     let return_fields = body.return_fields.unwrap_or(false);
     let filter = body.where_expr.as_deref();
 
@@ -3072,7 +3082,8 @@ async fn search_profile(
         &body.database_name,
         &body.collection_name,
         |coll| {
-            let (sr, profile) = coll.search_with_profile(&body.vector, k, filter, nprobe)?;
+            let (sr, profile) =
+                coll.search_with_profile(&body.vector, k, filter, nprobe, approx, eps)?;
             let fields_data = if return_fields && !sr.ids.is_empty() {
                 coll.retrieve_fields(&sr.ids)?
             } else {
@@ -4293,6 +4304,8 @@ async fn search_binary(
         return binary_bad_request(&e.to_string());
     }
     let nprobe = query.nprobe.unwrap_or(10);
+    let approx = query.approx.unwrap_or(false);
+    let eps = query.eps.unwrap_or(1e-4);
     let return_fields = query.return_fields.unwrap_or(false);
     let filter = query.where_expr.as_deref();
     let vector_field = query.vector_field.as_deref().unwrap_or("default");
@@ -4304,7 +4317,7 @@ async fn search_binary(
         let coll_arc = engine.get_or_open_collection(&query.collection_name, 0, 100_000)?;
         let coll = coll_arc.read();
         let sr = if vector_field == "default" {
-            coll.search(vector, k, filter, nprobe)?
+            coll.search(vector, k, filter, nprobe, approx, eps)?
         } else {
             coll.search_vector_field(vector_field, vector, k, filter)?
         };

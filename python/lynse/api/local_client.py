@@ -781,11 +781,15 @@ class LocalCollection:
                     - **IVF**: number of partitions to probe — higher = better recall, slower.
                     - **HNSW**: ef_search beam width — higher = better recall, slower.
                     - **Flat / PQ / RaBitQ / PolarVec**: ignored (exhaustive two-pass search).
+                - approx (bool): two-phase approximate flat distance search.
+                - eps (float): distance rounding tolerance when approx=True (default 1e-4).
 
         Returns:
             ResultView: Search results with ids, distances, and optional fields.
         """
         nprobe = kwargs.get('nprobe', 10)
+        approx = kwargs.get('approx', False)
+        eps = float(kwargs.get('eps', 1e-4))
         vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
         result = self._rust_coll.search(
             vec,
@@ -793,6 +797,8 @@ class LocalCollection:
             where=where,
             field_name=vector_field,
             nprobe=nprobe,
+            approx=approx,
+            eps=eps,
         )
         need_fields = should_fetch_fields(
             return_fields=return_fields,

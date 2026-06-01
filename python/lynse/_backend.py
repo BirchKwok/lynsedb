@@ -494,6 +494,8 @@ class Collection:
         where: Optional[str] = None,
         field_name: str = "default",
         nprobe: int = 10,
+        approx: bool = False,
+        eps: float = 1e-4,
     ) -> ResultView:
         """Search for nearest neighbors.
 
@@ -507,13 +509,16 @@ class Collection:
                 - **IVF**: number of partitions to probe — higher = better recall, slower.
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
                 - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).
+            approx: if True, use two-phase approximate distance search on flat
+                brute-force (partial-dimension coarse rank + exact re-score).
+            eps: distance rounding tolerance when ``approx=True`` (default 1e-4).
 
         Returns:
             ResultView with ids, distances.
         """
         vector = np.ascontiguousarray(vector, dtype=np.float32).ravel()
         if field_name == "default":
-            result = self._inner.search(vector, k, where, nprobe)
+            result = self._inner.search(vector, k, where, nprobe, approx, eps)
         else:
             result = self._inner.search_vector_field(field_name, vector, k, where)
         ids = result.ids()

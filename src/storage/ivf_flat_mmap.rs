@@ -1154,7 +1154,7 @@ mod tests {
 
         // IVF with nprobe=all should match brute force
         let (ivf_ids, _) = idx.search(&query, 5, n_partitions, DistanceMetric::InnerProduct);
-        let (bf_ids, _) = bf.search(&query, 5, DistanceMetric::InnerProduct, false);
+        let (bf_ids, _) = bf.search(&query, 5, DistanceMetric::InnerProduct, false, None);
 
         // Top-1 should always match
         assert_eq!(ivf_ids[0], bf_ids[0], "IVF top-1 should match brute force");

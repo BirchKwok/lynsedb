@@ -36,6 +36,9 @@ unsafe fn prefetch_read_data(ptr: *const u8) {
     }
 }
 
+/// Software prefetch distance (in vectors) for sequential f32 scans.
+const PREFETCH_AHEAD_VECTORS: usize = 8;
+
 // ─── madvise helper ─────────────────────────────────────────────────────────
 
 /// Apply madvise hints to a mmap for sequential scan performance.
@@ -330,6 +333,7 @@ impl FlatMmap {
         k: usize,
         metric: DistanceMetric,
         use_sq8: bool,
+        approx: Option<super::approx_search::ApproxSearchConfig>,
     ) -> (Vec<u32>, Vec<f32>) {
         let n = self.n_vectors;
         if n == 0 || k == 0 {
@@ -338,6 +342,13 @@ impl FlatMmap {
         let k = k.min(n);
         let dim = self.dim;
         let candidates = self.as_slice();
+
+        // Approximate two-phase search (partial dims + exact re-score on shortlist).
+        if let Some(config) = approx {
+            return super::approx_search::approx_flat_search(
+                query, candidates, dim, k, n, metric, config,
+            );
+        }
 
         // SQ8 two-pass path (only when user explicitly requested SQ8)
         if use_sq8
@@ -356,7 +367,7 @@ impl FlatMmap {
         // Full f32 scan
         match metric {
             DistanceMetric::InnerProduct => {
-                fused_topk_parallel::<false>(query, candidates, dim, k, n, simd::inner_product_f32)
+                fused_topk_ip_parallel(query, candidates, dim, k, n)
             }
             DistanceMetric::L2Squared => {
                 fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::l2_squared_f32)
@@ -447,6 +458,360 @@ fn passes_threshold<const ASC: bool>(dist: f32, threshold: f32) -> bool {
     }
 }
 
+/// Scan one parallel chunk for IP top-k using batch-8 dot products + prefetch.
+fn ip_scan_chunk_topk(
+    query: &[f32],
+    cand_chunk: &[f32],
+    dim: usize,
+    k: usize,
+    base_idx: usize,
+) -> Vec<TopKEntry> {
+    let n_in_chunk = cand_chunk.len() / dim;
+    let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
+    let mut threshold = f32::NEG_INFINITY;
+    let mut filled = false;
+
+    let blocks8 = n_in_chunk / 8;
+    for block in 0..blocks8 {
+        if block + 1 < blocks8 {
+            unsafe {
+                prefetch_read_data(cand_chunk.as_ptr().add((block + 1) * 8 * dim).cast());
+            }
+        }
+        let base = block * 8 * dim;
+        let v0 = unsafe { cand_chunk.get_unchecked(base..base + dim) };
+        let v1 = unsafe { cand_chunk.get_unchecked(base + dim..base + 2 * dim) };
+        let v2 = unsafe { cand_chunk.get_unchecked(base + 2 * dim..base + 3 * dim) };
+        let v3 = unsafe { cand_chunk.get_unchecked(base + 3 * dim..base + 4 * dim) };
+        let v4 = unsafe { cand_chunk.get_unchecked(base + 4 * dim..base + 5 * dim) };
+        let v5 = unsafe { cand_chunk.get_unchecked(base + 5 * dim..base + 6 * dim) };
+        let v6 = unsafe { cand_chunk.get_unchecked(base + 6 * dim..base + 7 * dim) };
+        let v7 = unsafe { cand_chunk.get_unchecked(base + 7 * dim..base + 8 * dim) };
+        let dists = simd::inner_product_batch8_f32(query, v0, v1, v2, v3, v4, v5, v6, v7);
+        for (j, &dist) in dists.iter().enumerate() {
+            if !filled || dist > threshold {
+                topk_insert::<false>(
+                    &mut top,
+                    k,
+                    TopKEntry {
+                        dist,
+                        idx: (base_idx + block * 8 + j) as u32,
+                    },
+                    &mut threshold,
+                    &mut filled,
+                );
+            }
+        }
+    }
+
+    let rem_start = blocks8 * 8;
+    for i in rem_start..n_in_chunk {
+        if i + PREFETCH_AHEAD_VECTORS < n_in_chunk {
+            unsafe {
+                prefetch_read_data(cand_chunk.as_ptr().add((i + PREFETCH_AHEAD_VECTORS) * dim).cast());
+            }
+        }
+        let cand = unsafe { cand_chunk.get_unchecked(i * dim..(i + 1) * dim) };
+        let dist = simd::inner_product_f32(query, cand);
+        if !filled || dist > threshold {
+            topk_insert::<false>(
+                &mut top,
+                k,
+                TopKEntry {
+                    dist,
+                    idx: (base_idx + i) as u32,
+                },
+                &mut threshold,
+                &mut filled,
+            );
+        }
+    }
+
+    if !filled && !top.is_empty() {
+        top.sort_unstable_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal));
+    }
+    top
+}
+
+/// Prefix-dimension coarse shortlist for approximate two-phase search.
+///
+/// Uses a binary heap per chunk (O(n log pool)) — `fused_topk`'s sorted-array
+/// insert is O(n·pool) and unusable for pool ≫ k.
+pub(super) fn approx_coarse_shortlist(
+    query: &[f32],
+    candidates: &[f32],
+    dim: usize,
+    d_coarse: usize,
+    pool: usize,
+    n: usize,
+    metric: DistanceMetric,
+) -> Vec<u32> {
+    let d = d_coarse.min(dim);
+    match metric {
+        DistanceMetric::InnerProduct => {
+            prefix_coarse_shortlist_ip(query, candidates, dim, d, pool, n)
+        }
+        DistanceMetric::L2Squared => {
+            let q = &query[..d];
+            prefix_coarse_shortlist::<true>(q, candidates, dim, d, pool, n, |q, c| {
+                simd::l2_squared_f32(q, &c[..d])
+            })
+        }
+        DistanceMetric::Cosine => {
+            let q = &query[..d];
+            prefix_coarse_shortlist::<true>(q, candidates, dim, d, pool, n, |q, c| {
+                simd::cosine_distance_f32(q, &c[..d])
+            })
+        }
+        other => {
+            let q = &query[..d];
+            prefix_coarse_shortlist::<true>(q, candidates, dim, d, pool, n, |q, c| {
+                distance::compute_distance_f32(q, &c[..d], other)
+            })
+        }
+    }
+}
+
+fn prefix_coarse_shortlist_ip(
+    query: &[f32],
+    candidates: &[f32],
+    dim: usize,
+    d_coarse: usize,
+    pool: usize,
+    n: usize,
+) -> Vec<u32> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    #[derive(Clone, Copy, PartialEq)]
+    struct Entry {
+        score: f32,
+        idx: u32,
+    }
+    impl Eq for Entry {}
+    impl PartialOrd for Entry {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Entry {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.score
+                .partial_cmp(&other.score)
+                .unwrap_or(Ordering::Equal)
+        }
+    }
+
+    let q = &query[..d_coarse];
+    let n_threads = rayon::current_num_threads();
+    let chunk_vecs = (n / n_threads).max(512);
+    let chunk_floats = chunk_vecs * dim;
+
+    let merged: Vec<Entry> = candidates
+        .par_chunks(chunk_floats)
+        .enumerate()
+        .map(|(chunk_idx, cand_chunk)| {
+            let n_in_chunk = cand_chunk.len() / dim;
+            let base_idx = chunk_idx * chunk_vecs;
+            let mut heap: BinaryHeap<Reverse<Entry>> = BinaryHeap::with_capacity(pool + 1);
+
+            let blocks8 = n_in_chunk / 8;
+            for block in 0..blocks8 {
+                if block + 1 < blocks8 {
+                    unsafe {
+                        prefetch_read_data(cand_chunk.as_ptr().add((block + 1) * 8 * dim).cast());
+                    }
+                }
+                let base = block * 8 * dim;
+                let v0 = unsafe { cand_chunk.get_unchecked(base..base + dim) };
+                let v1 = unsafe { cand_chunk.get_unchecked(base + dim..base + 2 * dim) };
+                let v2 = unsafe { cand_chunk.get_unchecked(base + 2 * dim..base + 3 * dim) };
+                let v3 = unsafe { cand_chunk.get_unchecked(base + 3 * dim..base + 4 * dim) };
+                let v4 = unsafe { cand_chunk.get_unchecked(base + 4 * dim..base + 5 * dim) };
+                let v5 = unsafe { cand_chunk.get_unchecked(base + 5 * dim..base + 6 * dim) };
+                let v6 = unsafe { cand_chunk.get_unchecked(base + 6 * dim..base + 7 * dim) };
+                let v7 = unsafe { cand_chunk.get_unchecked(base + 7 * dim..base + 8 * dim) };
+                let dists = simd::inner_product_batch8_f32(
+                    q,
+                    &v0[..d_coarse],
+                    &v1[..d_coarse],
+                    &v2[..d_coarse],
+                    &v3[..d_coarse],
+                    &v4[..d_coarse],
+                    &v5[..d_coarse],
+                    &v6[..d_coarse],
+                    &v7[..d_coarse],
+                );
+                for (j, &score) in dists.iter().enumerate() {
+                    let entry = Entry {
+                        score,
+                        idx: (base_idx + block * 8 + j) as u32,
+                    };
+                    if heap.len() < pool {
+                        heap.push(Reverse(entry));
+                    } else if entry.score > heap.peek().unwrap().0.score {
+                        heap.pop();
+                        heap.push(Reverse(entry));
+                    }
+                }
+            }
+
+            let rem_start = blocks8 * 8;
+            for i in rem_start..n_in_chunk {
+                let cand = unsafe { cand_chunk.get_unchecked(i * dim..(i + 1) * dim) };
+                let score = simd::inner_product_f32(q, &cand[..d_coarse]);
+                let entry = Entry {
+                    score,
+                    idx: (base_idx + i) as u32,
+                };
+                if heap.len() < pool {
+                    heap.push(Reverse(entry));
+                } else if entry.score > heap.peek().unwrap().0.score {
+                    heap.pop();
+                    heap.push(Reverse(entry));
+                }
+            }
+
+            heap.into_iter().map(|Reverse(e)| e).collect()
+        })
+        .reduce(
+            || Vec::new(),
+            |mut a, b| {
+                a.extend(b);
+                if a.len() <= pool {
+                    return a;
+                }
+                a.sort_unstable_by(|x, y| y.score.partial_cmp(&x.score).unwrap_or(Ordering::Equal));
+                a.truncate(pool);
+                a
+            },
+        );
+
+    merged.iter().map(|e| e.idx).collect()
+}
+
+fn prefix_coarse_shortlist<const ASC: bool>(
+    query: &[f32],
+    candidates: &[f32],
+    dim: usize,
+    d_coarse: usize,
+    pool: usize,
+    n: usize,
+    score_fn: impl Fn(&[f32], &[f32]) -> f32 + Send + Sync,
+) -> Vec<u32> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    #[derive(Clone, Copy, PartialEq)]
+    struct Entry {
+        score: f32,
+        idx: u32,
+    }
+    impl Eq for Entry {}
+    impl PartialOrd for Entry {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Entry {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.score
+                .partial_cmp(&other.score)
+                .unwrap_or(Ordering::Equal)
+        }
+    }
+
+    let n_threads = rayon::current_num_threads();
+    let chunk_vecs = (n / n_threads).max(512);
+    let chunk_floats = chunk_vecs * dim;
+
+    let merged: Vec<Entry> = candidates
+        .par_chunks(chunk_floats)
+        .enumerate()
+        .map(|(chunk_idx, cand_chunk)| {
+            let n_in_chunk = cand_chunk.len() / dim;
+            let base_idx = chunk_idx * chunk_vecs;
+
+            if ASC {
+                let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(pool + 1);
+                for i in 0..n_in_chunk {
+                    let cand = unsafe { cand_chunk.get_unchecked(i * dim..(i + 1) * dim) };
+                    let entry = Entry {
+                        score: score_fn(query, cand),
+                        idx: (base_idx + i) as u32,
+                    };
+                    if heap.len() < pool {
+                        heap.push(entry);
+                    } else if entry.score < heap.peek().unwrap().score {
+                        heap.pop();
+                        heap.push(entry);
+                    }
+                }
+                heap.into_vec()
+            } else {
+                let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(pool + 1);
+                for i in 0..n_in_chunk {
+                    let cand = unsafe { cand_chunk.get_unchecked(i * dim..(i + 1) * dim) };
+                    let entry = Entry {
+                        score: score_fn(query, cand),
+                        idx: (base_idx + i) as u32,
+                    };
+                    if heap.len() < pool {
+                        heap.push(entry);
+                    } else if entry.score > heap.peek().unwrap().score {
+                        heap.pop();
+                        heap.push(entry);
+                    }
+                }
+                heap.into_vec()
+            }
+        })
+        .reduce(
+            || Vec::new(),
+            |mut a, b| {
+                a.extend(b);
+                if a.len() <= pool {
+                    return a;
+                }
+                if ASC {
+                    a.sort_unstable_by(|x, y| x.score.partial_cmp(&y.score).unwrap_or(Ordering::Equal));
+                } else {
+                    a.sort_unstable_by(|x, y| y.score.partial_cmp(&x.score).unwrap_or(Ordering::Equal));
+                }
+                a.truncate(pool);
+                a
+            },
+        );
+
+    merged.iter().map(|e| e.idx).collect()
+}
+
+/// IP-specific fused parallel top-k: batch-8 dot products + software prefetch.
+#[inline(never)]
+fn fused_topk_ip_parallel(
+    query: &[f32],
+    candidates: &[f32],
+    dim: usize,
+    k: usize,
+    n: usize,
+) -> (Vec<u32>, Vec<f32>) {
+    if n < 4096 {
+        return fused_topk_seq::<false>(query, candidates, dim, k, 0, &simd::inner_product_f32);
+    }
+
+    let n_threads = rayon::current_num_threads();
+    let chunk_vecs = (n / n_threads).max(512);
+    let chunk_floats = chunk_vecs * dim;
+
+    let chunk_results: Vec<Vec<TopKEntry>> = candidates
+        .par_chunks(chunk_floats)
+        .enumerate()
+        .map(|(chunk_idx, cand_chunk)| ip_scan_chunk_topk(query, cand_chunk, dim, k, chunk_idx * chunk_vecs))
+        .collect();
+
+    merge_topk_results::<false>(&chunk_results, k)
+}
+
 /// Fused parallel distance + sorted-array top-k.
 ///
 /// `ASC=true`: ascending (L2/Cosine) — keep k smallest distances.
@@ -487,6 +852,11 @@ fn fused_topk_parallel<const ASC: bool>(
             let pairs = n_in_chunk / 2;
             let dim2 = dim * 2;
             for i in 0..pairs {
+                if i + 4 < pairs {
+                    unsafe {
+                        prefetch_read_data(ptr.add((i + 4) * dim2).cast());
+                    }
+                }
                 let cand0 = unsafe { std::slice::from_raw_parts(ptr, dim) };
                 let cand1 = unsafe { std::slice::from_raw_parts(ptr.wrapping_add(dim), dim) };
                 let dist0 = dist_fn(query, cand0);
@@ -574,6 +944,11 @@ fn fused_topk_seq<const ASC: bool>(
     let mut filled = false;
 
     for i in 0..n {
+        if i + PREFETCH_AHEAD_VECTORS < n {
+            unsafe {
+                prefetch_read_data(candidates.as_ptr().add((i + PREFETCH_AHEAD_VECTORS) * dim).cast());
+            }
+        }
         let cand = unsafe {
             let start = i * dim;
             candidates.get_unchecked(start..start + dim)
@@ -1196,14 +1571,14 @@ mod tests {
 
         // Search: query = unit x, IP metric, k=2
         let query = vec![1.0f32, 0.0, 0.0, 0.0];
-        let (ids, dists) = store.search(&query, 2, DistanceMetric::InnerProduct, false);
+        let (ids, dists) = store.search(&query, 2, DistanceMetric::InnerProduct, false, None);
         assert_eq!(ids.len(), 2);
         assert_eq!(ids[0], 0); // exact match (IP=1.0)
         assert!((dists[0] - 1.0).abs() < 1e-6);
 
         // Search: L2, query = origin, k=2 → closest should be vec 0 and vec 1 (tied at 1.0)
         let query_origin = vec![0.0f32, 0.0, 0.0, 0.0];
-        let (ids_l2, dists_l2) = store.search(&query_origin, 1, DistanceMetric::L2Squared, false);
+        let (ids_l2, dists_l2) = store.search(&query_origin, 1, DistanceMetric::L2Squared, false, None);
         // All unit vectors have L2=1.0 to origin, mixed has L2=0.5
         assert_eq!(ids_l2[0], 2); // vec 2 is closest (0.5^2+0.5^2=0.5)
     }
@@ -1243,7 +1618,7 @@ mod tests {
         // Reopen and verify
         let mut store = FlatMmap::open(&path, dim).unwrap();
         assert_eq!(store.len(), 2);
-        let (ids, _) = store.search(&[1.0, 2.0, 3.0], 1, DistanceMetric::L2Squared, false);
+        let (ids, _) = store.search(&[1.0, 2.0, 3.0], 1, DistanceMetric::L2Squared, false, None);
         assert_eq!(ids[0], 0);
     }
 }

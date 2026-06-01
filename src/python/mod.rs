@@ -267,21 +267,25 @@ impl PyCollection {
     ///
     /// Returns:
     ///     PySearchResult with ids, distances, fields
-    #[pyo3(signature = (vector, k=None, where_expr=None, nprobe=None))]
+    #[pyo3(signature = (vector, k=None, where_expr=None, nprobe=None, approx=None, eps=None))]
     fn search(
         &self,
         vector: PyReadonlyArray1<f32>,
         k: Option<usize>,
         where_expr: Option<&str>,
         nprobe: Option<usize>,
+        approx: Option<bool>,
+        eps: Option<f32>,
     ) -> PyResult<PySearchResult> {
         let query = vector.as_slice()?;
         let k = k.unwrap_or(10);
         let nprobe = nprobe.unwrap_or(10);
+        let approx = approx.unwrap_or(false);
+        let eps = eps.unwrap_or(1e-4);
 
         let coll = self.inner.read();
         let result = coll
-            .search(query, k, where_expr, nprobe)
+            .search(query, k, where_expr, nprobe, approx, eps)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         Ok(PySearchResult { inner: result })
@@ -326,7 +330,7 @@ impl PyCollection {
     }
 
     /// Search and return profile/explain metadata as a Python dict.
-    #[pyo3(signature = (vector, k=None, where_expr=None, nprobe=None))]
+    #[pyo3(signature = (vector, k=None, where_expr=None, nprobe=None, approx=None, eps=None))]
     fn search_profile<'py>(
         &self,
         py: Python<'py>,
@@ -334,14 +338,18 @@ impl PyCollection {
         k: Option<usize>,
         where_expr: Option<&str>,
         nprobe: Option<usize>,
+        approx: Option<bool>,
+        eps: Option<f32>,
     ) -> PyResult<PyObject> {
         let query = vector.as_slice()?;
         let k = k.unwrap_or(10);
         let nprobe = nprobe.unwrap_or(10);
+        let approx = approx.unwrap_or(false);
+        let eps = eps.unwrap_or(1e-4);
 
         let coll = self.inner.read();
         let (result, profile) = coll
-            .search_with_profile(query, k, where_expr, nprobe)
+            .search_with_profile(query, k, where_expr, nprobe, approx, eps)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let value = serde_json::json!({
             "items": {
@@ -975,7 +983,7 @@ impl PyFlatIndex {
             pyo3::exceptions::PyValueError::new_err(format!("Unknown metric: {}", metric))
         })?;
         let q = query.as_slice()?;
-        let (ids, dists) = self.inner.search(q, k, metric, false);
+        let (ids, dists) = self.inner.search(q, k, metric, false, None);
         Ok((ids.into_pyarray_bound(py), dists.into_pyarray_bound(py)))
     }
 
@@ -1013,7 +1021,7 @@ impl PyFlatIndex {
             let q_end = q_start + dim;
             let (ids, dists) = self
                 .inner
-                .search(&flat[q_start..q_end], k, metric_enum, false);
+                .search(&flat[q_start..q_end], k, metric_enum, false, None);
             results.push((ids.into_pyarray_bound(py), dists.into_pyarray_bound(py)));
         }
         Ok(results)

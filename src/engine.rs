@@ -2441,6 +2441,8 @@ impl Collection {
         k: usize,
         where_expr: Option<&str>,
         nprobe: usize,
+        approx: bool,
+        eps: f32,
     ) -> Result<SearchResult> {
         let dim = self.meta.dimension;
         if query.len() != dim {
@@ -2462,6 +2464,12 @@ impl Collection {
             nprobe,
             ef_search: None,
             subset_indices,
+        };
+
+        let approx_cfg = if approx {
+            Some(crate::storage::approx_search::ApproxSearchConfig::new(eps))
+        } else {
+            None
         };
 
         let (result_ids, result_dists) = if let Some(ref idx) = self.index {
@@ -2526,7 +2534,7 @@ impl Collection {
                 }
                 Some(fm) => {
                     let use_sq8 = self.resolve_use_sq8();
-                    let (indices, dists) = fm.search(query, k, metric, use_sq8);
+                    let (indices, dists) = fm.search(query, k, metric, use_sq8, approx_cfg);
                     let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                     (ids, dists)
                 }
@@ -2558,7 +2566,7 @@ impl Collection {
         where_expr: Option<&str>,
     ) -> Result<SearchResult> {
         if field_name == DEFAULT_VECTOR_FIELD_NAME || field_name.trim().is_empty() {
-            return self.search(query, k, where_expr, 10);
+            return self.search(query, k, where_expr, 10, false, 1e-4);
         }
 
         let field_name = Self::validate_vector_field_name(field_name)?;
@@ -2612,7 +2620,7 @@ impl Collection {
             match guard.as_ref() {
                 None => (Vec::new(), Vec::new()),
                 Some(fm) => {
-                    let (rows, dists) = fm.search(query, search_k, metric, use_sq8);
+                    let (rows, dists) = fm.search(query, search_k, metric, use_sq8, None);
                     (rows.into_iter().map(|row| row as u64).collect(), dists)
                 }
             }
@@ -2704,6 +2712,8 @@ impl Collection {
         k: usize,
         where_expr: Option<&str>,
         nprobe: usize,
+        approx: bool,
+        eps: f32,
     ) -> Result<(SearchResult, QueryProfile)> {
         let started = Instant::now();
         let mut filter_us = 0u64;
@@ -2717,7 +2727,7 @@ impl Collection {
         }
 
         let search_started = Instant::now();
-        let result = self.search(query, k, where_expr, nprobe)?;
+        let result = self.search(query, k, where_expr, nprobe, approx, eps)?;
         let search_us = elapsed_micros_u64(search_started);
         let total_vectors = self.shape()?.0;
         let filtered = where_expr.is_some();
@@ -2790,7 +2800,7 @@ impl Collection {
         let mut fused: HashMap<u64, f32> = HashMap::new();
 
         if let Some(vector) = query {
-            let vector_result = self.search(vector, candidate_limit, where_expr, nprobe)?;
+            let vector_result = self.search(vector, candidate_limit, where_expr, nprobe, false, 1e-4)?;
             let vector_scores =
                 normalize_vector_scores(&vector_result.distances, self.resolve_metric());
             add_fused_scores(
@@ -3086,7 +3096,7 @@ impl Collection {
                         None => (vec![], vec![]),
                         Some(fm) => {
                             let use_sq8 = self.resolve_use_sq8();
-                            let (indices, dists) = fm.search(query, k, metric, use_sq8);
+                            let (indices, dists) = fm.search(query, k, metric, use_sq8, None);
                             let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                             (ids, dists)
                         }
@@ -3145,7 +3155,7 @@ impl Collection {
             None => {
                 // No filter — use unfiltered path
                 let use_sq8 = self.resolve_use_sq8();
-                let (indices, dists) = fm.search(query, k, metric, use_sq8);
+                let (indices, dists) = fm.search(query, k, metric, use_sq8, None);
                 let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                 return Ok((ids, dists));
             }
@@ -3362,7 +3372,7 @@ impl Collection {
         // Search with oversample: get more results than needed
         let search_k = (k * oversample).min(fm.len());
         let use_sq8 = self.resolve_use_sq8();
-        let (indices, dists) = fm.search(query, search_k, metric, use_sq8);
+        let (indices, dists) = fm.search(query, search_k, metric, use_sq8, None);
 
         // Filter by matching IDs
         let mut result_ids = Vec::with_capacity(k);
@@ -3457,11 +3467,11 @@ impl Collection {
             if let Some(fm) = guard.as_ref() {
                 let use_sq8 = self.resolve_use_sq8();
                 for _ in 0..warmup {
-                    let _ = fm.search(query, k, metric, use_sq8);
+                    let _ = fm.search(query, k, metric, use_sq8, None);
                 }
                 let t4 = std::time::Instant::now();
                 for _ in 0..iterations {
-                    let _ = fm.search(query, k, metric, use_sq8);
+                    let _ = fm.search(query, k, metric, use_sq8, None);
                 }
                 let us4 = t4.elapsed().as_micros() as f64 / iterations as f64;
                 results.push(("unfiltered_mmap".to_string(), us4, k));
@@ -5412,7 +5422,7 @@ mod tests {
 
         let result = coll_arc
             .read()
-            .search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10)
+            .search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10, false, 1e-4)
             .unwrap();
         assert_eq!(result.ids, vec![1]);
         assert!(coll_arc.try_write().is_none());
@@ -5453,7 +5463,7 @@ mod tests {
         assert!(ro.is_read_only());
         assert!(ro2.is_read_only());
 
-        let result = ro.search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10).unwrap();
+        let result = ro.search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10, false, 1e-4).unwrap();
         assert_eq!(result.ids, vec![7]);
 
         let err = ro
@@ -5660,7 +5670,7 @@ mod tests {
         let coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
         assert_eq!(coll.list_deleted_ids(), vec![20]);
 
-        let result = coll.search(&[0.0, 1.0, 0.0, 0.0], 2, None, 10).unwrap();
+        let result = coll.search(&[0.0, 1.0, 0.0, 0.0], 2, None, 10, false, 1e-4).unwrap();
         assert_eq!(result.ids, vec![10]);
     }
 
@@ -5681,7 +5691,7 @@ mod tests {
         .unwrap();
 
         let (result, profile) = coll
-            .search_with_profile(&[1.0, 0.0, 0.0, 0.0], 1, Some("\"category\" = 'doc'"), 10)
+            .search_with_profile(&[1.0, 0.0, 0.0, 0.0], 1, Some("\"category\" = 'doc'"), 10, false, 1e-4)
             .unwrap();
         assert_eq!(result.ids, vec![10]);
         assert_eq!(profile.query_kind, "vector");
@@ -5890,7 +5900,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.ids, vec![20]);
 
-        let default_result = coll.search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10).unwrap();
+        let default_result = coll.search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10, false, 1e-4).unwrap();
         assert_eq!(default_result.ids, vec![10]);
     }
 
@@ -6027,7 +6037,7 @@ mod tests {
 
         let coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
         assert_eq!(coll.get_index_mode(), Some("HNSW"));
-        let result = coll.search(&[0.0, 1.0, 0.0, 0.0], 1, None, 10).unwrap();
+        let result = coll.search(&[0.0, 1.0, 0.0, 0.0], 1, None, 10, false, 1e-4).unwrap();
         assert_eq!(result.ids, vec![202]);
     }
 }

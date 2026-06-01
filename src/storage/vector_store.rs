@@ -335,7 +335,7 @@ mod tests {
         let guard = store.read_mmap().unwrap();
         let fm = guard.as_ref().unwrap();
         let query = vec![1.0f32, 0.0, 0.0, 0.0];
-        let (ids, dists) = fm.search(&query, 2, DistanceMetric::InnerProduct, false);
+        let (ids, dists) = fm.search(&query, 2, DistanceMetric::InnerProduct, false, None);
         assert_eq!(ids.len(), 2);
         assert_eq!(ids[0], 0); // exact match (IP=1.0)
         assert!((dists[0] - 1.0).abs() < 1e-6);
