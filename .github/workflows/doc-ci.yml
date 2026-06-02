@@ -1,13 +1,34 @@
 name: doc-ci
 on:
   push:
-    branches:
-      - master
-      - main
+    tags:
+      - "v*"
 permissions:
   contents: write
 jobs:
+  verify-main-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      on_main: ${{ steps.check.outputs.on_main }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        name: Check tag commit is on main
+        run: |
+          git fetch origin main:refs/remotes/origin/main --prune
+          tag_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          if git merge-base --is-ancestor "$tag_commit" origin/main; then
+            echo "on_main=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag $GITHUB_REF_NAME does not point to a commit on main."
+            echo "on_main=false" >> "$GITHUB_OUTPUT"
+          fi
+
   deploy:
+    needs: verify-main-tag
+    if: needs.verify-main-tag.outputs.on_main == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +51,6 @@ jobs:
             mkdocs-material-
       - run: pip install mkdocs-material mkdocstrings-python mike
       - run: |
-          git pull
-          mike deploy --push --update-aliases $(cat ../../VERSION) latest
+          version="${GITHUB_REF_NAME#v}"
+          mike deploy --push --update-aliases "$version" latest
           mike set-default --push latest

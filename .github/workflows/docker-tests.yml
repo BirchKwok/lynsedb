@@ -2,14 +2,33 @@ name: Docker API Tests
 
 on:
   push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+    tags:
+      - "v*"
 
 jobs:
+  verify-main-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      on_main: ${{ steps.check.outputs.on_main }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - id: check
+      name: Check tag commit is on main
+      run: |
+        git fetch origin main:refs/remotes/origin/main --prune
+        tag_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+        if git merge-base --is-ancestor "$tag_commit" origin/main; then
+          echo "on_main=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "Tag $GITHUB_REF_NAME does not point to a commit on main."
+          echo "on_main=false" >> "$GITHUB_OUTPUT"
+        fi
+
   build-and-publish:
+    needs: verify-main-tag
+    if: needs.verify-main-tag.outputs.on_main == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -50,7 +69,6 @@ jobs:
         LYNSE_REMOTE_BASE_URL: http://127.0.0.1:7637
 
     - name: Login to Docker Hub
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       uses: docker/login-action@v1
       with:
         registry: docker.io
@@ -58,7 +76,6 @@ jobs:
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
     - name: Build and push Docker images
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       uses: docker/build-push-action@v2
       with:
         context: .
