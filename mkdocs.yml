@@ -71,26 +71,25 @@ markdown_extensions:
 
 plugins:
   - search
-  - mkdocstrings:
-      handlers:
-        python:
-          options:
-            docstring_style: google
-            show_source: true
-            sort: source
-            render_markdown: true
 
 nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - Tutorials:
+    - Connect and deploy: tutorials/connect_and_deploy.md
     - Add vectors: tutorials/add_vectors.md
-  - FieldExpression: FieldExpression.md
+    - Search and filter: tutorials/search_and_filter.md
+    - Indexing guide: tutorials/indexing.md
+    - Named, sparse, and hybrid search: tutorials/named_sparse_hybrid.md
+    - Backup and maintenance: tutorials/operations.md
+  - Concepts:
+    - Field filters: FieldExpression.md
+    - ResultView: result_view.md
+    - Production roadmap: production_roadmap.md
   - API Reference:
-    - Client Distribution: client.md
+    - Python client: client.md
     - HTTP API:
-      - App: http_api/serve_api/app.md
-      - HTTP Serve:
-        - Collection: http_api/serve_api/collection_ops.md
-        - Database: http_api/serve_api/database_ops.md
-      - HTTP Client: http_api/client_api.md
+      - Server overview: http_api/serve_api/app.md
+      - Database endpoints: http_api/serve_api/database_ops.md
+      - Collection endpoints: http_api/serve_api/collection_ops.md
+      - Python HTTP client: http_api/client_api.md

@@ -1,4 +1,5 @@
 """session.py: this file is used to manage the database insertion operations."""
+import queue
 from typing import Union, List, Tuple
 
 import numpy as np
@@ -22,14 +23,22 @@ class DataInsertionSession:
     def _commit(self):
         self.db.commit()
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type:
-            self._commit()
-            del thread_local.caller_name
-            raise exc_type(exc_val).with_traceback(exc_tb)
+    def _discard_pending(self):
+        lock = getattr(self.db, "_lock", None)
+        if lock is None or not hasattr(self.db, "_mesosphere_list"):
+            return
+        with lock:
+            self.db._mesosphere_list = queue.Queue()
 
-        self._commit()
-        del thread_local.caller_name
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if exc_type:
+                self._discard_pending()
+            else:
+                self._commit()
+        finally:
+            if hasattr(thread_local, "caller_name"):
+                del thread_local.caller_name
         return False
 
     def add_item(self, vector: Union[np.ndarray, list], id: int, *,

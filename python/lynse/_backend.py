@@ -435,10 +435,15 @@ class Collection:
             **kwargs: Additional keyword arguments:
                 - 'n_clusters' (int): Number of clusters (IVF modes only).
         """
+        n_clusters = kwargs.pop("n_clusters", None)
+        if kwargs:
+            unknown = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unsupported build_index keyword argument(s): {unknown}")
+
         if field_name == "default":
-            self._inner.build_index(index_mode)
+            self._inner.build_index(index_mode, n_clusters)
         else:
-            self._inner.build_vector_field_index(field_name, index_mode)
+            self._inner.build_vector_field_index(field_name, index_mode, n_clusters)
 
     def remove_index(self, field_name: str = "default") -> None:
         """Remove the index.
@@ -509,9 +514,11 @@ class Collection:
                 - **IVF**: number of partitions to probe — higher = better recall, slower.
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
                 - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).
-            approx: if True, use two-phase approximate distance search on flat
-                brute-force (partial-dimension coarse rank + exact re-score).
-            eps: distance rounding tolerance when ``approx=True`` (default 1e-4).
+            approx: if True, use metric-specific flat approximation for IP, L2,
+                and Cosine. Ignored for Hamming/Jaccard, which always use exact
+                binary-distance search.
+            eps: distance rounding tolerance when ``approx=True`` for supported
+                metrics (default 1e-4).
 
         Returns:
             ResultView with ids, distances.
@@ -520,7 +527,7 @@ class Collection:
         if field_name == "default":
             result = self._inner.search(vector, k, where, nprobe, approx, eps)
         else:
-            result = self._inner.search_vector_field(field_name, vector, k, where)
+            result = self._inner.search_vector_field(field_name, vector, k, where, approx, eps)
         ids = result.ids()
         distances = result.distances()
         idx_type, metric = _parse_index_mode(result.index_mode())

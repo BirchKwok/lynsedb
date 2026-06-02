@@ -1,78 +1,84 @@
-<div style="text-align: center;">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="img/big-logo.png">
-    <source media="(prefers-color-scheme: dark)" srcset="img/big-logo.png">
-    <img alt="LynseDB logo" src="img/big-logo.png" height="100" style="display: block; margin: auto;">
-  </picture>
-</div>
-<br>
+# LynseDB
 
+LynseDB is a lightweight vector database with a Python-first API and a Rust
+storage/search backend. It can run embedded in a single Python process or as an
+HTTP server for multi-process and production deployments.
 
-<p align="center">
-  <a href="https://discord.gg/u7DrH565XZ"><img src="https://img.shields.io/badge/Discord-Online-brightgreen" alt="Discord"></a>
-  <a href="https://badge.fury.io/py/LynseDB"><img src="https://badge.fury.io/py/LynseDB.svg" alt="PyPI version"></a>
-  <a href="https://pypi.org/project/LynseDB/"><img src="https://img.shields.io/pypi/pyversions/LynseDB" alt="PyPI - Python Version"></a>
-  <a href="https://github.com/BirchKwok/LynseDB/actions/workflows/python-tests.yml"><img src="https://github.com/BirchKwok/LynseDB/actions/workflows/python-tests.yml/badge.svg" alt="Python testing"></a>
-  <a href="https://github.com/BirchKwok/LynseDB/actions/workflows/docker-tests.yml"><img src="https://github.com/BirchKwok/LynseDB/actions/workflows/docker-tests.yml/badge.svg" alt="Docker build"></a>
-</p>
+The API is intentionally small: create a database, create a collection, write
+vectors with metadata, build an index when you need faster search, and query the
+same collection locally or remotely with the same high-level Python calls.
 
+## What LynseDB is good at
 
-**LynseDB** is a vector database implemented purely in Python, designed to be lightweight, server-optional, and easy to deploy locally or remotely. It offers straightforward and clear Python APIs, aiming to lower the entry barrier for using vector databases.
+- Local development and small services that want an embedded vector store.
+- Remote deployments where several workers need to share one database process.
+- Metadata filtering with SQL-like `where` expressions.
+- Multiple vector representations per record through named vector fields.
+- Dense, sparse, text, and hybrid retrieval.
+- Recall-first search with explicit index and search knobs.
 
-It focuses on achieving 100% recall, prioritizing recall accuracy over high-speed search performance. This approach ensures that users can reliably retrieve all relevant vector data, making LynseDB particularly suitable for applications that require responses within hundreds of milliseconds.
+## Execution modes
 
-## LynseDB features
+| Mode | How to start | Best for | Notes |
+| --- | --- | --- | --- |
+| Local | `lynse.VectorDBClient()` or `lynse.VectorDBClient(uri="./data")` | notebooks, scripts, single-process apps | No server and no network hop. Do not share the same local path between independent processes. |
+| Remote | `lynse serve ...` plus `lynse.VectorDBClient("http://host:7637")` | web services, workers, production | Use HTTP mode when more than one process writes or searches the same data. |
 
-⚡ **Server-optional, simple parameters, simple API.**
-
-⚡ **Fast, memory-efficient, easily scales to millions of vectors.**
-
-⚡ **Based on a generic Python software stack, platform-independent, highly versatile.**
-
-⚡ **Recall-prioritized design, lifecycle search caching technology, FieldExpression fast filtering, Field multi-type indexing, and other user-centric features**
-
-## Some Defects You Should Know
-
-- Not yet backward compatible
-
-LynseDB is actively being updated, and API backward compatibility is not guaranteed. You should use version numbers as a strong constraint during deployment to avoid unnecessary feature conflicts and errors.
-
-- Data size constraints
-
-Although our goal is to enable brute force search or inverted indexing on billion-scale vectors, we currently still recommend using it on a scale of millions of vectors or less for the best experience.
-
-- Python's native api is not process-safe
-
-The Python native API is recommended for use in single-process environments, whether single-threaded or multi-threaded; for ensuring process safety in multi-process environments, please use the HTTP API.
-
-
-## Installation
-
-### Prerequisite
-
-- python version >= 3.9
-- Owns one of the operating systems: Windows, macOS, or Ubuntu (or other Linux distributions). The recommendation is for the latest version of the system, but non-latest versions should also be installable, although they have not been tested.
-- Memory >= 4GB, Free Disk >= 4GB.
-
-### Install Client API package (Mandatory)
+## Install
 
 ```shell
 pip install LynseDB
 ```
 
-### If you wish to use Docker (Optional)
+Python 3.9 or newer is required. Wheels are published for common macOS, Linux,
+and Windows environments.
 
-You must first [install Docker](https://docs.docker.com/engine/install/) on the host machine.
+## First search
 
-After installing the [Client API package](#install-client-api-package-mandatory):
+```python
+import numpy as np
+import lynse
 
-```shell
-docker pull birchkwok/lynsedb:latest
-docker run -p 7637:7637 -v lynsedb-data:/data birchkwok/lynsedb:latest
-# optional auth:
-# docker run -p 7637:7637 -e LYNSE_API_KEY=your_key -v lynsedb-data:/data birchkwok/lynsedb:latest
+client = lynse.VectorDBClient(uri="./lynsedb-data")
+db = client.create_database("demo", drop_if_exists=True)
+collection = db.require_collection("documents", dim=4, drop_if_exists=True)
+
+items = [
+    ([0.10, 0.20, 0.30, 0.40], 1, {"title": "intro", "lang": "en"}),
+    ([0.11, 0.19, 0.29, 0.39], 2, {"title": "guide", "lang": "en"}),
+    ([0.80, 0.10, 0.20, 0.10], 3, {"title": "notes", "lang": "fr"}),
+]
+
+with collection.insert_session() as session:
+    session.bulk_add_items(items, enable_progress_bar=False)
+
+collection.build_index("FLAT-L2")
+
+result = collection.search(
+    np.array([0.10, 0.20, 0.30, 0.40], dtype=np.float32),
+    k=2,
+    where="lang = 'en'",
+    return_fields=True,
+)
+
+print(result.to_list())
 ```
 
-## License
-### Apache License
-[Version 2.0, January 2004](https://www.apache.org/licenses/LICENSE-2.0)
+## Learn next
+
+- Start with the [Quickstart](quickstart.md) for the complete write, index,
+  search, query, and delete lifecycle.
+- Use [Connect and deploy](tutorials/connect_and_deploy.md) to choose local or
+  remote mode.
+- Use [Search and filter](tutorials/search_and_filter.md) for vector search,
+  metadata filtering, text search, and reranking.
+- Use [Indexing guide](tutorials/indexing.md) to choose between flat, HNSW, IVF,
+  DiskANN, and quantized indexes.
+- Use [Named, sparse, and hybrid search](tutorials/named_sparse_hybrid.md) for
+  multimodal and retrieval-augmented applications.
+
+## Stability notes
+
+LynseDB is still evolving. Pin versions for deployments and test migrations
+before upgrading. For concurrent production access, prefer the HTTP server over
+sharing one local data directory across independent Python processes.

@@ -67,6 +67,12 @@ class VectorDBClient:
                 rj = response.json()
                 if rj.get('status') != 'success':
                     raise ConnectionError(f'Failed to connect to the server at {uri}.')
+
+                auth_response = httpx.get(f'{uri.rstrip("/")}/list_databases', headers=headers)
+                if auth_response.status_code == 401:
+                    raise ConnectionError('Authentication failed: invalid api_key.')
+                if auth_response.status_code != 200:
+                    raise ConnectionError(f'Failed to connect to the server at {uri}.')
             except httpx.RequestError:
                 raise ConnectionError(f'Failed to connect to the server at {uri}.')
 

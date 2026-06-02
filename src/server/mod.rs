@@ -1134,6 +1134,7 @@ struct BuildVectorFieldIndexRequest {
     collection_name: String,
     field_name: String,
     index_mode: Option<String>,
+    n_clusters: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -1231,6 +1232,7 @@ struct BuildIndexRequest {
     database_name: String,
     collection_name: String,
     index_mode: Option<String>,
+    n_clusters: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -2030,7 +2032,7 @@ fn openapi_schemas() -> serde_json::Value {
         "CreateVectorFieldRequest": object_schema(&["database_name", "collection_name", "field_name", "dim", "metric", "index_mode"]),
         "AddNamedVectorsRequest": object_schema(&["database_name", "collection_name", "field_name", "vectors", "ids"]),
         "AddSparseVectorsRequest": object_schema(&["database_name", "collection_name", "vectors", "ids"]),
-        "BuildVectorFieldIndexRequest": object_schema(&["database_name", "collection_name", "field_name", "index_mode"]),
+        "BuildVectorFieldIndexRequest": object_schema(&["database_name", "collection_name", "field_name", "index_mode", "n_clusters"]),
         "SearchRequest": object_schema(&["database_name", "collection_name", "vector", "vector_field", "k", "where", "return_fields", "nprobe"]),
         "SearchProfileRequest": object_schema(&["database_name", "collection_name", "vector", "k", "where", "return_fields", "nprobe"]),
         "TextSearchRequest": object_schema(&["database_name", "collection_name", "text", "text_fields", "k", "where", "return_fields"]),
@@ -2039,7 +2041,7 @@ fn openapi_schemas() -> serde_json::Value {
         "BatchSearchRequest": object_schema(&["database_name", "collection_name", "vectors", "k", "where", "return_fields", "nprobe"]),
         "CommitRequest": object_schema(&["database_name", "collection_name", "items"]),
         "UpdateDescriptionRequest": object_schema(&["database_name", "collection_name", "description"]),
-        "BuildIndexRequest": object_schema(&["database_name", "collection_name", "index_mode"]),
+        "BuildIndexRequest": object_schema(&["database_name", "collection_name", "index_mode", "n_clusters"]),
         "HeadTailRequest": object_schema(&["database_name", "collection_name", "n"]),
         "QueryRequest": object_schema(&["database_name", "collection_name", "where", "filter_ids", "return_ids_only"]),
         "QueryVectorsRequest": object_schema(&["database_name", "collection_name", "where", "filter_ids"]),
@@ -2861,7 +2863,11 @@ async fn build_vector_field_index(
             .map(|(n, _)| n)
             .unwrap_or(0);
         metrics.track_index_build(n_vectors, || {
-            coll.build_vector_field_index(&body.field_name, index_mode)
+            coll.build_vector_field_index_with_options(
+                &body.field_name,
+                index_mode,
+                body.n_clusters,
+            )
         })
     });
 
@@ -2871,6 +2877,7 @@ async fn build_vector_field_index(
             "collection_name": body.collection_name,
             "field_name": body.field_name,
             "index_mode": index_mode,
+            "n_clusters": body.n_clusters,
         })),
         Err(e) => error_response(&e.to_string()),
     }
@@ -3021,7 +3028,7 @@ async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> H
         let sr = if vector_field == "default" {
             coll.search(&body.vector, k, filter, nprobe, approx, eps)?
         } else {
-            coll.search_vector_field(vector_field, &body.vector, k, filter)?
+            coll.search_vector_field_with_options(vector_field, &body.vector, k, filter, approx, eps)?
         };
 
         let fields_data = if return_fields && !sr.ids.is_empty() {
@@ -3661,7 +3668,9 @@ async fn build_index(
         &body.collection_name,
         |coll| {
             let n_vectors = coll.shape().map(|(n, _)| n).unwrap_or(0);
-            metrics.track_index_build(n_vectors, || coll.build_index(index_mode))
+            metrics.track_index_build(n_vectors, || {
+                coll.build_index_with_options(index_mode, body.n_clusters)
+            })
         },
     );
 
@@ -3669,7 +3678,8 @@ async fn build_index(
         Ok(()) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name,
             "collection_name": body.collection_name,
-            "index_mode": index_mode
+            "index_mode": index_mode,
+            "n_clusters": body.n_clusters
         })),
         Err(e) => error_response(&e.to_string()),
     }
@@ -4319,7 +4329,7 @@ async fn search_binary(
         let sr = if vector_field == "default" {
             coll.search(vector, k, filter, nprobe, approx, eps)?
         } else {
-            coll.search_vector_field(vector_field, vector, k, filter)?
+            coll.search_vector_field_with_options(vector_field, vector, k, filter, approx, eps)?
         };
 
         let fields_data = if return_fields && !sr.ids.is_empty() {

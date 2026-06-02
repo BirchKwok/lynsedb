@@ -76,9 +76,7 @@ pub fn inner_product_batch8_f32(
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            return unsafe {
-                inner_product_batch8_avx2_fma(query, v0, v1, v2, v3, v4, v5, v6, v7)
-            };
+            return unsafe { inner_product_batch8_avx2_fma(query, v0, v1, v2, v3, v4, v5, v6, v7) };
         }
     }
 
@@ -111,6 +109,39 @@ pub fn l2_squared_f32(a: &[f32], b: &[f32]) -> f32 {
 
     #[allow(unreachable_code)]
     l2_squared_scalar(a, b)
+}
+
+/// Batch L2 squared: one query against eight candidate vectors.
+#[inline(always)]
+pub fn l2_squared_batch8_f32(
+    query: &[f32],
+    v0: &[f32],
+    v1: &[f32],
+    v2: &[f32],
+    v3: &[f32],
+    v4: &[f32],
+    v5: &[f32],
+    v6: &[f32],
+    v7: &[f32],
+) -> [f32; 8] {
+    debug_assert_eq!(query.len(), v0.len());
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        return l2_squared_batch8_neon(query, v0, v1, v2, v3, v4, v5, v6, v7);
+    }
+
+    #[allow(unreachable_code)]
+    [
+        l2_squared_f32(query, v0),
+        l2_squared_f32(query, v1),
+        l2_squared_f32(query, v2),
+        l2_squared_f32(query, v3),
+        l2_squared_f32(query, v4),
+        l2_squared_f32(query, v5),
+        l2_squared_f32(query, v6),
+        l2_squared_f32(query, v7),
+    ]
 }
 
 /// Cosine distance = 1 - cosine_similarity.
@@ -736,7 +767,12 @@ fn inner_product_batch4_neon(
             accumulate!(acc3, p3);
         }
 
-        out = [vaddvq_f32(acc0), vaddvq_f32(acc1), vaddvq_f32(acc2), vaddvq_f32(acc3)];
+        out = [
+            vaddvq_f32(acc0),
+            vaddvq_f32(acc1),
+            vaddvq_f32(acc2),
+            vaddvq_f32(acc3),
+        ];
     }
 
     let base = chunks16 * 16;
@@ -855,6 +891,115 @@ fn inner_product_batch8_neon(
         out[5] += q * v5[base + i];
         out[6] += q * v6[base + i];
         out[7] += q * v7[base + i];
+    }
+    out
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn l2_squared_batch8_neon(
+    query: &[f32],
+    v0: &[f32],
+    v1: &[f32],
+    v2: &[f32],
+    v3: &[f32],
+    v4: &[f32],
+    v5: &[f32],
+    v6: &[f32],
+    v7: &[f32],
+) -> [f32; 8] {
+    use std::arch::aarch64::*;
+
+    let n = query.len();
+    let chunks16 = n / 16;
+    let remainder = n % 16;
+
+    let mut out;
+    unsafe {
+        let mut acc0 = vdupq_n_f32(0.0);
+        let mut acc1 = vdupq_n_f32(0.0);
+        let mut acc2 = vdupq_n_f32(0.0);
+        let mut acc3 = vdupq_n_f32(0.0);
+        let mut acc4 = vdupq_n_f32(0.0);
+        let mut acc5 = vdupq_n_f32(0.0);
+        let mut acc6 = vdupq_n_f32(0.0);
+        let mut acc7 = vdupq_n_f32(0.0);
+
+        let qp = query.as_ptr();
+        let p0 = v0.as_ptr();
+        let p1 = v1.as_ptr();
+        let p2 = v2.as_ptr();
+        let p3 = v3.as_ptr();
+        let p4 = v4.as_ptr();
+        let p5 = v5.as_ptr();
+        let p6 = v6.as_ptr();
+        let p7 = v7.as_ptr();
+
+        for i in 0..chunks16 {
+            let base = i * 16;
+            let qa0 = vld1q_f32(qp.add(base));
+            let qa1 = vld1q_f32(qp.add(base + 4));
+            let qa2 = vld1q_f32(qp.add(base + 8));
+            let qa3 = vld1q_f32(qp.add(base + 12));
+
+            macro_rules! accumulate_l2 {
+                ($acc:ident, $bp:ident) => {{
+                    let vb0 = vld1q_f32($bp.add(base));
+                    let vb1 = vld1q_f32($bp.add(base + 4));
+                    let vb2 = vld1q_f32($bp.add(base + 8));
+                    let vb3 = vld1q_f32($bp.add(base + 12));
+                    let d0 = vsubq_f32(qa0, vb0);
+                    let d1 = vsubq_f32(qa1, vb1);
+                    let d2 = vsubq_f32(qa2, vb2);
+                    let d3 = vsubq_f32(qa3, vb3);
+                    $acc = vfmaq_f32($acc, d0, d0);
+                    $acc = vfmaq_f32($acc, d1, d1);
+                    $acc = vfmaq_f32($acc, d2, d2);
+                    $acc = vfmaq_f32($acc, d3, d3);
+                }};
+            }
+
+            accumulate_l2!(acc0, p0);
+            accumulate_l2!(acc1, p1);
+            accumulate_l2!(acc2, p2);
+            accumulate_l2!(acc3, p3);
+            accumulate_l2!(acc4, p4);
+            accumulate_l2!(acc5, p5);
+            accumulate_l2!(acc6, p6);
+            accumulate_l2!(acc7, p7);
+        }
+
+        out = [
+            vaddvq_f32(acc0),
+            vaddvq_f32(acc1),
+            vaddvq_f32(acc2),
+            vaddvq_f32(acc3),
+            vaddvq_f32(acc4),
+            vaddvq_f32(acc5),
+            vaddvq_f32(acc6),
+            vaddvq_f32(acc7),
+        ];
+    }
+
+    let base = chunks16 * 16;
+    for i in 0..remainder {
+        let q = query[base + i];
+        let d0 = q - v0[base + i];
+        let d1 = q - v1[base + i];
+        let d2 = q - v2[base + i];
+        let d3 = q - v3[base + i];
+        let d4 = q - v4[base + i];
+        let d5 = q - v5[base + i];
+        let d6 = q - v6[base + i];
+        let d7 = q - v7[base + i];
+        out[0] += d0 * d0;
+        out[1] += d1 * d1;
+        out[2] += d2 * d2;
+        out[3] += d3 * d3;
+        out[4] += d4 * d4;
+        out[5] += d5 * d5;
+        out[6] += d6 * d6;
+        out[7] += d7 * d7;
     }
     out
 }
@@ -1001,6 +1146,27 @@ mod tests {
         let b = vec![0.0f32, 1.0, 0.0];
         let result = l2_squared_f32(&a, &b);
         assert!((result - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_l2_squared_batch8_matches_scalar() {
+        let dim = 128;
+        let query: Vec<f32> = (0..dim).map(|i| (i as f32 - 64.0) * 0.01).collect();
+        let rows: Vec<Vec<f32>> = (0..8)
+            .map(|row| {
+                (0..dim)
+                    .map(|i| ((row * 13 + i * 7) as f32 % 31.0 - 15.0) * 0.02)
+                    .collect()
+            })
+            .collect();
+
+        let batch = l2_squared_batch8_f32(
+            &query, &rows[0], &rows[1], &rows[2], &rows[3], &rows[4], &rows[5], &rows[6], &rows[7],
+        );
+        for i in 0..8 {
+            let expected = l2_squared_f32(&query, &rows[i]);
+            assert!((batch[i] - expected).abs() < 1e-4);
+        }
     }
 
     #[test]

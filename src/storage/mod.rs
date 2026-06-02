@@ -5,9 +5,9 @@
 //! - `wal`: Write-Ahead Log for crash-safe vector ingestion
 //! - `flat_mmap`: Ultra-fast flat binary storage with persistent mmap
 
+pub mod approx_search;
 pub mod bitset;
 pub mod field_store;
-pub mod approx_search;
 pub mod flat_mmap;
 pub mod ivf_flat_mmap;
 pub mod polarvec_mmap;

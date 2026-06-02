@@ -27,6 +27,75 @@ class TestSearch:
         result = populated_collection.search(query_vec, k=5)
         assert np.all(np.isfinite(result.distances))
 
+    def test_approx_search_matches_exact_on_small_flat_collection(
+        self, populated_collection, query_vec
+    ):
+        exact = populated_collection.search(query_vec, k=5, approx=False)
+        approx = populated_collection.search(query_vec, k=5, approx=True, eps=1e-4)
+        assert approx.ids.tolist() == exact.ids.tolist()
+        assert np.max(np.abs(approx.distances - exact.distances)) <= 1e-4
+        scaled = approx.distances / 1e-4
+        assert np.allclose(scaled, np.round(scaled), atol=1e-3)
+
+    def test_approx_search_rejects_non_finite_eps(self, populated_collection, query_vec):
+        result = populated_collection.search(query_vec, k=5, approx=True, eps=float("inf"))
+        assert len(result.ids) == 5
+        assert np.all(np.isfinite(result.distances))
+
+    def test_approx_is_ignored_for_hamming_and_jaccard(self, db):
+        vectors = np.array(
+            [
+                [1.0, 0.0, 1.0, 0.0],
+                [1.0, 1.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+        query = np.array([1.0, 0.0, 1.0, 0.0], dtype=np.float32)
+
+        for name, index_mode, eps in [
+            ("hamming_approx_ignored", "FLAT-HAMMING-BINARY", 2.0),
+            ("jaccard_approx_ignored", "FLAT-JACCARD-BINARY", 0.5),
+        ]:
+            coll = db.require_collection(name, dim=4, drop_if_exists=True)
+            with coll.insert_session() as session:
+                session.bulk_add_items(
+                    [(vectors[i], i, {"metric": name}) for i in range(len(vectors))],
+                    enable_progress_bar=False,
+                )
+            coll.build_index(index_mode)
+
+            exact = coll.search(query, k=3, approx=False)
+            approx = coll.search(query, k=3, approx=True, eps=eps)
+
+            assert approx.ids.tolist() == exact.ids.tolist()
+            assert np.allclose(approx.distances, exact.distances)
+            assert not np.allclose(exact.distances, np.round(exact.distances / eps) * eps)
+
+    def test_approx_search_with_filter_matches_exact_filter(
+        self, populated_collection, query_vec
+    ):
+        exact = populated_collection.search(
+            query_vec, k=5, where='"group" = 1', approx=False
+        )
+        approx = populated_collection.search(
+            query_vec, k=5, where='"group" = 1', approx=True, eps=1e-4
+        )
+        assert approx.ids.tolist() == exact.ids.tolist()
+        assert np.allclose(approx.distances, exact.distances)
+
+    def test_approx_search_refills_after_deleted_top_result(
+        self, populated_collection, query_vec
+    ):
+        baseline = populated_collection.search(query_vec, k=6, approx=True)
+        deleted = int(baseline.ids[0])
+        populated_collection.delete_items([deleted])
+
+        result = populated_collection.search(query_vec, k=5, approx=True)
+        assert len(result.ids) == 5
+        assert deleted not in result.ids.tolist()
+        assert result.ids.tolist() == baseline.ids[1:6].tolist()
+
     def test_search_default_k(self, populated_collection, query_vec):
         result = populated_collection.search(query_vec)
         assert len(result.ids) == 10
@@ -224,6 +293,27 @@ class TestSearch:
             if field["name"] == "image"
         )
         assert image_field["index_mode"] == "FLAT-L2"
+
+    def test_named_vector_field_approx_rounds_distances(self, populated_collection):
+        dim = 128
+        populated_collection.create_vector_field("image_approx", dim=dim, metric="l2")
+        ids = list(range(N))
+        vectors = np.zeros((N, dim), dtype=np.float32)
+        vectors[7, 96:] = 0.7
+        populated_collection.add_named_vectors("image_approx", vectors, ids)
+
+        query = np.zeros(dim, dtype=np.float32)
+        query[96:] = 1.0
+        exact = populated_collection.search(
+            query, k=1, vector_field="image_approx", approx=False
+        )
+        approx = populated_collection.search(
+            query, k=1, vector_field="image_approx", approx=True, eps=0.5
+        )
+
+        assert int(approx.ids[0]) == int(exact.ids[0]) == 7
+        assert not np.isclose(float(exact.distances[0]), float(approx.distances[0]))
+        assert np.isclose(float(approx.distances[0]) % 0.5, 0.0)
 
     def test_named_vector_field_search_with_filter_and_fields(self, populated_collection):
         populated_collection.create_vector_field("text_vec", dim=2, metric="ip")

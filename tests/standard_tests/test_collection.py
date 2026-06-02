@@ -176,6 +176,10 @@ class TestIndexBuildRemove:
     def test_build_ivf_l2(self, populated_collection):
         populated_collection.build_index("IVF-L2", n_clusters=4)
 
+    def test_n_clusters_rejects_non_ivf_index(self, populated_collection):
+        with pytest.raises(RuntimeError, match="n_clusters is only supported"):
+            populated_collection.build_index("HNSW", n_clusters=4)
+
 
 class TestSoftDelete:
     def test_delete_items(self, populated_collection):
@@ -295,6 +299,16 @@ class TestInsertSession:
             for i in range(10):
                 session.add_item(np.random.rand(DIM).astype(np.float32), id=i)
         assert collection.shape[0] == 10
+
+    def test_session_exception_discards_pending_buffer(self, collection):
+        with pytest.raises(ValueError):
+            with collection.insert_session() as session:
+                session.add_item(np.ones(DIM, dtype=np.float32), id=88)
+                raise ValueError("boom")
+
+        assert not collection.is_id_exists(88)
+        collection.commit()
+        assert not collection.is_id_exists(88)
 
     def test_data_not_visible_before_commit(self, collection):
         collection.add_item(np.ones(DIM, dtype=np.float32), id=55, buffer_size=True)

@@ -221,6 +221,7 @@ impl FieldIndex {
 
         // Track integer ranges for dense field detection
         let is_int = matches!(key, IndexKey::Int(_));
+        let previous_range = self.int_ranges.get(&field).copied();
         if let IndexKey::Int(i) = &key {
             let entry = self
                 .int_ranges
@@ -257,6 +258,30 @@ impl FieldIndex {
             FieldIndexType::DenseInt(vec) => {
                 if let IndexKey::Int(i) = key {
                     let min = self.int_ranges.get(&field).map(|(m, _, _)| *m).unwrap_or(0);
+                    let previous_min = previous_range.map(|(m, _, _)| m).unwrap_or(min);
+                    if min < previous_min {
+                        let shift = (previous_min - min) as usize;
+                        if shift.saturating_add(vec.len()) < 2_000_000 {
+                            let mut rebased = Vec::with_capacity(vec.len() + shift);
+                            rebased.resize_with(shift, Vec::new);
+                            rebased.append(vec);
+                            *vec = rebased;
+                        } else {
+                            let mut new_map = HashMap::new();
+                            for (offset, ids) in vec.iter().enumerate() {
+                                if !ids.is_empty() {
+                                    new_map.insert(
+                                        IndexKey::Int(previous_min + offset as i64),
+                                        ids.clone(),
+                                    );
+                                }
+                            }
+                            new_map.entry(IndexKey::Int(i)).or_default().push(ext_id);
+                            *idx = FieldIndexType::Sparse(new_map);
+                            return true;
+                        }
+                    }
+
                     let idx_usize = (i - min) as usize;
                     if idx_usize < vec.len() {
                         vec[idx_usize].push(ext_id);
@@ -378,7 +403,11 @@ impl FieldIndex {
         if let FieldIndexType::DenseInt(vec) = idx {
             if let IndexKey::Int(i) = key {
                 let min = self.int_ranges.get(field).map(|(m, _, _)| *m).unwrap_or(0);
-                let idx_usize = (i - min) as usize;
+                let offset = i - min;
+                if offset < 0 {
+                    return None;
+                }
+                let idx_usize = offset as usize;
                 if idx_usize < vec.len() && !vec[idx_usize].is_empty() {
                     return Some(&vec[idx_usize]);
                 }
@@ -453,8 +482,16 @@ impl FieldIndex {
             Some(FieldIndexType::Sparse(map)) => map.len(),
             None => 0,
         };
-        let range_count = self.range_index.get(field).map(|map| map.len()).unwrap_or(0);
-        let array_count = self.array_index.get(field).map(|map| map.len()).unwrap_or(0);
+        let range_count = self
+            .range_index
+            .get(field)
+            .map(|map| map.len())
+            .unwrap_or(0);
+        let array_count = self
+            .array_index
+            .get(field)
+            .map(|map| map.len())
+            .unwrap_or(0);
 
         equality_count.max(range_count).max(array_count)
     }
@@ -839,6 +876,49 @@ impl FieldStore {
         Ok(())
     }
 
+    /// Rebuild the field table and external-id map from caller-provided rows.
+    ///
+    /// Used after vector compaction, where collection row offsets are rewritten
+    /// densely and the field-store external IDs must be rewritten to match.
+    pub fn rebuild_at_ids(
+        &self,
+        external_ids: &[u64],
+        fields_list: &[HashMap<String, serde_json::Value>],
+    ) -> Result<()> {
+        if external_ids.len() != fields_list.len() {
+            return Err(LynseError::InvalidArgument(format!(
+                "external_ids length ({}) must match fields length ({})",
+                external_ids.len(),
+                fields_list.len()
+            )));
+        }
+
+        let _ = self.db.drop_table(&self.table_name);
+        self.db
+            .create_table_with_schema(
+                &self.table_name,
+                &[("external_id".to_string(), apexbase::ColumnType::Int64)],
+            )
+            .map_err(|e| LynseError::ApexBase(format!("Create table error: {}", e)))?;
+        let _ = std::fs::remove_file(&self.map_path);
+
+        {
+            let mut next = self.next_id.write();
+            *next = external_ids
+                .iter()
+                .copied()
+                .max()
+                .map(|id| id + 1)
+                .unwrap_or(0);
+            self.cache.write().clear();
+            self.apex_id_map.write().clear();
+            *self.field_eq_index.write() = FieldIndex::default();
+        }
+
+        self.batch_store_at_ids(external_ids, fields_list)?;
+        Ok(())
+    }
+
     /// Query fields using a SQL-like filter expression.
     /// Returns matching external IDs.
     /// Fast path: if the expression is a simple AND of equality conditions and the
@@ -1175,8 +1255,8 @@ impl FieldStore {
     /// Returns `Some(ext_ids)` on success, `None` if the index is cold or the
     /// expression is too complex (caller should fall back to ApexBase SQL).
     fn query_from_index(&self, filter_expr: &str) -> Option<Vec<u64>> {
-        if let Some((field, keys)) = parse_indexed_in(filter_expr)
-            .or_else(|| parse_indexed_or_equalities(filter_expr))
+        if let Some((field, keys)) =
+            parse_indexed_in(filter_expr).or_else(|| parse_indexed_or_equalities(filter_expr))
         {
             return Some(self.query_index_values(&field, &keys));
         }
@@ -1653,12 +1733,7 @@ enum IndexedCondition {
 /// fall back to ApexBase SQL, such as OR, LIKE, and function calls.
 fn parse_indexed_in(expr: &str) -> Option<(String, Vec<IndexKey>)> {
     let expr = expr.trim();
-    if !expr.starts_with('"') {
-        return None;
-    }
-    let close = expr[1..].find('"')?;
-    let field = expr[1..1 + close].to_string();
-    let rest = expr[1 + close + 1..].trim();
+    let (field, rest) = parse_field_ref(expr)?;
     if !starts_with_keyword(rest, "IN") {
         return None;
     }
@@ -1712,12 +1787,7 @@ fn parse_indexed_or_leaves(expr: &str) -> Option<Vec<(String, IndexKey)>> {
 
 fn parse_equality_condition(expr: &str) -> Option<(String, IndexKey)> {
     let expr = expr.trim();
-    if !expr.starts_with('"') {
-        return None;
-    }
-    let close = expr[1..].find('"')?;
-    let field = expr[1..1 + close].to_string();
-    let rest = expr[1 + close + 1..].trim();
+    let (field, rest) = parse_field_ref(expr)?;
     if !rest.starts_with('=') || rest.starts_with("!=") {
         return None;
     }
@@ -1859,14 +1929,7 @@ fn split_on_and(expr: &str) -> Vec<&str> {
 
 fn parse_single_indexed_condition(expr: &str) -> Option<IndexedCondition> {
     let expr = expr.trim();
-
-    // Field name must be double-quoted
-    if !expr.starts_with('"') {
-        return None;
-    }
-    let close = expr[1..].find('"')?;
-    let field = expr[1..1 + close].to_string();
-    let rest = expr[1 + close + 1..].trim();
+    let (field, rest) = parse_field_ref(expr)?;
 
     if starts_with_keyword(rest, "CONTAINS") {
         let value = rest["CONTAINS".len()..].trim();
@@ -1901,6 +1964,33 @@ fn parse_single_indexed_condition(expr: &str) -> Option<IndexedCondition> {
     }
 
     None
+}
+
+fn parse_field_ref(expr: &str) -> Option<(String, &str)> {
+    let expr = expr.trim_start();
+    if expr.starts_with('"') {
+        let close = expr[1..].find('"')?;
+        let field = expr[1..1 + close].to_string();
+        let rest = expr[1 + close + 1..].trim_start();
+        return Some((field, rest));
+    }
+
+    let mut chars = expr.char_indices();
+    let (_, first) = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+
+    let mut end = first.len_utf8();
+    for (idx, ch) in chars {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    Some((expr[..end].to_string(), expr[end..].trim_start()))
 }
 
 fn starts_with_keyword(value: &str, keyword: &str) -> bool {
@@ -2004,13 +2094,36 @@ mod tests {
         }
 
         let key = IndexKey::Int(1);
-        assert_eq!(idx.get("order", &key).map(|ids| ids.as_slice()), Some(&[1][..]));
+        assert_eq!(
+            idx.get("order", &key).map(|ids| ids.as_slice()),
+            Some(&[1][..])
+        );
 
         let high = IndexKey::Int(149_999);
         assert_eq!(
             idx.get("order", &high).map(|ids| ids.as_slice()),
             Some(&[149_999][..])
         );
+    }
+
+    #[test]
+    fn dense_int_index_rebases_when_min_decreases() {
+        let mut idx = FieldIndex::default();
+        for (id, group) in [1, 2, 1, 2, 1, 0, 2, 0].into_iter().enumerate() {
+            idx.insert_value("group", &serde_json::json!(group), id as u64);
+        }
+
+        assert_eq!(
+            idx.get("group", &IndexKey::Int(0))
+                .map(|ids| ids.as_slice()),
+            Some(&[5, 7][..])
+        );
+        assert_eq!(
+            idx.get("group", &IndexKey::Int(1))
+                .map(|ids| ids.as_slice()),
+            Some(&[0, 2, 4][..])
+        );
+        assert_eq!(idx.get("group", &IndexKey::Int(-1)), None);
     }
 
     #[test]
@@ -2021,7 +2134,9 @@ mod tests {
         }
 
         assert!(idx.blacklisted.contains("uuid"));
-        assert!(idx.get("uuid", &IndexKey::Str("value_0".to_string())).is_none());
+        assert!(idx
+            .get("uuid", &IndexKey::Str("value_0".to_string()))
+            .is_none());
     }
 
     #[test]
@@ -2030,13 +2145,42 @@ mod tests {
         assert_eq!(field, "order");
         assert_eq!(keys.len(), 2);
 
+        let (field, keys) = parse_indexed_in("order IN (1, 2)").unwrap();
+        assert_eq!(field, "order");
+        assert_eq!(keys.len(), 2);
+
         let (field, keys) = parse_indexed_or_equalities("\"order\" = 1 OR \"order\" = 2").unwrap();
         assert_eq!(field, "order");
         assert_eq!(keys.len(), 2);
 
-        let leaves =
-            parse_indexed_or_leaves("\"order\" = 1 OR test = 'test_1'").unwrap();
+        let (field, keys) = parse_indexed_or_equalities("order = 1 OR order = 2").unwrap();
+        assert_eq!(field, "order");
+        assert_eq!(keys.len(), 2);
+
+        let leaves = parse_indexed_or_leaves("\"order\" = 1 OR test = 'test_1'").unwrap();
         assert_eq!(leaves.len(), 2);
+
+        let leaves = parse_indexed_or_leaves("name = 'a OR b' OR status = 'active'").unwrap();
+        assert_eq!(leaves.len(), 2);
+        assert!(
+            matches!(&leaves[0], (field, IndexKey::Str(value)) if field == "name" && value == "a OR b")
+        );
+    }
+
+    #[test]
+    fn parse_indexed_where_accepts_unquoted_fields() {
+        let conditions = parse_indexed_where("status = 'active' AND score >= 10").unwrap();
+        assert_eq!(conditions.len(), 2);
+        assert!(matches!(
+            &conditions[0],
+            IndexedCondition::Eq(field, IndexKey::Str(value))
+                if field == "status" && value == "active"
+        ));
+        assert!(matches!(
+            &conditions[1],
+            IndexedCondition::Range(field, RangeOp::Gte, RangeKey::Number(_))
+                if field == "score"
+        ));
     }
 
     #[test]

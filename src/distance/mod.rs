@@ -53,6 +53,11 @@ impl DistanceMetric {
             Self::Jaccard => "jaccard",
         }
     }
+
+    /// Whether `search(..., approx=True)` has a metric-specific implementation.
+    pub fn supports_flat_approx(&self) -> bool {
+        matches!(self, Self::InnerProduct | Self::L2Squared | Self::Cosine)
+    }
 }
 
 /// Compute distance between two f32 vectors.

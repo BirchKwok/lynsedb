@@ -53,3 +53,73 @@ def test_remote_delete_restore_and_stats(remote_server, unique_name):
     collection.restore_items([11])
     assert collection.list_deleted_ids() == []
     assert collection.stats()["n_live"] == 2
+
+
+def test_remote_query_without_filter_returns_empty(remote_server, unique_name):
+    client = lynse.VectorDBClient(remote_server.base_url)
+    db = client.create_database(unique_name, drop_if_exists=True)
+    collection = db.require_collection("query_contract", dim=4, drop_if_exists=True)
+
+    with collection.insert_session() as session:
+        session.add_item([1.0, 0.0, 0.0, 0.0], id=1, field={"tag": "alpha"})
+
+    assert len(collection.query().ids) == 0
+    assert collection.query_vectors().vectors.shape == (0, 4)
+
+
+def test_remote_named_vector_index_uses_field_endpoint(remote_server, unique_name):
+    client = lynse.VectorDBClient(remote_server.base_url)
+    db = client.create_database(unique_name, drop_if_exists=True)
+    collection = db.require_collection("named_vector_remote", dim=4, drop_if_exists=True)
+
+    with collection.insert_session() as session:
+        session.bulk_add_items(
+            [
+                (np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), 1, {"tag": "one"}),
+                (np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32), 2, {"tag": "two"}),
+            ],
+            enable_progress_bar=False,
+        )
+
+    collection.create_vector_field("image", dim=3, metric="l2")
+    collection.add_named_vectors(
+        "image",
+        np.array([[1.0, 0.0, 0.0], [9.0, 0.0, 0.0]], dtype=np.float32),
+        ids=[1, 2],
+    )
+    collection.build_index("IVF-L2", field_name="image", n_clusters=2)
+
+    fields = collection.list_vector_fields()
+    image_field = next(field for field in fields if field["name"] == "image")
+    assert image_field["index_mode"] == "IVF-L2"
+
+    result = collection.search([1.1, 0.0, 0.0], k=1, vector_field="image")
+    assert result.ids.tolist() == [1]
+
+    collection.remove_index(field_name="image")
+    image_field = next(field for field in collection.list_vector_fields() if field["name"] == "image")
+    assert image_field["index_mode"] == "FLAT-L2"
+
+
+def test_remote_search_forwards_approx_options(remote_server, unique_name):
+    client = lynse.VectorDBClient(remote_server.base_url)
+    db = client.create_database(unique_name, drop_if_exists=True)
+    collection = db.require_collection("approx_remote", dim=128, drop_if_exists=True)
+
+    vectors = np.zeros((3, 128), dtype=np.float32)
+    vectors[1, 96:] = 0.7
+    with collection.insert_session() as session:
+        session.bulk_add_items(
+            [(vectors[i], i, {"tag": str(i)}) for i in range(len(vectors))],
+            enable_progress_bar=False,
+        )
+    collection.build_index("FLAT-L2")
+
+    query = np.zeros(128, dtype=np.float32)
+    query[96:] = 1.0
+    exact = collection.search(query, k=1, approx=False)
+    approx = collection.search(query, k=1, approx=True, eps=0.5)
+
+    assert int(approx.ids[0]) == int(exact.ids[0]) == 1
+    assert not np.isclose(float(exact.distances[0]), float(approx.distances[0]))
+    assert np.isclose(float(approx.distances[0]) % 0.5, 0.0)

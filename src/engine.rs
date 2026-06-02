@@ -1403,8 +1403,11 @@ impl Collection {
             if !existing_field_user_ids.is_empty() {
                 self.field_store
                     .replace_fields_at_ids(&existing_field_rows, &existing_field_values)?;
-                self.text_index
-                    .upsert_documents(&existing_field_user_ids, &existing_field_values, false)?;
+                self.text_index.upsert_documents(
+                    &existing_field_user_ids,
+                    &existing_field_values,
+                    false,
+                )?;
                 recovered_any = true;
             }
         }
@@ -1661,16 +1664,29 @@ impl Collection {
         ids
     }
 
-    /// Filter tombstoned IDs from (ids, dists) pairs.
-    fn filter_tombstoned(&self, ids: Vec<u64>, dists: Vec<f32>) -> (Vec<u64>, Vec<f32>) {
+    /// Filter tombstoned IDs from (ids, dists) pairs and cap the result length.
+    fn filter_tombstoned_limit(
+        &self,
+        ids: Vec<u64>,
+        dists: Vec<f32>,
+        limit: usize,
+    ) -> (Vec<u64>, Vec<f32>) {
         let set = self.tombstone.read();
-        if set.is_empty() {
-            return (ids, dists);
+        let iter = ids.into_iter().zip(dists);
+        let pairs: Vec<(u64, f32)> = if set.is_empty() {
+            iter.take(limit).collect()
+        } else {
+            iter.filter(|(id, _)| !set.contains(id))
+                .take(limit)
+                .collect()
+        };
+        let mut out_ids = Vec::with_capacity(pairs.len());
+        let mut out_dists = Vec::with_capacity(pairs.len());
+        for (id, dist) in pairs {
+            out_ids.push(id);
+            out_dists.push(dist);
         }
-        ids.into_iter()
-            .zip(dists)
-            .filter(|(id, _)| !set.contains(id))
-            .unzip()
+        (out_ids, out_dists)
     }
 
     /// Load the last sync fingerprint from disk.
@@ -2113,15 +2129,29 @@ impl Collection {
 
     /// Build or change the index for a named vector field.
     pub fn build_vector_field_index(&mut self, field_name: &str, index_type: &str) -> Result<()> {
+        self.build_vector_field_index_with_options(field_name, index_type, None)
+    }
+
+    pub fn build_vector_field_index_with_options(
+        &mut self,
+        field_name: &str,
+        index_type: &str,
+        n_clusters: Option<usize>,
+    ) -> Result<()> {
         self.ensure_writable()?;
         if field_name == DEFAULT_VECTOR_FIELD_NAME || field_name.trim().is_empty() {
-            return self.build_index(index_type);
+            return self.build_index_with_options(index_type, n_clusters);
         }
 
         let field_name = Self::validate_vector_field_name(field_name)?;
         let metric = Self::metric_from_mode_str(index_type);
         let index_type = Self::normalize_field_index_mode(Some(index_type), metric)?;
         let is_flat = Self::resolve_metric_from_type(&index_type).is_some();
+        if n_clusters.is_some() && !index_type.to_uppercase().starts_with("IVF") {
+            return Err(LynseError::InvalidArgument(
+                "n_clusters is only supported for IVF indexes".to_string(),
+            ));
+        }
 
         {
             let field = self
@@ -2159,7 +2189,7 @@ impl Collection {
 
                 let all_data = fm.as_slice();
                 let row_ids: Vec<u64> = (0..n as u64).collect();
-                let mut idx = index::create_index(&index_type)?;
+                let mut idx = index::create_index_with_options(&index_type, n_clusters)?;
                 idx.build(all_data, n, dim, Some(&row_ids))?;
                 drop(guard);
 
@@ -2172,6 +2202,7 @@ impl Collection {
                     "n_vectors": n,
                     "dimension": dim,
                     "index_file": index_file,
+                    "n_clusters": n_clusters,
                 });
                 Self::save_index_metadata(&meta_path, &meta)?;
                 field.index = Some(idx);
@@ -2275,6 +2306,14 @@ impl Collection {
     ///
     /// For HNSW/IVF types: loads data from mmap and builds the index structure.
     pub fn build_index(&mut self, index_type: &str) -> Result<()> {
+        self.build_index_with_options(index_type, None)
+    }
+
+    pub fn build_index_with_options(
+        &mut self,
+        index_type: &str,
+        n_clusters: Option<usize>,
+    ) -> Result<()> {
         self.ensure_writable()?;
         let dim = self.meta.dimension;
         let upper = index_type.to_uppercase();
@@ -2285,6 +2324,11 @@ impl Collection {
         self.polarvec_index = None;
 
         let is_flat = Self::resolve_metric_from_type(index_type).is_some();
+        if n_clusters.is_some() && !upper.starts_with("IVF") {
+            return Err(LynseError::InvalidArgument(
+                "n_clusters is only supported for IVF indexes".to_string(),
+            ));
+        }
 
         let n_vectors = if is_flat {
             // Flat family: clear any HNSW/IVF tree index, and remove stale graph index.bin
@@ -2348,7 +2392,7 @@ impl Collection {
             let all_data = fm.as_slice();
             let ids: Vec<u64> = (0..n as u64).collect();
 
-            let mut idx = index::create_index(index_type)?;
+            let mut idx = index::create_index_with_options(index_type, n_clusters)?;
             idx.build(all_data, n, dim, Some(&ids))?;
 
             // Save index to disk
@@ -2363,6 +2407,7 @@ impl Collection {
                 "n_vectors": n,
                 "dimension": dim,
                 "index_file": index_file,
+                "n_clusters": n_clusters,
             });
             Self::save_index_metadata(&meta_path, &meta)?;
             n
@@ -2459,14 +2504,21 @@ impl Collection {
             None
         };
 
+        let tombstone_count = self.tombstone.read().len();
         let search_params = SearchParams {
-            k,
+            k: if tombstone_count == 0 {
+                k
+            } else {
+                k.saturating_add(tombstone_count)
+            },
             nprobe,
             ef_search: None,
             subset_indices,
         };
+        let search_k = search_params.k;
 
-        let approx_cfg = if approx {
+        let collection_metric = self.resolve_metric();
+        let approx_cfg = if approx && collection_metric.supports_flat_approx() {
             Some(crate::storage::approx_search::ApproxSearchConfig::new(eps))
         } else {
             None
@@ -2474,52 +2526,52 @@ impl Collection {
 
         let (result_ids, result_dists) = if let Some(ref idx) = self.index {
             // HNSW/IVF index path
-            idx.search(query, k, &search_params)?
+            idx.search(query, search_k, &search_params)?
         } else if let Some(ref pq) = self.pq_index {
             // PQ (Product Quantization) two-pass search
-            let metric = self.resolve_metric();
+            let metric = collection_metric;
             let guard = self.vector_store.read_mmap()?;
             match guard.as_ref() {
                 None => (vec![], vec![]),
                 Some(fm) => {
                     let (indices, dists) =
-                        pq.search(query, k, fm.as_slice(), metric, PQ_OVERSAMPLE);
+                        pq.search(query, search_k, fm.as_slice(), metric, PQ_OVERSAMPLE);
                     let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                     (ids, dists)
                 }
             }
         } else if let Some(ref rq) = self.rabitq_index {
             // RaBitQ binary two-pass search
-            let metric = self.resolve_metric();
+            let metric = collection_metric;
             let guard = self.vector_store.read_mmap()?;
             match guard.as_ref() {
                 None => (vec![], vec![]),
                 Some(fm) => {
                     let (indices, dists) =
-                        rq.search(query, k, fm.as_slice(), metric, RABITQ_OVERSAMPLE);
+                        rq.search(query, search_k, fm.as_slice(), metric, RABITQ_OVERSAMPLE);
                     let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                     (ids, dists)
                 }
             }
         } else if let Some(ref pv) = self.polarvec_index {
             // PolarVec multi-bit LUT two-pass search
-            let metric = self.resolve_metric();
+            let metric = collection_metric;
             let guard = self.vector_store.read_mmap()?;
             match guard.as_ref() {
                 None => (vec![], vec![]),
                 Some(fm) => {
                     let (indices, dists) =
-                        pv.search(query, k, fm.as_slice(), metric, POLARVEC_OVERSAMPLE);
+                        pv.search(query, search_k, fm.as_slice(), metric, POLARVEC_OVERSAMPLE);
                     let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                     (ids, dists)
                 }
             }
         } else if search_params.subset_indices.is_some() {
             // Filtered brute-force on mmap data
-            self.brute_force_search_filtered(query, k, &search_params)?
+            self.brute_force_search_filtered(query, search_k, &search_params)?
         } else {
             // Unfiltered: zero-copy mmap + fused parallel topk (~5ms for 1M×128)
-            let metric = self.resolve_metric();
+            let metric = collection_metric;
             let guard = self.vector_store.read_mmap()?;
             match guard.as_ref() {
                 None => {
@@ -2534,7 +2586,7 @@ impl Collection {
                 }
                 Some(fm) => {
                     let use_sq8 = self.resolve_use_sq8();
-                    let (indices, dists) = fm.search(query, k, metric, use_sq8, approx_cfg);
+                    let (indices, dists) = fm.search(query, search_k, metric, use_sq8, approx_cfg);
                     let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                     (ids, dists)
                 }
@@ -2545,7 +2597,7 @@ impl Collection {
             .iter()
             .map(|&row| self.row_to_user_id(row))
             .collect();
-        let (result_ids, result_dists) = self.filter_tombstoned(result_ids, result_dists);
+        let (result_ids, result_dists) = self.filter_tombstoned_limit(result_ids, result_dists, k);
 
         Ok(SearchResult {
             ids: result_ids,
@@ -2565,8 +2617,21 @@ impl Collection {
         k: usize,
         where_expr: Option<&str>,
     ) -> Result<SearchResult> {
+        self.search_vector_field_with_options(field_name, query, k, where_expr, false, 1e-4)
+    }
+
+    /// Search a named vector field with flat-search approximation controls.
+    pub fn search_vector_field_with_options(
+        &self,
+        field_name: &str,
+        query: &[f32],
+        k: usize,
+        where_expr: Option<&str>,
+        approx: bool,
+        eps: f32,
+    ) -> Result<SearchResult> {
         if field_name == DEFAULT_VECTOR_FIELD_NAME || field_name.trim().is_empty() {
-            return self.search(query, k, where_expr, 10, false, 1e-4);
+            return self.search(query, k, where_expr, 10, approx, eps);
         }
 
         let field_name = Self::validate_vector_field_name(field_name)?;
@@ -2616,11 +2681,16 @@ impl Collection {
             let metric = DistanceMetric::from_str(&field.config.metric)
                 .unwrap_or_else(|| Self::metric_from_mode_str(&field.config.index_mode));
             let use_sq8 = field.config.index_mode.to_uppercase().contains("SQ8");
+            let approx_cfg = if approx && metric.supports_flat_approx() {
+                Some(crate::storage::approx_search::ApproxSearchConfig::new(eps))
+            } else {
+                None
+            };
             let guard = field.vector_store.read_mmap()?;
             match guard.as_ref() {
                 None => (Vec::new(), Vec::new()),
                 Some(fm) => {
-                    let (rows, dists) = fm.search(query, search_k, metric, use_sq8, None);
+                    let (rows, dists) = fm.search(query, search_k, metric, use_sq8, approx_cfg);
                     (rows.into_iter().map(|row| row as u64).collect(), dists)
                 }
             }
@@ -2800,7 +2870,8 @@ impl Collection {
         let mut fused: HashMap<u64, f32> = HashMap::new();
 
         if let Some(vector) = query {
-            let vector_result = self.search(vector, candidate_limit, where_expr, nprobe, false, 1e-4)?;
+            let vector_result =
+                self.search(vector, candidate_limit, where_expr, nprobe, false, 1e-4)?;
             let vector_scores =
                 normalize_vector_scores(&vector_result.distances, self.resolve_metric());
             add_fused_scores(
@@ -3041,16 +3112,22 @@ impl Collection {
             .map(|i| {
                 let start = i * dim;
                 let query = &queries[start..start + dim];
+                let tombstone_count = self.tombstone.read().len();
+                let search_k = if tombstone_count == 0 {
+                    k
+                } else {
+                    k.saturating_add(tombstone_count)
+                };
 
                 let search_params = SearchParams {
-                    k,
+                    k: search_k,
                     nprobe,
                     ef_search: None,
                     subset_indices: subset_indices.clone(),
                 };
 
                 let (result_ids, result_dists) = if let Some(ref idx) = self.index {
-                    idx.search(query, k, &search_params)?
+                    idx.search(query, search_k, &search_params)?
                 } else if let Some(ref pq) = self.pq_index {
                     let metric = self.resolve_metric();
                     let guard = self.vector_store.read_mmap()?;
@@ -3058,7 +3135,7 @@ impl Collection {
                         None => (vec![], vec![]),
                         Some(fm) => {
                             let (indices, dists) =
-                                pq.search(query, k, fm.as_slice(), metric, PQ_OVERSAMPLE);
+                                pq.search(query, search_k, fm.as_slice(), metric, PQ_OVERSAMPLE);
                             let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                             (ids, dists)
                         }
@@ -3069,8 +3146,13 @@ impl Collection {
                     match guard.as_ref() {
                         None => (vec![], vec![]),
                         Some(fm) => {
-                            let (indices, dists) =
-                                rq.search(query, k, fm.as_slice(), metric, RABITQ_OVERSAMPLE);
+                            let (indices, dists) = rq.search(
+                                query,
+                                search_k,
+                                fm.as_slice(),
+                                metric,
+                                RABITQ_OVERSAMPLE,
+                            );
                             let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                             (ids, dists)
                         }
@@ -3081,14 +3163,19 @@ impl Collection {
                     match guard.as_ref() {
                         None => (vec![], vec![]),
                         Some(fm) => {
-                            let (indices, dists) =
-                                pv.search(query, k, fm.as_slice(), metric, POLARVEC_OVERSAMPLE);
+                            let (indices, dists) = pv.search(
+                                query,
+                                search_k,
+                                fm.as_slice(),
+                                metric,
+                                POLARVEC_OVERSAMPLE,
+                            );
                             let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                             (ids, dists)
                         }
                     }
                 } else if search_params.subset_indices.is_some() {
-                    self.brute_force_search_filtered(query, k, &search_params)?
+                    self.brute_force_search_filtered(query, search_k, &search_params)?
                 } else {
                     let metric = self.resolve_metric();
                     let guard = self.vector_store.read_mmap()?;
@@ -3096,7 +3183,8 @@ impl Collection {
                         None => (vec![], vec![]),
                         Some(fm) => {
                             let use_sq8 = self.resolve_use_sq8();
-                            let (indices, dists) = fm.search(query, k, metric, use_sq8, None);
+                            let (indices, dists) =
+                                fm.search(query, search_k, metric, use_sq8, None);
                             let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                             (ids, dists)
                         }
@@ -3107,7 +3195,8 @@ impl Collection {
                     .iter()
                     .map(|&row| self.row_to_user_id(row))
                     .collect();
-                let (result_ids, result_dists) = self.filter_tombstoned(result_ids, result_dists);
+                let (result_ids, result_dists) =
+                    self.filter_tombstoned_limit(result_ids, result_dists, k);
 
                 Ok(SearchResult {
                     ids: result_ids,
@@ -3573,7 +3662,8 @@ impl Collection {
         if fields.is_some() {
             self.field_store
                 .replace_fields_at_ids(&field_rows, &field_values)?;
-            self.text_index.upsert_documents(ids, fields.unwrap(), true)?;
+            self.text_index
+                .upsert_documents(ids, fields.unwrap(), true)?;
         }
         if tombstone_changed {
             let path = self.path.join("tombstone.bin");
@@ -3982,6 +4072,7 @@ impl Collection {
         // Collect live vectors and their user IDs
         let mut live_vectors: Vec<f32> = Vec::with_capacity((n_total - n_removed) * dim);
         let mut live_user_ids: Vec<u64> = Vec::new();
+        let mut live_old_rows: Vec<u64> = Vec::new();
 
         for row in 0..n_total {
             if tombstoned_rows.contains(&row) {
@@ -3990,7 +4081,9 @@ impl Collection {
             let start = row * dim;
             live_vectors.extend_from_slice(&all_vectors[start..start + dim]);
             live_user_ids.push(self.row_to_user_id(row as u64));
+            live_old_rows.push(row as u64);
         }
+        let live_fields = self.field_store.retrieve_many(&live_old_rows)?;
 
         // Atomically rewrite vectors.bin
         self.vector_store.replace_data(&live_vectors)?;
@@ -4008,6 +4101,10 @@ impl Collection {
             .flat_map(|id| id.to_le_bytes())
             .collect();
         std::fs::write(self.path.join("id_map.bin"), &id_bytes)?;
+
+        let new_field_rows: Vec<u64> = (0..live_fields.len() as u64).collect();
+        self.field_store
+            .rebuild_at_ids(&new_field_rows, &live_fields)?;
 
         let mut field_indexes_to_rebuild = Vec::new();
         for field in self.named_vector_fields.values_mut() {
@@ -5463,7 +5560,9 @@ mod tests {
         assert!(ro.is_read_only());
         assert!(ro2.is_read_only());
 
-        let result = ro.search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10, false, 1e-4).unwrap();
+        let result = ro
+            .search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10, false, 1e-4)
+            .unwrap();
         assert_eq!(result.ids, vec![7]);
 
         let err = ro
@@ -5670,7 +5769,9 @@ mod tests {
         let coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
         assert_eq!(coll.list_deleted_ids(), vec![20]);
 
-        let result = coll.search(&[0.0, 1.0, 0.0, 0.0], 2, None, 10, false, 1e-4).unwrap();
+        let result = coll
+            .search(&[0.0, 1.0, 0.0, 0.0], 2, None, 10, false, 1e-4)
+            .unwrap();
         assert_eq!(result.ids, vec![10]);
     }
 
@@ -5691,7 +5792,14 @@ mod tests {
         .unwrap();
 
         let (result, profile) = coll
-            .search_with_profile(&[1.0, 0.0, 0.0, 0.0], 1, Some("\"category\" = 'doc'"), 10, false, 1e-4)
+            .search_with_profile(
+                &[1.0, 0.0, 0.0, 0.0],
+                1,
+                Some("\"category\" = 'doc'"),
+                10,
+                false,
+                1e-4,
+            )
             .unwrap();
         assert_eq!(result.ids, vec![10]);
         assert_eq!(profile.query_kind, "vector");
@@ -5900,8 +6008,39 @@ mod tests {
             .unwrap();
         assert_eq!(result.ids, vec![20]);
 
-        let default_result = coll.search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10, false, 1e-4).unwrap();
+        let default_result = coll
+            .search(&[1.0, 0.0, 0.0, 0.0], 1, None, 10, false, 1e-4)
+            .unwrap();
         assert_eq!(default_result.ids, vec![10]);
+    }
+
+    #[test]
+    fn named_vector_field_approx_search_uses_sampled_dims() {
+        let tmp = TempDir::new().unwrap();
+        let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        let n = 4096usize;
+        let dim = 128usize;
+        let true_id = 3000u64;
+
+        let primary = vec![0.0f32; n * 4];
+        let ids: Vec<u64> = (0..n as u64).collect();
+        coll.add_items(&primary, n, &ids, None).unwrap();
+        coll.create_vector_field("image", dim, Some("l2"), None)
+            .unwrap();
+
+        let mut named = vec![0.0f32; n * dim];
+        let mut query = vec![0.0f32; dim];
+        for j in 96..dim {
+            query[j] = 1.0;
+            named[true_id as usize * dim + j] = 1.0;
+        }
+        coll.add_named_vectors("image", &named, n, &ids).unwrap();
+
+        let result = coll
+            .search_vector_field_with_options("image", &query, 1, None, true, 1e-4)
+            .unwrap();
+        assert_eq!(result.ids, vec![true_id]);
+        assert_eq!(result.distances, vec![0.0]);
     }
 
     #[test]
@@ -6037,7 +6176,9 @@ mod tests {
 
         let coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
         assert_eq!(coll.get_index_mode(), Some("HNSW"));
-        let result = coll.search(&[0.0, 1.0, 0.0, 0.0], 1, None, 10, false, 1e-4).unwrap();
+        let result = coll
+            .search(&[0.0, 1.0, 0.0, 0.0], 1, None, 10, false, 1e-4)
+            .unwrap();
         assert_eq!(result.ids, vec![202]);
     }
 }

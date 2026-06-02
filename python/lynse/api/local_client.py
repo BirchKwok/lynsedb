@@ -687,7 +687,7 @@ class LocalCollection:
         Returns:
             dict: Status message.
         """
-        self._rust_coll.build_index(index_mode, field_name=field_name)
+        self._rust_coll.build_index(index_mode, field_name=field_name, **kwargs)
         return {'status': 'success'}
 
     def remove_index(self, field_name: str = 'default'):
@@ -781,8 +781,11 @@ class LocalCollection:
                     - **IVF**: number of partitions to probe — higher = better recall, slower.
                     - **HNSW**: ef_search beam width — higher = better recall, slower.
                     - **Flat / PQ / RaBitQ / PolarVec**: ignored (exhaustive two-pass search).
-                - approx (bool): two-phase approximate flat distance search.
-                - eps (float): distance rounding tolerance when approx=True (default 1e-4).
+                - approx (bool): metric-specific flat approximation for IP, L2,
+                  and Cosine. Ignored for Hamming/Jaccard, which always use the
+                  exact binary-distance path.
+                - eps (float): distance rounding tolerance when approx=True
+                  for supported metrics (default 1e-4).
 
         Returns:
             ResultView: Search results with ids, distances, and optional fields.

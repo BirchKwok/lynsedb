@@ -220,9 +220,15 @@ impl PyCollection {
     }
 
     /// Build or change the index for a named vector field.
-    fn build_vector_field_index(&self, field_name: &str, index_type: &str) -> PyResult<()> {
+    #[pyo3(signature = (field_name, index_type, n_clusters=None))]
+    fn build_vector_field_index(
+        &self,
+        field_name: &str,
+        index_type: &str,
+        n_clusters: Option<usize>,
+    ) -> PyResult<()> {
         let mut coll = self.inner.write();
-        coll.build_vector_field_index(field_name, index_type)
+        coll.build_vector_field_index_with_options(field_name, index_type, n_clusters)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -244,9 +250,10 @@ impl PyCollection {
     ///
     /// Args:
     ///     index_type: e.g. "IVF-IP-SQ8", "HNSW-L2", "Flat-Cos", etc.
-    fn build_index(&self, index_type: &str) -> PyResult<()> {
+    #[pyo3(signature = (index_type, n_clusters=None))]
+    fn build_index(&self, index_type: &str, n_clusters: Option<usize>) -> PyResult<()> {
         let mut coll = self.inner.write();
-        coll.build_index(index_type)
+        coll.build_index_with_options(index_type, n_clusters)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -264,6 +271,8 @@ impl PyCollection {
     ///     k: number of results
     ///     where: optional SQL-like filter string
     ///     nprobe: number of IVF probes (default 10)
+    ///     approx: flat-search approximation for IP/L2/Cosine only; ignored for Hamming/Jaccard
+    ///     eps: distance rounding tolerance when approx applies
     ///
     /// Returns:
     ///     PySearchResult with ids, distances, fields
@@ -292,20 +301,27 @@ impl PyCollection {
     }
 
     /// Search a named vector field.
-    #[pyo3(signature = (field_name, vector, k=None, where_expr=None))]
+    ///
+    /// approx applies only to IP/L2/Cosine fields; Hamming/Jaccard fields always
+    /// use exact binary-distance search.
+    #[pyo3(signature = (field_name, vector, k=None, where_expr=None, approx=None, eps=None))]
     fn search_vector_field(
         &self,
         field_name: &str,
         vector: PyReadonlyArray1<f32>,
         k: Option<usize>,
         where_expr: Option<&str>,
+        approx: Option<bool>,
+        eps: Option<f32>,
     ) -> PyResult<PySearchResult> {
         let query = vector.as_slice()?;
         let k = k.unwrap_or(10);
+        let approx = approx.unwrap_or(false);
+        let eps = eps.unwrap_or(1e-4);
 
         let coll = self.inner.read();
         let result = coll
-            .search_vector_field(field_name, query, k, where_expr)
+            .search_vector_field_with_options(field_name, query, k, where_expr, approx, eps)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         Ok(PySearchResult { inner: result })
@@ -1019,9 +1035,9 @@ impl PyFlatIndex {
         for q in 0..n_queries {
             let q_start = q * dim;
             let q_end = q_start + dim;
-            let (ids, dists) = self
-                .inner
-                .search(&flat[q_start..q_end], k, metric_enum, false, None);
+            let (ids, dists) =
+                self.inner
+                    .search(&flat[q_start..q_end], k, metric_enum, false, None);
             results.push((ids.into_pyarray_bound(py), dists.into_pyarray_bound(py)));
         }
         Ok(results)

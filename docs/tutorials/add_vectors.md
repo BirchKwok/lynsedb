@@ -1,112 +1,151 @@
-# Tutorial: Add vectors
+# Tutorial: Add Vectors
 
-First, import the LynseDB client:
+This tutorial covers write patterns, commit behavior, IDs, metadata fields, and
+high-throughput ingestion.
 
-```python linenums="1"
-import lynse
+## Setup
+
+```python
 import numpy as np
+import lynse
+
+client = lynse.VectorDBClient(uri="./lynsedb-ingest")
+db = client.create_database("ingest_demo", drop_if_exists=True)
+collection = db.require_collection("items", dim=128, drop_if_exists=True)
 ```
 
-Create a local client (no server needed):
+## IDs and vectors
 
-```python linenums="1"
-client = lynse.VectorDBClient()
-my_db = client.create_database("my_vec_db", drop_if_exists=False)
+LynseDB uses your integer IDs as stable external IDs. IDs should be unique inside
+one collection. Incrementing IDs are recommended because they keep storage
+layout predictable and make debugging easier.
+
+Dense vectors are stored as `float32`. Convert arrays before insertion when you
+control the embedding pipeline:
+
+```python
+vector = np.random.rand(128).astype(np.float32)
 ```
 
-## Add vectors one at a time
+## Add one item
 
-Create or truncate a collection:
-
-```python linenums="1"
-collection = my_db.require_collection("test_add_vectors", dim=128, drop_if_exists=True)
-```
-
-Use `insert_session` to automatically commit on exit. Pass a `field` dict to store
-arbitrary metadata alongside each vector.
-
-```python linenums="1"
+```python
 with collection.insert_session() as session:
-    ret_id = session.add_item(
+    inserted_id = session.add_item(
         vector=np.random.rand(128).astype(np.float32),
         id=1,
-        field={'category': 'A', 'score': 0.9},
+        field={
+            "category": "docs",
+            "score": 0.91,
+            "published": True,
+            "tags": ["vector", "python"],
+            "created_at": "2026-06-02",
+        },
     )
 
-# Without insert_session, call commit() manually:
-# collection.commit()
+print(inserted_id)
 ```
 
-```python linenums="1"
-print(ret_id)       # 1
-print(collection)
-```
+`insert_session()` commits when the block succeeds. If an exception is raised,
+pending buffered writes in that session are discarded.
 
-    1
-    LocalCollectionInstance(
-        database="my_vec_db",
-        collection="test_add_vectors",
-        shape=(1, 128)
-    )
+## Add many items
 
-Check whether an ID exists and query the highest stored ID:
+Use `bulk_add_items()` when each row has metadata:
 
-```python linenums="1"
-print(collection.is_id_exists(1))   # True
-print(collection.max_id)            # 1
-```
-
-## Add vectors in bulk
-
-```python linenums="1"
-collection = my_db.require_collection("test_bulk_add", dim=128, drop_if_exists=True)
-```
-
-Build a list of `(vector, id, field)` tuples and pass them to `bulk_add_items`:
-
-```python linenums="1"
+```python
 items = [
-    (np.random.rand(128).astype(np.float32), i, {'category': f'cat_{i % 3}'})
-    for i in range(10)
+    (
+        np.random.rand(128).astype(np.float32),
+        i,
+        {"category": f"cat_{i % 3}", "score": float(i) / 100.0},
+    )
+    for i in range(2, 1002)
 ]
 
 with collection.insert_session() as session:
-    ids = session.bulk_add_items(items)
-
-print(ids)          # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-print(collection)
-```
-
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-    LocalCollectionInstance(
-        database="my_vec_db",
-        collection="test_bulk_add",
-        shape=(10, 128)
+    ids = session.bulk_add_items(
+        items,
+        batch_size=1000,
+        enable_progress_bar=False,
     )
 
-## High-throughput binary bulk add
-
-When you have large volumes of vectors without per-vector metadata, use
-`bulk_add_binary` for maximum write throughput. IDs are assigned automatically
-starting from `max_id + 1`.
-
-```python linenums="1"
-collection = my_db.require_collection("test_binary_add", dim=128, drop_if_exists=True)
-
-vecs = np.random.rand(10_000, 128).astype(np.float32)
-n_added = collection.bulk_add_binary(vecs, batch_size=5000)
-collection.commit()
-
-print(f"Added {n_added} vectors")
-print(collection.shape)   # (10000, 128)
+print(len(ids))
 ```
 
-## Check collection info
+Tuple shape can be `(vector, id, field)` or `(vector, id)`.
 
-```python linenums="1"
-print(collection.shape)    # (n_vectors, dim)
-print(collection.max_id)   # highest user ID
+## Buffer control
+
+`add_item()` is buffered by default. You can tune or disable buffering:
+
+```python
+with collection.insert_session() as session:
+    session.add_item(vector=np.zeros(128, dtype=np.float32), id=2001, buffer_size=5000)
+    session.add_item(vector=np.ones(128, dtype=np.float32), id=2002, buffer_size=False)
+```
+
+- `buffer_size=True` uses the client default batch size.
+- `buffer_size=False` writes the item immediately.
+- `buffer_size=<int>` flushes whenever the buffer reaches that size.
+
+## High-throughput dense ingestion
+
+Use `bulk_add_binary()` for large arrays when you do not need per-row metadata in
+the same call. IDs are assigned automatically after the current max ID.
+
+```python
+vectors = np.random.rand(100_000, 128).astype(np.float32)
+
+added = collection.bulk_add_binary(
+    vectors,
+    batch_size=50_000,
+    enable_progress_bar=False,
+)
+collection.commit()
+
+print(added)
+print(collection.shape)
+```
+
+## Add metadata later
+
+If you inserted vectors first and want to replace or add metadata later, use
+upsert methods:
+
+```python
+collection.upsert_items(
+    [
+        (np.random.rand(128).astype(np.float32), 3001, {"category": "updated"}),
+        (np.random.rand(128).astype(np.float32), 3002, {"category": "updated"}),
+    ],
+    enable_progress_bar=False,
+)
+collection.commit()
+```
+
+Two-tuples `(vector, id)` update only vectors and preserve existing fields.
+Three-tuples `(vector, id, field)` replace the row fields.
+
+## Commit and durability
+
+Use these calls explicitly in services:
+
+```python
+collection.flush()       # flush client and storage buffers
+collection.checkpoint()  # force a durable checkpoint
+collection.close()       # flush and close this handle
+```
+
+`commit()` is enough for normal write batches. `checkpoint()` is useful before
+backups or controlled shutdowns.
+
+## Common ingestion checks
+
+```python
+print(collection.shape)       # (n_vectors, dim)
+print(collection.max_id)      # highest external ID
+print(collection.is_id_exists(1))
 print(collection.stats())
-# {'n_vectors': 10000, 'n_live': 10000, 'n_tombstoned': 0,
-#  'dimension': 128, 'index_mode': 'FLAT', 'max_id': ...}
+print(collection.list_fields())
 ```

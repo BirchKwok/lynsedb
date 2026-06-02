@@ -1178,15 +1178,28 @@ class Collection:
         Raises:
             ExecutionError: If the server returns an error.
         """
-        uri = f'{self._uri}/build_index'
-        data = {
-            "database_name": self._database_name,
-            "collection_name": self._collection_name,
-            "index_mode": index_mode,
-            "field_name": field_name,
-        }
-        if 'n_clusters' in kwargs:
-            data['n_clusters'] = kwargs['n_clusters']
+        n_clusters = kwargs.pop('n_clusters', None)
+        if kwargs:
+            unknown = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unsupported build_index keyword argument(s): {unknown}")
+
+        if field_name == 'default':
+            uri = f'{self._uri}/build_index'
+            data = {
+                "database_name": self._database_name,
+                "collection_name": self._collection_name,
+                "index_mode": index_mode,
+            }
+        else:
+            uri = f'{self._uri}/build_vector_field_index'
+            data = {
+                "database_name": self._database_name,
+                "collection_name": self._collection_name,
+                "field_name": field_name,
+                "index_mode": index_mode,
+            }
+        if n_clusters is not None:
+            data['n_clusters'] = int(n_clusters)
 
         response = self._session.post(uri, json=data)
 
@@ -1209,12 +1222,19 @@ class Collection:
         Raises:
             ExecutionError: If the server returns an error.
         """
-        uri = f'{self._uri}/remove_index'
-        data = {
-            "database_name": self._database_name,
-            "collection_name": self._collection_name,
-            "field_name": field_name,
-        }
+        if field_name == 'default':
+            uri = f'{self._uri}/remove_index'
+            data = {
+                "database_name": self._database_name,
+                "collection_name": self._collection_name,
+            }
+        else:
+            uri = f'{self._uri}/remove_vector_field_index'
+            data = {
+                "database_name": self._database_name,
+                "collection_name": self._collection_name,
+                "field_name": field_name,
+            }
         response = self._session.post(uri, json=data)
 
         if response.status_code == 200:
@@ -1332,6 +1352,12 @@ class Collection:
         nprobe = kwargs.get('nprobe')
         if nprobe is not None:
             params['nprobe'] = nprobe
+        approx = kwargs.get('approx')
+        if approx is not None:
+            params['approx'] = str(bool(approx)).lower()
+        eps = kwargs.get('eps')
+        if eps is not None:
+            params['eps'] = float(eps)
 
         uri = f'{self._uri}/search_binary'
         response = self._session.post(
@@ -1416,6 +1442,8 @@ class Collection:
                 "vector": vec.tolist(),
                 "where": where,
                 "nprobe": kwargs.get("nprobe"),
+                "approx": kwargs.get("approx"),
+                "eps": kwargs.get("eps"),
             },
             rerank_k=rerank_k,
         )
@@ -1873,6 +1901,9 @@ class Collection:
         raise_if(ValueError, not isinstance(where, (str, type(None))),
                  'where must be a SQL/WHERE expression string or None.')
 
+        if where is None and filter_ids is None:
+            return ResultView(ids=np.array([], dtype=np.int64), result_type="query")
+
         data = {
             "database_name": self._database_name,
             "collection_name": self._collection_name,
@@ -1914,6 +1945,15 @@ class Collection:
 
         raise_if(ValueError, not isinstance(where, (str, type(None))),
                  'where must be a SQL/WHERE expression string or None.')
+
+        if where is None and filter_ids is None:
+            dim = int(self._init_params.get('dim') or 0)
+            return ResultView(
+                vectors=np.empty((0, dim), dtype=np.float32),
+                ids=np.array([], dtype=np.int64),
+                fields=[],
+                result_type="data",
+            )
 
         data = {
             "database_name": self._database_name,

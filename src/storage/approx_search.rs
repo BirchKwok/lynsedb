@@ -3,12 +3,16 @@
 //! Inspired by:
 //! - **ADSampling** (Gao et al.): partial-dimension distance estimates for pruning.
 //! - **ANSMET** (ISCA'25): partial-dimension lower/upper bounds for early termination.
-//! - **Two-phase coarse→fine**: cheap prefix scan → exact f32 re-score on a shortlist.
+//! - **Hybrid coarse→fine search**: raw f32 aggregate or partial-dimension
+//!   shortlist followed by exact f32 re-score on the shortlist.
 //!
-//! Coarse pass reuses the fused top-k scan in `flat_mmap` (SIMD batch-8 for IP) on
-//! leading dimensions only; `eps` controls output rounding and shortlist size.
+//! The approximate path never quantizes vectors. `eps` controls output rounding
+//! while ranking is still performed on raw f32 distances. Approximate flat
+//! search is only implemented for IP, L2, and Cosine; Hamming/Jaccard use the
+//! exact binary-distance path even if a caller passes `approx=True`.
 
 use crate::distance::{self, simd, DistanceMetric};
+use rayon::prelude::*;
 use std::cmp::Ordering;
 
 /// Configuration for approximate distance search on flat mmap data.
@@ -20,8 +24,83 @@ pub struct ApproxSearchConfig {
 impl ApproxSearchConfig {
     pub fn new(eps: f32) -> Self {
         Self {
-            eps: eps.max(1e-8),
+            eps: normalize_eps(eps),
         }
+    }
+}
+
+const DEFAULT_EPS: f32 = 1e-4;
+const MIN_EPS: f32 = 1e-8;
+pub(super) const APPROX_BOUND_BLOCK_LEN: usize = 16;
+pub(super) const APPROX_INIT_ROWS: usize = 65_536;
+
+/// Exact f32 norm sidecar for safe early termination.
+///
+/// This is not vector quantization: values are not bucketed, compressed, or used
+/// as a replacement distance. They are f32 suffix norms derived from the original
+/// vectors and only provide upper/lower bounds for pruning.
+pub(super) struct ApproxBounds {
+    pub block_len: usize,
+    pub block_count: usize,
+    pub suffix_norm2: Vec<f32>,
+    pub total_norm2: Vec<f32>,
+}
+
+impl ApproxBounds {
+    #[allow(dead_code)]
+    pub(super) fn build(candidates: &[f32], dim: usize, block_len: usize) -> Self {
+        let block_len = block_len.max(1);
+        let n = if dim == 0 { 0 } else { candidates.len() / dim };
+        let block_count = dim.div_ceil(block_len).max(1);
+        let mut suffix_norm2 = vec![0.0f32; n * block_count];
+        let mut total_norm2 = vec![0.0f32; n];
+
+        suffix_norm2
+            .par_chunks_mut(block_count)
+            .zip(total_norm2.par_iter_mut())
+            .zip(candidates.par_chunks(dim))
+            .for_each(|((tails, total), cand)| {
+                let mut suffix = 0.0f32;
+                for block in (0..block_count).rev() {
+                    tails[block] = suffix;
+                    let start = block * block_len;
+                    let end = (start + block_len).min(dim);
+                    let mut norm = 0.0f32;
+                    for &value in &cand[start..end] {
+                        norm += value * value;
+                    }
+                    suffix += norm;
+                }
+                *total = suffix;
+            });
+
+        Self {
+            block_len,
+            block_count,
+            suffix_norm2,
+            total_norm2,
+        }
+    }
+
+    #[inline]
+    pub(super) fn is_compatible(&self, dim: usize, block_len: usize, n: usize) -> bool {
+        self.block_len == block_len
+            && self.block_count == dim.div_ceil(block_len.max(1)).max(1)
+            && self.total_norm2.len() == n
+            && self.suffix_norm2.len() == n * self.block_count
+    }
+}
+
+/// Normalize user-provided distance precision.
+///
+/// `eps` is allowed to be very large, but it must be finite and positive. This
+/// keeps `round_to_eps` from producing NaN for inputs such as `inf`.
+#[inline]
+pub fn normalize_eps(eps: f32) -> f32 {
+    if eps.is_finite() && eps > 0.0 {
+        eps.max(MIN_EPS)
+    } else {
+        DEFAULT_EPS
     }
 }
 
@@ -34,25 +113,6 @@ pub fn round_to_eps(value: f32, eps: f32) -> f32 {
     (value / eps).round() * eps
 }
 
-/// Leading dimensions scanned in the coarse pass (prefix SIMD; ~75% bandwidth at d=96).
-fn coarse_dims(full_dim: usize, eps: f32) -> usize {
-    let log = (-eps.log10()).clamp(2.0, 8.0);
-    let target = (52.0 + 4.0 * log).round() as usize;
-    target.max(64).min(96).min(full_dim)
-}
-
-/// Shortlist size for the exact re-score phase.
-fn candidate_pool_size(k: usize, n: usize, eps: f32) -> usize {
-    let log = (-eps.log10() as f64).clamp(2.0, 8.0);
-    let from_k = (k as f64 * (35.0 + 12.0 * log)).round() as usize;
-    let from_n = ((n as f64).powf(0.40) * (10.0 + 2.0 * log)).round() as usize;
-    let mut pool = from_k.max(from_n).max(k + 128);
-    if n >= 100_000 {
-        pool = pool.max(8000);
-    }
-    pool.min(n).min(16384)
-}
-
 fn exact_distance(query: &[f32], cand: &[f32], metric: DistanceMetric) -> f32 {
     match metric {
         DistanceMetric::InnerProduct => simd::inner_product_f32(query, cand),
@@ -62,7 +122,7 @@ fn exact_distance(query: &[f32], cand: &[f32], metric: DistanceMetric) -> f32 {
     }
 }
 
-/// Two-phase approximate flat search: prefix-dimension coarse ranking + exact re-score.
+/// Approximate flat search entry used by tests and fallback callers.
 pub fn approx_flat_search(
     query: &[f32],
     candidates: &[f32],
@@ -75,16 +135,66 @@ pub fn approx_flat_search(
     if n == 0 || k == 0 {
         return (vec![], vec![]);
     }
+
+    approx_flat_search_with_bounds(query, candidates, dim, k, n, metric, config, None)
+}
+
+pub(super) fn approx_flat_search_with_bounds(
+    query: &[f32],
+    candidates: &[f32],
+    dim: usize,
+    k: usize,
+    n: usize,
+    metric: DistanceMetric,
+    config: ApproxSearchConfig,
+    bounds: Option<&ApproxBounds>,
+) -> (Vec<u32>, Vec<f32>) {
+    if n == 0 || k == 0 {
+        return (vec![], vec![]);
+    }
     let k = k.min(n);
     let eps = config.eps;
-    let d_coarse = coarse_dims(dim, eps);
-    let pool = candidate_pool_size(k, n, eps);
 
-    let shortlist = super::flat_mmap::approx_coarse_shortlist(
-        query, candidates, dim, d_coarse, pool, n, metric,
-    );
+    if !metric.supports_flat_approx() {
+        return distance::top_k_search(query, candidates, dim, k, metric);
+    }
 
-    refine_shortlist(query, candidates, dim, k, metric, eps, shortlist)
+    if matches!(
+        metric,
+        DistanceMetric::InnerProduct | DistanceMetric::L2Squared | DistanceMetric::Cosine
+    ) && dim > APPROX_BOUND_BLOCK_LEN
+        && n > APPROX_INIT_ROWS
+    {
+        let (indices, dists) =
+            super::flat_mmap::approx_hybrid_search(query, candidates, dim, k, n, metric, eps);
+        let dists = dists
+            .into_iter()
+            .map(|dist| round_to_eps(dist, eps))
+            .collect();
+        return (indices, dists);
+    }
+
+    if let Some(bounds) = bounds {
+        if matches!(
+            metric,
+            DistanceMetric::InnerProduct | DistanceMetric::L2Squared | DistanceMetric::Cosine
+        ) && bounds.is_compatible(dim, APPROX_BOUND_BLOCK_LEN, n)
+            && dim > APPROX_BOUND_BLOCK_LEN
+            && n > APPROX_INIT_ROWS
+        {
+            let (indices, dists) = super::flat_mmap::approx_bounded_search(
+                query, candidates, dim, k, n, metric, bounds,
+            );
+            let dists = dists
+                .into_iter()
+                .map(|dist| round_to_eps(dist, eps))
+                .collect();
+            return (indices, dists);
+        }
+    }
+
+    let all_rows = (0..n as u32).collect();
+    refine_shortlist(query, candidates, dim, k, metric, eps, all_rows)
 }
 
 fn refine_shortlist(
@@ -99,31 +209,44 @@ fn refine_shortlist(
     let ascending = metric.is_ascending();
     let mut scored: Vec<(f32, u32)> = shortlist
         .into_iter()
-        .map(|idx| {
+        .filter_map(|idx| {
             let start = idx as usize * dim;
-            let cand = unsafe { candidates.get_unchecked(start..start + dim) };
+            let cand = candidates.get(start..start + dim)?;
             let dist = round_to_eps(exact_distance(query, cand, metric), eps);
-            (dist, idx)
+            Some((dist, idx))
         })
         .collect();
 
     let take = k.min(scored.len());
+    if take == 0 {
+        return (Vec::new(), Vec::new());
+    }
     if ascending {
-        scored.select_nth_unstable_by(take - 1, |a, b| {
-            a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal)
-        });
-        scored[..take].sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        scored.select_nth_unstable_by(take - 1, |a, b| cmp_ascending(*a, *b));
+        scored[..take].sort_unstable_by(|a, b| cmp_ascending(*a, *b));
     } else {
-        scored.select_nth_unstable_by(take - 1, |a, b| {
-            b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal)
-        });
-        scored[..take].sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        scored.select_nth_unstable_by(take - 1, |a, b| cmp_descending(*a, *b));
+        scored[..take].sort_unstable_by(|a, b| cmp_descending(*a, *b));
     }
 
     let top = &scored[..take];
     let indices = top.iter().map(|&(_, idx)| idx).collect();
     let dists = top.iter().map(|&(d, _)| d).collect();
     (indices, dists)
+}
+
+#[inline]
+fn cmp_ascending(a: (f32, u32), b: (f32, u32)) -> Ordering {
+    a.0.partial_cmp(&b.0)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| a.1.cmp(&b.1))
+}
+
+#[inline]
+fn cmp_descending(a: (f32, u32), b: (f32, u32)) -> Ordering {
+    b.0.partial_cmp(&a.0)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| a.1.cmp(&b.1))
 }
 
 #[cfg(test)]
@@ -134,6 +257,60 @@ mod tests {
     fn test_round_to_eps() {
         assert!((round_to_eps(1.234567, 1e-4) - 1.2346).abs() < 1e-6);
         assert!((round_to_eps(1.23454, 1e-4) - 1.2345).abs() < 1e-6);
+        assert_eq!(round_to_eps(f32::INFINITY, 1e-4), f32::INFINITY);
+    }
+
+    #[test]
+    fn test_normalize_eps_rejects_non_finite_values() {
+        assert_eq!(ApproxSearchConfig::new(f32::INFINITY).eps, 1e-4);
+        assert_eq!(ApproxSearchConfig::new(f32::NAN).eps, 1e-4);
+        assert_eq!(ApproxSearchConfig::new(-1.0).eps, 1e-4);
+        assert_eq!(ApproxSearchConfig::new(0.0).eps, 1e-4);
+        assert_eq!(ApproxSearchConfig::new(1e-12).eps, 1e-8);
+    }
+
+    #[test]
+    fn test_binary_metrics_ignore_approx_and_eps_rounding() {
+        let dim = 4;
+        let query = vec![1.0, 0.0, 1.0, 0.0];
+        let data = vec![
+            1.0, 0.0, 1.0, 0.0, //
+            1.0, 1.0, 1.0, 0.0, //
+            0.0, 1.0, 0.0, 1.0,
+        ];
+        let cases = [
+            (DistanceMetric::Hamming, 2.0f32),
+            (DistanceMetric::Jaccard, 0.5f32),
+        ];
+
+        for (metric, eps) in cases {
+            let exact = distance::top_k_search(&query, &data, dim, 3, metric);
+            let approx = approx_flat_search(
+                &query,
+                &data,
+                dim,
+                3,
+                3,
+                metric,
+                ApproxSearchConfig::new(eps),
+            );
+            let rounded: Vec<f32> = exact
+                .1
+                .iter()
+                .map(|&dist| round_to_eps(dist, eps))
+                .collect();
+
+            assert_eq!(approx.0, exact.0);
+            assert_eq!(approx.1, exact.1);
+            assert!(
+                approx
+                    .1
+                    .iter()
+                    .zip(rounded.iter())
+                    .any(|(actual, rounded)| (actual - rounded).abs() > 1e-6),
+                "metric={metric:?} unexpectedly matched eps-rounded distances"
+            );
+        }
     }
 
     fn test_rng(seed: u64) -> impl FnMut() -> f32 {
@@ -171,7 +348,11 @@ mod tests {
             } else {
                 pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
             }
-            pairs.into_iter().take(10).map(|(_, idx)| idx).collect::<Vec<_>>()
+            pairs
+                .into_iter()
+                .take(10)
+                .map(|(_, idx)| idx)
+                .collect::<Vec<_>>()
         };
 
         for metric in [
@@ -191,7 +372,7 @@ mod tests {
             );
             let recall = ids.iter().filter(|id| gt.contains(id)).count() as f32 / 10.0;
             assert!(
-                recall >= 0.8,
+                recall >= 0.97,
                 "metric={:?} recall={recall} ids={ids:?} gt={gt:?}",
                 metric
             );

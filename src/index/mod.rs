@@ -283,8 +283,26 @@ pub fn resolve_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, Qua
 
 /// Create an index from a type alias string.
 pub fn create_index(alias: &str) -> Result<Box<dyn VectorIndex>> {
+    create_index_with_options(alias, None)
+}
+
+pub fn create_index_with_options(
+    alias: &str,
+    n_centroids: Option<usize>,
+) -> Result<Box<dyn VectorIndex>> {
     let (index_type, metric, quant) = resolve_index_type(alias)
         .ok_or_else(|| LynseError::InvalidArgument(format!("Unknown index type: {}", alias)))?;
+
+    if n_centroids == Some(0) {
+        return Err(LynseError::InvalidArgument(
+            "n_clusters must be greater than 0".to_string(),
+        ));
+    }
+    if n_centroids.is_some() && index_type != IndexType::IVF {
+        return Err(LynseError::InvalidArgument(
+            "n_clusters is only supported for IVF indexes".to_string(),
+        ));
+    }
 
     match index_type {
         IndexType::Flat => Ok(Box::new(flat::FlatIndex::new(metric, quant))),
@@ -301,7 +319,9 @@ pub fn create_index(alias: &str) -> Result<Box<dyn VectorIndex>> {
             128, // max_degree
         ))),
         IndexType::IVF => Ok(Box::new(ivf::IVFIndex::new(
-            metric, quant, 256, // n_centroids
+            metric,
+            quant,
+            n_centroids.unwrap_or(256),
             32,  // nprobe
         ))),
     }
