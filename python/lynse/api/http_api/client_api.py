@@ -192,10 +192,17 @@ class HTTPClient:
         try:
             response = self._session.post(uri, json=data)
             if response.status_code == 200:
-                del data['collection_name']
-                del data['database_name']
-                collection = Collection(uri=self.uri, database_name=self.database_name,
-                                        collection_name=collection, api_key=self._api_key, **data)
+                collection = Collection(
+                    uri=self.uri,
+                    database_name=self.database_name,
+                    collection_name=collection,
+                    dim=dim,
+                    n_threads=n_threads,
+                    warm_up=warm_up,
+                    drop_if_exists=drop_if_exists,
+                    description=description,
+                    api_key=self._api_key,
+                )
                 return collection
             else:
                 raise_error_response(response)
@@ -225,11 +232,18 @@ class HTTPClient:
             data = {"database_name": self.database_name, "collection_name": collection}
             response = self._session.post(uri, json=data)
 
-            params = response.json()['params']['config']
-            params.update({'warm_up': warm_up})
+            config = response.json()['params']['config']
 
-            return Collection(uri=self.uri, database_name=self.database_name, collection_name=collection,
-                              api_key=self._api_key, **params)
+            return Collection(
+                uri=self.uri,
+                database_name=self.database_name,
+                collection_name=collection,
+                dim=config.get('dim'),
+                chunk_size=config.get('chunk_size'),
+                description=config.get('description'),
+                warm_up=warm_up,
+                api_key=self._api_key,
+            )
         else:
             raise_error_response(response)
 
@@ -537,7 +551,21 @@ class Collection:
     """
     name = "Remote"
 
-    def __init__(self, uri, database_name, collection_name, **params):
+    def __init__(
+            self,
+            uri,
+            database_name,
+            collection_name,
+            dim: Union[int, None] = None,
+            chunk_size: Union[int, None] = None,
+            description: Union[str, None] = None,
+            n_threads: Union[int, None] = 10,
+            warm_up: bool = False,
+            drop_if_exists: bool = False,
+            cache_query: Union[bool, None] = None,
+            cache_chunks: Union[int, None] = None,
+            api_key: Union[str, None] = None,
+    ):
         """
         Initialize the collection.
 
@@ -545,23 +573,34 @@ class Collection:
             uri (str): The URI of the server.
             database_name (str): The name of the database.
             collection_name (str): The name of the collection.
-            **params: The collection parameters.
-                - dim (int): The dimension of the vectors.
-                - chunk_size (int): The chunk size.
-                - cache_query (bool): Whether to use cache.
-                - n_threads (int): The number of threads.
-                - warm_up (bool): Whether to warm up.
-                - drop_if_exists (bool): Whether to drop the collection if it exists.
-                - cache_chunks (int): The number of chunks to cache.
+            dim (int): The dimension of the vectors.
+            chunk_size (int): The chunk size.
+            description (str): Optional collection description.
+            n_threads (int): The number of threads.
+            warm_up (bool): Whether to warm up.
+            drop_if_exists (bool): Whether to drop the collection if it exists.
+            cache_query (bool): Whether to use cache. Currently ignored by the
+                Rust HTTP client.
+            cache_chunks (int): The number of chunks to cache. Currently
+                ignored by the Rust HTTP client.
+            api_key (str): Optional Bearer token.
 
         """
         self.IS_DELETED = False
         self._uri = uri
         self._database_name = database_name
         self._collection_name = collection_name
-        api_key = params.pop('api_key', None)
         self._session = Poster(api_key=api_key)
-        self._init_params = params
+        self._init_params = {
+            'dim': dim,
+            'chunk_size': chunk_size,
+            'description': description,
+            'n_threads': n_threads,
+            'warm_up': warm_up,
+            'drop_if_exists': drop_if_exists,
+            'cache_query': cache_query,
+            'cache_chunks': cache_chunks,
+        }
 
         self.COMMIT_FLAG = False
 
@@ -1096,7 +1135,12 @@ class Collection:
         else:
             raise_error_response(response)
 
-    def build_index(self, index_mode: str = 'FLAT', field_name: str = 'default', **kwargs):
+    def build_index(
+            self,
+            index_mode: str = 'FLAT',
+            field_name: str = 'default',
+            n_clusters: Union[int, None] = None,
+    ):
         """
         Build the index for the collection.
 
@@ -1168,9 +1212,8 @@ class Collection:
                 - 'IVF-HAMMING-BINARY': IVF index with Hamming distance (binary vectors).
             field_name (str): Named vector field to build index for.
                 Defaults to "default" (the primary collection vector).
-            kwargs: Additional keyword arguments. The following are available:
-
-                - 'n_clusters' (int): The number of clusters. Only available for IVF modes.
+            n_clusters (int, optional): The number of clusters. Only IVF modes
+                use it; other index modes silently ignore it.
 
         Returns:
             dict: The response from the server.
@@ -1178,11 +1221,6 @@ class Collection:
         Raises:
             ExecutionError: If the server returns an error.
         """
-        n_clusters = kwargs.pop('n_clusters', None)
-        if kwargs:
-            unknown = ", ".join(sorted(kwargs))
-            raise TypeError(f"Unsupported build_index keyword argument(s): {unknown}")
-
         if field_name == 'default':
             uri = f'{self._uri}/build_index'
             data = {
@@ -1198,7 +1236,7 @@ class Collection:
                 "field_name": field_name,
                 "index_mode": index_mode,
             }
-        if n_clusters is not None:
+        if n_clusters is not None and index_mode.upper().startswith("IVF"):
             data['n_clusters'] = int(n_clusters)
 
         response = self._session.post(uri, json=data)
@@ -1325,7 +1363,17 @@ class Collection:
 
         return DataInsertionSession(self)
 
-    def _search(self, vector, k, where, return_fields=False, **kwargs):
+    def _search(
+            self,
+            vector,
+            k,
+            where,
+            return_fields=False,
+            vector_field: str = "default",
+            nprobe: int = 10,
+            approx: bool = False,
+            eps: float = 1e-4,
+    ):
         """
         Search the collection using compact binary protocol.
 
@@ -1346,16 +1394,12 @@ class Collection:
         }
         if where is not None:
             params['where'] = where
-        vector_field = kwargs.get('vector_field')
         if vector_field is not None and vector_field != "default":
             params['vector_field'] = vector_field
-        nprobe = kwargs.get('nprobe')
         if nprobe is not None:
             params['nprobe'] = nprobe
-        approx = kwargs.get('approx')
         if approx is not None:
             params['approx'] = str(bool(approx)).lower()
-        eps = kwargs.get('eps')
         if eps is not None:
             params['eps'] = float(eps)
 
@@ -1378,7 +1422,9 @@ class Collection:
             reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
             rerank_k: Optional[int] = None,
             rerank_with_fields: bool = False,
-            **kwargs
+            nprobe: int = 10,
+            approx: bool = False,
+            eps: float = 1e-4,
     ):
         """
         Search the database for the vectors most similar to the given vector.
@@ -1398,16 +1444,16 @@ class Collection:
                 backend result size.
             rerank_with_fields (bool): Fetch candidate fields for reranker payload
                 even when ``return_fields=False``.
-            **kwargs: Additional keyword arguments:
-
-                - nprobe (int): Controls search breadth by index type (default: 10).
-                    - **IVF**: number of partitions to probe — higher = better recall, slower.
-                    - **HNSW**: ef_search beam width — higher = better recall, slower.
-                    - **Flat / PQ / RaBitQ / PolarVec**: ignored (exhaustive two-pass search).
-                - rescore (bool): Re-score binary/SQ8 quantization results with exact f32.
-                    Recommended when index mode contains 'Binary'. Default: False.
-                - rescore_multiplier (int): Candidate pool size multiplier for rescoring.
-                    Active only when rescore is True. Default: 10 for Binary, 2 otherwise.
+            nprobe (int): Controls search breadth by index type (default: 10).
+                - **IVF**: number of partitions to probe; higher improves recall and increases latency.
+                - **HNSW**: ef_search beam width; higher improves recall and increases latency.
+                - **Flat / PQ / RaBitQ / PolarVec**: ignored.
+                - Named vector fields: ignored.
+            approx (bool): Metric-specific flat approximation for IP, L2,
+                and Cosine. Ignored for Hamming/Jaccard.
+            eps (float): Distance rounding tolerance when ``approx=True``
+                for supported metrics (default 1e-4). Ignored when
+                ``approx=False`` or the metric does not support approximation.
 
         Returns:
             ResultView: Search results with ids, distances, and optional fields.
@@ -1428,7 +1474,9 @@ class Collection:
             where=where,
             return_fields=send_return_fields,
             vector_field=vector_field,
-            **kwargs,
+            nprobe=nprobe,
+            approx=approx,
+            eps=eps,
         )
         ids, dists, fields, _ = _decode_search_binary(buf)
         ids, dists, reranked_fields = apply_external_rerank(
@@ -1441,9 +1489,9 @@ class Collection:
                 "vector_field": vector_field,
                 "vector": vec.tolist(),
                 "where": where,
-                "nprobe": kwargs.get("nprobe"),
-                "approx": kwargs.get("approx"),
-                "eps": kwargs.get("eps"),
+                "nprobe": nprobe,
+                "approx": approx,
+                "eps": float(eps),
             },
             rerank_k=rerank_k,
         )
@@ -1525,8 +1573,7 @@ class Collection:
 
     def search_profile(
             self, vector: Union[list[float], np.ndarray], k: int = 10, *,
-            where: Union[str, None] = None, return_fields: bool = False,
-            nprobe: int = 10
+            where: Union[str, None] = None, nprobe: int = 10
     ):
         """Search and return profile/explain metadata."""
         vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
@@ -1537,7 +1584,6 @@ class Collection:
             "vector": vec.tolist(),
             "k": k,
             "where": where,
-            "return_fields": return_fields,
             "nprobe": nprobe,
         }
         response = self._session.post(uri, json=data)
@@ -1610,8 +1656,8 @@ class Collection:
             text_weight: float = 1.0,
             rrf_k: float = 60.0,
             candidate_limit: Union[int, None] = None,
-            return_fields: bool = False,
             nprobe: int = 10,
+            return_fields: bool = False,
             reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
             rerank_k: Optional[int] = None,
             rerank_with_fields: bool = True,

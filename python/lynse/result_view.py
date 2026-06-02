@@ -336,9 +336,32 @@ class ResultView:
             result.append(entry)
         return result
 
-    def to_json(self, **kwargs) -> str:
+    def to_json(
+        self,
+        *,
+        skipkeys: bool = False,
+        ensure_ascii: bool = True,
+        check_circular: bool = True,
+        allow_nan: bool = True,
+        cls: Any = None,
+        indent: Any = None,
+        separators: Any = None,
+        default: Any = None,
+        sort_keys: bool = False,
+    ) -> str:
         """Serialize to JSON string."""
-        return json.dumps(self.to_list(), **kwargs)
+        return json.dumps(
+            self.to_list(),
+            skipkeys=skipkeys,
+            ensure_ascii=ensure_ascii,
+            check_circular=check_circular,
+            allow_nan=allow_nan,
+            cls=cls,
+            indent=indent,
+            separators=separators,
+            default=default,
+            sort_keys=sort_keys,
+        )
 
     def to_pandas(self):
         """Convert to a ``pandas.DataFrame`` (zero-copy for numeric columns).

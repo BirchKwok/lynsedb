@@ -59,8 +59,9 @@ collection.build_index("IVF-L2", n_clusters=256)
 
 Rules:
 
-- `n_clusters` is accepted only for IVF indexes.
-- `n_clusters` must be greater than zero.
+- `n_clusters` is used only for IVF indexes.
+- For non-IVF indexes, `n_clusters` is allowed and ignored by the Python API.
+- For IVF indexes, `n_clusters` must be greater than zero.
 - More clusters usually reduce scanned vectors per query but can require higher
   `nprobe` for recall.
 
@@ -83,6 +84,7 @@ result = collection.search(query, k=10, nprobe=64)
 ```
 
 Higher `nprobe` generally improves recall and increases latency.
+Flat, PQ, RaBitQ, PolarVec, and named vector-field searches ignore `nprobe`.
 
 ## Approximate flat distance rounding
 

@@ -75,7 +75,7 @@ Remote-only database helpers:
 
 | Method | Description |
 | --- | --- |
-| `build_index(index_mode="FLAT", field_name="default", **kwargs)` | Build or change an index. IVF accepts `n_clusters`. |
+| `build_index(index_mode="FLAT", field_name="default", n_clusters=None)` | Build or change an index. IVF uses `n_clusters`; other index modes ignore it. |
 | `remove_index(field_name="default")` | Remove the primary or named-field index. |
 | `create_vector_field(name, dim, metric="ip", index_mode=None)` | Create a named vector field. |
 | `list_vector_fields()` | List `default` and named vector fields. |
@@ -86,13 +86,22 @@ Remote-only database helpers:
 
 | Method | Description |
 | --- | --- |
-| `search(vector, k=10, *, where=None, return_fields=False, vector_field="default", reranker=None, rerank_k=None, rerank_with_fields=False, **kwargs)` | Dense vector search. `kwargs` include `nprobe`, `approx`, and `eps`. |
+| `search(vector, k=10, *, where=None, return_fields=False, vector_field="default", reranker=None, rerank_k=None, rerank_with_fields=False, nprobe=10, approx=False, eps=1e-4)` | Dense vector search. |
 | `batch_search(vectors, k=10, *, where=None, return_fields=False, nprobe=10, reranker=None, rerank_k=None, rerank_with_fields=False)` | Search multiple query vectors. |
 | `search_range(vector, threshold, max_results=1000)` | Return all matches within a metric-specific threshold. |
 | `search_profile(vector, k=10, *, where=None, nprobe=10)` | Search with explain/profile metadata. |
 | `search_sparse(vector, k=10, *, where=None, return_fields=False, reranker=None, rerank_k=None, rerank_with_fields=True)` | Sparse inner-product search. |
 | `text_search(text, k=10, *, text_fields=None, where=None, return_fields=False, reranker=None, rerank_k=None, rerank_with_fields=True)` | BM25 search over metadata fields. |
 | `hybrid_search(vector=None, text=None, k=10, *, where=None, text_fields=None, fusion="rrf", vector_weight=1.0, text_weight=1.0, rrf_k=60.0, candidate_limit=None, nprobe=10, return_fields=False, reranker=None, rerank_k=None, rerank_with_fields=True)` | Dense plus text hybrid search. |
+
+Parameter behavior is the same for local and HTTP Python clients:
+
+- `n_clusters` is used only by IVF index modes. Passing it to Flat, PQ, RaBitQ,
+  PolarVec, HNSW, or DiskANN modes is allowed and ignored.
+- `nprobe` controls IVF partitions and HNSW search breadth. Flat, PQ, RaBitQ,
+  PolarVec, and named vector-field searches ignore it.
+- `approx` and `eps` apply only to supported flat IP, L2, and cosine paths.
+  Hamming/Jaccard metrics and non-approximate paths ignore them.
 
 ## Collection Query and Data Access
 

@@ -66,19 +66,16 @@ class LocalClient:
         rust_coll = self._manager.get_collection(
             self.database_name, collection, dim
         )
-        params = {
-            'dim': dim,
-            'n_threads': n_threads,
-            'warm_up': warm_up,
-            'drop_if_exists': drop_if_exists,
-            'description': description,
-        }
         return LocalCollection(
             manager=self._manager,
             database_name=self.database_name,
             collection_name=collection,
             rust_collection=rust_coll,
-            **params,
+            dim=dim,
+            n_threads=n_threads,
+            warm_up=warm_up,
+            drop_if_exists=drop_if_exists,
+            description=description,
         )
 
     def get_collection(self, collection: str, warm_up=True):
@@ -104,16 +101,13 @@ class LocalClient:
         rust_coll = self._manager.get_collection(
             self.database_name, collection, dim
         )
-        params = {
-            'dim': dim,
-            'warm_up': warm_up,
-        }
         return LocalCollection(
             manager=self._manager,
             database_name=self.database_name,
             collection_name=collection,
             rust_collection=rust_coll,
-            **params,
+            dim=dim,
+            warm_up=warm_up,
         )
 
     def drop_collection(self, collection: str):
@@ -261,13 +255,30 @@ class LocalCollection:
     """
     name = "Local"
 
-    def __init__(self, manager, database_name, collection_name, rust_collection, **params):
+    def __init__(
+            self,
+            manager,
+            database_name,
+            collection_name,
+            rust_collection,
+            dim: Union[int, None] = None,
+            n_threads: Union[int, None] = 10,
+            warm_up: bool = False,
+            drop_if_exists: bool = False,
+            description: Union[str, None] = None,
+    ):
         self.IS_DELETED = False
         self._manager = manager
         self._database_name = database_name
         self._collection_name = collection_name
         self._rust_coll = rust_collection
-        self._init_params = params
+        self._init_params = {
+            'dim': dim,
+            'n_threads': n_threads,
+            'warm_up': warm_up,
+            'drop_if_exists': drop_if_exists,
+            'description': description,
+        }
 
         self.COMMIT_FLAG = False
         self._mesosphere_list = queue.Queue()
@@ -608,7 +619,12 @@ class LocalCollection:
             'max_id': self._rust_coll.max_id(),
         }
 
-    def build_index(self, index_mode: str = 'FLAT', field_name: str = 'default', **kwargs):
+    def build_index(
+            self,
+            index_mode: str = 'FLAT',
+            field_name: str = 'default',
+            n_clusters: Union[int, None] = None,
+    ):
         """
         Build the index for the collection.
 
@@ -680,14 +696,18 @@ class LocalCollection:
                 - 'IVF-HAMMING-BINARY': IVF index with Hamming distance (binary vectors).
             field_name (str): Named vector field to build index for.
                 Defaults to "default" (the primary collection vector).
-            kwargs: Additional keyword arguments. The following are available:
-
-                - 'n_clusters' (int): The number of clusters. Only available for IVF modes.
+            n_clusters (int, optional): The number of clusters. Only IVF modes
+                use it; other index modes silently ignore it.
 
         Returns:
             dict: Status message.
         """
-        self._rust_coll.build_index(index_mode, field_name=field_name, **kwargs)
+        effective_n_clusters = n_clusters if index_mode.upper().startswith("IVF") else None
+        self._rust_coll.build_index(
+            index_mode,
+            field_name=field_name,
+            n_clusters=effective_n_clusters,
+        )
         return {'status': 'success'}
 
     def remove_index(self, field_name: str = 'default'):
@@ -757,7 +777,9 @@ class LocalCollection:
             reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
             rerank_k: Optional[int] = None,
             rerank_with_fields: bool = False,
-            **kwargs
+            nprobe: int = 10,
+            approx: bool = False,
+            eps: float = 1e-4,
     ):
         """
         Search the collection for the vectors most similar to the given vector.
@@ -775,24 +797,21 @@ class LocalCollection:
                 backend result size.
             rerank_with_fields (bool): Fetch candidate fields for reranker payload
                 even when ``return_fields=False``.
-            **kwargs: Additional keyword arguments:
-
-                - nprobe (int): Controls search breadth by index type (default: 10).
-                    - **IVF**: number of partitions to probe — higher = better recall, slower.
-                    - **HNSW**: ef_search beam width — higher = better recall, slower.
-                    - **Flat / PQ / RaBitQ / PolarVec**: ignored (exhaustive two-pass search).
-                - approx (bool): metric-specific flat approximation for IP, L2,
-                  and Cosine. Ignored for Hamming/Jaccard, which always use the
-                  exact binary-distance path.
-                - eps (float): distance rounding tolerance when approx=True
-                  for supported metrics (default 1e-4).
+            nprobe (int): Controls search breadth by index type (default: 10).
+                - **IVF**: number of partitions to probe; higher improves recall and increases latency.
+                - **HNSW**: ef_search beam width; higher improves recall and increases latency.
+                - **Flat / PQ / RaBitQ / PolarVec**: ignored.
+                - Named vector fields: ignored.
+            approx (bool): Metric-specific flat approximation for IP, L2,
+                and Cosine. Ignored for Hamming/Jaccard.
+            eps (float): Distance rounding tolerance when ``approx=True``
+                for supported metrics (default 1e-4). Ignored when
+                ``approx=False`` or the metric does not support approximation.
 
         Returns:
             ResultView: Search results with ids, distances, and optional fields.
         """
-        nprobe = kwargs.get('nprobe', 10)
-        approx = kwargs.get('approx', False)
-        eps = float(kwargs.get('eps', 1e-4))
+        eps = float(eps)
         vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
         result = self._rust_coll.search(
             vec,
@@ -822,6 +841,8 @@ class LocalCollection:
                 "vector": vec.tolist(),
                 "where": where,
                 "nprobe": nprobe,
+                "approx": approx,
+                "eps": eps,
             },
             rerank_k=rerank_k,
         )

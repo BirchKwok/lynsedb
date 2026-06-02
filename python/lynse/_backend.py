@@ -369,7 +369,12 @@ class Collection:
             vectors = vectors.reshape(1, -1)
         self._inner.add_items(vectors, [int(i) for i in ids], fields)
 
-    def build_index(self, index_mode: str, field_name: str = "default", **kwargs) -> None:
+    def build_index(
+        self,
+        index_mode: str,
+        field_name: str = "default",
+        n_clusters: Optional[int] = None,
+    ) -> None:
         """Build or rebuild the index.
 
         Args:
@@ -432,18 +437,15 @@ class Collection:
 
             field_name (str): Named vector field to build index for.
                 Defaults to "default" (the primary collection vector).
-            **kwargs: Additional keyword arguments:
-                - 'n_clusters' (int): Number of clusters (IVF modes only).
+            n_clusters (int, optional): Number of clusters. Only IVF modes use
+                it; other index modes silently ignore it.
         """
-        n_clusters = kwargs.pop("n_clusters", None)
-        if kwargs:
-            unknown = ", ".join(sorted(kwargs))
-            raise TypeError(f"Unsupported build_index keyword argument(s): {unknown}")
+        effective_n_clusters = n_clusters if index_mode.upper().startswith("IVF") else None
 
         if field_name == "default":
-            self._inner.build_index(index_mode, n_clusters)
+            self._inner.build_index(index_mode, effective_n_clusters)
         else:
-            self._inner.build_vector_field_index(field_name, index_mode, n_clusters)
+            self._inner.build_vector_field_index(field_name, index_mode, effective_n_clusters)
 
     def remove_index(self, field_name: str = "default") -> None:
         """Remove the index.

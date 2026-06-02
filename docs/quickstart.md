@@ -116,7 +116,7 @@ collection.build_index("FLAT-L2")
 print(collection.index_mode)
 ```
 
-IVF accepts `n_clusters`; other index families reject it:
+IVF uses `n_clusters`; other index families allow the argument and ignore it:
 
 ```python
 collection.build_index("IVF-L2", n_clusters=256)
@@ -159,6 +159,9 @@ Approximate flat distance rounding is available for IP, L2, and cosine metrics:
 ```python
 result = collection.search(query, k=3, approx=True, eps=1e-4)
 ```
+
+Flat, PQ, RaBitQ, PolarVec, and named vector-field searches ignore `nprobe`.
+Hamming and Jaccard metrics ignore `approx` and `eps`.
 
 ## 7. Query metadata and vectors
 

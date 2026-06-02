@@ -64,6 +64,12 @@ The remote `Collection` class mirrors the local collection API:
 - maintenance: `delete_items`, `restore_items`, `list_deleted_ids`, `compact`,
   `snapshot_to`, `export_to`, `update_description`.
 
+The HTTP Python client uses the same explicit method signatures and parameter
+ignore rules as the local client. For example, `build_index(...,
+n_clusters=...)` uses `n_clusters` only for IVF indexes, and `search(...,
+nprobe=..., approx=..., eps=...)` ignores parameters that do not apply to the
+active index or metric.
+
 ## Error behavior
 
 The HTTP client raises `ExecutionError` when the server returns a non-200 JSON

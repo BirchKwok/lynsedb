@@ -69,7 +69,8 @@ class DataInsertionSession:
 
     def bulk_add_items(
             self, vectors: Union[List[Tuple[np.ndarray, int, dict]], List[Tuple[np.ndarray, int]]],
-            **kwargs
+            batch_size: int = 1000,
+            enable_progress_bar: bool = True,
     ):
         """
         Bulk add vectors to the collection in batches.
@@ -79,11 +80,17 @@ class DataInsertionSession:
         Parameters:
             vectors (list or tuple): A list or tuple of vectors to be saved.
                 Each vector can be a tuple of (vector, id, field).
+            batch_size (int): The batch size. Default is 1000.
+            enable_progress_bar (bool): Whether to enable the progress bar.
 
         Returns:
             list: A list of indices where the vectors are stored.
         """
-        return self.db.bulk_add_items(vectors, **kwargs)
+        return self.db.bulk_add_items(
+            vectors,
+            batch_size=batch_size,
+            enable_progress_bar=enable_progress_bar,
+        )
 
 
 class DummySession:
