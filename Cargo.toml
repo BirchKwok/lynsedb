@@ -16,7 +16,7 @@ pyo3 = { version = "0.22", features = ["extension-module"] }
 numpy = "0.22"
 
 # Storage backends
-apexbase = { path = "src/apexbase", default-features = false }
+apexbase = { version = "1.19.0", default-features = false }
 arrow = { version = "57.3.0", features = ["ipc"] }
 
 

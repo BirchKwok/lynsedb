@@ -1802,18 +1802,23 @@ fn split_on_or(expr: &str) -> Vec<&str> {
     let mut i = 0usize;
     let mut in_dquote = false;
     let mut in_squote = false;
+    let mut in_backtick = false;
 
     while i < bytes.len() {
         match bytes[i] {
-            b'"' if !in_squote => {
+            b'"' if !in_squote && !in_backtick => {
                 in_dquote = !in_dquote;
                 i += 1;
             }
-            b'\'' if !in_dquote => {
+            b'\'' if !in_dquote && !in_backtick => {
                 in_squote = !in_squote;
                 i += 1;
             }
-            _ if !in_dquote && !in_squote => {
+            b'`' if !in_dquote && !in_squote => {
+                in_backtick = !in_backtick;
+                i += 1;
+            }
+            _ if !in_dquote && !in_squote && !in_backtick => {
                 if i + 4 <= bytes.len()
                     && bytes[i] == b' '
                     && bytes[i + 1].to_ascii_uppercase() == b'O'
@@ -1841,18 +1846,23 @@ fn split_csv_tokens(values: &str) -> Vec<&str> {
     let mut i = 0usize;
     let mut in_dquote = false;
     let mut in_squote = false;
+    let mut in_backtick = false;
 
     while i < bytes.len() {
         match bytes[i] {
-            b'"' if !in_squote => {
+            b'"' if !in_squote && !in_backtick => {
                 in_dquote = !in_dquote;
                 i += 1;
             }
-            b'\'' if !in_dquote => {
+            b'\'' if !in_dquote && !in_backtick => {
                 in_squote = !in_squote;
                 i += 1;
             }
-            b',' if !in_dquote && !in_squote => {
+            b'`' if !in_dquote && !in_squote => {
+                in_backtick = !in_backtick;
+                i += 1;
+            }
+            b',' if !in_dquote && !in_squote && !in_backtick => {
                 let token = values[start..i].trim();
                 if !token.is_empty() {
                     tokens.push(token);
@@ -1891,18 +1901,23 @@ fn split_on_and(expr: &str) -> Vec<&str> {
     let mut i = 0usize;
     let mut in_dquote = false;
     let mut in_squote = false;
+    let mut in_backtick = false;
 
     while i < bytes.len() {
         match bytes[i] {
-            b'"' if !in_squote => {
+            b'"' if !in_squote && !in_backtick => {
                 in_dquote = !in_dquote;
                 i += 1;
             }
-            b'\'' if !in_dquote => {
+            b'\'' if !in_dquote && !in_backtick => {
                 in_squote = !in_squote;
                 i += 1;
             }
-            _ if !in_dquote && !in_squote => {
+            b'`' if !in_dquote && !in_squote => {
+                in_backtick = !in_backtick;
+                i += 1;
+            }
+            _ if !in_dquote && !in_squote && !in_backtick => {
                 // Check for " AND " (case-insensitive, 5 bytes)
                 if i + 5 <= bytes.len()
                     && bytes[i] == b' '
@@ -1968,8 +1983,9 @@ fn parse_single_indexed_condition(expr: &str) -> Option<IndexedCondition> {
 
 fn parse_field_ref(expr: &str) -> Option<(String, &str)> {
     let expr = expr.trim_start();
-    if expr.starts_with('"') {
-        let close = expr[1..].find('"')?;
+    if expr.starts_with('"') || expr.starts_with('`') {
+        let quote = expr.as_bytes()[0] as char;
+        let close = expr[1..].find(quote)?;
         let field = expr[1..1 + close].to_string();
         let rest = expr[1 + close + 1..].trim_start();
         return Some((field, rest));
@@ -2145,6 +2161,10 @@ mod tests {
         assert_eq!(field, "order");
         assert_eq!(keys.len(), 2);
 
+        let (field, keys) = parse_indexed_in("`order` IN (1, 2)").unwrap();
+        assert_eq!(field, "order");
+        assert_eq!(keys.len(), 2);
+
         let (field, keys) = parse_indexed_in("order IN (1, 2)").unwrap();
         assert_eq!(field, "order");
         assert_eq!(keys.len(), 2);
@@ -2153,11 +2173,18 @@ mod tests {
         assert_eq!(field, "order");
         assert_eq!(keys.len(), 2);
 
+        let (field, keys) = parse_indexed_or_equalities("`order` = 1 OR `order` = 2").unwrap();
+        assert_eq!(field, "order");
+        assert_eq!(keys.len(), 2);
+
         let (field, keys) = parse_indexed_or_equalities("order = 1 OR order = 2").unwrap();
         assert_eq!(field, "order");
         assert_eq!(keys.len(), 2);
 
         let leaves = parse_indexed_or_leaves("\"order\" = 1 OR test = 'test_1'").unwrap();
+        assert_eq!(leaves.len(), 2);
+
+        let leaves = parse_indexed_or_leaves("`order` = 1 OR `test` = 'test_1'").unwrap();
         assert_eq!(leaves.len(), 2);
 
         let leaves = parse_indexed_or_leaves("name = 'a OR b' OR status = 'active'").unwrap();
@@ -2170,6 +2197,22 @@ mod tests {
     #[test]
     fn parse_indexed_where_accepts_unquoted_fields() {
         let conditions = parse_indexed_where("status = 'active' AND score >= 10").unwrap();
+        assert_eq!(conditions.len(), 2);
+        assert!(matches!(
+            &conditions[0],
+            IndexedCondition::Eq(field, IndexKey::Str(value))
+                if field == "status" && value == "active"
+        ));
+        assert!(matches!(
+            &conditions[1],
+            IndexedCondition::Range(field, RangeOp::Gte, RangeKey::Number(_))
+                if field == "score"
+        ));
+    }
+
+    #[test]
+    fn parse_indexed_where_accepts_backtick_fields() {
+        let conditions = parse_indexed_where("`status` = 'active' AND `score` >= 10").unwrap();
         assert_eq!(conditions.len(), 2);
         assert!(matches!(
             &conditions[0],
