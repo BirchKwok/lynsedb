@@ -498,9 +498,12 @@ class LocalCollection:
             end = (i + 1) * batch_size
             items = vectors[start:end]
 
-            vecs_with_fields = []
-            ids_with_fields = []
-            fields_with_fields = []
+            existing_vecs_with_fields = []
+            existing_ids_with_fields = []
+            existing_fields_with_fields = []
+            new_vecs_with_fields = []
+            new_ids_with_fields = []
+            new_fields_with_fields = []
             vecs_without_fields = []
             ids_without_fields = []
             seen_ids = set()
@@ -512,10 +515,17 @@ class LocalCollection:
                     v, vid, vf = item
                     if int(vid) in seen_ids:
                         raise ValueError(f'duplicate id {vid} within the same upsert batch')
-                    seen_ids.add(int(vid))
-                    vecs_with_fields.append(v if isinstance(v, np.ndarray) else np.array(v, dtype=np.float32))
-                    ids_with_fields.append(int(vid))
-                    fields_with_fields.append(vf)
+                    int_vid = int(vid)
+                    seen_ids.add(int_vid)
+                    vec = v if isinstance(v, np.ndarray) else np.array(v, dtype=np.float32)
+                    if self._rust_coll.is_id_exists(int_vid):
+                        existing_vecs_with_fields.append(vec)
+                        existing_ids_with_fields.append(int_vid)
+                        existing_fields_with_fields.append(vf)
+                    else:
+                        new_vecs_with_fields.append(vec)
+                        new_ids_with_fields.append(int_vid)
+                        new_fields_with_fields.append(vf)
                     ids.append(vid)
                 elif len(item) == 2:
                     v, vid = item
@@ -531,9 +541,20 @@ class LocalCollection:
             if vecs_without_fields:
                 vec_array = np.array(vecs_without_fields, dtype=np.float32)
                 self._rust_coll.upsert_items(ids_without_fields, vec_array, None)
-            if vecs_with_fields:
-                vec_array = np.array(vecs_with_fields, dtype=np.float32)
-                self._rust_coll.upsert_items(ids_with_fields, vec_array, fields_with_fields)
+            if existing_vecs_with_fields:
+                vec_array = np.array(existing_vecs_with_fields, dtype=np.float32)
+                self._rust_coll.upsert_items(
+                    existing_ids_with_fields,
+                    vec_array,
+                    existing_fields_with_fields,
+                )
+            if new_vecs_with_fields:
+                vec_array = np.array(new_vecs_with_fields, dtype=np.float32)
+                self._rust_coll.add_items(
+                    vec_array,
+                    new_ids_with_fields,
+                    new_fields_with_fields,
+                )
             self.COMMIT_FLAG = False
 
         return ids

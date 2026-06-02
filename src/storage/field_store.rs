@@ -1553,6 +1553,9 @@ fn fields_by_apex_id_from_batch(
 fn fields_by_external_id_from_batch(
     batch: &RecordBatch,
 ) -> Result<Vec<(u64, HashMap<String, serde_json::Value>)>> {
+    if batch.num_rows() == 0 && !record_batch_has_column(batch, "external_id") {
+        return Ok(Vec::new());
+    }
     let ext_ids = u64_column_values(batch, "external_id")?;
     let field_columns = field_column_indices(batch);
     let mut rows = Vec::with_capacity(batch.num_rows());
