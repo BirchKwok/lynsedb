@@ -11,6 +11,11 @@ on:
         type: string
 permissions:
   contents: write
+
+concurrency:
+  group: docs-gh-pages
+  cancel-in-progress: false
+
 jobs:
   prepare-deploy:
     runs-on: ubuntu-latest
@@ -54,6 +59,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch existing docs branch
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch origin +refs/heads/gh-pages:refs/heads/gh-pages
+          fi
       - name: Configure Git Credentials
         run: |
           git config user.name github-actions[bot]
