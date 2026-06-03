@@ -7,15 +7,6 @@
 </div>
 <br>
 
-<p align="center">
-  <a href="https://discord.com/invite/rcYK5nYF"><img src="https://img.shields.io/badge/Discord-Online-brightgreen" alt="Discord"></a>
-  <a href="https://badge.fury.io/py/LynseDB"><img src="https://badge.fury.io/py/LynseDB.svg" alt="PyPI version"></a>
-  <a href="https://pypi.org/project/LynseDB/"><img src="https://img.shields.io/pypi/pyversions/LynseDB" alt="PyPI - Python Version"></a>
-  <a href="https://github.com/BirchKwok/LynseDB/actions/workflows/python-tests.yml"><img src="https://github.com/BirchKwok/LynseDB/actions/workflows/python-tests.yml/badge.svg" alt="Python testing"></a>
-  <a href="https://github.com/BirchKwok/LynseDB/actions/workflows/docker-tests.yml"><img src="https://github.com/BirchKwok/LynseDB/actions/workflows/docker-tests.yml/badge.svg" alt="Docker build"></a>
-</p>
-
-# LynseDB
 
 **LynseDB** is a high-performance, low-cost vector database that can run either
 embedded inside your Python process or as a standalone HTTP service. It keeps a
