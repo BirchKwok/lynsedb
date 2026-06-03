@@ -3,32 +3,54 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Docs version to deploy, for example 0.2.0"
+        required: true
+        type: string
 permissions:
   contents: write
 jobs:
-  verify-main-tag:
+  prepare-deploy:
     runs-on: ubuntu-latest
     outputs:
-      on_main: ${{ steps.check.outputs.on_main }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - id: check
+      - id: check-tag
         name: Check tag commit is on main
+        if: github.event_name == 'push'
         run: |
-          git fetch origin main:refs/remotes/origin/main --prune
+          git fetch origin +refs/heads/main:refs/remotes/origin/main --prune
           tag_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
-          if git merge-base --is-ancestor "$tag_commit" origin/main; then
-            echo "on_main=true" >> "$GITHUB_OUTPUT"
-          else
+          main_commit="$(git rev-parse origin/main)"
+          echo "Tag commit: $tag_commit"
+          echo "origin/main: $main_commit"
+          if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
             echo "Tag $GITHUB_REF_NAME does not point to a commit on main."
-            echo "on_main=false" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
+      - id: version
+        name: Resolve docs version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          if [ -z "$version" ]; then
+            echo "Docs version cannot be empty."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   deploy:
-    needs: verify-main-tag
-    if: needs.verify-main-tag.outputs.on_main == 'true'
+    needs: prepare-deploy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +73,6 @@ jobs:
             mkdocs-material-
       - run: pip install mkdocs-material mkdocstrings-python mike
       - run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${{ needs.prepare-deploy.outputs.version }}"
           mike deploy --push --update-aliases "$version" latest
           mike set-default --push latest

@@ -1,17 +1,25 @@
 # LynseDB
 
-LynseDB is a lightweight vector database with a Python-first API and a Rust
-storage/search backend. It can run embedded in a single Python process or as an
-HTTP server for multi-process and production deployments.
+LynseDB is a high-performance, low-cost vector database with a Python-first API
+and a Rust storage/search backend. It can run embedded inside a single Python
+process or as an HTTP server for multi-process and production deployments.
 
 The API is intentionally small: create a database, create a collection, write
 vectors with metadata, build an index when you need faster search, and query the
 same collection locally or remotely with the same high-level Python calls.
 
+Use it when you want vector search that starts as an embedded local library,
+can move to a service when your app grows, and does not require a heavy
+database cluster for common semantic search, RAG, agent memory, and multimodal
+retrieval workloads.
+
 ## What LynseDB is good at
 
-- Local development and small services that want an embedded vector store.
-- Remote deployments where several workers need to share one database process.
+- Local development, notebooks, scripts, tests, and small services that want an
+  embedded vector store.
+- Remote deployments where several workers or services need to share one
+  database process.
+- Low-operational-cost deployments where predictable resource use matters.
 - Metadata filtering with SQL-like `where` expressions.
 - Multiple vector representations per record through named vector fields.
 - Dense, sparse, text, and hybrid retrieval.
