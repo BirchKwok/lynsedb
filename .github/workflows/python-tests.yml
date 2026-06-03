@@ -8,27 +8,24 @@ on:
 jobs:
   verify-main-tag:
     runs-on: ubuntu-latest
-    outputs:
-      on_main: ${{ steps.check.outputs.on_main }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - id: check
-        name: Check tag commit is on main
+      - name: Check tag commit is on main
         run: |
-          git fetch origin main:refs/remotes/origin/main --prune
+          git fetch origin +refs/heads/main:refs/remotes/origin/main
           tag_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
-          if git merge-base --is-ancestor "$tag_commit" origin/main; then
-            echo "on_main=true" >> "$GITHUB_OUTPUT"
-          else
+          main_commit="$(git rev-parse origin/main)"
+          echo "Tag commit: $tag_commit"
+          echo "origin/main: $main_commit"
+          if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
             echo "Tag $GITHUB_REF_NAME does not point to a commit on main."
-            echo "on_main=false" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
 
   build:
     needs: verify-main-tag
-    if: needs.verify-main-tag.outputs.on_main == 'true'
     strategy:
       fail-fast: false
       matrix:
