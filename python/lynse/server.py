@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 LynseDB Server CLI.
 
