@@ -15,6 +15,10 @@ db = client.create_database("app", drop_if_exists=False)
 collection = db.require_collection("items", dim=768)
 ```
 
+Local mode is supported on Linux and macOS. Native Windows environments are not
+supported; use WSL 2 (Windows Subsystem for Linux) for local mode on Windows, or
+run the HTTP server with Docker.
+
 Use local mode for:
 
 - notebooks and experiments;
@@ -102,6 +106,9 @@ docker run \
   -v lynsedb-data:/data \
   birchkwok/lynsedb:latest
 ```
+
+Docker is the recommended Windows deployment path when you do not want to run
+inside WSL 2.
 
 Deployment examples are included in:
 

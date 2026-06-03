@@ -10,6 +10,10 @@ results, and clean up.
 pip install LynseDB
 ```
 
+Native Linux and macOS environments are supported. Native Windows environments
+are not supported; on Windows, use WSL 2 (Windows Subsystem for Linux) or
+Docker.
+
 ```python
 import numpy as np
 import lynse

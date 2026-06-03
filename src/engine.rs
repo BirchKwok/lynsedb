@@ -2280,16 +2280,12 @@ impl Collection {
     /// dropped; this method makes outstanding state durable and stops the WAL.
     pub fn close(&mut self) -> Result<()> {
         if !self.read_only {
-            self.field_store.close()?;
+            self.field_store.flush()?;
             self.checkpoint()?;
             self.wal.stop()?;
-        } else {
-            self.field_store.release_caches();
         }
 
-        self.vector_store.close();
         for field in self.named_vector_fields.values_mut() {
-            field.vector_store.close();
             field.index = None;
         }
         self.index = None;
@@ -4810,7 +4806,6 @@ impl DatabaseEngine {
             fallback_path
         };
 
-        apexbase::storage::engine().invalidate_dir(&path.join("fields_db"));
         if path.exists() {
             std::fs::remove_dir_all(&path)?;
         }
@@ -6315,7 +6310,6 @@ impl DatabaseManager {
         let db_path = self.root_path.join(name);
         if let Some(engine) = existing {
             engine.close_open_collections()?;
-            apexbase::storage::engine().invalidate_dir(&db_path);
         }
 
         if db_path.exists() {

@@ -34,6 +34,10 @@ server for multi-process and production deployments.
 
 Python 3.9 or newer is required.
 
+Native Linux and macOS environments are supported. Native Windows environments
+are not supported; on Windows, run LynseDB inside WSL 2 (Windows Subsystem for
+Linux) or use Docker.
+
 ```shell
 pip install LynseDB
 ```
@@ -107,6 +111,9 @@ when multiple processes need to share the same database.
 docker run -p 7637:7637 -v lynsedb-data:/data birchkwok/lynsedb:latest
 docker run -p 7637:7637 -e LYNSE_API_KEY=your_key -v lynsedb-data:/data birchkwok/lynsedb:latest
 ```
+
+On Windows, use this Docker image or install/run LynseDB from a Linux
+environment in WSL 2.
 
 ## Documentation
 

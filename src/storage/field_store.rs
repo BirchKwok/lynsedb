@@ -506,9 +506,6 @@ const MAX_CACHE_ENTRIES: usize = 200_000;
 /// Each vector ID maps to a row of arbitrary metadata fields stored in ApexBase.
 /// Supports SQL-like filtering used by `where` in the Python API.
 pub struct FieldStore {
-    /// Path to the ApexBase database directory
-    #[allow(dead_code)]
-    db_path: PathBuf,
     /// ApexBase database handle
     db: apexbase::embedded::ApexDB,
     /// Table name for fields
@@ -579,7 +576,6 @@ impl FieldStore {
         };
 
         let store = Self {
-            db_path: db_path.to_path_buf(),
             db,
             table_name: table_name.to_string(),
             next_id: Arc::new(RwLock::new(next_id)),
@@ -592,24 +588,14 @@ impl FieldStore {
         Ok(store)
     }
 
-    /// Flush this table and evict ApexBase's process-wide caches for this DB.
-    ///
-    /// ApexBase keeps table backends in a global cache. Evicting them here is
-    /// important on Windows, where cached file and mmap handles block directory
-    /// cleanup and drop/recreate workflows.
-    pub fn close(&self) -> Result<()> {
+    /// Flush this table's pending writes.
+    pub fn flush(&self) -> Result<()> {
         if let Ok(table) = self.db.table(&self.table_name) {
             table
                 .flush()
                 .map_err(|e| LynseError::ApexBase(format!("Flush error: {}", e)))?;
         }
-        self.release_caches();
         Ok(())
-    }
-
-    /// Evict ApexBase's process-wide caches for this DB without flushing.
-    pub fn release_caches(&self) {
-        apexbase::storage::engine().invalidate_dir(&self.db_path);
     }
 
     /// Store a single record with its fields.

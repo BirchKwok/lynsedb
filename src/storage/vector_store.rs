@@ -269,14 +269,6 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Release any cached mmap handles.
-    ///
-    /// This is mainly needed before deleting collection directories on Windows,
-    /// where open mmap handles prevent file removal.
-    pub fn close(&self) {
-        *self.mmap_cache.write() = None;
-    }
-
     /// Check if any vector data exists.
     pub fn file_exists(&self) -> bool {
         self.total_vectors.load(Ordering::Relaxed) > 0
