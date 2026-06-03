@@ -265,6 +265,12 @@ class VectorDBClient:
         self.close()
         return False
 
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def __repr__(self):
         if self._is_remote:
             return f'{self.__class__.__name__}(uri={self._uri})'

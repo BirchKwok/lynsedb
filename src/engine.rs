@@ -2279,12 +2279,23 @@ impl Collection {
     /// The writer lock is released when the `Collection` object itself is
     /// dropped; this method makes outstanding state durable and stops the WAL.
     pub fn close(&mut self) -> Result<()> {
-        if self.read_only {
-            self.lock.take();
-            return Ok(());
+        if !self.read_only {
+            self.field_store.close()?;
+            self.checkpoint()?;
+            self.wal.stop()?;
+        } else {
+            self.field_store.release_caches();
         }
-        self.checkpoint()?;
-        self.wal.stop()?;
+
+        self.vector_store.close();
+        for field in self.named_vector_fields.values_mut() {
+            field.vector_store.close();
+            field.index = None;
+        }
+        self.index = None;
+        self.pq_index = None;
+        self.rabitq_index = None;
+        self.polarvec_index = None;
         self.lock.take();
         Ok(())
     }
@@ -4786,15 +4797,22 @@ impl DatabaseEngine {
     pub fn drop_collection(&self, name: &str) -> Result<()> {
         self.ensure_writable()?;
         let mut collections = self.collections.write();
+        let fallback_path = self.root_path.join(name);
 
-        if let Some(coll) = collections.remove(name) {
-            let coll_guard = coll.write();
+        let path = if let Some(coll) = collections.remove(name) {
+            let mut coll_guard = coll.write();
             let path = coll_guard.path.clone();
+            coll_guard.close()?;
             drop(coll_guard);
             drop(coll);
-            if path.exists() {
-                std::fs::remove_dir_all(&path)?;
-            }
+            path
+        } else {
+            fallback_path
+        };
+
+        apexbase::storage::engine().invalidate_dir(&path.join("fields_db"));
+        if path.exists() {
+            std::fs::remove_dir_all(&path)?;
         }
         Ok(())
     }
@@ -6291,9 +6309,15 @@ impl DatabaseManager {
     pub fn drop_database(&self, name: &str) -> Result<()> {
         self.ensure_writable()?;
         let mut dbs = self.databases.write();
-        dbs.remove(name);
+        let existing = dbs.remove(name);
+        drop(dbs);
 
         let db_path = self.root_path.join(name);
+        if let Some(engine) = existing {
+            engine.close_open_collections()?;
+            apexbase::storage::engine().invalidate_dir(&db_path);
+        }
+
         if db_path.exists() {
             std::fs::remove_dir_all(&db_path)?;
         }

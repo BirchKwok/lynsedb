@@ -19,6 +19,7 @@ def client(tmp_root):
     """VectorDBClient in local mode pointing at a temp dir."""
     c = lynse.VectorDBClient(uri=tmp_root)
     yield c
+    c.close()
 
 
 @pytest.fixture(scope="function")

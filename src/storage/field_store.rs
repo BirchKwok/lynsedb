@@ -592,6 +592,26 @@ impl FieldStore {
         Ok(store)
     }
 
+    /// Flush this table and evict ApexBase's process-wide caches for this DB.
+    ///
+    /// ApexBase keeps table backends in a global cache. Evicting them here is
+    /// important on Windows, where cached file and mmap handles block directory
+    /// cleanup and drop/recreate workflows.
+    pub fn close(&self) -> Result<()> {
+        if let Ok(table) = self.db.table(&self.table_name) {
+            table
+                .flush()
+                .map_err(|e| LynseError::ApexBase(format!("Flush error: {}", e)))?;
+        }
+        self.release_caches();
+        Ok(())
+    }
+
+    /// Evict ApexBase's process-wide caches for this DB without flushing.
+    pub fn release_caches(&self) {
+        apexbase::storage::engine().invalidate_dir(&self.db_path);
+    }
+
     /// Store a single record with its fields.
     /// Returns the assigned external ID.
     pub fn store(&self, fields: &HashMap<String, serde_json::Value>) -> Result<u64> {

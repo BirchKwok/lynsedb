@@ -12,8 +12,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Python bindings
-pyo3 = { version = "0.22", features = ["extension-module"] }
-numpy = "0.22"
+pyo3 = { version = "0.26", features = ["extension-module"] }
+numpy = "0.26"
 
 # Storage backends
 apexbase = { version = "1.19.0", default-features = false }

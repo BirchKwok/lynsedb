@@ -7,6 +7,7 @@ use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyA
 use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use pyo3::{IntoPyObjectExt, Py, PyAny};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -621,7 +622,7 @@ impl PyCollection {
             .head(n)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        let arr = data.into_pyarray_bound(py);
+        let arr = data.into_pyarray(py);
         let field_list = fields_to_pylist(py, &fields)?;
         Ok((arr, ids, field_list))
     }
@@ -638,7 +639,7 @@ impl PyCollection {
             .tail(n)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        let arr = data.into_pyarray_bound(py);
+        let arr = data.into_pyarray(py);
         let field_list = fields_to_pylist(py, &fields)?;
         Ok((arr, ids, field_list))
     }
@@ -665,7 +666,7 @@ impl PyCollection {
     ///
     /// Returns: numpy array of shape (n_vectors, dimension) backed by OS mmap.
     /// No data is copied — reads go directly to the page cache.
-    fn vectors_numpy<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+    fn vectors_numpy<'py>(&self, py: Python<'py>) -> PyResult<Py<PyAny>> {
         let coll = self.inner.read();
         let (path, n, dim) = coll
             .vector_store_info()
@@ -674,21 +675,18 @@ impl PyCollection {
 
         if n == 0 {
             // Return empty array
-            let np = py.import_bound("numpy")?;
+            let np = py.import("numpy")?;
             let empty = np.call_method1("zeros", ((0, dim), "float32"))?;
-            return Ok(empty.into());
+            return Ok(empty.unbind());
         }
 
-        let np = py.import_bound("numpy")?;
-        let dtype_obj: PyObject = "float32".into_py(py);
-        let mode_obj: PyObject = "r".into_py(py);
-        let shape_obj: PyObject = (n as usize, dim).into_py(py);
-        let kwargs = PyDict::new_bound(py);
-        kwargs.set_item("dtype", dtype_obj)?;
-        kwargs.set_item("mode", mode_obj)?;
-        kwargs.set_item("shape", shape_obj)?;
+        let np = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "float32")?;
+        kwargs.set_item("mode", "r")?;
+        kwargs.set_item("shape", (n as usize, dim))?;
         let memmap = np.call_method("memmap", (path,), Some(&kwargs))?;
-        Ok(memmap.into())
+        Ok(memmap.unbind())
     }
 
     /// Retrieve vectors by IDs as a zero-copy-friendly numpy array.
@@ -710,7 +708,7 @@ impl PyCollection {
             .read_vectors_by_ids(&ids)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        let arr = unsafe { numpy::PyArray2::<f32>::new_bound(py, [n_ids, dim], false) };
+        let arr = unsafe { numpy::PyArray2::<f32>::new(py, [n_ids, dim], false) };
         let out_slice = unsafe { arr.as_slice_mut()? };
         let copy_len = flat.len().min(out_slice.len());
         out_slice[..copy_len].copy_from_slice(&flat[..copy_len]);
@@ -879,19 +877,19 @@ impl PySearchResult {
     /// Get result IDs as numpy array (zero-copy transfer to numpy).
     fn ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
         let ids: Vec<i64> = self.inner.ids.iter().map(|&id| id as i64).collect();
-        ids.into_pyarray_bound(py)
+        ids.into_pyarray(py)
     }
 
     /// Get result distances as numpy array (zero-copy transfer to numpy).
     fn distances<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        self.inner.distances.clone().into_pyarray_bound(py)
+        self.inner.distances.clone().into_pyarray(py)
     }
 
     /// Get result fields as list of dicts.
     fn fields<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let list = PyList::empty_bound(py);
+        let list = PyList::empty(py);
         for field_map in &self.inner.fields {
-            let dict = PyDict::new_bound(py);
+            let dict = PyDict::new(py);
             for (k, v) in field_map {
                 dict.set_item(k, json_to_py(py, v)?)?;
             }
@@ -1000,7 +998,7 @@ impl PyFlatIndex {
         })?;
         let q = query.as_slice()?;
         let (ids, dists) = self.inner.search(q, k, metric, false, None);
-        Ok((ids.into_pyarray_bound(py), dists.into_pyarray_bound(py)))
+        Ok((ids.into_pyarray(py), dists.into_pyarray(py)))
     }
 
     /// Batch search: multiple queries against the same data.
@@ -1038,7 +1036,7 @@ impl PyFlatIndex {
             let (ids, dists) =
                 self.inner
                     .search(&flat[q_start..q_end], k, metric_enum, false, None);
-            results.push((ids.into_pyarray_bound(py), dists.into_pyarray_bound(py)));
+            results.push((ids.into_pyarray(py), dists.into_pyarray(py)));
         }
         Ok(results)
     }
@@ -1135,7 +1133,7 @@ impl PyIvfFlatIndex {
         })?;
         let q = query.as_slice()?;
         let (ids, dists) = self.inner.search(q, k, nprobe, metric);
-        Ok((ids.into_pyarray_bound(py), dists.into_pyarray_bound(py)))
+        Ok((ids.into_pyarray(py), dists.into_pyarray(py)))
     }
 }
 
@@ -1188,7 +1186,7 @@ fn py_top_k_search<'py>(
 
     let (ids, dists) = crate::distance::top_k_search(q, flat, dim, k, metric);
 
-    Ok((ids.into_pyarray_bound(py), dists.into_pyarray_bound(py)))
+    Ok((ids.into_pyarray(py), dists.into_pyarray(py)))
 }
 
 // ─── DatabaseManager binding ─────────────────────────────────────────────────
@@ -1452,9 +1450,9 @@ fn fields_to_pylist<'py>(
     py: Python<'py>,
     fields: &[HashMap<String, serde_json::Value>],
 ) -> PyResult<Bound<'py, PyList>> {
-    let list = PyList::empty_bound(py);
+    let list = PyList::empty(py);
     for field_map in fields {
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         for (k, v) in field_map {
             dict.set_item(k, json_to_py(py, v)?)?;
         }
@@ -1467,9 +1465,9 @@ fn vector_fields_to_pylist<'py>(
     py: Python<'py>,
     fields: &[VectorFieldConfig],
 ) -> PyResult<Bound<'py, PyList>> {
-    let list = PyList::empty_bound(py);
+    let list = PyList::empty(py);
     for field in fields {
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         dict.set_item("name", &field.name)?;
         dict.set_item("dimension", field.dimension)?;
         dict.set_item("metric", &field.metric)?;
@@ -1541,29 +1539,29 @@ fn py_to_json_value(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<serde_json::Value>
 }
 
 /// Convert serde_json::Value to a Python object.
-fn json_to_py(py: Python<'_>, v: &serde_json::Value) -> PyResult<pyo3::PyObject> {
+fn json_to_py(py: Python<'_>, v: &serde_json::Value) -> PyResult<Py<PyAny>> {
     match v {
         serde_json::Value::Null => Ok(py.None()),
-        serde_json::Value::Bool(b) => Ok(b.into_py(py)),
+        serde_json::Value::Bool(b) => (*b).into_py_any(py),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(i.into_py(py))
+                i.into_py_any(py)
             } else if let Some(f) = n.as_f64() {
-                Ok(f.into_py(py))
+                f.into_py_any(py)
             } else {
-                Ok(n.to_string().into_py(py))
+                n.to_string().into_py_any(py)
             }
         }
-        serde_json::Value::String(s) => Ok(s.into_py(py)),
+        serde_json::Value::String(s) => s.into_py_any(py),
         serde_json::Value::Array(arr) => {
-            let list = PyList::empty_bound(py);
+            let list = PyList::empty(py);
             for item in arr {
                 list.append(json_to_py(py, item)?)?;
             }
             Ok(list.into_any().unbind())
         }
         serde_json::Value::Object(obj) => {
-            let dict = PyDict::new_bound(py);
+            let dict = PyDict::new(py);
             for (k, v) in obj {
                 dict.set_item(k, json_to_py(py, v)?)?;
             }
