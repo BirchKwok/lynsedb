@@ -11,6 +11,7 @@
 //! This avoids the costly munmap+mmap cycle on every write batch.
 
 use crate::error::{LynseError, Result};
+use crate::storage::dtype::{encode_f32_slice_as_le_bytes, VectorDtype};
 use crate::storage::flat_mmap::FlatMmap;
 use parking_lot::RwLock;
 use std::io::Write;
@@ -38,6 +39,7 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 pub struct VectorStore {
     collection_path: PathBuf,
     dimension: usize,
+    dtype: VectorDtype,
     /// Path to the single vectors file.
     vectors_path: PathBuf,
     /// Cached FlatMmap for reads. None = stale (needs re-mmap on next read).
@@ -50,17 +52,27 @@ pub struct VectorStore {
 
 impl VectorStore {
     /// Create or open a vector store at the given path.
-    pub fn new(collection_path: &Path, dimension: usize, _chunk_size: usize) -> Result<Self> {
+    pub fn new(
+        collection_path: &Path,
+        dimension: usize,
+        _chunk_size: usize,
+        dtype: VectorDtype,
+    ) -> Result<Self> {
         std::fs::create_dir_all(collection_path)?;
 
         let vectors_path = collection_path.join("vectors.bin");
+        let row_width = dimension as u64 * dtype.byte_width() as u64;
 
         // Compute total vectors from file size (if file exists)
         let total_vectors = if vectors_path.exists() {
             let file_len = std::fs::metadata(&vectors_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            file_len / (dimension as u64 * 4)
+            if row_width == 0 {
+                0
+            } else {
+                file_len / row_width
+            }
         } else {
             0
         };
@@ -77,6 +89,7 @@ impl VectorStore {
         Ok(Self {
             collection_path: collection_path.to_path_buf(),
             dimension,
+            dtype,
             vectors_path,
             mmap_cache: RwLock::new(None), // lazy — created on first read
             total_vectors: AtomicU64::new(total_vectors),
@@ -87,6 +100,10 @@ impl VectorStore {
     /// Get vector dimension.
     pub fn dimension(&self) -> usize {
         self.dimension
+    }
+
+    pub fn dtype(&self) -> VectorDtype {
+        self.dtype
     }
 
     /// Get the collection path.
@@ -123,14 +140,13 @@ impl VectorStore {
         }
 
         // Raw byte append — no mmap involved
-        let bytes: &[u8] =
-            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
+        let bytes = encode_f32_slice_as_le_bytes(data, self.dtype);
         {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&self.vectors_path)?;
-            file.write_all(bytes)?;
+            file.write_all(&bytes)?;
             file.flush()?;
         }
 
@@ -180,7 +196,7 @@ impl VectorStore {
         if guard.is_none() {
             let total = self.total_vectors.load(Ordering::Relaxed);
             if total > 0 {
-                let fm = FlatMmap::open(&self.vectors_path, self.dimension)
+                let fm = FlatMmap::open(&self.vectors_path, self.dimension, self.dtype)
                     .map_err(|e| LynseError::Storage(format!("FlatMmap open error: {}", e)))?;
                 *guard = Some(fm);
             }
@@ -206,9 +222,8 @@ impl VectorStore {
             0
         };
 
-        let bytes: &[u8] =
-            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
-        atomic_write(&self.vectors_path, bytes)?;
+        let bytes = encode_f32_slice_as_le_bytes(data, self.dtype);
+        atomic_write(&self.vectors_path, &bytes)?;
 
         self.total_vectors
             .store(n_vectors as u64, Ordering::Relaxed);
@@ -232,7 +247,7 @@ impl VectorStore {
     /// Used during WAL recovery when `id_map.bin` proves that a previous write
     /// reached the vector file but did not fully reach the commit boundary.
     pub fn truncate_to_vectors(&self, n_vectors: usize) -> Result<()> {
-        let target_len = n_vectors as u64 * self.dimension as u64 * 4;
+        let target_len = n_vectors as u64 * self.dimension as u64 * self.dtype.byte_width() as u64;
         let current_len = std::fs::metadata(&self.vectors_path)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -283,12 +298,13 @@ impl VectorStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::dtype::VectorDtype;
     use tempfile::TempDir;
 
     #[test]
     fn test_write_read_roundtrip() {
         let tmp = TempDir::new().unwrap();
-        let store = VectorStore::new(tmp.path(), 4, 100).unwrap();
+        let store = VectorStore::new(tmp.path(), 4, 100, VectorDtype::F32).unwrap();
 
         // Write 10 vectors of dim 4
         let data: Vec<f32> = (0..40).map(|i| i as f32).collect();
@@ -319,7 +335,7 @@ mod tests {
         use crate::distance::DistanceMetric;
 
         let tmp = TempDir::new().unwrap();
-        let store = VectorStore::new(tmp.path(), 4, 100).unwrap();
+        let store = VectorStore::new(tmp.path(), 4, 100, VectorDtype::F32).unwrap();
 
         // Write 5 vectors
         let data: Vec<f32> = vec![
@@ -344,7 +360,7 @@ mod tests {
     #[test]
     fn test_many_small_writes() {
         let tmp = TempDir::new().unwrap();
-        let store = VectorStore::new(tmp.path(), 4, 100).unwrap();
+        let store = VectorStore::new(tmp.path(), 4, 100, VectorDtype::F32).unwrap();
 
         // Simulate many small flushes (like insert_session)
         for i in 0..100 {
@@ -358,5 +374,33 @@ mod tests {
         let guard = store.read_mmap().unwrap();
         let fm = guard.as_ref().unwrap();
         assert_eq!(fm.len(), 1000);
+    }
+
+    #[test]
+    fn test_f16_storage_roundtrip_and_search() {
+        use crate::distance::DistanceMetric;
+
+        let tmp = TempDir::new().unwrap();
+        let store = VectorStore::new(tmp.path(), 4, 100, VectorDtype::F16).unwrap();
+        let data: Vec<f32> = vec![
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.5, 0.5, 0.0, 0.0,
+        ];
+        store.write(&data).unwrap();
+
+        assert_eq!(std::fs::metadata(store.vectors_path()).unwrap().len(), 24);
+        assert_eq!(store.get_shape().unwrap(), (3, 4));
+
+        let guard = store.read_mmap().unwrap();
+        let fm = guard.as_ref().unwrap();
+        assert_eq!(fm.dtype(), VectorDtype::F16);
+        assert_eq!(fm.as_f32_cow().into_owned(), data);
+
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+        let (ids, dists) = fm.search(&query, 2, DistanceMetric::InnerProduct, false, None);
+        assert_eq!(ids, vec![0, 2]);
+        assert!((dists[0] - 1.0).abs() < 1e-6);
+        assert!((dists[1] - 0.5).abs() < 1e-6);
     }
 }

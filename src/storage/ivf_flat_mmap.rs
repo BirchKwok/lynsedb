@@ -11,6 +11,7 @@
 //! Target: < 0.5ms for 1M×128 IP top-10 with nprobe=10, 256 partitions.
 
 use crate::distance::{self, DistanceMetric};
+use crate::storage::dtype::VectorDtype;
 use crate::storage::flat_mmap::FlatMmap;
 use rayon::prelude::*;
 use std::fs::File;
@@ -101,7 +102,7 @@ impl IvfFlatMmap {
         }
 
         // Step 5: Write reordered data to flat file
-        let mut flat = FlatMmap::open(data_path, dim)?;
+        let mut flat = FlatMmap::open(data_path, dim, VectorDtype::F32)?;
         flat.write(&reordered)?;
 
         // Step 6: Save metadata
@@ -131,7 +132,7 @@ impl IvfFlatMmap {
 
     /// Open an existing IVF_FLAT index.
     pub fn open(data_path: &Path, dim: usize) -> std::io::Result<Self> {
-        let flat = FlatMmap::open(data_path, dim)?;
+        let flat = FlatMmap::open(data_path, dim, VectorDtype::F32)?;
         let meta_path = data_path.with_extension("ivf_meta.bin");
 
         let (dim_loaded, n_vectors, n_partitions, centroids, partition_offsets, original_ids) =
@@ -1147,7 +1148,7 @@ mod tests {
         .unwrap();
 
         // Brute force
-        let mut bf = FlatMmap::open(&bf_path, dim).unwrap();
+        let mut bf = FlatMmap::open(&bf_path, dim, VectorDtype::F32).unwrap();
         bf.write(&data).unwrap();
 
         let query: Vec<f32> = data[0..dim].to_vec();

@@ -34,7 +34,7 @@ Returned by `create_database()` or `get_database()`.
 
 | Method | Description |
 | --- | --- |
-| `require_collection(collection, dim=None, n_threads=10, warm_up=False, drop_if_exists=False, description=None)` | Create or open a collection. |
+| `require_collection(collection, dim=None, n_threads=10, warm_up=False, drop_if_exists=False, description=None, dtypes="float32")` | Create or open a collection. Use `dtypes="float16"` for half-precision vector storage. |
 | `get_collection(collection, warm_up=True)` | Open an existing collection. |
 | `drop_collection(collection)` | Drop a collection. |
 | `show_collections()` | List collection names. |

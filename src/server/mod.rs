@@ -500,9 +500,13 @@ fn validate_collection_insert(
     limits: &ServerLimits,
     coll: &crate::engine::Collection,
     additional_vectors: u64,
-    additional_vector_bytes: u64,
+    _request_vector_bytes: u64,
 ) -> Result<(), LynseError> {
-    let (current_vectors, _) = coll.shape()?;
+    let (current_vectors, dim) = coll.shape()?;
+    let additional_vector_bytes = additional_vectors
+        .checked_mul(dim as u64)
+        .and_then(|values| values.checked_mul(coll.vector_dtype().byte_width() as u64))
+        .ok_or_else(|| LynseError::InvalidArgument("collection vector bytes overflow".into()))?;
     validate_collection_vector_count(limits, current_vectors, additional_vectors)?;
     validate_collection_vector_bytes(
         limits,
@@ -1024,6 +1028,7 @@ struct RequireCollectionRequest {
     dim: usize,
     drop_if_exists: Option<bool>,
     description: Option<String>,
+    dtypes: Option<String>,
     // Accepted for backward API compat but ignored
     #[allow(dead_code)]
     n_threads: Option<usize>,
@@ -1103,6 +1108,7 @@ struct CreateVectorFieldRequest {
     dim: usize,
     metric: Option<String>,
     index_mode: Option<String>,
+    dtypes: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2021,7 +2027,7 @@ fn openapi_schemas() -> serde_json::Value {
         "DatabaseExistsRequest": object_schema(&["database_name"]),
         "SnapshotDatabaseRequest": object_schema(&["database_name", "snapshot_path"]),
         "RestoreDatabaseRequest": object_schema(&["database_name", "snapshot_path", "overwrite"]),
-        "RequireCollectionRequest": object_schema(&["database_name", "collection_name", "dim", "drop_if_exists", "description"]),
+        "RequireCollectionRequest": object_schema(&["database_name", "collection_name", "dim", "drop_if_exists", "description", "dtypes"]),
         "CollectionRequest": object_schema(&["database_name", "collection_name"]),
         "SnapshotCollectionRequest": object_schema(&["database_name", "collection_name", "snapshot_path"]),
         "ExportCollectionRequest": object_schema(&["database_name", "collection_name", "export_path"]),
@@ -2029,7 +2035,7 @@ fn openapi_schemas() -> serde_json::Value {
         "ImportCollectionRequest": object_schema(&["database_name", "collection_name", "export_path", "overwrite"]),
         "AddItemRequest": object_schema(&["database_name", "collection_name", "item"]),
         "BulkAddItemsRequest": object_schema(&["database_name", "collection_name", "items"]),
-        "CreateVectorFieldRequest": object_schema(&["database_name", "collection_name", "field_name", "dim", "metric", "index_mode"]),
+        "CreateVectorFieldRequest": object_schema(&["database_name", "collection_name", "field_name", "dim", "metric", "index_mode", "dtypes"]),
         "AddNamedVectorsRequest": object_schema(&["database_name", "collection_name", "field_name", "vectors", "ids"]),
         "AddSparseVectorsRequest": object_schema(&["database_name", "collection_name", "vectors", "ids"]),
         "BuildVectorFieldIndexRequest": object_schema(&["database_name", "collection_name", "field_name", "index_mode", "n_clusters"]),
@@ -2399,13 +2405,14 @@ async fn required_collection(
 ) -> HttpResponse {
     let drop_if_exists = body.drop_if_exists.unwrap_or(false);
 
-    match state.manager.require_collection(
+    match state.manager.require_collection_with_dtype(
         &body.database_name,
         &body.collection_name,
         body.dim,
         100_000,
         drop_if_exists,
         body.description.as_deref(),
+        body.dtypes.as_deref(),
     ) {
         Ok(()) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name,
@@ -2711,11 +2718,12 @@ async fn create_vector_field(
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
         let mut coll = coll_arc.write();
-        coll.create_vector_field(
+        coll.create_vector_field_with_dtype(
             &body.field_name,
             body.dim,
             body.metric.as_deref(),
             body.index_mode.as_deref(),
+            body.dtypes.as_deref(),
         )
     });
 
@@ -3028,7 +3036,14 @@ async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> H
         let sr = if vector_field == "default" {
             coll.search(&body.vector, k, filter, nprobe, approx, eps)?
         } else {
-            coll.search_vector_field_with_options(vector_field, &body.vector, k, filter, approx, eps)?
+            coll.search_vector_field_with_options(
+                vector_field,
+                &body.vector,
+                k,
+                filter,
+                approx,
+                eps,
+            )?
         };
 
         let fields_data = if return_fields && !sr.ids.is_empty() {
@@ -3641,6 +3656,7 @@ async fn show_collections_details(
         }
         if let Some(cfg) = config {
             detail["dim"] = serde_json::json!(cfg.dim);
+            detail["dtypes"] = serde_json::json!(cfg.dtypes);
             if let Some(ref desc) = cfg.description {
                 detail["description"] = serde_json::json!(desc);
             }

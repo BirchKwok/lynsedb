@@ -45,6 +45,7 @@ class LocalClient:
             warm_up: bool = False,
             drop_if_exists: bool = False,
             description: str = None,
+            dtypes: str = "float32",
     ):
         """
         Create or open a collection.
@@ -56,12 +57,13 @@ class LocalClient:
             warm_up (bool): Whether to warm up. Default is False.
             drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
             description (str): A description of the collection. Default is None.
+            dtypes (str): Dense vector storage dtype, "float32" or "float16".
 
         Returns:
             LocalCollection: The collection object.
         """
         self._manager.require_collection(
-            self.database_name, collection, dim, drop_if_exists, description
+            self.database_name, collection, dim, drop_if_exists, description, dtypes
         )
         rust_coll = self._manager.get_collection(
             self.database_name, collection, dim
@@ -76,6 +78,7 @@ class LocalClient:
             warm_up=warm_up,
             drop_if_exists=drop_if_exists,
             description=description,
+            dtypes=dtypes,
         )
 
     def get_collection(self, collection: str, warm_up=True):
@@ -97,6 +100,7 @@ class LocalClient:
             raise RuntimeError(f"Collection config for '{collection}' not found.")
 
         dim = config['dim']
+        dtypes = config.get('dtypes', 'float32')
 
         rust_coll = self._manager.get_collection(
             self.database_name, collection, dim
@@ -107,6 +111,7 @@ class LocalClient:
             collection_name=collection,
             rust_collection=rust_coll,
             dim=dim,
+            dtypes=dtypes,
             warm_up=warm_up,
         )
 
@@ -231,6 +236,7 @@ class LocalClient:
                 details.append({
                     'collection': coll_name,
                     'dim': config['dim'],
+                    'dtypes': config.get('dtypes', 'float32'),
                     'description': config.get('description'),
                 })
         try:
@@ -266,6 +272,7 @@ class LocalCollection:
             warm_up: bool = False,
             drop_if_exists: bool = False,
             description: Union[str, None] = None,
+            dtypes: str = "float32",
     ):
         self.IS_DELETED = False
         self._manager = manager
@@ -278,6 +285,7 @@ class LocalCollection:
             'warm_up': warm_up,
             'drop_if_exists': drop_if_exists,
             'description': description,
+            'dtypes': dtypes,
         }
 
         self.COMMIT_FLAG = False
@@ -287,6 +295,10 @@ class LocalCollection:
     @property
     def is_read_only(self) -> bool:
         return self._rust_coll.is_read_only
+
+    @property
+    def vector_dtype(self) -> str:
+        return self._rust_coll.vector_dtype
 
     def exists(self):
         """Check if the collection exists."""
@@ -747,9 +759,10 @@ class LocalCollection:
             dim: int,
             metric: str = "ip",
             index_mode: Union[str, None] = None,
+            dtypes: Union[str, None] = None,
     ):
         """Create a named vector field with its own dimension and metric."""
-        self._rust_coll.create_vector_field(name, int(dim), metric, index_mode)
+        self._rust_coll.create_vector_field(name, int(dim), metric, index_mode, dtypes)
         return {'status': 'success'}
 
     def list_vector_fields(self):

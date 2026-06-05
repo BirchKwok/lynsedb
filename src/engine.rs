@@ -6,6 +6,7 @@
 use crate::distance::DistanceMetric;
 use crate::error::{LynseError, Result};
 use crate::index::{self, SearchParams, VectorIndex};
+use crate::storage::dtype::{f16_bits_to_f32, VectorDtype};
 use crate::storage::field_store::FieldStore;
 use crate::storage::polarvec_mmap::{
     parse_bits, PolarVecIndex, DEFAULT_BITS as POLARVEC_DEFAULT_BITS,
@@ -41,7 +42,7 @@ const TEXT_INDEX_FORMAT_VERSION: u32 = 1;
 const STORAGE_FORMAT_NAME: &str = "lynsedb-collection";
 const DATABASE_SNAPSHOT_FORMAT_NAME: &str = "lynsedb-database";
 const COLLECTION_EXPORT_FORMAT_NAME: &str = "lynsedb-collection-jsonl-binary-export";
-const STORAGE_FORMAT_VERSION: u32 = 1;
+const STORAGE_FORMAT_VERSION: u32 = 2;
 const WAL_FORMAT_VERSION: u32 = 2;
 
 #[cfg(test)]
@@ -61,6 +62,7 @@ pub struct CollectionMeta {
 pub struct Collection {
     pub meta: CollectionMeta,
     path: PathBuf,
+    vector_dtype: VectorDtype,
     vector_store: VectorStore,
     field_store: FieldStore,
     wal: WALStorage,
@@ -225,15 +227,20 @@ struct CollectionExportManifest {
 
 impl CollectionExportManifest {
     fn current(collection: &Collection, count: usize) -> Self {
+        let vector_dtype = collection.vector_dtype;
         Self {
             export_type: "lynsedb-collection-export".to_string(),
             collection_name: collection.meta.name.clone(),
             export_format: COLLECTION_EXPORT_FORMAT_NAME.to_string(),
-            export_version: STORAGE_FORMAT_VERSION,
+            export_version: if vector_dtype == VectorDtype::F16 {
+                STORAGE_FORMAT_VERSION
+            } else {
+                1
+            },
             dimension: collection.meta.dimension,
             chunk_size: collection.meta.chunk_size,
             count,
-            vector_dtype: "f32".to_string(),
+            vector_dtype: vector_dtype.storage_name().to_string(),
             byte_order: "little-endian".to_string(),
             vectors_file: COLLECTION_EXPORT_VECTORS_FILE.to_string(),
             metadata_file: COLLECTION_EXPORT_METADATA_FILE.to_string(),
@@ -254,6 +261,8 @@ pub struct VectorFieldConfig {
     pub dimension: usize,
     pub metric: String,
     pub index_mode: String,
+    #[serde(default = "default_vector_dtype_string")]
+    pub dtypes: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -269,6 +278,10 @@ struct NamedVectorField {
     id_map: Vec<u64>,
     reverse_id_map: HashMap<u64, usize>,
     path: PathBuf,
+}
+
+fn default_vector_dtype_string() -> String {
+    VectorDtype::F32.storage_name().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -775,14 +788,18 @@ impl DatabaseSnapshotManifest {
 }
 
 impl StorageManifest {
-    fn current(name: &str, dimension: usize, chunk_size: usize) -> Self {
+    fn current(name: &str, dimension: usize, chunk_size: usize, vector_dtype: VectorDtype) -> Self {
         Self {
             format: STORAGE_FORMAT_NAME.to_string(),
-            version: STORAGE_FORMAT_VERSION,
+            version: if vector_dtype == VectorDtype::F16 {
+                2
+            } else {
+                1
+            },
             collection_name: name.to_string(),
             dimension,
             chunk_size,
-            vector_dtype: "float32".to_string(),
+            vector_dtype: vector_dtype.storage_name().to_string(),
             id_map_encoding: "u64-le-row-offset-map".to_string(),
             wal_version: WAL_FORMAT_VERSION,
             field_store: "apexbase".to_string(),
@@ -804,9 +821,30 @@ impl Collection {
         Ok((path.to_string_lossy().to_string(), n as usize, dim))
     }
 
+    pub fn vector_dtype(&self) -> VectorDtype {
+        self.vector_dtype
+    }
+
     /// Create or open a collection.
     pub fn open(path: &Path, name: &str, dimension: usize, chunk_size: usize) -> Result<Self> {
-        Self::open_with_mode(path, name, dimension, chunk_size, OpenMode::ReadWrite)
+        Self::open_with_mode(path, name, dimension, chunk_size, OpenMode::ReadWrite, None)
+    }
+
+    pub fn open_with_dtype(
+        path: &Path,
+        name: &str,
+        dimension: usize,
+        chunk_size: usize,
+        vector_dtype: VectorDtype,
+    ) -> Result<Self> {
+        Self::open_with_mode(
+            path,
+            name,
+            dimension,
+            chunk_size,
+            OpenMode::ReadWrite,
+            Some(vector_dtype),
+        )
     }
 
     /// Open an existing collection in read-only mode.
@@ -816,7 +854,7 @@ impl Collection {
         dimension: usize,
         chunk_size: usize,
     ) -> Result<Self> {
-        Self::open_with_mode(path, name, dimension, chunk_size, OpenMode::ReadOnly)
+        Self::open_with_mode(path, name, dimension, chunk_size, OpenMode::ReadOnly, None)
     }
 
     fn open_with_mode(
@@ -825,6 +863,7 @@ impl Collection {
         dimension: usize,
         chunk_size: usize,
         mode: OpenMode,
+        requested_dtype: Option<VectorDtype>,
     ) -> Result<Self> {
         let collection_path = path.join(name);
         if mode == OpenMode::ReadWrite {
@@ -846,8 +885,14 @@ impl Collection {
                     .to_string(),
             ));
         }
-        let manifest =
-            Self::ensure_storage_manifest(&collection_path, name, dimension, chunk_size)?;
+        let manifest = Self::ensure_storage_manifest(
+            &collection_path,
+            name,
+            dimension,
+            chunk_size,
+            requested_dtype,
+        )?;
+        let vector_dtype = VectorDtype::parse(&manifest.vector_dtype)?;
         let dimension = if dimension == 0 {
             manifest.dimension
         } else {
@@ -859,7 +904,7 @@ impl Collection {
             chunk_size
         };
 
-        let vector_store = VectorStore::new(&collection_path, dimension, chunk_size)?;
+        let vector_store = VectorStore::new(&collection_path, dimension, chunk_size, vector_dtype)?;
 
         let field_db_path = collection_path.join("fields_db");
         let field_store = FieldStore::new(&field_db_path, "fields")?;
@@ -883,7 +928,7 @@ impl Collection {
             dimension,
             chunk_size,
             index_mode: index_mode.clone(),
-            dtypes: "float32".to_string(),
+            dtypes: vector_dtype.storage_name().to_string(),
         };
 
         let tombstone_path = collection_path.join("tombstone.bin");
@@ -895,6 +940,7 @@ impl Collection {
         let mut coll = Self {
             meta,
             path: collection_path,
+            vector_dtype,
             vector_store,
             field_store,
             wal,
@@ -957,6 +1003,7 @@ impl Collection {
         name: &str,
         dimension: usize,
         chunk_size: usize,
+        requested_dtype: Option<VectorDtype>,
     ) -> Result<StorageManifest> {
         let manifest_path = Self::storage_manifest_path(collection_path);
         if manifest_path.exists() {
@@ -994,6 +1041,16 @@ impl Collection {
                     manifest.chunk_size, chunk_size
                 )));
             }
+            let manifest_dtype = VectorDtype::parse(&manifest.vector_dtype)?;
+            if let Some(dtype) = requested_dtype {
+                if manifest_dtype != dtype {
+                    return Err(LynseError::InvalidArgument(format!(
+                        "collection vector dtype {} does not match requested dtype {}",
+                        manifest_dtype.storage_name(),
+                        dtype.storage_name()
+                    )));
+                }
+            }
             return Ok(manifest);
         }
 
@@ -1003,7 +1060,8 @@ impl Collection {
             ));
         }
 
-        let manifest = StorageManifest::current(name, dimension, chunk_size);
+        let vector_dtype = requested_dtype.unwrap_or_default();
+        let manifest = StorageManifest::current(name, dimension, chunk_size, vector_dtype);
         Self::write_storage_manifest(&manifest_path, &manifest)?;
         Ok(manifest)
     }
@@ -1126,7 +1184,9 @@ impl Collection {
         for mut config in manifest.fields {
             let name = Self::validate_vector_field_name(&config.name)?;
             let field_path = root.join(&name);
-            let store = VectorStore::new(&field_path, config.dimension, chunk_size)?;
+            let vector_dtype = VectorDtype::parse(&config.dtypes)?;
+            config.dtypes = vector_dtype.storage_name().to_string();
+            let store = VectorStore::new(&field_path, config.dimension, chunk_size, vector_dtype)?;
             let index_path = field_path.join("index");
             let index_meta_path = field_path.join("index_meta");
             if mode == OpenMode::ReadWrite {
@@ -1329,12 +1389,7 @@ impl Collection {
                 manifest.export_version, STORAGE_FORMAT_VERSION
             )));
         }
-        if manifest.vector_dtype != "f32" {
-            return Err(LynseError::Storage(format!(
-                "unsupported export vector dtype '{}'",
-                manifest.vector_dtype
-            )));
-        }
+        VectorDtype::parse(&manifest.vector_dtype)?;
         if manifest.byte_order != "little-endian" {
             return Err(LynseError::Storage(format!(
                 "unsupported export byte order '{}'",
@@ -1920,6 +1975,17 @@ impl Collection {
         metric: Option<&str>,
         index_mode: Option<&str>,
     ) -> Result<VectorFieldConfig> {
+        self.create_vector_field_with_dtype(name, dimension, metric, index_mode, None)
+    }
+
+    pub fn create_vector_field_with_dtype(
+        &mut self,
+        name: &str,
+        dimension: usize,
+        metric: Option<&str>,
+        index_mode: Option<&str>,
+        dtypes: Option<&str>,
+    ) -> Result<VectorFieldConfig> {
         self.ensure_writable()?;
         if dimension == 0 {
             return Err(LynseError::InvalidArgument(
@@ -1930,11 +1996,16 @@ impl Collection {
         let name = Self::validate_vector_field_name(name)?;
         let metric = Self::resolve_named_vector_metric(metric, index_mode)?;
         let index_mode = Self::normalize_field_index_mode(index_mode, metric)?;
+        let vector_dtype = match dtypes {
+            Some(dtype) => VectorDtype::parse(dtype)?,
+            None => self.vector_dtype,
+        };
 
         if let Some(existing) = self.named_vector_fields.get(&name) {
             if existing.config.dimension == dimension
                 && existing.config.metric == metric.name()
                 && existing.config.index_mode == index_mode
+                && VectorDtype::parse(&existing.config.dtypes)? == vector_dtype
             {
                 return Ok(existing.config.clone());
             }
@@ -1947,12 +2018,14 @@ impl Collection {
         let root = Self::vector_fields_root(&self.path);
         std::fs::create_dir_all(&root)?;
         let field_path = root.join(&name);
-        let vector_store = VectorStore::new(&field_path, dimension, self.meta.chunk_size)?;
+        let vector_store =
+            VectorStore::new(&field_path, dimension, self.meta.chunk_size, vector_dtype)?;
         let config = VectorFieldConfig {
             name: name.clone(),
             dimension,
             metric: metric.name().to_string(),
             index_mode,
+            dtypes: vector_dtype.storage_name().to_string(),
         };
 
         self.named_vector_fields.insert(
@@ -1981,6 +2054,7 @@ impl Collection {
                 .index_mode
                 .clone()
                 .unwrap_or_else(|| "FLAT".to_string()),
+            dtypes: self.vector_dtype.storage_name().to_string(),
         }];
         let mut named: Vec<VectorFieldConfig> = self
             .named_vector_fields
@@ -2007,18 +2081,18 @@ impl Collection {
 
     /// Estimate dense vector bytes stored by the primary and named vector fields.
     pub fn estimated_vector_bytes(&self) -> Result<u64> {
-        fn field_bytes(n_vectors: u64, dim: usize) -> Result<u64> {
+        fn field_bytes(n_vectors: u64, dim: usize, dtype: VectorDtype) -> Result<u64> {
             n_vectors
                 .checked_mul(dim as u64)
-                .and_then(|floats| floats.checked_mul(std::mem::size_of::<f32>() as u64))
+                .and_then(|values| values.checked_mul(dtype.byte_width() as u64))
                 .ok_or_else(|| LynseError::Storage("vector byte estimate overflows".to_string()))
         }
 
         let (primary_n, primary_dim) = self.shape()?;
-        let mut total = field_bytes(primary_n, primary_dim)?;
+        let mut total = field_bytes(primary_n, primary_dim, self.vector_store.dtype())?;
         for field in self.named_vector_fields.values() {
             let (n, dim) = field.vector_store.get_shape()?;
-            let bytes = field_bytes(n, dim)?;
+            let bytes = field_bytes(n, dim, field.vector_store.dtype())?;
             total = total
                 .checked_add(bytes)
                 .ok_or_else(|| LynseError::Storage("vector byte estimate overflows".to_string()))?;
@@ -2187,10 +2261,10 @@ impl Collection {
                     return Err(LynseError::EmptyDatabase);
                 }
 
-                let all_data = fm.as_slice();
+                let all_data = fm.as_f32_cow();
                 let row_ids: Vec<u64> = (0..n as u64).collect();
                 let mut idx = index::create_index_with_options(&index_type, n_clusters)?;
-                idx.build(all_data, n, dim, Some(&row_ids))?;
+                idx.build(&all_data, n, dim, Some(&row_ids))?;
                 drop(guard);
 
                 let index_data = idx.serialize()?;
@@ -2355,7 +2429,8 @@ impl Collection {
                     let n_subspaces = parse_n_subspaces(&upper, dim);
                     let guard = self.vector_store.read_mmap()?;
                     let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
-                    let pq = PQIndex::build(fm.as_slice(), n, dim, n_subspaces);
+                    let all_data = fm.as_f32_cow();
+                    let pq = PQIndex::build(&all_data, n, dim, n_subspaces);
                     drop(guard);
                     let pq_path = self.path.join("pq_index.bin");
                     pq.save(&pq_path)
@@ -2366,7 +2441,8 @@ impl Collection {
                 if n > 0 {
                     let guard = self.vector_store.read_mmap()?;
                     let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
-                    let rq = RaBitQIndex::build(fm.as_slice(), n, dim);
+                    let all_data = fm.as_f32_cow();
+                    let rq = RaBitQIndex::build(&all_data, n, dim);
                     drop(guard);
                     let rq_path = self.path.join("rabitq_index.bin");
                     rq.save(&rq_path)
@@ -2379,7 +2455,8 @@ impl Collection {
                     let metric = self.resolve_metric();
                     let guard = self.vector_store.read_mmap()?;
                     let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
-                    let pv = PolarVecIndex::build_for_metric(fm.as_slice(), n, dim, bits, metric);
+                    let all_data = fm.as_f32_cow();
+                    let pv = PolarVecIndex::build_for_metric(&all_data, n, dim, bits, metric);
                     drop(guard);
                     let pv_path = self.path.join("polarvec_index.bin");
                     pv.save(&pv_path)
@@ -2397,11 +2474,11 @@ impl Collection {
                 return Err(LynseError::EmptyDatabase);
             }
 
-            let all_data = fm.as_slice();
+            let all_data = fm.as_f32_cow();
             let ids: Vec<u64> = (0..n as u64).collect();
 
             let mut idx = index::create_index_with_options(index_type, n_clusters)?;
-            idx.build(all_data, n, dim, Some(&ids))?;
+            idx.build(&all_data, n, dim, Some(&ids))?;
 
             // Save index to disk
             let index_data = idx.serialize()?;
@@ -2542,8 +2619,9 @@ impl Collection {
             match guard.as_ref() {
                 None => (vec![], vec![]),
                 Some(fm) => {
+                    let all_data = fm.as_f32_cow();
                     let (indices, dists) =
-                        pq.search(query, search_k, fm.as_slice(), metric, PQ_OVERSAMPLE);
+                        pq.search(query, search_k, &all_data, metric, PQ_OVERSAMPLE);
                     let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                     (ids, dists)
                 }
@@ -2555,8 +2633,9 @@ impl Collection {
             match guard.as_ref() {
                 None => (vec![], vec![]),
                 Some(fm) => {
+                    let all_data = fm.as_f32_cow();
                     let (indices, dists) =
-                        rq.search(query, search_k, fm.as_slice(), metric, RABITQ_OVERSAMPLE);
+                        rq.search(query, search_k, &all_data, metric, RABITQ_OVERSAMPLE);
                     let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                     (ids, dists)
                 }
@@ -2568,8 +2647,9 @@ impl Collection {
             match guard.as_ref() {
                 None => (vec![], vec![]),
                 Some(fm) => {
+                    let all_data = fm.as_f32_cow();
                     let (indices, dists) =
-                        pv.search(query, search_k, fm.as_slice(), metric, POLARVEC_OVERSAMPLE);
+                        pv.search(query, search_k, &all_data, metric, POLARVEC_OVERSAMPLE);
                     let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                     (ids, dists)
                 }
@@ -3142,8 +3222,9 @@ impl Collection {
                     match guard.as_ref() {
                         None => (vec![], vec![]),
                         Some(fm) => {
+                            let all_data = fm.as_f32_cow();
                             let (indices, dists) =
-                                pq.search(query, search_k, fm.as_slice(), metric, PQ_OVERSAMPLE);
+                                pq.search(query, search_k, &all_data, metric, PQ_OVERSAMPLE);
                             let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                             (ids, dists)
                         }
@@ -3154,13 +3235,9 @@ impl Collection {
                     match guard.as_ref() {
                         None => (vec![], vec![]),
                         Some(fm) => {
-                            let (indices, dists) = rq.search(
-                                query,
-                                search_k,
-                                fm.as_slice(),
-                                metric,
-                                RABITQ_OVERSAMPLE,
-                            );
+                            let all_data = fm.as_f32_cow();
+                            let (indices, dists) =
+                                rq.search(query, search_k, &all_data, metric, RABITQ_OVERSAMPLE);
                             let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                             (ids, dists)
                         }
@@ -3171,13 +3248,9 @@ impl Collection {
                     match guard.as_ref() {
                         None => (vec![], vec![]),
                         Some(fm) => {
-                            let (indices, dists) = pv.search(
-                                query,
-                                search_k,
-                                fm.as_slice(),
-                                metric,
-                                POLARVEC_OVERSAMPLE,
-                            );
+                            let all_data = fm.as_f32_cow();
+                            let (indices, dists) =
+                                pv.search(query, search_k, &all_data, metric, POLARVEC_OVERSAMPLE);
                             let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
                             (ids, dists)
                         }
@@ -3285,7 +3358,7 @@ impl Collection {
             None => return Ok((Vec::new(), Vec::new())),
             Some(fm) => fm,
         };
-        let all_data = fm.as_slice();
+        let all_data = fm.as_f32_cow();
         let n_vectors = fm.len();
 
         let subset_set: std::collections::HashSet<u64> = subset.iter().cloned().collect();
@@ -3334,7 +3407,7 @@ impl Collection {
             None => return Ok((Vec::new(), Vec::new())),
             Some(fm) => fm,
         };
-        let all_data = fm.as_slice();
+        let all_data = fm.as_f32_cow();
         let n_vectors = fm.len();
 
         if subset.is_empty() {
@@ -3619,7 +3692,7 @@ impl Collection {
             let guard = self.vector_store.read_mmap()?;
             match guard.as_ref() {
                 None => (Vec::new(), 0usize),
-                Some(fm) => (fm.as_slice().to_vec(), fm.len()),
+                Some(fm) => (fm.as_f32_cow().into_owned(), fm.len()),
             }
         };
         if all_vectors.len() != n_total * dim {
@@ -3807,12 +3880,12 @@ impl Collection {
         if let Some(ref mut idx) = self.index {
             let guard = self.vector_store.read_mmap()?;
             if let Some(fm) = guard.as_ref() {
-                let all_data = fm.as_slice();
+                let all_data = fm.as_f32_cow();
                 let n_vectors = fm.len();
 
                 if n_vectors > 0 {
                     let ids: Vec<u64> = (0..n_vectors as u64).collect();
-                    idx.build(all_data, n_vectors, dim, Some(&ids))?;
+                    idx.build(&all_data, n_vectors, dim, Some(&ids))?;
 
                     let index_data = idx.serialize()?;
                     let index_path = self.path.join("index");
@@ -3850,7 +3923,8 @@ impl Collection {
             Some(fm) => {
                 let total = fm.len();
                 let take = n.min(total);
-                let data = fm.as_slice()[..take * dim].to_vec();
+                let all_data = fm.as_f32_cow();
+                let data = all_data[..take * dim].to_vec();
                 let user_ids: Vec<u64> = (0..take as u64)
                     .map(|row| self.row_to_user_id(row))
                     .collect();
@@ -3877,7 +3951,8 @@ impl Collection {
                 let total = fm.len();
                 let take = n.min(total);
                 let start = total - take;
-                let data = fm.as_slice()[start * dim..].to_vec();
+                let all_data = fm.as_f32_cow();
+                let data = all_data[start * dim..].to_vec();
                 let user_ids: Vec<u64> = (start as u64..total as u64)
                     .map(|row| self.row_to_user_id(row))
                     .collect();
@@ -3951,7 +4026,7 @@ impl Collection {
             .collect();
 
         if let Some(fm) = guard.as_ref() {
-            let all_data = fm.as_slice();
+            let all_data = fm.as_f32_cow();
             let n_total = fm.len();
 
             for (out_pos, &row) in row_offsets.iter().enumerate() {
@@ -4002,7 +4077,7 @@ impl Collection {
             Some(fm) => fm,
         };
 
-        let all_data = fm.as_slice();
+        let all_data = fm.as_f32_cow();
         let n_vectors = fm.len();
         let tombstone = self.tombstone.read();
 
@@ -4071,7 +4146,7 @@ impl Collection {
             let guard = self.vector_store.read_mmap()?;
             match guard.as_ref() {
                 None => return Ok(0),
-                Some(fm) => (fm.as_slice().to_vec(), fm.len()),
+                Some(fm) => (fm.as_f32_cow().into_owned(), fm.len()),
             }
         };
 
@@ -4121,7 +4196,7 @@ impl Collection {
                 let guard = field.vector_store.read_mmap()?;
                 match guard.as_ref() {
                     None => (Vec::new(), 0),
-                    Some(fm) => (fm.as_slice().to_vec(), fm.len()),
+                    Some(fm) => (fm.as_f32_cow().into_owned(), fm.len()),
                 }
             };
 
@@ -4234,12 +4309,26 @@ impl Collection {
             let vectors_file = std::fs::File::create(&vectors_path)?;
             let mut vectors_writer = std::io::BufWriter::new(vectors_file);
             if let Some(fm) = guard.as_ref() {
-                let all_data = fm.as_slice();
-                for &row in &row_offsets {
-                    let start = row as usize * dim;
-                    let end = start + dim;
-                    for value in &all_data[start..end] {
-                        vectors_writer.write_all(&value.to_le_bytes())?;
+                match fm.dtype() {
+                    VectorDtype::F32 => {
+                        let all_data = fm.as_slice();
+                        for &row in &row_offsets {
+                            let start = row as usize * dim;
+                            let end = start + dim;
+                            for value in &all_data[start..end] {
+                                vectors_writer.write_all(&value.to_le_bytes())?;
+                            }
+                        }
+                    }
+                    VectorDtype::F16 => {
+                        let all_data = fm.as_f16_bits_slice();
+                        for &row in &row_offsets {
+                            let start = row as usize * dim;
+                            let end = start + dim;
+                            for value in &all_data[start..end] {
+                                vectors_writer.write_all(&value.to_le_bytes())?;
+                            }
+                        }
                     }
                 }
             }
@@ -4295,6 +4384,7 @@ impl Collection {
 
         self.ensure_writable()?;
         Self::validate_export_manifest(manifest)?;
+        let vector_dtype = VectorDtype::parse(&manifest.vector_dtype)?;
         if manifest.dimension != self.meta.dimension {
             return Err(LynseError::DimensionMismatch {
                 expected: self.meta.dimension,
@@ -4314,9 +4404,12 @@ impl Collection {
         let mut vectors_reader = std::io::BufReader::new(vectors_file);
         let metadata_reader = std::io::BufReader::new(metadata_file);
 
-        let row_byte_len = manifest.dimension.checked_mul(4).ok_or_else(|| {
-            LynseError::InvalidArgument("export dimension is too large".to_string())
-        })?;
+        let row_byte_len = manifest
+            .dimension
+            .checked_mul(vector_dtype.byte_width())
+            .ok_or_else(|| {
+                LynseError::InvalidArgument("export dimension is too large".to_string())
+            })?;
         let mut row_bytes = vec![0u8; row_byte_len];
         let mut vectors = Vec::with_capacity(manifest.dimension * 1024);
         let mut ids = Vec::with_capacity(1024);
@@ -4328,8 +4421,17 @@ impl Collection {
             let record: CollectionExportRecord = serde_json::from_str(&line)
                 .map_err(|e| LynseError::Serialization(e.to_string()))?;
             vectors_reader.read_exact(&mut row_bytes)?;
-            for chunk in row_bytes.chunks_exact(4) {
-                vectors.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            match vector_dtype {
+                VectorDtype::F32 => {
+                    for chunk in row_bytes.chunks_exact(4) {
+                        vectors.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+                    }
+                }
+                VectorDtype::F16 => {
+                    for chunk in row_bytes.chunks_exact(2) {
+                        vectors.push(f16_bits_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])));
+                    }
+                }
             }
             ids.push(record.id);
             fields.push(record.field);
@@ -4759,14 +4861,36 @@ impl DatabaseEngine {
         dimension: usize,
         chunk_size: usize,
     ) -> Result<Arc<RwLock<Collection>>> {
+        self.get_or_open_collection_with_dtype(name, dimension, chunk_size, None)
+    }
+
+    pub fn get_or_open_collection_with_dtype(
+        &self,
+        name: &str,
+        dimension: usize,
+        chunk_size: usize,
+        vector_dtype: Option<VectorDtype>,
+    ) -> Result<Arc<RwLock<Collection>>> {
         let mut collections = self.collections.write();
 
         if let Some(coll) = collections.get(name) {
+            if let Some(dtype) = vector_dtype {
+                let existing = coll.read().vector_dtype;
+                if existing != dtype {
+                    return Err(LynseError::InvalidArgument(format!(
+                        "collection vector dtype {} does not match requested dtype {}",
+                        existing.storage_name(),
+                        dtype.storage_name()
+                    )));
+                }
+            }
             return Ok(Arc::clone(coll));
         }
 
         let collection = if self.read_only {
             Collection::open_read_only(&self.root_path, name, dimension, chunk_size)?
+        } else if let Some(dtype) = vector_dtype {
+            Collection::open_with_dtype(&self.root_path, name, dimension, chunk_size, dtype)?
         } else {
             Collection::open(&self.root_path, name, dimension, chunk_size)?
         };
@@ -4782,12 +4906,22 @@ impl DatabaseEngine {
         dimension: usize,
         chunk_size: usize,
     ) -> Result<Arc<RwLock<Collection>>> {
+        self.create_collection_with_dtype(name, dimension, chunk_size, VectorDtype::F32)
+    }
+
+    pub fn create_collection_with_dtype(
+        &self,
+        name: &str,
+        dimension: usize,
+        chunk_size: usize,
+        vector_dtype: VectorDtype,
+    ) -> Result<Arc<RwLock<Collection>>> {
         self.ensure_writable()?;
         let coll_path = self.root_path.join(name);
         if coll_path.exists() {
             return Err(LynseError::CollectionAlreadyExists(name.to_string()));
         }
-        self.get_or_open_collection(name, dimension, chunk_size)
+        self.get_or_open_collection_with_dtype(name, dimension, chunk_size, Some(vector_dtype))
     }
 
     /// Drop a collection.
@@ -5030,6 +5164,9 @@ impl DatabaseEngine {
             dim: storage_manifest.dimension,
             chunk_size: storage_manifest.chunk_size,
             description: None,
+            dtypes: VectorDtype::parse(&storage_manifest.vector_dtype)?
+                .storage_name()
+                .to_string(),
         })
     }
 
@@ -5077,11 +5214,13 @@ impl DatabaseEngine {
             std::fs::remove_dir_all(&target_path)?;
         }
 
-        let mut collection = Collection::open(
+        let export_dtype = VectorDtype::parse(&export_manifest.vector_dtype)?;
+        let mut collection = Collection::open_with_dtype(
             &self.root_path,
             name,
             export_manifest.dimension,
             export_manifest.chunk_size,
+            export_dtype,
         )?;
         let import_result = collection.import_from_export(export_path, &export_manifest);
         if let Err(err) = import_result {
@@ -5098,6 +5237,7 @@ impl DatabaseEngine {
             dim: export_manifest.dimension,
             chunk_size: export_manifest.chunk_size,
             description: None,
+            dtypes: export_dtype.storage_name().to_string(),
         })
     }
 
@@ -5127,6 +5267,89 @@ mod tests {
 
         let err = coll.add_items(&vectors, 1, &[42], None).unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn f16_collection_persists_dtype_and_searches_after_reopen() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut coll =
+                Collection::open_with_dtype(tmp.path(), "col", 4, 100, VectorDtype::F16).unwrap();
+            coll.add_items(
+                &[
+                    1.0, 0.0, 0.0, 0.0, //
+                    0.0, 1.0, 0.0, 0.0, //
+                    0.5, 0.5, 0.0, 0.0,
+                ],
+                3,
+                &[10, 11, 12],
+                None,
+            )
+            .unwrap();
+            coll.checkpoint().unwrap();
+            assert_eq!(coll.vector_dtype(), VectorDtype::F16);
+            assert_eq!(
+                std::fs::metadata(coll.vector_store.vectors_path())
+                    .unwrap()
+                    .len(),
+                24
+            );
+        }
+
+        let coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        assert_eq!(coll.vector_dtype(), VectorDtype::F16);
+        assert_eq!(coll.meta.dtypes, "float16");
+
+        let result = coll
+            .search(&[1.0, 0.0, 0.0, 0.0], 2, None, 10, false, 1e-4)
+            .unwrap();
+        assert_eq!(result.ids, vec![10, 12]);
+        assert!((result.distances[0] - 1.0).abs() < 1e-6);
+        assert!((result.distances[1] - 0.5).abs() < 1e-6);
+        drop(coll);
+
+        let err = match Collection::open_with_dtype(tmp.path(), "col", 4, 100, VectorDtype::F32) {
+            Ok(_) => panic!("opening an f16 collection as f32 should fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("does not match requested dtype"));
+    }
+
+    #[test]
+    fn f16_named_vector_field_searches() {
+        let tmp = TempDir::new().unwrap();
+        let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        coll.add_items(
+            &[
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0,
+            ],
+            2,
+            &[1, 2],
+            None,
+        )
+        .unwrap();
+        let config = coll
+            .create_vector_field_with_dtype("image", 2, Some("ip"), None, Some("float16"))
+            .unwrap();
+        assert_eq!(config.dtypes, "float16");
+        coll.add_named_vectors("image", &[1.0, 0.0, 0.0, 1.0], 2, &[1, 2])
+            .unwrap();
+
+        let result = coll
+            .search_vector_field_with_options("image", &[0.0, 1.0], 1, None, false, 1e-4)
+            .unwrap();
+        assert_eq!(result.ids, vec![2]);
+        assert!((result.distances[0] - 1.0).abs() < 1e-6);
+
+        let field = coll.named_vector_fields.get("image").unwrap();
+        assert_eq!(field.vector_store.dtype(), VectorDtype::F16);
+        assert_eq!(
+            std::fs::metadata(field.vector_store.vectors_path())
+                .unwrap()
+                .len(),
+            8
+        );
     }
 
     #[test]
@@ -5375,6 +5598,81 @@ mod tests {
 
                 let (vectors, fields) = coll.read_vectors_by_ids(&[10])?;
                 assert_eq!(vectors, vec![1.0, 0.0, 0.0, 0.0]);
+                assert_eq!(fields[0].get("tag"), Some(&serde_json::json!("keep")));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn manager_export_import_f16_collection_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let export_path = tmp.path().join("exports").join("col_f16_export");
+        let manager = DatabaseManager::new(tmp.path()).unwrap();
+        manager.create_database("db").unwrap();
+        manager
+            .require_collection_with_dtype(
+                "db",
+                "col",
+                4,
+                100,
+                false,
+                Some("source"),
+                Some("float16"),
+            )
+            .unwrap();
+        manager
+            .with_database("db", |engine| {
+                let coll = engine.get_or_open_collection_with_dtype(
+                    "col",
+                    4,
+                    100,
+                    Some(VectorDtype::F16),
+                )?;
+                let fields = vec![HashMap::from([(
+                    "tag".to_string(),
+                    serde_json::json!("keep"),
+                )])];
+                coll.write()
+                    .add_items(&[1.0, 0.5, 0.0, -0.5], 1, &[10], Some(&fields))?;
+                Ok(())
+            })
+            .unwrap();
+
+        manager
+            .export_collection("db", "col", &export_path)
+            .unwrap();
+
+        let manifest = Collection::read_export_manifest(&export_path).unwrap();
+        assert_eq!(manifest.vector_dtype, "float16");
+        assert_eq!(manifest.dimension, 4);
+        assert_eq!(manifest.count, 1);
+        assert_eq!(
+            std::fs::metadata(export_path.join(COLLECTION_EXPORT_VECTORS_FILE))
+                .unwrap()
+                .len(),
+            8
+        );
+
+        manager
+            .import_collection_from_export("db", "imported_f16", &export_path, false)
+            .unwrap();
+        let configs = manager.get_collection_configs("db").unwrap();
+        assert_eq!(configs.get("imported_f16").unwrap().dtypes, "float16");
+
+        manager
+            .with_database("db", |engine| {
+                let coll = engine.get_or_open_collection_with_dtype(
+                    "imported_f16",
+                    4,
+                    100,
+                    Some(VectorDtype::F16),
+                )?;
+                let coll = coll.read();
+                assert_eq!(coll.vector_dtype(), VectorDtype::F16);
+                assert_eq!(coll.shape()?, (1, 4));
+                let (vectors, fields) = coll.read_vectors_by_ids(&[10])?;
+                assert_eq!(vectors, vec![1.0, 0.5, 0.0, -0.5]);
                 assert_eq!(fields[0].get("tag"), Some(&serde_json::json!("keep")));
                 Ok(())
             })
@@ -6206,6 +6504,8 @@ pub struct CollectionConfig {
     pub chunk_size: usize,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default = "default_vector_dtype_string")]
+    pub dtypes: String,
 }
 
 /// Top-level manager for multiple databases.
@@ -6447,7 +6747,32 @@ impl DatabaseManager {
         drop_if_exists: bool,
         description: Option<&str>,
     ) -> Result<()> {
+        self.require_collection_with_dtype(
+            db_name,
+            collection_name,
+            dim,
+            chunk_size,
+            drop_if_exists,
+            description,
+            None,
+        )
+    }
+
+    pub fn require_collection_with_dtype(
+        &self,
+        db_name: &str,
+        collection_name: &str,
+        dim: usize,
+        chunk_size: usize,
+        drop_if_exists: bool,
+        description: Option<&str>,
+        dtypes: Option<&str>,
+    ) -> Result<()> {
         self.ensure_writable()?;
+        let vector_dtype = match dtypes {
+            Some(dtype) => VectorDtype::parse(dtype)?,
+            None => VectorDtype::F32,
+        };
         // Ensure database is open
         self.get_or_open_database(db_name)?;
 
@@ -6459,12 +6784,24 @@ impl DatabaseManager {
         }
 
         self.with_database(db_name, |engine| {
-            let _ = engine.get_or_open_collection(collection_name, dim, chunk_size)?;
+            let _ = engine.get_or_open_collection_with_dtype(
+                collection_name,
+                dim,
+                chunk_size,
+                Some(vector_dtype),
+            )?;
             Ok(())
         })?;
 
         // Save collection config
-        self.save_collection_config(db_name, collection_name, dim, chunk_size, description)?;
+        self.save_collection_config(
+            db_name,
+            collection_name,
+            dim,
+            chunk_size,
+            description,
+            Some(vector_dtype),
+        )?;
         Ok(())
     }
 
@@ -6476,6 +6813,7 @@ impl DatabaseManager {
         dim: usize,
         chunk_size: usize,
         description: Option<&str>,
+        vector_dtype: Option<VectorDtype>,
     ) -> Result<()> {
         let db_path = self.root_path.join(db_name);
         let config_path = db_path.join("collections.json");
@@ -6492,7 +6830,13 @@ impl DatabaseManager {
                 dim,
                 chunk_size,
                 description: description.map(|s| s.to_string()),
+                dtypes: vector_dtype.unwrap_or_default().storage_name().to_string(),
             });
+        entry.dim = dim;
+        entry.chunk_size = chunk_size;
+        if let Some(dtype) = vector_dtype {
+            entry.dtypes = dtype.storage_name().to_string();
+        }
         if let Some(desc) = description {
             entry.description = Some(desc.to_string());
         }
@@ -6742,6 +7086,7 @@ impl DatabaseManager {
             config.dim,
             config.chunk_size,
             config.description.as_deref(),
+            Some(VectorDtype::parse(&config.dtypes)?),
         )
     }
 
@@ -6764,6 +7109,7 @@ impl DatabaseManager {
             config.dim,
             config.chunk_size,
             config.description.as_deref(),
+            Some(VectorDtype::parse(&config.dtypes)?),
         )
     }
 

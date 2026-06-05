@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::engine::{Collection, DatabaseEngine, DatabaseManager, SearchResult, VectorFieldConfig};
+use crate::storage::dtype::VectorDtype;
 
 /// Register all Python classes and functions into the module.
 pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -58,19 +59,36 @@ impl PyDatabaseEngine {
     }
 
     /// Create a new collection.
-    fn create_collection(&self, name: &str, dimension: usize) -> PyResult<PyCollection> {
+    #[pyo3(signature = (name, dimension, dtypes=None))]
+    fn create_collection(
+        &self,
+        name: &str,
+        dimension: usize,
+        dtypes: Option<&str>,
+    ) -> PyResult<PyCollection> {
+        let vector_dtype = parse_py_vector_dtype(dtypes)?;
         let coll = self
             .inner
-            .create_collection(name, dimension, 100_000)
+            .create_collection_with_dtype(name, dimension, 100_000, vector_dtype)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(PyCollection { inner: coll })
     }
 
     /// Get or open an existing collection.
-    fn get_collection(&self, name: &str, dimension: usize) -> PyResult<PyCollection> {
+    #[pyo3(signature = (name, dimension, dtypes=None))]
+    fn get_collection(
+        &self,
+        name: &str,
+        dimension: usize,
+        dtypes: Option<&str>,
+    ) -> PyResult<PyCollection> {
+        let vector_dtype = dtypes
+            .map(VectorDtype::parse)
+            .transpose()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         let coll = self
             .inner
-            .get_or_open_collection(name, dimension, 100_000)
+            .get_or_open_collection_with_dtype(name, dimension, 100_000, vector_dtype)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(PyCollection { inner: coll })
     }
@@ -182,16 +200,17 @@ impl PyCollection {
     }
 
     /// Create an additional named vector field for existing records.
-    #[pyo3(signature = (name, dimension, metric=None, index_mode=None))]
+    #[pyo3(signature = (name, dimension, metric=None, index_mode=None, dtypes=None))]
     fn create_vector_field(
         &self,
         name: &str,
         dimension: usize,
         metric: Option<&str>,
         index_mode: Option<&str>,
+        dtypes: Option<&str>,
     ) -> PyResult<()> {
         let mut coll = self.inner.write();
-        coll.create_vector_field(name, dimension, metric, index_mode)
+        coll.create_vector_field_with_dtype(name, dimension, metric, index_mode, dtypes)
             .map(|_| ())
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
@@ -466,6 +485,10 @@ impl PyCollection {
         self.inner.read().meta.dimension
     }
 
+    fn vector_dtype(&self) -> String {
+        self.inner.read().vector_dtype().storage_name().to_string()
+    }
+
     /// Get current index mode.
     fn index_mode(&self) -> Option<String> {
         self.inner.read().meta.index_mode.clone()
@@ -647,7 +670,7 @@ impl PyCollection {
     /// Get vector store info for zero-copy mmap access.
     ///
     /// Returns (path, n_vectors, dimension) so Python can create:
-    ///   vectors = np.memmap(path, dtype=np.float32, mode='r').reshape(n, dim)
+    ///   vectors = np.memmap(path, dtype=collection.vector_dtype, mode='r').reshape(n, dim)
     ///
     /// This is **true zero-copy**: OS page cache ensures the same physical
     /// pages are shared between Rust mmap and Python memmap.
@@ -668,6 +691,7 @@ impl PyCollection {
     /// No data is copied — reads go directly to the page cache.
     fn vectors_numpy<'py>(&self, py: Python<'py>) -> PyResult<Py<PyAny>> {
         let coll = self.inner.read();
+        let dtype = coll.vector_dtype().numpy_name().to_string();
         let (path, n, dim) = coll
             .vector_store_info()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
@@ -676,13 +700,13 @@ impl PyCollection {
         if n == 0 {
             // Return empty array
             let np = py.import("numpy")?;
-            let empty = np.call_method1("zeros", ((0, dim), "float32"))?;
+            let empty = np.call_method1("zeros", ((0, dim), dtype.as_str()))?;
             return Ok(empty.unbind());
         }
 
         let np = py.import("numpy")?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "float32")?;
+        kwargs.set_item("dtype", dtype)?;
         kwargs.set_item("mode", "r")?;
         kwargs.set_item("shape", (n as usize, dim))?;
         let memmap = np.call_method("memmap", (path,), Some(&kwargs))?;
@@ -948,8 +972,12 @@ pub struct PyFlatIndex {
 impl PyFlatIndex {
     #[new]
     fn new(path: &str, dim: usize) -> PyResult<Self> {
-        let inner = crate::storage::flat_mmap::FlatMmap::open(std::path::Path::new(path), dim)
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let inner = crate::storage::flat_mmap::FlatMmap::open(
+            std::path::Path::new(path),
+            dim,
+            VectorDtype::F32,
+        )
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
 
@@ -1260,7 +1288,7 @@ impl PyDatabaseManager {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-    #[pyo3(signature = (db_name, collection_name, dim, drop_if_exists=None, description=None))]
+    #[pyo3(signature = (db_name, collection_name, dim, drop_if_exists=None, description=None, dtypes=None))]
     fn require_collection(
         &self,
         db_name: &str,
@@ -1268,15 +1296,17 @@ impl PyDatabaseManager {
         dim: usize,
         drop_if_exists: Option<bool>,
         description: Option<&str>,
+        dtypes: Option<&str>,
     ) -> PyResult<()> {
         self.inner
-            .require_collection(
+            .require_collection_with_dtype(
                 db_name,
                 collection_name,
                 dim,
                 100_000,
                 drop_if_exists.unwrap_or(false),
                 description,
+                dtypes,
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
@@ -1387,14 +1417,14 @@ impl PyDatabaseManager {
         &self,
         db_name: &str,
         collection_name: &str,
-    ) -> PyResult<Option<(usize, usize, Option<String>)>> {
+    ) -> PyResult<Option<(usize, usize, Option<String>, String)>> {
         let configs = self
             .inner
             .get_collection_configs(db_name)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(configs
             .get(collection_name)
-            .map(|c| (c.dim, c.chunk_size, c.description.clone())))
+            .map(|c| (c.dim, c.chunk_size, c.description.clone(), c.dtypes.clone())))
     }
 
     fn root_path(&self) -> String {
@@ -1472,9 +1502,17 @@ fn vector_fields_to_pylist<'py>(
         dict.set_item("dimension", field.dimension)?;
         dict.set_item("metric", &field.metric)?;
         dict.set_item("index_mode", &field.index_mode)?;
+        dict.set_item("dtypes", &field.dtypes)?;
         list.append(dict)?;
     }
     Ok(list)
+}
+
+fn parse_py_vector_dtype(dtypes: Option<&str>) -> PyResult<VectorDtype> {
+    dtypes
+        .map(VectorDtype::parse)
+        .unwrap_or_else(|| Ok(VectorDtype::F32))
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 fn py_fields_to_json(

@@ -20,16 +20,23 @@ LynseDB uses your integer IDs as stable external IDs. IDs should be unique insid
 one collection. Incrementing IDs are recommended because they keep storage
 layout predictable and make debugging easier.
 
-Dense vectors are stored as `float32`. Convert arrays before insertion when you
-control the embedding pipeline:
+Dense vectors are stored as `float32` by default. Use `dtypes="float16"` when
+you want half-precision vector storage:
+
+```python
+collection = db.require_collection("items_f16", dim=128, dtypes="float16")
+```
+
+Convert arrays before insertion when you control the embedding pipeline:
 
 ```python
 vector = np.random.rand(128).astype(np.float32)
 ```
 
-If your embedding model returns Python lists or `float64` arrays, LynseDB will
-convert them to `float32`. Converting before insertion makes memory use more
-predictable:
+If your embedding model returns Python lists, `float64`, or `float16` arrays,
+LynseDB accepts them through the Python API and computes distances in `float32`.
+For `float16` collections, stored vectors are quantized to half precision on
+write:
 
 ```python
 embedding = np.asarray(embedding, dtype=np.float32)
@@ -257,7 +264,8 @@ print(collection.list_fields())
 
 ## Ingestion recipe for production
 
-1. Generate embeddings in `float32`.
+1. Generate embeddings in `float32`, or choose `dtypes="float16"` when storage
+   footprint matters more than full precision.
 2. Assign stable integer IDs.
 3. Store source identifiers, tenant, language, timestamps, and display text in
    metadata fields.

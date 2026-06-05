@@ -57,6 +57,7 @@ tempfile = "3"
 memmap2 = "0.9"
 libc = "0.2"
 num_cpus = "1"
+half = "2"
 
 [features]
 default = []

@@ -322,7 +322,7 @@ pub fn create_index_with_options(
             metric,
             quant,
             n_centroids.unwrap_or(256),
-            32,  // nprobe
+            32, // nprobe
         ))),
     }
 }

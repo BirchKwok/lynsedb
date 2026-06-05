@@ -161,9 +161,10 @@ class DatabaseManager:
         dim: int,
         drop_if_exists: bool = False,
         description: Optional[str] = None,
+        dtypes: str = "float32",
     ) -> None:
         self._manager.require_collection(
-            db_name, collection_name, dim, drop_if_exists, description
+            db_name, collection_name, dim, drop_if_exists, description, dtypes
         )
 
     def drop_collection(self, db_name: str, collection_name: str) -> None:
@@ -220,8 +221,8 @@ class DatabaseManager:
         result = self._manager.get_collection_config(db_name, collection_name)
         if result is None:
             return None
-        dim, _chunk_size, description = result
-        return {"dim": dim, "description": description}
+        dim, _chunk_size, description, dtypes = result
+        return {"dim": dim, "description": description, "dtypes": dtypes}
 
     @property
     def root_path(self) -> str:
@@ -280,15 +281,15 @@ class RustEngine:
     # ── Collection management ──
 
     def create_collection(
-        self, name: str, dimension: int,
+        self, name: str, dimension: int, dtypes: str = "float32",
     ) -> "Collection":
-        coll = self._engine.create_collection(name, dimension)
+        coll = self._engine.create_collection(name, dimension, dtypes)
         return Collection(coll)
 
     def get_collection(
-        self, name: str, dimension: int,
+        self, name: str, dimension: int, dtypes: Optional[str] = None,
     ) -> "Collection":
-        coll = self._engine.get_collection(name, dimension)
+        coll = self._engine.get_collection(name, dimension, dtypes)
         return Collection(coll)
 
     def drop_collection(self, name: str) -> None:
@@ -465,9 +466,10 @@ class Collection:
         dimension: int,
         metric: Optional[str] = None,
         index_mode: Optional[str] = None,
+        dtypes: Optional[str] = None,
     ) -> None:
         """Create a named vector field with its own dimension and metric."""
-        self._inner.create_vector_field(name, int(dimension), metric, index_mode)
+        self._inner.create_vector_field(name, int(dimension), metric, index_mode, dtypes)
 
     def list_vector_fields(self) -> List[Dict[str, Any]]:
         """List vector fields, including the reserved default primary vector."""
@@ -726,6 +728,10 @@ class Collection:
     @property
     def dimension(self) -> int:
         return self._inner.dimension()
+
+    @property
+    def vector_dtype(self) -> str:
+        return self._inner.vector_dtype()
 
     @property
     def index_mode(self) -> Optional[str]:

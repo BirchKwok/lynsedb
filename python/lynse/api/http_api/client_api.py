@@ -156,6 +156,7 @@ class HTTPClient:
             warm_up: bool = False,
             drop_if_exists: bool = False,
             description: str = None,
+            dtypes: str = "float32",
     ):
         """
         Create a collection.
@@ -170,6 +171,7 @@ class HTTPClient:
             drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
             description (str): A description of the collection. Default is None.
                 The description is limited to 500 characters.
+            dtypes (str): Dense vector storage dtype, "float32" or "float16".
 
         Returns:
             Collection: The collection object.
@@ -187,6 +189,7 @@ class HTTPClient:
             "warm_up": warm_up,
             "drop_if_exists": drop_if_exists,
             "description": description,
+            "dtypes": dtypes,
         }
 
         try:
@@ -201,6 +204,7 @@ class HTTPClient:
                     warm_up=warm_up,
                     drop_if_exists=drop_if_exists,
                     description=description,
+                    dtypes=dtypes,
                     api_key=self._api_key,
                 )
                 return collection
@@ -241,6 +245,7 @@ class HTTPClient:
                 dim=config.get('dim'),
                 chunk_size=config.get('chunk_size'),
                 description=config.get('description'),
+                dtypes=config.get('dtypes', 'float32'),
                 warm_up=warm_up,
                 api_key=self._api_key,
             )
@@ -565,6 +570,7 @@ class Collection:
             cache_query: Union[bool, None] = None,
             cache_chunks: Union[int, None] = None,
             api_key: Union[str, None] = None,
+            dtypes: str = "float32",
     ):
         """
         Initialize the collection.
@@ -584,6 +590,7 @@ class Collection:
             cache_chunks (int): The number of chunks to cache. Currently
                 ignored by the Rust HTTP client.
             api_key (str): Optional Bearer token.
+            dtypes (str): Dense vector storage dtype.
 
         """
         self.IS_DELETED = False
@@ -600,12 +607,17 @@ class Collection:
             'drop_if_exists': drop_if_exists,
             'cache_query': cache_query,
             'cache_chunks': cache_chunks,
+            'dtypes': dtypes,
         }
 
         self.COMMIT_FLAG = False
 
         self._mesosphere_list = queue.Queue()
         self._lock = Lock()
+
+    @property
+    def vector_dtype(self) -> str:
+        return self._init_params.get('dtypes', 'float32')
 
     def exists(self):
         """
@@ -1286,6 +1298,7 @@ class Collection:
             dim: int,
             metric: str = "ip",
             index_mode: Union[str, None] = None,
+            dtypes: Union[str, None] = None,
     ):
         """Create a named vector field with its own dimension and metric."""
         uri = f'{self._uri}/create_vector_field'
@@ -1296,6 +1309,7 @@ class Collection:
             "dim": int(dim),
             "metric": metric,
             "index_mode": index_mode,
+            "dtypes": dtypes,
         }
         response = self._session.post(uri, json=data)
         if response.status_code == 200:

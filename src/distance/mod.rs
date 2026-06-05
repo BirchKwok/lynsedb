@@ -73,6 +73,19 @@ pub fn compute_distance_f32(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32
     }
 }
 
+/// Compute distance between an f32 query and an f16-encoded candidate row.
+#[inline(always)]
+pub fn compute_distance_f16(query: &[f32], candidate_bits: &[u16], metric: DistanceMetric) -> f32 {
+    debug_assert_eq!(query.len(), candidate_bits.len());
+    match metric {
+        DistanceMetric::InnerProduct => simd::inner_product_f16(query, candidate_bits),
+        DistanceMetric::L2Squared => simd::l2_squared_f16(query, candidate_bits),
+        DistanceMetric::Cosine => simd::cosine_distance_f16(query, candidate_bits),
+        DistanceMetric::Hamming => simd::hamming_f16(query, candidate_bits),
+        DistanceMetric::Jaccard => simd::jaccard_f16(query, candidate_bits),
+    }
+}
+
 // ─── Batch distance computation ─────────────────────────────────────────────
 
 /// Compute distances from one query to all candidates, writing into a pre-allocated buffer.

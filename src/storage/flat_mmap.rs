@@ -13,9 +13,11 @@
 
 use crate::distance::simd;
 use crate::distance::{self, DistanceMetric};
+use crate::storage::dtype::{decode_f16_bytes_to_f32, encode_f32_slice_as_le_bytes, VectorDtype};
 use memmap2::Mmap;
 use parking_lot::RwLock;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
@@ -86,6 +88,7 @@ const APPROX_IP_ORDER_VECTOR_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub struct FlatMmap {
     path: PathBuf,
     dim: usize,
+    dtype: VectorDtype,
     n_vectors: usize,
     /// Persistent mmap — kept alive for the lifetime of this struct.
     mmap: Option<Mmap>,
@@ -116,15 +119,15 @@ impl FlatMmap {
     /// Create or open a flat vector file.
     ///
     /// Applies cheap mmap hints without eager-prefaulting the whole file.
-    pub fn open(path: &Path, dim: usize) -> std::io::Result<Self> {
+    pub fn open(path: &Path, dim: usize, dtype: VectorDtype) -> std::io::Result<Self> {
         if !path.exists() {
             File::create(path)?;
         }
 
         let file = File::open(path)?;
         let file_len = file.metadata()?.len() as usize;
-        let n_floats = file_len / 4;
-        let n_vectors = if dim > 0 { n_floats / dim } else { 0 };
+        let n_values = file_len / dtype.byte_width();
+        let n_vectors = if dim > 0 { n_values / dim } else { 0 };
 
         let mmap = if n_vectors > 0 {
             let m = unsafe { Mmap::map(&file)? };
@@ -141,6 +144,7 @@ impl FlatMmap {
         Ok(Self {
             path: path.to_path_buf(),
             dim,
+            dtype,
             n_vectors,
             mmap,
             sq8: RwLock::new(None),
@@ -162,19 +166,53 @@ impl FlatMmap {
     }
 
     #[inline]
+    pub fn dtype(&self) -> VectorDtype {
+        self.dtype
+    }
+
+    #[inline]
     fn vector_file_len(&self) -> u64 {
-        (self.n_vectors * self.dim * std::mem::size_of::<f32>()) as u64
+        (self.n_vectors * self.dim * self.dtype.byte_width()) as u64
     }
 
     /// Get the raw f32 slice from mmap (zero-copy).
     #[inline]
     pub fn as_slice(&self) -> &[f32] {
+        assert_eq!(
+            self.dtype,
+            VectorDtype::F32,
+            "as_slice() is only zero-copy for float32 vector stores"
+        );
         match &self.mmap {
             Some(m) => {
                 let ptr = m.as_ptr() as *const f32;
                 unsafe { std::slice::from_raw_parts(ptr, self.n_vectors * self.dim) }
             }
             None => &[],
+        }
+    }
+
+    #[inline]
+    pub fn as_f16_bits_slice(&self) -> &[u16] {
+        assert_eq!(
+            self.dtype,
+            VectorDtype::F16,
+            "as_f16_bits_slice() is only valid for float16 vector stores"
+        );
+        match &self.mmap {
+            Some(m) => {
+                let ptr = m.as_ptr() as *const u16;
+                unsafe { std::slice::from_raw_parts(ptr, self.n_vectors * self.dim) }
+            }
+            None => &[],
+        }
+    }
+
+    pub fn as_f32_cow(&self) -> Cow<'_, [f32]> {
+        match (self.dtype, &self.mmap) {
+            (VectorDtype::F32, _) => Cow::Borrowed(self.as_slice()),
+            (VectorDtype::F16, Some(m)) => Cow::Owned(decode_f16_bytes_to_f32(m)),
+            (VectorDtype::F16, None) => Cow::Borrowed(&[]),
         }
     }
 
@@ -200,16 +238,15 @@ impl FlatMmap {
             .create(true)
             .append(true)
             .open(&self.path)?;
-        let bytes: &[u8] =
-            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
-        file.write_all(bytes)?;
+        let bytes = encode_f32_slice_as_le_bytes(data, self.dtype);
+        file.write_all(&bytes)?;
         file.flush()?;
         drop(file);
 
         // Re-mmap with madvise hints
         let file = File::open(&self.path)?;
         let file_len = file.metadata()?.len() as usize;
-        self.n_vectors = file_len / 4 / self.dim;
+        self.n_vectors = file_len / self.dtype.byte_width() / self.dim;
         let m = unsafe { Mmap::map(&file)? };
         madvise_sequential(&m);
         self.mmap = Some(m);
@@ -256,8 +293,8 @@ impl FlatMmap {
         // Slow path: build SQ8 quantization
         let mut guard = self.sq8.write();
         if guard.is_none() {
-            let candidates = self.as_slice();
-            *guard = Some(SQ8Data::from_f32_parallel(candidates, self.dim));
+            let candidates = self.as_f32_cow();
+            *guard = Some(SQ8Data::from_f32_parallel(&candidates, self.dim));
         }
     }
 
@@ -281,8 +318,9 @@ impl FlatMmap {
         }
 
         let pool = pool.min(self.n_vectors);
+        let candidates = self.as_f32_cow();
         let (sum_desc, sum_desc_vectors, sum_asc, sum_asc_vectors) =
-            build_approx_ip_row_order(self.as_slice(), self.dim, 0, self.n_vectors, pool);
+            build_approx_ip_row_order(&candidates, self.dim, 0, self.n_vectors, pool);
         let order = ApproxIpOrder {
             n_vectors: self.n_vectors,
             pool,
@@ -314,7 +352,8 @@ impl FlatMmap {
             return;
         }
 
-        let norms = build_approx_norms(self.as_slice(), self.dim, self.n_vectors);
+        let candidates = self.as_f32_cow();
+        let norms = build_approx_norms(&candidates, self.dim, self.n_vectors);
         let _ = save_approx_norms(&self.path, self.dim, self.vector_file_len(), &norms);
         *guard = Some(norms);
     }
@@ -338,7 +377,24 @@ impl FlatMmap {
         }
         let k = k.min(subset_indices.len());
         let dim = self.dim;
-        let candidates = self.as_slice();
+        if self.dtype == VectorDtype::F16 {
+            return search_filtered_f16(
+                query,
+                self.as_f16_bits_slice(),
+                dim,
+                k,
+                n,
+                metric,
+                subset_indices,
+            );
+        }
+        let candidates_cow;
+        let candidates: &[f32] = if self.dtype == VectorDtype::F32 {
+            self.as_slice()
+        } else {
+            candidates_cow = self.as_f32_cow();
+            &candidates_cow
+        };
 
         // Threshold: direct access for few matches, parallel scan for many
         const DIRECT_ACCESS_LIMIT: usize = 50_000;
@@ -460,11 +516,11 @@ impl FlatMmap {
         }
         let k = k.min(n);
         let dim = self.dim;
-        let candidates = self.as_slice();
 
         // Approximate two-phase search on the original f32 data. This path
         // intentionally does not use SQ8/PQ/RaBitQ quantized representations.
         if let Some(config) = approx.filter(|_| metric.supports_flat_approx()) {
+            let candidates = self.as_f32_cow();
             if metric == DistanceMetric::InnerProduct
                 && dim > super::approx_search::APPROX_BOUND_BLOCK_LEN
                 && n > super::approx_search::APPROX_INIT_ROWS
@@ -472,21 +528,42 @@ impl FlatMmap {
                 let pool = approx_ip_order_pool_size(k, n, config.eps);
                 self.ensure_approx_ip_order(pool);
                 if let Some(order) = self.approx_ip_order.read().as_ref() {
-                    return approx_ip_order_search(query, candidates, dim, k, n, config.eps, order);
+                    return approx_ip_order_search(
+                        query,
+                        &candidates,
+                        dim,
+                        k,
+                        n,
+                        config.eps,
+                        order,
+                    );
                 }
             }
             if matches!(metric, DistanceMetric::L2Squared | DistanceMetric::Cosine) {
                 self.ensure_approx_norms();
                 if let Some(norms) = self.approx_norms.read().as_ref() {
                     if let Some(result) = approx_norm_cached_search(
-                        query, candidates, norms, dim, k, n, metric, config.eps,
+                        query,
+                        &candidates,
+                        norms,
+                        dim,
+                        k,
+                        n,
+                        metric,
+                        config.eps,
                     ) {
                         return result;
                     }
                 }
             }
             return super::approx_search::approx_flat_search(
-                query, candidates, dim, k, n, metric, config,
+                query,
+                &candidates,
+                dim,
+                k,
+                n,
+                metric,
+                config,
             );
         }
 
@@ -497,14 +574,20 @@ impl FlatMmap {
                 DistanceMetric::InnerProduct | DistanceMetric::L2Squared | DistanceMetric::Cosine
             )
         {
+            let candidates = self.as_f32_cow();
             self.ensure_sq8();
             let sq8_guard = self.sq8.read();
             if let Some(ref sq8) = *sq8_guard {
-                return sq8_two_pass_search(query, candidates, sq8, dim, k, n, metric);
+                return sq8_two_pass_search(query, &candidates, sq8, dim, k, n, metric);
             }
         }
 
+        if self.dtype == VectorDtype::F16 {
+            return exact_flat_search_f16(query, self.as_f16_bits_slice(), dim, k, n, metric);
+        }
+
         // Full f32 scan
+        let candidates = self.as_slice();
         exact_flat_search(query, candidates, dim, k, n, metric)
     }
 }
@@ -527,6 +610,30 @@ fn exact_flat_search(
         }
         _ => fused_topk_parallel::<true>(query, candidates, dim, k, n, |a, b| {
             distance::compute_distance_f32(a, b, metric)
+        }),
+    }
+}
+
+fn exact_flat_search_f16(
+    query: &[f32],
+    candidates: &[u16],
+    dim: usize,
+    k: usize,
+    n: usize,
+    metric: DistanceMetric,
+) -> (Vec<u32>, Vec<f32>) {
+    match metric {
+        DistanceMetric::InnerProduct => {
+            fused_topk_parallel_f16::<false>(query, candidates, dim, k, n, simd::inner_product_f16)
+        }
+        DistanceMetric::L2Squared => {
+            fused_topk_parallel_f16::<true>(query, candidates, dim, k, n, simd::l2_squared_f16)
+        }
+        DistanceMetric::Cosine => {
+            fused_topk_parallel_f16::<true>(query, candidates, dim, k, n, simd::cosine_distance_f16)
+        }
+        _ => fused_topk_parallel_f16::<true>(query, candidates, dim, k, n, |a, b| {
+            distance::compute_distance_f16(a, b, metric)
         }),
     }
 }
@@ -4046,6 +4153,142 @@ fn fused_topk_seq<const ASC: bool>(
     (indices, dists)
 }
 
+#[inline(never)]
+fn fused_topk_parallel_f16<const ASC: bool>(
+    query: &[f32],
+    candidates: &[u16],
+    dim: usize,
+    k: usize,
+    n: usize,
+    dist_fn: impl Fn(&[f32], &[u16]) -> f32 + Send + Sync,
+) -> (Vec<u32>, Vec<f32>) {
+    if n < 4096 {
+        return fused_topk_seq_f16::<ASC>(query, candidates, dim, k, 0, &dist_fn);
+    }
+
+    let n_threads = rayon::current_num_threads();
+    let chunk_vecs = (n / n_threads).max(512);
+    let chunk_values = chunk_vecs * dim;
+
+    let chunk_results: Vec<Vec<TopKEntry>> = candidates
+        .par_chunks(chunk_values)
+        .enumerate()
+        .map(|(chunk_idx, cand_chunk)| {
+            let n_in_chunk = cand_chunk.len() / dim;
+            let base_idx = chunk_idx * chunk_vecs;
+
+            let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
+            let mut threshold: f32 = if ASC {
+                f32::INFINITY
+            } else {
+                f32::NEG_INFINITY
+            };
+            let mut filled = false;
+
+            for i in 0..n_in_chunk {
+                if i + PREFETCH_AHEAD_VECTORS < n_in_chunk {
+                    unsafe {
+                        prefetch_read_data(
+                            cand_chunk
+                                .as_ptr()
+                                .add((i + PREFETCH_AHEAD_VECTORS) * dim)
+                                .cast(),
+                        );
+                    }
+                }
+                let cand = unsafe { cand_chunk.get_unchecked(i * dim..(i + 1) * dim) };
+                let dist = dist_fn(query, cand);
+
+                if !filled || passes_threshold::<ASC>(dist, threshold) {
+                    topk_insert::<ASC>(
+                        &mut top,
+                        k,
+                        TopKEntry {
+                            dist,
+                            idx: (base_idx + i) as u32,
+                        },
+                        &mut threshold,
+                        &mut filled,
+                    );
+                }
+            }
+
+            if !filled && !top.is_empty() {
+                if ASC {
+                    top.sort_unstable_by(|a, b| {
+                        a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal)
+                    });
+                } else {
+                    top.sort_unstable_by(|a, b| {
+                        b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal)
+                    });
+                }
+            }
+            top
+        })
+        .collect();
+
+    merge_topk_results::<ASC>(&chunk_results, k)
+}
+
+fn fused_topk_seq_f16<const ASC: bool>(
+    query: &[f32],
+    candidates: &[u16],
+    dim: usize,
+    k: usize,
+    base_idx: usize,
+    dist_fn: &impl Fn(&[f32], &[u16]) -> f32,
+) -> (Vec<u32>, Vec<f32>) {
+    let n = candidates.len() / dim;
+    let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
+    let mut threshold: f32 = if ASC {
+        f32::INFINITY
+    } else {
+        f32::NEG_INFINITY
+    };
+    let mut filled = false;
+
+    for i in 0..n {
+        if i + PREFETCH_AHEAD_VECTORS < n {
+            unsafe {
+                prefetch_read_data(
+                    candidates
+                        .as_ptr()
+                        .add((i + PREFETCH_AHEAD_VECTORS) * dim)
+                        .cast(),
+                );
+            }
+        }
+        let cand = unsafe { candidates.get_unchecked(i * dim..(i + 1) * dim) };
+        let dist = dist_fn(query, cand);
+
+        if !filled || passes_threshold::<ASC>(dist, threshold) {
+            topk_insert::<ASC>(
+                &mut top,
+                k,
+                TopKEntry {
+                    dist,
+                    idx: (base_idx + i) as u32,
+                },
+                &mut threshold,
+                &mut filled,
+            );
+        }
+    }
+
+    if !filled && !top.is_empty() {
+        if ASC {
+            top.sort_unstable_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal));
+        } else {
+            top.sort_unstable_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal));
+        }
+    }
+
+    let indices = top.iter().map(|e| e.idx).collect();
+    let dists = top.iter().map(|e| e.dist).collect();
+    (indices, dists)
+}
+
 /// Merge per-thread sorted results into final top-k.
 fn merge_topk_results<const ASC: bool>(
     chunk_results: &[Vec<TopKEntry>],
@@ -4140,6 +4383,164 @@ fn direct_access_topk<const ASC: bool>(
     (indices, dists)
 }
 
+fn direct_access_topk_f16<const ASC: bool>(
+    query: &[f32],
+    candidates: &[u16],
+    dim: usize,
+    k: usize,
+    n_vectors: usize,
+    subset_ids: &[u64],
+    dist_fn: impl Fn(&[f32], &[u16]) -> f32,
+) -> (Vec<u32>, Vec<f32>) {
+    let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
+    let mut threshold: f32 = if ASC {
+        f32::INFINITY
+    } else {
+        f32::NEG_INFINITY
+    };
+    let mut filled = false;
+
+    for &id in subset_ids {
+        let idx = id as usize;
+        if idx >= n_vectors {
+            continue;
+        }
+        let start = idx * dim;
+        let cand = unsafe { candidates.get_unchecked(start..start + dim) };
+        let dist = dist_fn(query, cand);
+
+        if !filled || passes_threshold::<ASC>(dist, threshold) {
+            topk_insert::<ASC>(
+                &mut top,
+                k,
+                TopKEntry {
+                    dist,
+                    idx: idx as u32,
+                },
+                &mut threshold,
+                &mut filled,
+            );
+        }
+    }
+
+    if !filled && !top.is_empty() {
+        if ASC {
+            top.sort_unstable_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal));
+        } else {
+            top.sort_unstable_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal));
+        }
+    }
+
+    let indices = top.iter().map(|e| e.idx).collect();
+    let dists = top.iter().map(|e| e.dist).collect();
+    (indices, dists)
+}
+
+fn search_filtered_f16(
+    query: &[f32],
+    candidates: &[u16],
+    dim: usize,
+    k: usize,
+    n: usize,
+    metric: DistanceMetric,
+    subset_indices: &[u64],
+) -> (Vec<u32>, Vec<f32>) {
+    const DIRECT_ACCESS_LIMIT: usize = 50_000;
+
+    if subset_indices.len() <= DIRECT_ACCESS_LIMIT {
+        return match metric {
+            DistanceMetric::InnerProduct => direct_access_topk_f16::<false>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                subset_indices,
+                simd::inner_product_f16,
+            ),
+            DistanceMetric::L2Squared => direct_access_topk_f16::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                subset_indices,
+                simd::l2_squared_f16,
+            ),
+            DistanceMetric::Cosine => direct_access_topk_f16::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                subset_indices,
+                simd::cosine_distance_f16,
+            ),
+            _ => direct_access_topk_f16::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                subset_indices,
+                |a, b| distance::compute_distance_f16(a, b, metric),
+            ),
+        };
+    }
+
+    let max_id = subset_indices.iter().copied().max().unwrap_or(0) as usize;
+    let mut bitset = vec![0u64; (max_id / 64) + 1];
+    for &id in subset_indices {
+        let idx = id as usize;
+        if idx < n {
+            bitset[idx / 64] |= 1u64 << (idx % 64);
+        }
+    }
+
+    match metric {
+        DistanceMetric::InnerProduct => fused_topk_parallel_filtered_f16::<false>(
+            query,
+            candidates,
+            dim,
+            k,
+            n,
+            &bitset,
+            max_id,
+            simd::inner_product_f16,
+        ),
+        DistanceMetric::L2Squared => fused_topk_parallel_filtered_f16::<true>(
+            query,
+            candidates,
+            dim,
+            k,
+            n,
+            &bitset,
+            max_id,
+            simd::l2_squared_f16,
+        ),
+        DistanceMetric::Cosine => fused_topk_parallel_filtered_f16::<true>(
+            query,
+            candidates,
+            dim,
+            k,
+            n,
+            &bitset,
+            max_id,
+            simd::cosine_distance_f16,
+        ),
+        _ => fused_topk_parallel_filtered_f16::<true>(
+            query,
+            candidates,
+            dim,
+            k,
+            n,
+            &bitset,
+            max_id,
+            |a, b| distance::compute_distance_f16(a, b, metric),
+        ),
+    }
+}
+
 /// Parallel scan with bitset filtering for high-selectivity filters.
 ///
 /// Same structure as `fused_topk_parallel` but skips non-matching vectors
@@ -4228,6 +4629,120 @@ fn fused_topk_parallel_filtered<const ASC: bool>(
 
                 let start = i * dim;
                 let cand = unsafe { cand_chunk.get_unchecked(start..start + dim) };
+                let dist = dist_fn(query, cand);
+
+                if !filled || passes_threshold::<ASC>(dist, threshold) {
+                    topk_insert::<ASC>(
+                        &mut top,
+                        k,
+                        TopKEntry {
+                            dist,
+                            idx: global_id as u32,
+                        },
+                        &mut threshold,
+                        &mut filled,
+                    );
+                }
+            }
+
+            if !filled && !top.is_empty() {
+                if ASC {
+                    top.sort_unstable_by(|a, b| {
+                        a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal)
+                    });
+                } else {
+                    top.sort_unstable_by(|a, b| {
+                        b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal)
+                    });
+                }
+            }
+            top
+        })
+        .collect();
+
+    merge_topk_results::<ASC>(&chunk_results, k)
+}
+
+#[inline(never)]
+fn fused_topk_parallel_filtered_f16<const ASC: bool>(
+    query: &[f32],
+    candidates: &[u16],
+    dim: usize,
+    k: usize,
+    n: usize,
+    bitset: &[u64],
+    max_id: usize,
+    dist_fn: impl Fn(&[f32], &[u16]) -> f32 + Send + Sync,
+) -> (Vec<u32>, Vec<f32>) {
+    if n < 4096 {
+        let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
+        let mut threshold: f32 = if ASC {
+            f32::INFINITY
+        } else {
+            f32::NEG_INFINITY
+        };
+        let mut filled = false;
+
+        for i in 0..n {
+            if i > max_id || (bitset[i / 64] & (1u64 << (i % 64))) == 0 {
+                continue;
+            }
+            let cand = unsafe { candidates.get_unchecked(i * dim..(i + 1) * dim) };
+            let dist = dist_fn(query, cand);
+            if !filled || passes_threshold::<ASC>(dist, threshold) {
+                topk_insert::<ASC>(
+                    &mut top,
+                    k,
+                    TopKEntry {
+                        dist,
+                        idx: i as u32,
+                    },
+                    &mut threshold,
+                    &mut filled,
+                );
+            }
+        }
+
+        if !filled && !top.is_empty() {
+            if ASC {
+                top.sort_unstable_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal));
+            } else {
+                top.sort_unstable_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal));
+            }
+        }
+
+        let indices = top.iter().map(|e| e.idx).collect();
+        let dists = top.iter().map(|e| e.dist).collect();
+        return (indices, dists);
+    }
+
+    let n_threads = rayon::current_num_threads();
+    let chunk_vecs = (n / n_threads).max(512);
+    let chunk_values = chunk_vecs * dim;
+
+    let chunk_results: Vec<Vec<TopKEntry>> = candidates
+        .par_chunks(chunk_values)
+        .enumerate()
+        .map(|(chunk_idx, cand_chunk)| {
+            let n_in_chunk = cand_chunk.len() / dim;
+            let base_idx = chunk_idx * chunk_vecs;
+
+            let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
+            let mut threshold: f32 = if ASC {
+                f32::INFINITY
+            } else {
+                f32::NEG_INFINITY
+            };
+            let mut filled = false;
+
+            for i in 0..n_in_chunk {
+                let global_id = base_idx + i;
+                if global_id > max_id || (bitset[global_id / 64] & (1u64 << (global_id % 64))) == 0
+                {
+                    continue;
+                }
+
+                let cand = unsafe { cand_chunk.get_unchecked(i * dim..(i + 1) * dim) };
                 let dist = dist_fn(query, cand);
 
                 if !filled || passes_threshold::<ASC>(dist, threshold) {
@@ -4619,7 +5134,7 @@ mod tests {
         let path = tmp.path().join("vectors.bin");
         let dim = 4;
 
-        let mut store = FlatMmap::open(&path, dim).unwrap();
+        let mut store = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
         assert_eq!(store.len(), 0);
 
         // Write 5 vectors
@@ -4654,7 +5169,7 @@ mod tests {
         let path = tmp.path().join("vectors.bin");
         let dim = 2;
 
-        let mut store = FlatMmap::open(&path, dim).unwrap();
+        let mut store = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
 
         // Write batch 1
         store.write(&[1.0, 2.0, 3.0, 4.0]).unwrap();
@@ -4676,12 +5191,12 @@ mod tests {
 
         // Write data
         {
-            let mut store = FlatMmap::open(&path, dim).unwrap();
+            let mut store = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
             store.write(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
         }
 
         // Reopen and verify
-        let store = FlatMmap::open(&path, dim).unwrap();
+        let store = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
         assert_eq!(store.len(), 2);
         let (ids, _) = store.search(&[1.0, 2.0, 3.0], 1, DistanceMetric::L2Squared, false, None);
         assert_eq!(ids[0], 0);
@@ -4736,7 +5251,7 @@ mod tests {
             data[true_idx as usize * dim + j] = 1.0;
         }
 
-        let mut store = FlatMmap::open(&path, dim).unwrap();
+        let mut store = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
         store.write(&data).unwrap();
 
         let (ids, dists) = store.search(
@@ -4766,7 +5281,7 @@ mod tests {
             data[true_idx as usize * dim + j] = 1.0;
         }
 
-        let mut store = FlatMmap::open(&path, dim).unwrap();
+        let mut store = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
         store.write(&data).unwrap();
 
         let (ids, dists) = store.search(
@@ -4796,7 +5311,7 @@ mod tests {
             data[negative_idx as usize * dim + j] = -2.0;
         }
 
-        let mut store = FlatMmap::open(&path, dim).unwrap();
+        let mut store = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
         store.write(&data).unwrap();
         let config = Some(crate::storage::approx_search::ApproxSearchConfig::new(1e-4));
 
@@ -4848,7 +5363,7 @@ mod tests {
             data[top_idx as usize * dim + j] = 1.0;
         }
 
-        let mut store = FlatMmap::open(&path, dim).unwrap();
+        let mut store = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
         store.write(&data).unwrap();
         let query = vec![1.0f32; dim];
         let config = Some(crate::storage::approx_search::ApproxSearchConfig::new(1e-4));
@@ -4860,7 +5375,7 @@ mod tests {
         assert!(sidecar_path.exists());
 
         drop(store);
-        let reopened = FlatMmap::open(&path, dim).unwrap();
+        let reopened = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
         assert!(reopened.approx_ip_order.read().is_some());
         let (ids, _) = reopened.search(&query, 1, DistanceMetric::InnerProduct, false, config);
         assert_eq!(ids, vec![top_idx]);
@@ -4875,7 +5390,7 @@ mod tests {
         file.write_all(bytes).unwrap();
         file.flush().unwrap();
 
-        let reopened_stale = FlatMmap::open(&path, dim).unwrap();
+        let reopened_stale = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
         assert!(reopened_stale.approx_ip_order.read().is_none());
         let (ids, dists) =
             reopened_stale.search(&query, 1, DistanceMetric::InnerProduct, false, config);
@@ -4905,7 +5420,7 @@ mod tests {
         }
         let query = data[query_idx * dim..(query_idx + 1) * dim].to_vec();
 
-        let mut store = FlatMmap::open(&path, dim).unwrap();
+        let mut store = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
         store.write(&data).unwrap();
         let sidecar_path = approx_norms_path(&path);
         assert!(sidecar_path.exists());
@@ -4927,7 +5442,7 @@ mod tests {
         }
 
         drop(store);
-        let reopened = FlatMmap::open(&path, dim).unwrap();
+        let reopened = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
         assert!(reopened.approx_norms.read().is_some());
         drop(reopened);
 
@@ -4939,7 +5454,7 @@ mod tests {
         file.write_all(bytes).unwrap();
         file.flush().unwrap();
 
-        let reopened_stale = FlatMmap::open(&path, dim).unwrap();
+        let reopened_stale = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
         assert!(reopened_stale.approx_norms.read().is_none());
         let _ = reopened_stale.search(&query, 5, DistanceMetric::Cosine, false, config);
         assert!(reopened_stale.approx_norms.read().is_some());

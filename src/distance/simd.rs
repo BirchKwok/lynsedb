@@ -3,6 +3,8 @@
 //! Optimized for high-dimensional vectors (700-3500 dims).
 //! Uses platform-specific SIMD intrinsics with fallback to scalar code.
 
+use half::f16;
+
 /// Inner product (dot product) of two f32 vectors.
 /// Higher value = more similar.
 #[inline(always)]
@@ -212,6 +214,89 @@ pub fn hamming_u8(a: &[u8], b: &[u8]) -> u32 {
         .zip(b.iter())
         .map(|(&x, &y)| (x ^ y).count_ones())
         .sum()
+}
+
+// ─── Float16 candidate distance helpers ─────────────────────────────────────
+
+/// Inner product between an f32 query and an f16-encoded candidate row.
+#[inline(always)]
+pub fn inner_product_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
+    debug_assert_eq!(query.len(), candidate_bits.len());
+    let mut sum = 0.0f64;
+    for i in 0..query.len() {
+        sum += (query[i] as f64) * (f16::from_bits(candidate_bits[i]).to_f32() as f64);
+    }
+    sum as f32
+}
+
+/// Squared L2 distance between an f32 query and an f16-encoded candidate row.
+#[inline(always)]
+pub fn l2_squared_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
+    debug_assert_eq!(query.len(), candidate_bits.len());
+    let mut sum = 0.0f64;
+    for i in 0..query.len() {
+        let cand = f16::from_bits(candidate_bits[i]).to_f32();
+        let diff = (query[i] - cand) as f64;
+        sum += diff * diff;
+    }
+    sum as f32
+}
+
+/// Cosine distance between an f32 query and an f16-encoded candidate row.
+#[inline(always)]
+pub fn cosine_distance_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
+    debug_assert_eq!(query.len(), candidate_bits.len());
+    let mut dot = 0.0f64;
+    let mut norm_q = 0.0f64;
+    let mut norm_c = 0.0f64;
+    for i in 0..query.len() {
+        let q = query[i] as f64;
+        let c = f16::from_bits(candidate_bits[i]).to_f32() as f64;
+        dot += q * c;
+        norm_q += q * q;
+        norm_c += c * c;
+    }
+    if norm_q == 0.0 || norm_c == 0.0 {
+        1.0
+    } else {
+        (1.0 - dot / (norm_q.sqrt() * norm_c.sqrt())) as f32
+    }
+}
+
+#[inline]
+pub fn hamming_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
+    debug_assert_eq!(query.len(), candidate_bits.len());
+    let mut count = 0u32;
+    for i in 0..query.len() {
+        let qb = query[i] > 0.5;
+        let cb = f16::from_bits(candidate_bits[i]).to_f32() > 0.5;
+        if qb != cb {
+            count += 1;
+        }
+    }
+    count as f32
+}
+
+#[inline]
+pub fn jaccard_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
+    debug_assert_eq!(query.len(), candidate_bits.len());
+    let mut intersection = 0u32;
+    let mut union = 0u32;
+    for i in 0..query.len() {
+        let qb = query[i] > 0.5;
+        let cb = f16::from_bits(candidate_bits[i]).to_f32() > 0.5;
+        if qb || cb {
+            union += 1;
+            if qb && cb {
+                intersection += 1;
+            }
+        }
+    }
+    if union == 0 {
+        0.0
+    } else {
+        1.0 - (intersection as f32 / union as f32)
+    }
 }
 
 // ─── Scalar fallbacks ────────────────────────────────────────────────────────
