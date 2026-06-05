@@ -92,10 +92,3 @@ class DataInsertionSession:
             enable_progress_bar=enable_progress_bar,
         )
 
-
-class DummySession:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        return False

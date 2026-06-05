@@ -2376,9 +2376,10 @@ impl Collection {
             } else if upper.contains("POLARVEC") {
                 if n > 0 {
                     let bits = parse_bits(&upper, POLARVEC_DEFAULT_BITS);
+                    let metric = self.resolve_metric();
                     let guard = self.vector_store.read_mmap()?;
                     let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
-                    let pv = PolarVecIndex::build(fm.as_slice(), n, dim, bits);
+                    let pv = PolarVecIndex::build_for_metric(fm.as_slice(), n, dim, bits, metric);
                     drop(guard);
                     let pv_path = self.path.join("polarvec_index.bin");
                     pv.save(&pv_path)

@@ -29,10 +29,16 @@
 //! v1: `[magic u32][version=1 u32][dim u32][padded_dim u32][bits u32][n_vectors u64]`
 //!     `[n_sign_words u32][sign_words ×u64][dim_mins ×f32][dim_scales ×f32]`
 //!     `[codes n×bytes_per_vec u8][norms n×f32]`
-//! v2: same as v1 + `[residual_sq n×f32]`  (||v_rot − v̂_rot||² per vector)
+//! v2: same as v1 + `[residual_sq n×f32]`  (||v_rot − vhat_rot||² per vector)
+//! v3: same as v2 + `[residual_signs n×u32]`
+//! v4: same as v3 + `[inv_v_hat_norms n×f32]`
+//! v5: `[magic][version=5][dim][padded_dim][bits][n_vectors][flags u32]`
+//!     `[n_sign_words][sign_words][dim_mins][dim_scales][codes]`
+//!     plus `[residual_sq]` when `flags & 1 != 0`
+//!     plus `[inv_v_hat_norms]` when `flags & 2 != 0`.
 //!
-//! L2 distance correction (v2): coarse score = LUT + residual_sq[i]
-//!   LUT ≈ ||q_rot − v̂_rot||²,  residual_sq[i] = ||e_rot||² = ||v_rot − v̂_rot||²
+//! L2 distance correction (v2+/v5 flag): coarse score = LUT + residual_sq[i]
+//!   LUT ~= ||q_rot - vhat_rot||²,  residual_sq[i] = ||e_rot||² = ||v_rot - vhat_rot||²
 //!   Together they approximate ||q_rot − v_rot||² minus the cross-term,
 //!   which has near-zero mean (RHT isotropy) → better candidate ranking.
 
@@ -48,18 +54,15 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 const POLARVEC_MAGIC: u32 = 0x504C_5651; // "PLVQ"
-const POLARVEC_VERSION: u32 = 4;
+const POLARVEC_VERSION: u32 = 5;
+const FLAG_RESIDUAL_SQ: u32 = 1;
+const FLAG_INV_V_HAT_NORMS: u32 = 2;
 /// Default oversample multiplier for two-pass re-ranking.
 pub const DEFAULT_OVERSAMPLE: usize = 20;
 /// Default bits per dimension.
 pub const DEFAULT_BITS: usize = 4;
 /// Seed for the RHT sign vector (same as RaBitQ for consistency).
 const SIGN_SEED: u64 = 42;
-const RESIDUAL_SIGN_BITS: usize = 32;
-const RESIDUAL_SIGN_SEED: u64 = 4242;
-const SIGN_RERANK_OVERSCAN: usize = 3;
-const IP_SIGN_CORRECTION_SCALE: f32 = 0.75;
-const COSINE_SIGN_CORRECTION_SCALE: f32 = 0.22;
 
 // ─── PolarVec Index ────────────────────────────────────────────────────────────
 
@@ -87,17 +90,14 @@ pub struct PolarVecIndex {
     dim_scales: Vec<f32>,
     /// Packed b-bit codes: `[n_vectors × bytes_per_vec]` u8 flat array.
     codes: Vec<u8>,
-    /// Original L2 norms: `[n_vectors]` f32.
-    norms: Vec<f32>,
     /// Per-vector quantization residual squared norm in rotated space:
     /// `residual_sq[i] = ||v_rot_i − v̂_rot_i||²`.
     /// Added to the LUT score for L2 metric to correct for quantization bias:
     /// `LUT[i] + residual_sq[i] ≈ ||q_rot − v_rot_i||² − cross_term`.
-    /// Empty for indices loaded from v1 files (no correction applied).
+    /// Empty for IP/Cosine indices and for v1 files (no correction applied).
     residual_sq: Vec<f32>,
-    residual_signs: Vec<u32>,
-    /// Reciprocal of ||v_hat_rot||: used as cosine-score denominator so the
-    /// LUT numerator and denominator are in the same (rotated, quantized) space.
+    /// Reciprocal of ||v_hat_rot|| for cosine coarse scoring. Empty for IP/L2
+    /// v5 indices; older files may populate it for compatibility.
     inv_v_hat_norms: Vec<f32>,
     n_vectors: usize,
 }
@@ -107,6 +107,21 @@ impl PolarVecIndex {
     ///
     /// `bits` controls compression: 4 (default, 8× vs f32), 3 (10.7×), 8 (4× like SQ8).
     pub fn build(data: &[f32], n_vectors: usize, dim: usize, bits: usize) -> Self {
+        Self::build_for_metric(data, n_vectors, dim, bits, DistanceMetric::L2Squared)
+    }
+
+    /// Build a PolarVec index with metric-aware auxiliary storage.
+    ///
+    /// IP/Cosine do not need per-vector correction arrays because the final exact
+    /// re-rank receives the original f32 data. L2 keeps one residual-squared
+    /// value per vector because it improves coarse candidate ordering cheaply.
+    pub fn build_for_metric(
+        data: &[f32],
+        n_vectors: usize,
+        dim: usize,
+        bits: usize,
+        metric: DistanceMetric,
+    ) -> Self {
         assert!(n_vectors > 0, "need at least one vector");
         assert!(dim > 0, "dimension must be positive");
         assert!(bits >= 1 && bits <= 8, "bits must be in [1, 8]");
@@ -116,8 +131,8 @@ impl PolarVecIndex {
         let bytes_per_vec = compute_bytes_per_vec(padded_dim, bits);
         let sign_words_len = (padded_dim + 63) / 64;
         let sign_words = generate_sign_words(sign_words_len, SIGN_SEED);
-        let projection_words =
-            generate_projection_words(RESIDUAL_SIGN_BITS, sign_words_len, RESIDUAL_SIGN_SEED);
+        let store_residual_sq = metric == DistanceMetric::L2Squared;
+        let store_inv_v_hat_norms = metric == DistanceMetric::Cosine;
 
         // Pass 1: compute per-dim min/max using a subsample (up to 50K vectors)
         let n_sample = n_vectors.min(50_000);
@@ -198,8 +213,7 @@ impl PolarVecIndex {
         let enc_chunk = 4096usize;
         let n_enc_chunks = (n_vectors + enc_chunk - 1) / enc_chunk;
 
-        let results: Vec<(usize, Vec<u8>, Vec<f32>, Vec<f32>, Vec<u32>, Vec<f32>)> = (0
-            ..n_enc_chunks)
+        let results: Vec<(usize, Vec<u8>, Vec<f32>, Vec<f32>)> = (0..n_enc_chunks)
             .into_par_iter()
             .map(|chunk| {
                 let start = chunk * enc_chunk;
@@ -207,20 +221,21 @@ impl PolarVecIndex {
                 let n_in = end - start;
 
                 let mut chunk_codes = vec![0u8; n_in * bytes_per_vec];
-                let mut chunk_norms = vec![0.0f32; n_in];
-                let mut chunk_residual_sq = vec![0.0f32; n_in];
-                let mut chunk_residual_signs = vec![0u32; n_in];
-                let mut chunk_inv_v_hat_norms = vec![0.0f32; n_in];
+                let mut chunk_residual_sq = if store_residual_sq {
+                    vec![0.0f32; n_in]
+                } else {
+                    Vec::new()
+                };
+                let mut chunk_inv_v_hat_norms = if store_inv_v_hat_norms {
+                    vec![0.0f32; n_in]
+                } else {
+                    Vec::new()
+                };
                 let mut buf = vec![0.0f32; padded_dim];
-                let mut residual = vec![0.0f32; padded_dim];
 
                 for i in 0..n_in {
                     let vi = start + i;
                     let src = &data[vi * dim..(vi + 1) * dim];
-
-                    // Store L2 norm of the original vector
-                    let norm = src.iter().map(|&x| x * x).sum::<f32>().sqrt();
-                    chunk_norms[i] = norm;
 
                     // Apply RHT
                     buf[..dim].copy_from_slice(src);
@@ -243,51 +258,51 @@ impl PolarVecIndex {
                         let raw_code = (val - dim_mins[d]) / dim_scales[d];
                         let code = raw_code.round().max(0.0).min(n_levels_m1) as u8;
                         pack_code_at(&mut chunk_codes, code_base, d, code, bits);
-                        let v_hat_d = dim_mins[d] + code as f32 * dim_scales[d];
-                        let diff = val - v_hat_d;
-                        residual[d] = diff;
-                        res_sq += diff * diff;
-                        v_hat_sq += v_hat_d * v_hat_d;
+                        if store_residual_sq || store_inv_v_hat_norms {
+                            let v_hat_d = dim_mins[d] + code as f32 * dim_scales[d];
+                            if store_residual_sq {
+                                let diff = val - v_hat_d;
+                                res_sq += diff * diff;
+                            }
+                            if store_inv_v_hat_norms {
+                                v_hat_sq += v_hat_d * v_hat_d;
+                            }
+                        }
                     }
-                    chunk_residual_sq[i] = res_sq;
-                    chunk_residual_signs[i] =
-                        project_sign_bits(&residual, &projection_words, sign_words_len);
-                    chunk_inv_v_hat_norms[i] = 1.0 / v_hat_sq.sqrt().max(1e-12);
+                    if store_residual_sq {
+                        chunk_residual_sq[i] = res_sq;
+                    }
+                    if store_inv_v_hat_norms {
+                        chunk_inv_v_hat_norms[i] = 1.0 / v_hat_sq.sqrt().max(1e-12);
+                    }
                 }
-                (
-                    start,
-                    chunk_codes,
-                    chunk_norms,
-                    chunk_residual_sq,
-                    chunk_residual_signs,
-                    chunk_inv_v_hat_norms,
-                )
+                (start, chunk_codes, chunk_residual_sq, chunk_inv_v_hat_norms)
             })
             .collect();
 
         // Merge encoding results
         let mut codes = vec![0u8; n_vectors * bytes_per_vec];
-        let mut norms = vec![0.0f32; n_vectors];
-        let mut residual_sq = vec![0.0f32; n_vectors];
-        let mut residual_signs = vec![0u32; n_vectors];
-        let mut inv_v_hat_norms = vec![0.0f32; n_vectors];
-        for (
-            start,
-            chunk_codes,
-            chunk_norms,
-            chunk_residual_sq,
-            chunk_residual_signs,
-            chunk_inv_v_hat_norms,
-        ) in results
-        {
+        let mut residual_sq = if store_residual_sq {
+            vec![0.0f32; n_vectors]
+        } else {
+            Vec::new()
+        };
+        let mut inv_v_hat_norms = if store_inv_v_hat_norms {
+            vec![0.0f32; n_vectors]
+        } else {
+            Vec::new()
+        };
+        for (start, chunk_codes, chunk_residual_sq, chunk_inv_v_hat_norms) in results {
             let end = (start + enc_chunk).min(n_vectors);
             let n_in = end - start;
             codes[start * bytes_per_vec..end * bytes_per_vec]
                 .copy_from_slice(&chunk_codes[..n_in * bytes_per_vec]);
-            norms[start..end].copy_from_slice(&chunk_norms[..n_in]);
-            residual_sq[start..end].copy_from_slice(&chunk_residual_sq[..n_in]);
-            residual_signs[start..end].copy_from_slice(&chunk_residual_signs[..n_in]);
-            inv_v_hat_norms[start..end].copy_from_slice(&chunk_inv_v_hat_norms[..n_in]);
+            if store_residual_sq {
+                residual_sq[start..end].copy_from_slice(&chunk_residual_sq[..n_in]);
+            }
+            if store_inv_v_hat_norms {
+                inv_v_hat_norms[start..end].copy_from_slice(&chunk_inv_v_hat_norms[..n_in]);
+            }
         }
 
         PolarVecIndex {
@@ -300,9 +315,7 @@ impl PolarVecIndex {
             dim_mins,
             dim_scales,
             codes,
-            norms,
             residual_sq,
-            residual_signs,
             inv_v_hat_norms,
             n_vectors,
         }
@@ -339,25 +352,6 @@ impl PolarVecIndex {
         apply_signs(&mut q_rot, &self.sign_words, self.padded_dim);
         fwht(&mut q_rot[..self.padded_dim]);
 
-        // For IP/Cosine: project the rotated query onto RESIDUAL_SIGN_BITS random directions.
-        // Cache the sum of projected values so sign_correction_score_scaled avoids recomputing
-        // it on every vector in the one-pass path.
-        let sign_projection: Option<([f32; RESIDUAL_SIGN_BITS], f32)> =
-            if matches!(
-                metric,
-                DistanceMetric::InnerProduct | DistanceMetric::Cosine
-            ) && !self.residual_signs.is_empty()
-            {
-                let n_words = (self.padded_dim + 63) / 64;
-                let projection_words =
-                    generate_projection_words(RESIDUAL_SIGN_BITS, n_words, RESIDUAL_SIGN_SEED);
-                let proj = project_query_values(&q_rot, &projection_words, n_words);
-                let total = proj.iter().sum::<f32>();
-                Some((proj, total))
-            } else {
-                None
-            };
-
         // Build per-dimension LUT (padded_dim × n_levels floats)
         let lut = build_lut(
             &q_rot,
@@ -384,78 +378,28 @@ impl PolarVecIndex {
         } else {
             &[][..]
         };
-
-        // For IP/Cosine with sign projection: two-phase approach (when dataset is large
-        // enough that the O(OVERSCAN×n_cands) merge overhead is worth the savings).
-        // Phase 1a: fast LUT-only scan of ALL n vectors → top OVERSCAN×n_candidates.
-        // Phase 1b: apply sign correction only to that small subset → top n_candidates.
-        // Phase 2:  exact f32 re-rank.
-        //
-        // For small datasets (n_vectors < SIGN_RERANK_TWO_PASS_RATIO × n_coarse) the
-        // fixed overhead of the second pass outweighs the saving, so fall back to
-        // one-pass metric-aware scoring with sign correction in the inner loop.
-        let n_coarse = (n_candidates * SIGN_RERANK_OVERSCAN).min(self.n_vectors);
-        // Use two-pass whenever n_coarse < n_vectors: the rerank costs only
-        // ~n_coarse × 32-bit-popcount ops (negligible) while saving n_vectors ×
-        // 32-float sign-correction in the hot scan loop.  When n_coarse == n_vectors
-        // there is no filtering benefit, so fall back to one-pass.
-        let use_two_pass = sign_projection.is_some() && n_coarse < self.n_vectors;
-        // Convert Option<([f32;32], f32)> → Option<(&[f32;32], f32)> for scan_topn
-        let sign_proj_ref: Option<(&[f32; RESIDUAL_SIGN_BITS], f32)> =
-            sign_projection.as_ref().map(|(proj, total)| (proj, *total));
-
-        let candidates: Vec<u32> = if use_two_pass {
-            let (proj, total) = sign_projection.as_ref().unwrap();
-            // Phase 1a: fast LUT-only coarse scan → Vec<(score, idx)>
-            let coarse = scan_topn(
-                &self.codes,
-                self.n_vectors,
-                self.bytes_per_vec,
-                self.bits,
-                self.n_levels,
-                &lut,
-                &byte_lut_4bit,
-                n_coarse,
-                ascending,
-                correction,
-                metric,
-                None,
-                &[],
-                &self.inv_v_hat_norms,
-            );
-            // Phase 1b: apply sign correction to the small subset (no LUT rescore)
-            rerank_candidates_metric_aware(
-                &coarse,
-                metric,
-                proj,
-                *total,
-                &self.residual_signs,
-                &self.inv_v_hat_norms,
-                n_candidates,
-                ascending,
-            )
+        let multiplier = if metric == DistanceMetric::Cosine {
+            &self.inv_v_hat_norms[..]
         } else {
-            // One-pass: sign correction (with total_qv cached) per-vector inside scan
-            scan_topn(
-                &self.codes,
-                self.n_vectors,
-                self.bytes_per_vec,
-                self.bits,
-                self.n_levels,
-                &lut,
-                &byte_lut_4bit,
-                n_candidates,
-                ascending,
-                correction,
-                metric,
-                sign_proj_ref,
-                &self.residual_signs,
-                &self.inv_v_hat_norms,
-            )
-            .into_iter()
-            .map(|(_, idx)| idx)
-            .collect()
+            &[][..]
         };
+
+        let candidates: Vec<u32> = scan_topn(
+            &self.codes,
+            self.n_vectors,
+            self.bytes_per_vec,
+            self.bits,
+            self.n_levels,
+            &lut,
+            &byte_lut_4bit,
+            n_candidates,
+            ascending,
+            correction,
+            multiplier,
+        )
+        .into_iter()
+        .map(|(_, idx)| idx)
+        .collect();
 
         // Pass 2: exact f32 re-rank
         rescore_exact(&candidates, query, f32_data, self.dim, k, metric)
@@ -481,6 +425,14 @@ impl PolarVecIndex {
         w.write_all(&(self.padded_dim as u32).to_le_bytes())?;
         w.write_all(&(self.bits as u32).to_le_bytes())?;
         w.write_all(&(self.n_vectors as u64).to_le_bytes())?;
+        let mut flags = 0u32;
+        if !self.residual_sq.is_empty() {
+            flags |= FLAG_RESIDUAL_SQ;
+        }
+        if !self.inv_v_hat_norms.is_empty() {
+            flags |= FLAG_INV_V_HAT_NORMS;
+        }
+        w.write_all(&flags.to_le_bytes())?;
 
         // Sign words
         w.write_all(&(self.sign_words.len() as u32).to_le_bytes())?;
@@ -499,21 +451,10 @@ impl PolarVecIndex {
         // Codes (raw u8)
         w.write_all(&self.codes)?;
 
-        // Norms (f32 LE)
-        for &n in &self.norms {
-            w.write_all(&n.to_le_bytes())?;
-        }
-
-        // v2: residual squared norms (f32 LE)
+        // v5 optional: residual squared norms (f32 LE)
         for &r in &self.residual_sq {
             w.write_all(&r.to_le_bytes())?;
         }
-
-        for &bits in &self.residual_signs {
-            w.write_all(&bits.to_le_bytes())?;
-        }
-
-        // v4: reciprocal of ||v_hat_rot|| for true cosine coarse scoring
         for &v in &self.inv_v_hat_norms {
             w.write_all(&v.to_le_bytes())?;
         }
@@ -534,13 +475,20 @@ impl PolarVecIndex {
                 "Invalid PolarVec magic bytes",
             ));
         }
-        let _version = read_u32le(&mut r)?;
+        let version = read_u32le(&mut r)?;
+        if !(1..=POLARVEC_VERSION).contains(&version) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Unsupported PolarVec version: {}", version),
+            ));
+        }
         let dim = read_u32le(&mut r)? as usize;
         let padded_dim = read_u32le(&mut r)? as usize;
         let bits = read_u32le(&mut r)? as usize;
         let n_vectors = read_u64le(&mut r)? as usize;
         let n_levels = 1usize << bits;
         let bytes_per_vec = compute_bytes_per_vec(padded_dim, bits);
+        let flags = if version >= 5 { read_u32le(&mut r)? } else { 0 };
 
         let n_sign_words = read_u32le(&mut r)? as usize;
         let mut sign_words = vec![0u64; n_sign_words];
@@ -563,14 +511,19 @@ impl PolarVecIndex {
         let mut codes = vec![0u8; n_vectors * bytes_per_vec];
         r.read_exact(&mut codes)?;
 
-        let mut norms = vec![0.0f32; n_vectors];
-        for n in norms.iter_mut() {
-            let b = read_4bytes(&mut r)?;
-            *n = f32::from_le_bytes(b);
+        // v1-v4 stored norms even though PolarVec no longer needs them.
+        if version <= 4 {
+            for _ in 0..n_vectors {
+                let _ = read_4bytes(&mut r)?;
+            }
         }
 
-        // v2: load residual_sq; v1 files have no residual data → empty Vec (no correction).
-        let residual_sq = if _version >= 2 {
+        let has_residual_sq = if version >= 5 {
+            flags & FLAG_RESIDUAL_SQ != 0
+        } else {
+            version >= 2
+        };
+        let residual_sq = if has_residual_sq {
             let mut rs = vec![0.0f32; n_vectors];
             for r_val in rs.iter_mut() {
                 let b = read_4bytes(&mut r)?;
@@ -580,38 +533,36 @@ impl PolarVecIndex {
         } else {
             Vec::new()
         };
-        let residual_signs = if _version >= 3 {
-            let mut signs = vec![0u32; n_vectors];
-            for sign_bits in signs.iter_mut() {
-                *sign_bits = read_u32le(&mut r)?;
+        // v3/v4 stored residual sign sketches; read and discard for compatibility.
+        if (3..=4).contains(&version) {
+            for _ in 0..n_vectors {
+                let _ = read_u32le(&mut r)?;
             }
-            signs
+        }
+        let has_inv_v_hat_norms = if version >= 5 {
+            flags & FLAG_INV_V_HAT_NORMS != 0
         } else {
-            Vec::new()
+            version == 4
         };
-
-        // v4: load inv_v_hat_norms; for older files recompute from codes.
-        let inv_v_hat_norms = if _version >= 4 {
+        let inv_v_hat_norms = if has_inv_v_hat_norms {
             let mut inv = vec![0.0f32; n_vectors];
             for v in inv.iter_mut() {
                 let b = read_4bytes(&mut r)?;
                 *v = f32::from_le_bytes(b);
             }
             inv
+        } else if version < 4 {
+            recompute_inv_v_hat_norms(
+                &codes,
+                n_vectors,
+                bytes_per_vec,
+                padded_dim,
+                bits,
+                &dim_mins,
+                &dim_scales,
+            )
         } else {
-            // Recompute from stored codes + quantization params
-            (0..n_vectors)
-                .map(|vi| {
-                    let vec_base = vi * bytes_per_vec;
-                    let mut v_hat_sq = 0.0f32;
-                    for d in 0..padded_dim {
-                        let code = unpack_code_at(&codes, vec_base, d, bits);
-                        let v_hat_d = dim_mins[d] + code as f32 * dim_scales[d];
-                        v_hat_sq += v_hat_d * v_hat_d;
-                    }
-                    1.0 / v_hat_sq.sqrt().max(1e-12)
-                })
-                .collect()
+            Vec::new()
         };
 
         Ok(PolarVecIndex {
@@ -624,9 +575,7 @@ impl PolarVecIndex {
             dim_mins,
             dim_scales,
             codes,
-            norms,
             residual_sq,
-            residual_signs,
             inv_v_hat_norms,
             n_vectors,
         })
@@ -688,20 +637,34 @@ fn unpack_code_at(codes: &[u8], vec_base: usize, d: usize, bits: usize) -> usize
     }
 }
 
+fn recompute_inv_v_hat_norms(
+    codes: &[u8],
+    n_vectors: usize,
+    bytes_per_vec: usize,
+    padded_dim: usize,
+    bits: usize,
+    dim_mins: &[f32],
+    dim_scales: &[f32],
+) -> Vec<f32> {
+    (0..n_vectors)
+        .map(|vi| {
+            let vec_base = vi * bytes_per_vec;
+            let mut v_hat_sq = 0.0f32;
+            for d in 0..padded_dim {
+                let code = unpack_code_at(codes, vec_base, d, bits);
+                let v_hat_d = dim_mins[d] + code as f32 * dim_scales[d];
+                v_hat_sq += v_hat_d * v_hat_d;
+            }
+            1.0 / v_hat_sq.sqrt().max(1e-12)
+        })
+        .collect()
+}
+
 // ─── Randomized Hadamard Transform helpers ────────────────────────────────────
 
 fn generate_sign_words(n_words: usize, seed: u64) -> Vec<u64> {
     let mut rng = SmallRng::seed_from_u64(seed);
     (0..n_words).map(|_| rng.gen::<u64>()).collect()
-}
-
-fn generate_projection_words(n_proj: usize, n_words: usize, seed: u64) -> Vec<u64> {
-    let mut rng = SmallRng::seed_from_u64(seed);
-    let mut words = vec![0u64; n_proj * n_words];
-    for word in words.iter_mut() {
-        *word = rng.gen::<u64>();
-    }
-    words
 }
 
 #[inline]
@@ -733,81 +696,6 @@ fn fwht(data: &mut [f32]) {
         }
         h = step;
     }
-}
-
-fn project_sign_bits(vec: &[f32], projection_words: &[u64], n_words: usize) -> u32 {
-    let mut out = 0u32;
-    let inv_sqrt_dim = 1.0 / (vec.len() as f32).sqrt();
-    for p in 0..RESIDUAL_SIGN_BITS {
-        let proj_base = p * n_words;
-        let mut dot = 0.0f32;
-        for (i, &val) in vec.iter().enumerate() {
-            let word = unsafe { *projection_words.get_unchecked(proj_base + i / 64) };
-            let sign = if (word >> (i % 64)) & 1 == 1 {
-                -1.0f32
-            } else {
-                1.0f32
-            };
-            dot += sign * val;
-        }
-        if dot * inv_sqrt_dim >= 0.0 {
-            out |= 1u32 << p;
-        }
-    }
-    out
-}
-
-fn project_query_values(
-    q_rot: &[f32],
-    projection_words: &[u64],
-    n_words: usize,
-) -> [f32; RESIDUAL_SIGN_BITS] {
-    let mut out = [0.0f32; RESIDUAL_SIGN_BITS];
-    let inv_sqrt_dim = 1.0 / (q_rot.len() as f32).sqrt();
-    for p in 0..RESIDUAL_SIGN_BITS {
-        let proj_base = p * n_words;
-        let mut dot = 0.0f32;
-        for (i, &val) in q_rot.iter().enumerate() {
-            let word = unsafe { *projection_words.get_unchecked(proj_base + i / 64) };
-            let sign = if (word >> (i % 64)) & 1 == 1 {
-                -1.0f32
-            } else {
-                1.0f32
-            };
-            dot += sign * val;
-        }
-        out[p] = dot * inv_sqrt_dim;
-    }
-    out
-}
-
-fn normalize_projection(values: &mut [f32; RESIDUAL_SIGN_BITS]) {
-    let norm = values.iter().map(|&x| x * x).sum::<f32>().sqrt();
-    if norm > 1e-12 {
-        for v in values.iter_mut() {
-            *v /= norm;
-        }
-    }
-}
-
-/// score = Σ_p qv_p × (2·bit_p − 1) = 2·pos_sum − total_qv.
-/// `total_qv` must equal `projected_query.iter().sum()` and is passed in
-/// to avoid recomputing it on every call in the hot scan loop.
-#[inline(always)]
-fn sign_correction_score_scaled(
-    sign_bits: u32,
-    projected_query: &[f32; RESIDUAL_SIGN_BITS],
-    total_qv: f32,
-    scale: f32,
-) -> f32 {
-    let mut pos_sum = 0.0f32;
-    let mut remaining = sign_bits;
-    while remaining != 0 {
-        let p = remaining.trailing_zeros() as usize;
-        pos_sum += unsafe { *projected_query.get_unchecked(p) };
-        remaining &= remaining - 1;
-    }
-    (2.0 * pos_sum - total_qv) * scale
 }
 
 // ─── LUT construction ─────────────────────────────────────────────────────────
@@ -1028,108 +916,6 @@ fn compute_lut_score(
     score
 }
 
-/// `sign_projection` carries `(projected_values, sum_of_projected_values)` so
-/// the sum is computed only once per query, not once per vector in the hot loop.
-#[inline(always)]
-fn score_metric_aware(
-    base_score: f32,
-    vi: usize,
-    metric: DistanceMetric,
-    sign_projection: Option<(&[f32; RESIDUAL_SIGN_BITS], f32)>,
-    residual_signs: &[u32],
-    inv_v_hat_norms: &[f32],
-) -> f32 {
-    match metric {
-        DistanceMetric::InnerProduct => {
-            if let Some((projected_query, total)) = sign_projection {
-                base_score
-                    + sign_correction_score_scaled(
-                        unsafe { *residual_signs.get_unchecked(vi) },
-                        projected_query,
-                        total,
-                        IP_SIGN_CORRECTION_SCALE,
-                    )
-            } else {
-                base_score
-            }
-        }
-        DistanceMetric::Cosine => {
-            let corrected_ip = if let Some((projected_query, total)) = sign_projection {
-                -base_score
-                    + sign_correction_score_scaled(
-                        unsafe { *residual_signs.get_unchecked(vi) },
-                        projected_query,
-                        total,
-                        COSINE_SIGN_CORRECTION_SCALE,
-                    )
-            } else {
-                -base_score
-            };
-            -(corrected_ip * unsafe { *inv_v_hat_norms.get_unchecked(vi) })
-        }
-        _ => base_score,
-    }
-}
-
-/// Re-rank a small coarse candidate set by adding residual sign correction,
-/// returning the top `n_candidates` indices.
-///
-/// Accepts the `(coarse_score, idx)` pairs already produced by `scan_topn`
-/// (which used no sign projection). Derives the final metric-aware score from
-/// the stored coarse score without re-running `compute_lut_score`:
-///
-/// - **IP**:    `final = coarse + sign_corr`
-/// - **Cosine**: `final = coarse - sign_corr × inv_||v̂||`
-///              (because coarse = −(q·v̂)×inv and final = −(q·v̂+corr)×inv)
-fn rerank_candidates_metric_aware(
-    coarse: &[(f32, u32)],
-    metric: DistanceMetric,
-    sign_projection: &[f32; RESIDUAL_SIGN_BITS],
-    total_qv: f32,
-    residual_signs: &[u32],
-    inv_v_hat_norms: &[f32],
-    n_candidates: usize,
-    ascending: bool,
-) -> Vec<u32> {
-    let mut scored: Vec<(f32, u32)> = coarse
-        .iter()
-        .map(|&(coarse_score, idx)| {
-            let vi = idx as usize;
-            let sign_bits = unsafe { *residual_signs.get_unchecked(vi) };
-            let final_score = match metric {
-                DistanceMetric::InnerProduct => {
-                    coarse_score
-                        + sign_correction_score_scaled(
-                            sign_bits,
-                            sign_projection,
-                            total_qv,
-                            IP_SIGN_CORRECTION_SCALE,
-                        )
-                }
-                DistanceMetric::Cosine => {
-                    let corr = sign_correction_score_scaled(
-                        sign_bits,
-                        sign_projection,
-                        total_qv,
-                        COSINE_SIGN_CORRECTION_SCALE,
-                    );
-                    coarse_score - corr * unsafe { *inv_v_hat_norms.get_unchecked(vi) }
-                }
-                _ => coarse_score,
-            };
-            (final_score, idx)
-        })
-        .collect();
-
-    if ascending {
-        scored.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
-    } else {
-        scored.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
-    }
-    scored.truncate(n_candidates);
-    scored.into_iter().map(|(_, idx)| idx).collect()
-}
-
 /// Compact heap entry for the LUT scan.
 #[derive(Clone, Copy)]
 struct ScanEntry {
@@ -1171,42 +957,33 @@ fn scan_topn(
     n_candidates: usize,
     ascending: bool,
     correction_scores: &[f32],
-    metric: DistanceMetric,
-    sign_projection: Option<(&[f32; RESIDUAL_SIGN_BITS], f32)>,
-    residual_signs: &[u32],
-    inv_v_hat_norms: &[f32],
+    multiplier_scores: &[f32],
 ) -> Vec<(f32, u32)> {
     let n_threads = rayon::current_num_threads().max(1);
     let chunk_vecs = (n_vectors / n_threads).max(256);
+    let n_chunks = (n_vectors + chunk_vecs - 1) / chunk_vecs;
 
     // Each thread emits (score, idx) pairs from its local heap – scores are
     // preserved so the merge phase can sort without re-running compute_lut_score.
-    let chunk_results: Vec<Vec<(f32, u32)>> = (0..n_vectors)
+    let chunk_results: Vec<Vec<(f32, u32)>> = (0..n_chunks)
         .into_par_iter()
-        .chunks(chunk_vecs)
-        .enumerate()
-        .map(|(chunk_idx, range_chunk)| {
-            let base = chunk_idx * chunk_vecs;
-            let n_in = range_chunk.len();
+        .map(|chunk_idx| {
+            let start = chunk_idx * chunk_vecs;
+            let end = (start + chunk_vecs).min(n_vectors);
 
             let has_correction = !correction_scores.is_empty();
+            let has_multiplier = !multiplier_scores.is_empty();
             if ascending {
                 let mut heap: BinaryHeap<ScanEntry> = BinaryHeap::with_capacity(n_candidates + 1);
-                for i in 0..n_in {
-                    let vi = base + i;
+                for vi in start..end {
                     let mut score =
                         compute_lut_score(codes, vi, bytes_per_vec, bits, lut, n_levels, byte_lut);
                     if has_correction {
                         score += unsafe { *correction_scores.get_unchecked(vi) };
                     }
-                    score = score_metric_aware(
-                        score,
-                        vi,
-                        metric,
-                        sign_projection,
-                        residual_signs,
-                        inv_v_hat_norms,
-                    );
+                    if has_multiplier {
+                        score *= unsafe { *multiplier_scores.get_unchecked(vi) };
+                    }
                     let entry = ScanEntry {
                         score,
                         idx: vi as u32,
@@ -1224,21 +1001,15 @@ fn scan_topn(
             } else {
                 let mut heap: BinaryHeap<std::cmp::Reverse<ScanEntry>> =
                     BinaryHeap::with_capacity(n_candidates + 1);
-                for i in 0..n_in {
-                    let vi = base + i;
+                for vi in start..end {
                     let mut score =
                         compute_lut_score(codes, vi, bytes_per_vec, bits, lut, n_levels, byte_lut);
                     if has_correction {
                         score += unsafe { *correction_scores.get_unchecked(vi) };
                     }
-                    score = score_metric_aware(
-                        score,
-                        vi,
-                        metric,
-                        sign_projection,
-                        residual_signs,
-                        inv_v_hat_norms,
-                    );
+                    if has_multiplier {
+                        score *= unsafe { *multiplier_scores.get_unchecked(vi) };
+                    }
                     let entry = ScanEntry {
                         score,
                         idx: vi as u32,
@@ -1334,138 +1105,6 @@ mod tests {
                 *v /= norm;
             }
         }
-    }
-
-    fn search_baseline_candidates(
-        idx: &PolarVecIndex,
-        query: &[f32],
-        k: usize,
-        f32_data: &[f32],
-        metric: DistanceMetric,
-        oversample: usize,
-    ) -> (Vec<u32>, Vec<f32>) {
-        let n_candidates = (k * oversample).min(idx.n_vectors);
-        let mut q_rot = vec![0.0f32; idx.padded_dim];
-        if metric == DistanceMetric::Cosine {
-            let q_norm = query.iter().map(|&x| x * x).sum::<f32>().sqrt().max(1e-12);
-            for d in 0..idx.dim {
-                q_rot[d] = query[d] / q_norm;
-            }
-        } else {
-            q_rot[..idx.dim].copy_from_slice(query);
-        }
-        apply_signs(&mut q_rot, &idx.sign_words, idx.padded_dim);
-        fwht(&mut q_rot[..idx.padded_dim]);
-        let lut = build_lut(
-            &q_rot,
-            idx.padded_dim,
-            idx.bits,
-            idx.n_levels,
-            &idx.dim_mins,
-            &idx.dim_scales,
-            metric,
-        );
-        let byte_lut_4bit = if idx.bits == 4 {
-            build_byte_lut_4bit(&lut, idx.bytes_per_vec)
-        } else {
-            Vec::new()
-        };
-        let correction = if metric == DistanceMetric::L2Squared {
-            &idx.residual_sq[..]
-        } else {
-            &[][..]
-        };
-        let sign_projection: Option<([f32; RESIDUAL_SIGN_BITS], f32)> =
-            if matches!(
-                metric,
-                DistanceMetric::InnerProduct | DistanceMetric::Cosine
-            ) && !idx.residual_signs.is_empty()
-            {
-                let n_words = (idx.padded_dim + 63) / 64;
-                let projection_words =
-                    generate_projection_words(RESIDUAL_SIGN_BITS, n_words, RESIDUAL_SIGN_SEED);
-                let proj = project_query_values(&q_rot, &projection_words, n_words);
-                let total = proj.iter().sum::<f32>();
-                Some((proj, total))
-            } else {
-                None
-            };
-        let sign_proj_ref: Option<(&[f32; RESIDUAL_SIGN_BITS], f32)> =
-            sign_projection.as_ref().map(|(proj, total)| (proj, *total));
-        let candidates = scan_topn(
-            &idx.codes,
-            idx.n_vectors,
-            idx.bytes_per_vec,
-            idx.bits,
-            idx.n_levels,
-            &lut,
-            &byte_lut_4bit,
-            n_candidates,
-            metric.is_ascending(),
-            correction,
-            metric,
-            sign_proj_ref,
-            &idx.residual_signs,
-            &idx.inv_v_hat_norms,
-        );
-        let ids: Vec<u32> = candidates.into_iter().map(|(_, i)| i).collect();
-        rescore_exact(&ids, query, f32_data, idx.dim, k, metric)
-    }
-
-    // Baseline: pure LUT scan, no sign correction, no inv_v_hat_norm — old proxy behaviour.
-    fn search_proxy_baseline(
-        idx: &PolarVecIndex,
-        query: &[f32],
-        k: usize,
-        f32_data: &[f32],
-        metric: DistanceMetric,
-        oversample: usize,
-    ) -> (Vec<u32>, Vec<f32>) {
-        let n_candidates = (k * oversample).min(idx.n_vectors);
-        let mut q_rot = vec![0.0f32; idx.padded_dim];
-        q_rot[..idx.dim].copy_from_slice(query);
-        apply_signs(&mut q_rot, &idx.sign_words, idx.padded_dim);
-        fwht(&mut q_rot[..idx.padded_dim]);
-        let lut = build_lut(
-            &q_rot,
-            idx.padded_dim,
-            idx.bits,
-            idx.n_levels,
-            &idx.dim_mins,
-            &idx.dim_scales,
-            metric,
-        );
-        let byte_lut_4bit = if idx.bits == 4 {
-            build_byte_lut_4bit(&lut, idx.bytes_per_vec)
-        } else {
-            Vec::new()
-        };
-        let correction = if metric == DistanceMetric::L2Squared {
-            &idx.residual_sq[..]
-        } else {
-            &[][..]
-        };
-        let empty_inv = vec![1.0f32; idx.n_vectors];
-        let ids: Vec<u32> = scan_topn(
-            &idx.codes,
-            idx.n_vectors,
-            idx.bytes_per_vec,
-            idx.bits,
-            idx.n_levels,
-            &lut,
-            &byte_lut_4bit,
-            n_candidates,
-            metric.is_ascending(),
-            correction,
-            metric,
-            None,
-            &[],
-            &empty_inv,
-        )
-        .into_iter()
-        .map(|(_, i)| i)
-        .collect();
-        rescore_exact(&ids, query, f32_data, idx.dim, k, metric)
     }
 
     fn recall_at_k(exact: &[u32], approx: &[u32]) -> f32 {
@@ -1643,7 +1282,29 @@ mod tests {
         assert_eq!(idx2.codes, idx.codes);
         assert_eq!(idx2.bytes_per_vec, idx.bytes_per_vec);
         assert_eq!(idx2.residual_sq, idx.residual_sq);
-        assert_eq!(idx2.residual_signs, idx.residual_signs);
+        assert_eq!(idx2.inv_v_hat_norms, idx.inv_v_hat_norms);
+    }
+
+    #[test]
+    fn test_polarvec_metric_aware_aux_storage() {
+        let n = 200;
+        let dim = 32;
+        let bits = 4;
+        let data = random_data(n, dim, 43);
+
+        let idx_ip =
+            PolarVecIndex::build_for_metric(&data, n, dim, bits, DistanceMetric::InnerProduct);
+        assert!(idx_ip.residual_sq.is_empty());
+        assert!(idx_ip.inv_v_hat_norms.is_empty());
+
+        let idx_l2 =
+            PolarVecIndex::build_for_metric(&data, n, dim, bits, DistanceMetric::L2Squared);
+        assert_eq!(idx_l2.residual_sq.len(), n);
+        assert!(idx_l2.inv_v_hat_norms.is_empty());
+
+        let idx_cos = PolarVecIndex::build_for_metric(&data, n, dim, bits, DistanceMetric::Cosine);
+        assert!(idx_cos.residual_sq.is_empty());
+        assert_eq!(idx_cos.inv_v_hat_norms.len(), n);
     }
 
     #[test]
@@ -1671,7 +1332,15 @@ mod tests {
                 let data = random_data(n, dim, 1);
                 let queries = random_data(nq, dim, 2);
 
-                let idx = PolarVecIndex::build(&data, n, dim, bits);
+                let idx_ip = PolarVecIndex::build_for_metric(
+                    &data,
+                    n,
+                    dim,
+                    bits,
+                    DistanceMetric::InnerProduct,
+                );
+                let idx_l2 =
+                    PolarVecIndex::build_for_metric(&data, n, dim, bits, DistanceMetric::L2Squared);
 
                 // --- flat brute-force (IP) ---
                 let t0 = Instant::now();
@@ -1685,7 +1354,7 @@ mod tests {
                 let t0 = Instant::now();
                 for qi in 0..nq {
                     let q = &queries[qi * dim..(qi + 1) * dim];
-                    let _ = idx.search(q, k, &data, DistanceMetric::InnerProduct, oversample);
+                    let _ = idx_ip.search(q, k, &data, DistanceMetric::InnerProduct, oversample);
                 }
                 let pv_ip_us = t0.elapsed().as_micros() as f64 / nq as f64;
 
@@ -1693,7 +1362,7 @@ mod tests {
                 let t0 = Instant::now();
                 for qi in 0..nq {
                     let q = &queries[qi * dim..(qi + 1) * dim];
-                    let _ = idx.search(q, k, &data, DistanceMetric::L2Squared, oversample);
+                    let _ = idx_l2.search(q, k, &data, DistanceMetric::L2Squared, oversample);
                 }
                 let pv_l2_us = t0.elapsed().as_micros() as f64 / nq as f64;
 
@@ -1702,7 +1371,13 @@ mod tests {
                 normalize_rows(&mut data_cos, dim);
                 let mut queries_cos = queries.clone();
                 normalize_rows(&mut queries_cos, dim);
-                let idx_cos = PolarVecIndex::build(&data_cos, n, dim, bits);
+                let idx_cos = PolarVecIndex::build_for_metric(
+                    &data_cos,
+                    n,
+                    dim,
+                    bits,
+                    DistanceMetric::Cosine,
+                );
 
                 let t0 = Instant::now();
                 for qi in 0..nq {
@@ -1718,7 +1393,7 @@ mod tests {
                 for qi in 0..nq_r {
                     let q = &queries[qi * dim..(qi + 1) * dim];
                     let exact = exact_topk(&data, dim, q, k, DistanceMetric::InnerProduct);
-                    let approx = idx
+                    let approx = idx_ip
                         .search(q, k, &data, DistanceMetric::InnerProduct, oversample)
                         .0;
                     recall_ip += recall_at_k(&exact, &approx);
@@ -1742,84 +1417,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    #[ignore]
-    fn bench_polarvec_sign_rerank_ip_cosine() {
-        let n = 20_000;
-        let dim = 128;
-        let bits = 3;
-        let k = 10;
-        let oversample = 2;
-        let nq = 100;
-
-        let data_ip = random_data(n, dim, 123);
-        let queries_ip = random_data(nq, dim, 456);
-        let idx_ip = PolarVecIndex::build(&data_ip, n, dim, bits);
-        let mut proxy_ip = 0.0f32;
-        let mut improved_ip = 0.0f32;
-        for qi in 0..nq {
-            let query = &queries_ip[qi * dim..(qi + 1) * dim];
-            let exact = exact_topk(&data_ip, dim, query, k, DistanceMetric::InnerProduct);
-            let proxy = search_proxy_baseline(
-                &idx_ip,
-                query,
-                k,
-                &data_ip,
-                DistanceMetric::InnerProduct,
-                oversample,
-            )
-            .0;
-            let improved = idx_ip
-                .search(query, k, &data_ip, DistanceMetric::InnerProduct, oversample)
-                .0;
-            proxy_ip += recall_at_k(&exact, &proxy);
-            improved_ip += recall_at_k(&exact, &improved);
-        }
-        println!(
-            "IP bits={} oversample={}: proxy recall@{}={:.4}, sign+inv_norm recall@{}={:.4}",
-            bits,
-            oversample,
-            k,
-            proxy_ip / nq as f32,
-            k,
-            improved_ip / nq as f32
-        );
-
-        let mut data_cos = random_data(n, dim, 789);
-        let mut queries_cos = random_data(nq, dim, 987);
-        normalize_rows(&mut data_cos, dim);
-        normalize_rows(&mut queries_cos, dim);
-        let idx_cos = PolarVecIndex::build(&data_cos, n, dim, bits);
-        let mut proxy_cos = 0.0f32;
-        let mut improved_cos = 0.0f32;
-        for qi in 0..nq {
-            let query = &queries_cos[qi * dim..(qi + 1) * dim];
-            let exact = exact_topk(&data_cos, dim, query, k, DistanceMetric::Cosine);
-            let proxy = search_proxy_baseline(
-                &idx_cos,
-                query,
-                k,
-                &data_cos,
-                DistanceMetric::Cosine,
-                oversample,
-            )
-            .0;
-            let improved = idx_cos
-                .search(query, k, &data_cos, DistanceMetric::Cosine, oversample)
-                .0;
-            proxy_cos += recall_at_k(&exact, &proxy);
-            improved_cos += recall_at_k(&exact, &improved);
-        }
-        println!(
-            "Cosine bits={} oversample={}: proxy recall@{}={:.4}, sign+inv_norm recall@{}={:.4}",
-            bits,
-            oversample,
-            k,
-            proxy_cos / nq as f32,
-            k,
-            improved_cos / nq as f32
-        );
     }
 }
