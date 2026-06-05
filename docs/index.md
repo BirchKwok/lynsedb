@@ -20,7 +20,7 @@ retrieval workloads.
 - Remote deployments where several workers or services need to share one
   database process.
 - Low-operational-cost deployments where predictable resource use matters.
-- Metadata filtering with SQL-like `where` expressions.
+- Standard SQL-style metadata filtering with `where` expressions.
 - Multiple vector representations per record through named vector fields.
 - Dense, sparse, text, and hybrid retrieval.
 - Recall-first search with explicit index and search knobs.
@@ -75,16 +75,22 @@ print(result.to_list())
 
 ## Learn next
 
-- Start with the [Quickstart](quickstart.md) for the complete write, index,
+- Start with the [Learning path](tutorials/learning_path.md) if you want a
+  step-by-step curriculum from zero to production.
+- Use the [Quickstart](quickstart.md) for the shortest complete write, index,
   search, query, and delete lifecycle.
+- Read [Core concepts](tutorials/core_concepts.md) to understand clients,
+  databases, collections, IDs, fields, indexes, and result objects.
 - Use [Connect and deploy](tutorials/connect_and_deploy.md) to choose local or
-  remote mode.
-- Use [Search and filter](tutorials/search_and_filter.md) for vector search,
-  metadata filtering, text search, and reranking.
-- Use [Indexing guide](tutorials/indexing.md) to choose between flat, HNSW, IVF,
-  DiskANN, and quantized indexes.
-- Use [Named, sparse, and hybrid search](tutorials/named_sparse_hybrid.md) for
-  multimodal and retrieval-augmented applications.
+  remote mode and configure the server.
+- Use [Search and filter](tutorials/search_and_filter.md) and the
+  [Metadata filter cookbook](tutorials/metadata_filter_cookbook.md) for vector
+  search, standard SQL-style filters, text search, hybrid search, and reranking.
+- Use [Indexing guide](tutorials/indexing.md) and
+  [Performance tuning](tutorials/performance_tuning.md) to choose between flat,
+  HNSW, IVF, DiskANN, and quantized indexes.
+- Use [Build a RAG workflow](tutorials/rag_workflow.md) for an end-to-end
+  retrieval example.
 
 ## Stability notes
 

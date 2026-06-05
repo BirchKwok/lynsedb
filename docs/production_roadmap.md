@@ -32,7 +32,7 @@ The repository already has the main building blocks:
 - Python local client through PyO3 bindings.
 - HTTP server and Python HTTP client.
 - Basic API-key authentication.
-- Metadata filtering through SQL-like field expressions.
+- Metadata filtering through standard SQL-style `where` expressions.
 
 ## Milestone 1: Reliability Core
 

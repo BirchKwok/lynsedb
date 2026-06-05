@@ -29,6 +29,46 @@ Use local mode for:
 Do not share the same local data path between independent writer processes. Use
 the HTTP server when more than one process needs access.
 
+### Default local path
+
+If `uri=None`, LynseDB uses the configured default root path:
+
+```python
+client = lynse.VectorDBClient()
+```
+
+By default this comes from `LYNSE_DEFAULT_ROOT_PATH` in the generated
+`~/.lynsedb_configs.yaml` file. Passing an explicit path is usually clearer for
+applications and tests:
+
+```python
+client = lynse.VectorDBClient(uri="./app-data")
+```
+
+### Local lifecycle
+
+Use one local client per process for a given root path:
+
+```python
+client = lynse.VectorDBClient(uri="./app-data")
+db = client.create_database("app")
+collection = db.require_collection("items", dim=768)
+
+# ... use collection ...
+
+collection.close()
+client.close()
+```
+
+For command-line scripts, the context manager is convenient:
+
+```python
+with lynse.VectorDBClient(uri="./app-data") as client:
+    db = client.get_database("app")
+    collection = db.get_collection("items")
+    print(collection.stats())
+```
+
 ## Read-only local mode
 
 Open existing storage without writes:
@@ -63,6 +103,19 @@ Remote mode is the recommended deployment mode for:
 - background jobs and online services sharing the same data;
 - containerized deployments;
 - environments where request logging, metrics, health checks, and auth matter.
+
+### Remote client lifecycle
+
+Create one client per process and reuse it:
+
+```python
+client = lynse.VectorDBClient("http://127.0.0.1:7637")
+db = client.get_database("app")
+collection = db.get_collection("items")
+```
+
+The remote client uses an HTTP connection pool. Avoid creating a new client for
+every request in a web application.
 
 ## API key authentication
 
@@ -116,6 +169,78 @@ Deployment examples are included in:
 - `docs/deployment/lynsedb.service`
 - `docs/deployment/kubernetes.yaml`
 
+Use a persistent volume for `/data`. Without a volume, data is tied to the
+container filesystem and can disappear when the container is removed.
+
+## Server configuration file
+
+`lynse serve` accepts a JSON or YAML config file. Environment variables override
+the config file, and explicit CLI flags override both.
+
+Example JSON:
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 7637,
+  "data_dir": "./server-data",
+  "api_key": "your_key",
+  "workers": 4,
+  "keep_alive_secs": 75,
+  "request_timeout_secs": 300,
+  "json_limit_mb": 256,
+  "payload_limit_mb": 512,
+  "slow_query_warn_ms": 1000,
+  "max_top_k": 10000,
+  "max_batch_vectors": 100000,
+  "max_collection_vectors": 10000000,
+  "max_collection_vector_bytes": 1099511627776,
+  "audit_log": true
+}
+```
+
+Run with:
+
+```shell
+lynse serve --config ./server.json
+```
+
+The config may also be nested under a `server` key:
+
+```json
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 7637,
+    "data_dir": "./server-data"
+  }
+}
+```
+
+YAML config files require `ruamel.yaml` to be installed.
+
+## Environment variables
+
+Common server environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `LYNSE_HOST` | Bind host. |
+| `LYNSE_PORT` or `PORT` | Server port. |
+| `LYNSE_DATA_DIR` or `LYNSE_ROOT` | Data directory. |
+| `LYNSE_API_KEY` | API key for Bearer or Basic auth. |
+| `LYNSE_SERVER_WORKERS` | HTTP worker threads. |
+| `LYNSE_KEEP_ALIVE_SECS` | Keep-alive timeout. |
+| `LYNSE_CLIENT_REQUEST_TIMEOUT_SECS` | Request timeout. |
+| `LYNSE_JSON_LIMIT_MB` | Maximum JSON body size. |
+| `LYNSE_PAYLOAD_LIMIT_MB` | Maximum raw payload size. |
+| `LYNSE_SLOW_QUERY_WARN_MS` | Slow query warning threshold; `0` disables. |
+| `LYNSE_MAX_TOP_K` | Maximum accepted `k`, `max_results`, `head`, or `tail` size; `0` disables. |
+| `LYNSE_MAX_BATCH_VECTORS` | Maximum vector, ID, or query count per request; `0` disables. |
+| `LYNSE_MAX_COLLECTION_VECTORS` | Maximum primary vectors per collection; `0` disables. |
+| `LYNSE_MAX_COLLECTION_VECTOR_BYTES` | Maximum estimated dense vector bytes per collection; `0` disables. |
+| `LYNSE_AUDIT_LOG` | Enable mutating-request audit logs. |
+
 ## Server tuning
 
 Common production guards:
@@ -134,6 +259,14 @@ lynse serve \
   --max-collection-vectors 10000000 \
   --audit-log
 ```
+
+Use limits as guardrails for public or shared services:
+
+- lower `--max-top-k` to prevent expensive accidental searches;
+- lower `--max-batch-vectors` to protect server memory;
+- set `--max-collection-vector-bytes` according to available disk and memory;
+- keep `--request-timeout-secs` high enough for index builds and large imports;
+- enable `--audit-log` when you need an operations trail for writes.
 
 Slow query warnings default to 1000 ms:
 
@@ -168,3 +301,27 @@ with lynse.VectorDBClient("http://127.0.0.1:7637") as client:
 ```
 
 For long-lived services, create one client per process and reuse it.
+
+## Deployment decision table
+
+| Situation | Recommended mode | Reason |
+| --- | --- | --- |
+| Notebook or experiment | Local | Fastest setup and no server process. |
+| Unit tests | Local with a temp directory | Easy cleanup and isolated data. |
+| One Python service with one worker | Local or remote | Local is simpler; remote is better if you want health checks and metrics. |
+| Web API with multiple workers | Remote | Avoid sharing one local path across independent processes. |
+| Multiple applications sharing data | Remote | One server owns the data directory. |
+| Windows host | Docker or WSL 2 | Native Windows is not supported. |
+| Production container | Remote | Use persistent volume, API key, health checks, and metrics. |
+
+## Production checklist
+
+- Pin the Python package and Docker image versions.
+- Store data on a persistent disk or volume.
+- Use the HTTP server for multi-process access.
+- Enable API keys outside trusted local networks.
+- Monitor `/healthz`, `/readyz`, and `/metrics`.
+- Set request and payload limits for your workload.
+- Take snapshots or exports before risky maintenance.
+- Test restore in a separate database before relying on backups.
+- Compare ANN recall against a flat baseline before changing index settings.

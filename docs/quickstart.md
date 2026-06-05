@@ -259,6 +259,50 @@ sparse_result = collection.search_sparse({42: 1.0}, k=2, return_fields=True)
 print(sparse_result.to_list())
 ```
 
+## 10. Update, delete, and compact
+
+Use upsert when the same external ID should be replaced or inserted:
+
+```python
+collection.upsert_item(
+    [0.12, 0.20, 0.31, 0.41],
+    id=1,
+    field={"title": "updated intro", "lang": "en", "rank": 1},
+)
+collection.commit()
+```
+
+Deletes are soft deletes. Deleted IDs disappear from search and query results,
+but their raw storage is kept until compaction:
+
+```python
+collection.delete_items([4])
+print(collection.list_deleted_ids())
+
+collection.restore_items([4])
+print(collection.list_deleted_ids())
+
+collection.delete_items([4])
+removed = collection.compact()
+print(removed)
+```
+
+## 11. What you learned
+
+This quickstart touched the whole everyday workflow:
+
+- choose local or remote mode with `VectorDBClient`;
+- create a database and collection;
+- insert vectors with stable integer IDs and metadata fields;
+- commit writes through `insert_session()`;
+- build and tune an index;
+- search by vector, filter by metadata, query fields, and retrieve vectors;
+- use text, hybrid, named vector, and sparse vector retrieval;
+- update, soft-delete, restore, and compact rows.
+
+For a complete curriculum, continue with the
+[Learning path](tutorials/learning_path.md).
+
 ## 10. ResultView
 
 Search, query, head, tail, and range APIs return `ResultView`.

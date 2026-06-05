@@ -76,14 +76,20 @@ nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - Tutorials:
+    - Learning path: tutorials/learning_path.md
+    - Core concepts: tutorials/core_concepts.md
     - Connect and deploy: tutorials/connect_and_deploy.md
+    - Databases and collections: tutorials/databases_collections.md
     - Add vectors: tutorials/add_vectors.md
     - Search and filter: tutorials/search_and_filter.md
+    - Metadata filter cookbook: tutorials/metadata_filter_cookbook.md
     - Indexing guide: tutorials/indexing.md
     - Named, sparse, and hybrid search: tutorials/named_sparse_hybrid.md
+    - Build a RAG workflow: tutorials/rag_workflow.md
+    - Performance tuning: tutorials/performance_tuning.md
     - Backup and maintenance: tutorials/operations.md
+    - Troubleshooting: tutorials/troubleshooting.md
   - Concepts:
-    - Field filters: FieldExpression.md
     - ResultView: result_view.md
     - Production roadmap: production_roadmap.md
   - API Reference:

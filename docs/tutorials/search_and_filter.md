@@ -35,6 +35,25 @@ result = collection.search(query, k=3, return_fields=True)
 print(result.to_list())
 ```
 
+`k` is the maximum number of returned matches. If filters or deleted rows remove
+most candidates, fewer than `k` rows may be returned.
+
+Use `return_fields=False` for the lowest payload size:
+
+```python
+result = collection.search(query, k=3)
+print(result.ids)
+print(result.distances)
+```
+
+Use `return_fields=True` when the application needs metadata in the same call:
+
+```python
+result = collection.search(query, k=3, return_fields=True)
+for row in result.to_list():
+    print(row["id"], row.get("title"))
+```
+
 The meaning of `distances` depends on the index metric:
 
 | Metric | Result ordering | Range-search threshold |
@@ -46,7 +65,7 @@ The meaning of `distances` depends on the index metric:
 
 ## Metadata filters
 
-Filters are SQL-like strings:
+Filters are standard SQL-style `where` strings:
 
 ```python
 result = collection.search(
@@ -63,8 +82,21 @@ Use `CONTAINS` for array metadata:
 result = collection.query(where="tags CONTAINS 'vector'")
 ```
 
-See [Field filters](../FieldExpression.md) for the supported syntax and
-performance notes.
+For more examples by field type, see the
+[Metadata filter cookbook](metadata_filter_cookbook.md).
+
+Filter strings are applied before or during candidate selection depending on the
+search path. Prefer selective filters such as tenant, language, category, and
+date ranges when you can.
+
+Quoting tips:
+
+```python
+collection.search(query, k=3, where="lang = 'en'")
+collection.search(query, k=3, where='"document.lang" = \'en\'')
+```
+
+The second form quotes a field name that contains punctuation.
 
 ## Query fields without vector search
 
@@ -80,6 +112,13 @@ print(ids_only.ids)
 `query()` without `where` or `filter_ids` returns an empty result. This prevents
 accidental full scans.
 
+Use `filter_ids` when your application already knows the candidate IDs:
+
+```python
+rows = collection.query(filter_ids=[1, 3], return_ids_only=False)
+print(rows.to_list())
+```
+
 ## Retrieve vectors
 
 ```python
@@ -92,6 +131,10 @@ print(data.fields)
 `query_vectors()` without `where` or `filter_ids` returns an empty `(0, dim)`
 vector array.
 
+Use `query_vectors()` sparingly in online request paths. Returning raw vectors
+is useful for evaluation, debugging, migration, and downstream numerical work,
+but it increases response size.
+
 ## Batch search
 
 ```python
@@ -102,6 +145,18 @@ for result in results:
     print(result.to_list())
 ```
 
+Batch search returns one `ResultView` per query vector. A shared `where` filter
+is applied to every query:
+
+```python
+results = collection.batch_search(
+    queries,
+    k=2,
+    where="lang = 'en'",
+    return_fields=True,
+)
+```
+
 ## Range search
 
 Range search returns all matches within a threshold, capped by `max_results`.
@@ -110,6 +165,13 @@ Range search returns all matches within a threshold, capped by `max_results`.
 nearby = collection.search_range(query, threshold=0.05, max_results=100)
 print(nearby.ids, nearby.distances)
 ```
+
+Threshold meaning depends on the metric:
+
+- L2, Hamming, and Jaccard return rows with distance `<= threshold`;
+- inner product and cosine return rows with score `>= threshold`.
+
+Use `max_results` as a safety cap for broad thresholds.
 
 ## Search profile
 
@@ -127,6 +189,9 @@ print(profile["items"]["ids"])
 print(profile["profile"])
 ```
 
+Use profiles during tuning, not as the primary application response. They are
+intended to explain candidate counts and timing details.
+
 ## Text search
 
 Text search runs BM25 over stored metadata fields.
@@ -142,6 +207,10 @@ print(result.to_list())
 ```
 
 `text_fields=None` searches all text-like metadata fields.
+
+Text search works best when text fields contain normal words, titles, tags, or
+short chunks. Keep binary payloads and very large documents out of metadata
+unless you actually want them searched.
 
 ## Hybrid search
 
@@ -172,6 +241,23 @@ result = collection.hybrid_search(
     k=3,
 )
 ```
+
+`candidate_limit` controls how many candidates each retrieval signal may
+contribute before fusion:
+
+```python
+result = collection.hybrid_search(
+    vector=query,
+    text="vector",
+    text_fields=["title"],
+    candidate_limit=50,
+    k=5,
+    return_fields=True,
+)
+```
+
+Use a larger `candidate_limit` when recall matters and a smaller value when
+latency matters.
 
 ## External rerank hook
 
@@ -214,3 +300,40 @@ result = collection.hybrid_search(
 
 Set `rerank_with_fields=True` when the reranker needs fields but the final
 result does not need to return them.
+
+## Search named vector fields
+
+Named vector fields are searched with the same `search()` method and the
+`vector_field` parameter:
+
+```python
+collection.create_vector_field("title_embedding", dim=2, metric="ip")
+collection.add_named_vectors(
+    "title_embedding",
+    np.array([[0.8, 0.2], [0.7, 0.3], [0.1, 0.9]], dtype=np.float32),
+    ids=[1, 2, 3],
+)
+collection.build_index("FLAT", field_name="title_embedding")
+collection.commit()
+
+title_result = collection.search(
+    [0.75, 0.25],
+    k=2,
+    vector_field="title_embedding",
+    return_fields=True,
+)
+print(title_result.to_list())
+```
+
+The `where` filter still uses metadata fields from the same IDs.
+
+## Search checklist
+
+- Build a flat index first and verify known queries.
+- Choose the metric that matches your embeddings.
+- Add `where` filters for tenant, language, visibility, category, and date.
+- Use `return_fields=False` in hot paths unless fields are needed immediately.
+- Use `search_profile()` to debug slow or surprising searches.
+- Use text or hybrid search when exact terms matter.
+- Use a reranker when final ordering requires a stronger model or business
+  rules.

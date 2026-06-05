@@ -34,6 +34,18 @@ print(result.ids)
 print(result.fields)
 ```
 
+The main result types are:
+
+| Result type | Produced by | Main attributes |
+| --- | --- | --- |
+| `search` | `search`, `batch_search`, `search_range`, `text_search`, `search_sparse`, `hybrid_search` | `ids`, `distances`, optional `fields` |
+| `query` | `query` | `ids`, optional `fields` |
+| `data` | `query_vectors`, `head`, `tail`, remote `read_by_only_id` | `vectors`, `ids`, `fields` |
+
+`distances` may be lower-is-better distances or higher-is-better scores
+depending on the metric. See the indexing and search tutorials for metric
+semantics.
+
 ## Tuple unpacking
 
 Search results unpack as `(ids, distances, fields)`:
@@ -78,6 +90,17 @@ result.to_list()
 result.to_json()
 ```
 
+Typical use:
+
+```python
+ids = result.ids.tolist()
+rows = result.to_list()
+payload = result.to_json()
+```
+
+Use `to_numpy()` for numerical post-processing and `to_list()` for application
+responses or debug prints.
+
 Optional conversions:
 
 ```python
@@ -112,3 +135,5 @@ print(bool(result))      # False
 print(result.ids)        # empty int64 array
 print(result.to_list())  # []
 ```
+
+This lets application code handle "no match" without special exception paths.

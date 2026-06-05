@@ -139,7 +139,7 @@ curl http://127.0.0.1:7637/openapi.json
 
 - Dense vector search with flat, HNSW, IVF, DiskANN, and quantized index
   families.
-- SQL-like metadata filtering through `where` expressions.
+- Standard SQL-style metadata filtering through `where` expressions.
 - Named vector fields for multimodal records, such as text and image embeddings
   on the same item.
 - Sparse vector search for feature-weight retrieval.
@@ -188,15 +188,21 @@ Deployment examples are included in:
 
 ## Documentation
 
+- [Learning path](docs/tutorials/learning_path.md)
+- [Core concepts](docs/tutorials/core_concepts.md)
 - [Quickstart](docs/quickstart.md)
 - [Connect and deploy](docs/tutorials/connect_and_deploy.md)
+- [Databases and collections](docs/tutorials/databases_collections.md)
 - [Add vectors](docs/tutorials/add_vectors.md)
 - [Search and filter](docs/tutorials/search_and_filter.md)
+- [Metadata filter cookbook](docs/tutorials/metadata_filter_cookbook.md)
 - [Indexing guide](docs/tutorials/indexing.md)
 - [Named, sparse, and hybrid search](docs/tutorials/named_sparse_hybrid.md)
+- [Build a RAG workflow](docs/tutorials/rag_workflow.md)
+- [Performance tuning](docs/tutorials/performance_tuning.md)
 - [Backup and maintenance](docs/tutorials/operations.md)
+- [Troubleshooting](docs/tutorials/troubleshooting.md)
 - [Client API](docs/client.md)
-- [Field filters](docs/FieldExpression.md)
 - [ResultView](docs/result_view.md)
 
 ## Stability Notes

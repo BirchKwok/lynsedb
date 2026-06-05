@@ -48,6 +48,7 @@ Returned by `create_database()` or `get_database()`.
 | `snapshot_database(snapshot_path)` | Snapshot this database. |
 | `restore_database(snapshot_path, overwrite=False)` | Restore this database from a snapshot. |
 | `drop_database()` | Drop this database. |
+| `is_read_only` | Local database property indicating whether storage was opened read-only. |
 
 Remote-only database helpers:
 
@@ -63,7 +64,7 @@ Remote-only database helpers:
 | `insert_session()` | Context manager that commits on success and discards pending buffered writes on exception. |
 | `add_item(vector, id, *, field=None, buffer_size=True)` | Add one dense vector with optional metadata. |
 | `bulk_add_items(vectors, batch_size=1000, enable_progress_bar=True)` | Add `(vector, id)` or `(vector, id, field)` tuples. |
-| `bulk_add_binary(vectors, batch_size=50000, enable_progress_bar=True)` | Add a dense `float32` array without metadata in the same call. |
+| `bulk_add_binary(vectors, batch_size=50000, enable_progress_bar=True)` | Add a dense `float32` array without metadata in the same call; IDs are assigned sequentially after `max_id`. |
 | `upsert_item(vector, id, *, field=None)` | Insert or update one row. |
 | `upsert_items(vectors, batch_size=1000, enable_progress_bar=True)` | Insert or update many rows. |
 | `commit()` | Commit pending writes. |
@@ -103,6 +104,10 @@ Parameter behavior is the same for local and HTTP Python clients:
 - `approx` and `eps` apply only to supported flat IP, L2, and cosine paths.
   Hamming/Jaccard metrics and non-approximate paths ignore them.
 
+`where` accepts standard SQL-style metadata filters, for example
+`"lang = 'en' AND rank <= 10"`, `"tags CONTAINS 'vector'"`, and
+`"created_at >= '2026-06-01'"`.
+
 ## Collection Query and Data Access
 
 | Method | Description |
@@ -112,11 +117,20 @@ Parameter behavior is the same for local and HTTP Python clients:
 | `head(n=5)` | First rows. |
 | `tail(n=5)` | Last rows. |
 | `list_fields()` | List metadata field names. |
+| `exists()` | Check whether the collection exists. |
+| `is_read_only` | Local collection property indicating whether storage is read-only. |
 | `is_id_exists(id)` | Check whether an ID exists. |
 | `max_id` | Highest stored external ID. |
 | `shape` | `(n_vectors, dim)`. |
 | `stats()` | Collection statistics. |
 | `index_mode` | Current primary index mode. |
+
+Remote-only collection helpers:
+
+| Method | Description |
+| --- | --- |
+| `read_by_only_id(id)` | Read one ID or a list of IDs and return vectors, IDs, and fields. Prefer `query_vectors(filter_ids=...)` for portable local/remote code. |
+| `get_collection_path()` | Return the collection path on the server filesystem. Useful for debugging server deployments. |
 
 ## Delete and Maintenance
 
@@ -129,3 +143,11 @@ Parameter behavior is the same for local and HTTP Python clients:
 | `snapshot_to(snapshot_path)` | Snapshot this collection. |
 | `export_to(export_path)` | Export this collection. |
 | `update_description(description)` | Update collection description. |
+
+## Further Reading
+
+- [Learning path](tutorials/learning_path.md) for the recommended tutorial order.
+- [Metadata filter cookbook](tutorials/metadata_filter_cookbook.md) for `where`
+  examples.
+- [Indexing guide](tutorials/indexing.md) for supported index names and tuning.
+- [ResultView](result_view.md) for return object conversions.
