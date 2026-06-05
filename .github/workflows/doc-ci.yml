@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Docs version to deploy, for example 0.2.0"
+        description: "Docs version to deploy, for example 0.3.0"
         required: true
         type: string
 permissions:

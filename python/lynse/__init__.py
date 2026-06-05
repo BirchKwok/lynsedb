@@ -6,7 +6,7 @@ from .configs.config import generate_config_file, load_config_file
 
 FILE_PATH = Path(__file__).parent.parent
 
-__version__ = '0.2.0'
+__version__ = '0.3.0'
 
 
 generate_config_file(), load_config_file()

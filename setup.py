@@ -15,7 +15,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name="LynseDB",
-    version="0.2.0",
+    version="0.3.0",
     description="A pure Python-implemented, lightweight, server-optional, multi-end compatible, vector database deployable locally or remotely.",
     long_description=long_description,
     long_description_content_type="text/markdown",
