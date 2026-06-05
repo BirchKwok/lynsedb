@@ -239,65 +239,96 @@ measure overlap with the flat baseline as a first recall proxy.
 
 ## Supported index names
 
-Common dense indexes:
+All index names are case-insensitive. The examples below show the supported
+spellings accepted by `build_index()`.
+
+Dense indexes:
 
 ```python
 collection.build_index("FLAT")
+collection.build_index("FLAT-IP")
 collection.build_index("FLAT-L2")
 collection.build_index("FLAT-COS")
+collection.build_index("FLAT-COSINE")
 collection.build_index("FLAT-IP-SQ8")
 collection.build_index("FLAT-L2-SQ8")
 collection.build_index("FLAT-COS-SQ8")
+collection.build_index("FLAT-COSINE-SQ8")
 
 collection.build_index("HNSW")
+collection.build_index("HNSW-IP")
 collection.build_index("HNSW-L2")
-collection.build_index("HNSW-Cos")
+collection.build_index("HNSW-COS")
+collection.build_index("HNSW-COSINE")
 collection.build_index("HNSW-IP-SQ8")
 collection.build_index("HNSW-L2-SQ8")
-collection.build_index("HNSW-Cos-SQ8")
+collection.build_index("HNSW-COS-SQ8")
+collection.build_index("HNSW-COSINE-SQ8")
 
 collection.build_index("DiskANN")
+collection.build_index("DiskANN-IP")
 collection.build_index("DiskANN-L2")
-collection.build_index("DiskANN-Cos")
+collection.build_index("DiskANN-COS")
+collection.build_index("DiskANN-COSINE")
 collection.build_index("DiskANN-IP-SQ8")
 collection.build_index("DiskANN-L2-SQ8")
-collection.build_index("DiskANN-Cos-SQ8")
+collection.build_index("DiskANN-COS-SQ8")
+collection.build_index("DiskANN-COSINE-SQ8")
 
 collection.build_index("IVF", n_clusters=256)
+collection.build_index("IVF-IP", n_clusters=256)
 collection.build_index("IVF-L2", n_clusters=256)
 collection.build_index("IVF-COS", n_clusters=256)
+collection.build_index("IVF-COSINE", n_clusters=256)
 collection.build_index("IVF-IP-SQ8", n_clusters=256)
 collection.build_index("IVF-L2-SQ8", n_clusters=256)
 collection.build_index("IVF-COS-SQ8", n_clusters=256)
+collection.build_index("IVF-COSINE-SQ8", n_clusters=256)
 ```
 
-Common quantized variants:
+Flat quantized variants:
 
 ```python
 collection.build_index("FLAT-IP-PQ")
 collection.build_index("FLAT-L2-PQ")
 collection.build_index("FLAT-COS-PQ")
+collection.build_index("FLAT-COSINE-PQ")
 collection.build_index("FLAT-IP-PQ8")
 collection.build_index("FLAT-IP-PQ16")
 collection.build_index("FLAT-L2-PQ8")
+collection.build_index("FLAT-COS-PQ8")
 collection.build_index("FLAT-IP-RABITQ")
 collection.build_index("FLAT-L2-RABITQ")
 collection.build_index("FLAT-COS-RABITQ")
+collection.build_index("FLAT-COSINE-RABITQ")
 collection.build_index("FLAT-IP-POLARVEC")
 collection.build_index("FLAT-L2-POLARVEC")
 collection.build_index("FLAT-COS-POLARVEC")
+collection.build_index("FLAT-COSINE-POLARVEC")
 collection.build_index("FLAT-IP-POLARVEC3")
 collection.build_index("FLAT-IP-POLARVEC4")
 collection.build_index("FLAT-IP-POLARVEC8")
 ```
 
+PQ accepts `FLAT-{IP,L2,COS,COSINE}-PQ` and
+`FLAT-{IP,L2,COS,COSINE}-PQ<N>`, where `<N>` is the requested number of
+subspaces. If `<N>` is omitted, LynseDB chooses an automatic subspace count.
+
+PolarVec accepts `FLAT-{IP,L2,COS,COSINE}-POLARVEC` and
+`FLAT-{IP,L2,COS,COSINE}-POLARVEC<N>`, where `<N>` is a bit width from 1 to 8.
+If `<N>` is omitted or invalid, LynseDB uses the default bit width.
+
 Binary variants:
 
 ```python
 collection.build_index("FLAT-HAMMING-BINARY")
+collection.build_index("FLAT-HAMMING")
 collection.build_index("FLAT-JACCARD-BINARY")
+collection.build_index("FLAT-JACCARD")
 collection.build_index("IVF-HAMMING-BINARY", n_clusters=256)
+collection.build_index("IVF-HAMMING", n_clusters=256)
 collection.build_index("IVF-JACCARD-BINARY", n_clusters=256)
+collection.build_index("IVF-JACCARD", n_clusters=256)
 ```
 
 ## Troubleshooting index choices
