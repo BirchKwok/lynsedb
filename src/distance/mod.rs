@@ -417,4 +417,98 @@ mod tests {
             batch_top_k_search(&queries, &candidates, 3, 1, DistanceMetric::L2Squared);
         assert_eq!(all_ids.len(), 2);
     }
+
+    #[test]
+    fn test_top_k_empty_and_zero_k_return_empty() {
+        let query = vec![1.0f32, 2.0];
+        let empty_candidates: Vec<f32> = Vec::new();
+
+        let (ids, dists) = top_k_search(&query, &empty_candidates, 2, 5, DistanceMetric::L2Squared);
+        assert!(ids.is_empty());
+        assert!(dists.is_empty());
+
+        let candidates = vec![1.0f32, 2.0, 3.0, 4.0];
+        let (ids, dists) = top_k_search(&query, &candidates, 2, 0, DistanceMetric::L2Squared);
+        assert!(ids.is_empty());
+        assert!(dists.is_empty());
+    }
+
+    #[test]
+    fn test_top_k_clamps_k_to_candidate_count() {
+        let query = vec![0.0f32, 0.0];
+        let candidates = vec![
+            2.0, 0.0, // dist=4
+            1.0, 0.0, // dist=1
+        ];
+
+        let (ids, dists) = top_k_search(&query, &candidates, 2, 10, DistanceMetric::L2Squared);
+
+        assert_eq!(ids, vec![1, 0]);
+        assert_eq!(dists.len(), 2);
+        assert!(dists[0] <= dists[1]);
+    }
+
+    #[test]
+    fn test_top_k_binary_metrics_are_sorted_by_lower_distance() {
+        let query = vec![1.0f32, 0.0, 1.0, 0.0];
+        let candidates = vec![
+            1.0, 0.0, 1.0, 0.0, // hamming=0, jaccard=0
+            1.0, 1.0, 1.0, 0.0, // hamming=1, jaccard=1/3
+            0.0, 1.0, 0.0, 1.0, // hamming=4, jaccard=1
+        ];
+
+        let (hamming_ids, hamming_dists) =
+            top_k_search(&query, &candidates, 4, 3, DistanceMetric::Hamming);
+        assert_eq!(hamming_ids, vec![0, 1, 2]);
+        assert_eq!(hamming_dists, vec![0.0, 1.0, 4.0]);
+
+        let (jaccard_ids, jaccard_dists) =
+            top_k_search(&query, &candidates, 4, 3, DistanceMetric::Jaccard);
+        assert_eq!(jaccard_ids, vec![0, 1, 2]);
+        assert!((jaccard_dists[0] - 0.0).abs() < 1e-6);
+        assert!((jaccard_dists[1] - (1.0 / 3.0)).abs() < 1e-6);
+        assert!((jaccard_dists[2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_quickselect_handles_zero_k_and_descending() {
+        let original: Vec<(f32, u32)> = vec![(1.0, 0), (5.0, 1), (3.0, 2), (2.0, 3)];
+        let mut zero_k = original.clone();
+        quickselect_k(&mut zero_k, 0, true);
+        assert_eq!(zero_k, original);
+
+        let mut descending = original;
+        quickselect_k(&mut descending, 2, false);
+        let top2: Vec<f32> = descending[..2].iter().map(|p| p.0).collect();
+        assert!(top2.contains(&5.0));
+        assert!(top2.contains(&3.0));
+    }
+
+    #[test]
+    fn test_heap_merge_handles_empty_existing_and_descending_scores() {
+        let (ids, dists) = top_k_heap_merge(&[], &[], &[0.2, 0.9, 0.4], &[20, 90, 40], 2, false);
+
+        assert_eq!(ids, vec![90, 40]);
+        assert_eq!(dists, vec![0.9, 0.4]);
+    }
+
+    #[test]
+    fn test_distance_metric_aliases_and_capabilities() {
+        assert_eq!(
+            DistanceMetric::from_str("DOT"),
+            Some(DistanceMetric::InnerProduct)
+        );
+        assert_eq!(
+            DistanceMetric::from_str("euclidean"),
+            Some(DistanceMetric::L2Squared)
+        );
+        assert_eq!(
+            DistanceMetric::from_str("cosine_distance"),
+            Some(DistanceMetric::Cosine)
+        );
+        assert_eq!(DistanceMetric::from_str("unknown"), None);
+
+        assert!(DistanceMetric::Cosine.supports_flat_approx());
+        assert!(!DistanceMetric::Hamming.supports_flat_approx());
+    }
 }

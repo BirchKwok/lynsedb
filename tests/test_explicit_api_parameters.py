@@ -113,6 +113,16 @@ class _FakeSession:
         return _FakeResponse()
 
 
+class _FakeSearchResult:
+    ids = np.array([7], dtype=np.int64)
+    distances = np.array([0.25], dtype=np.float32)
+    distance_metric = "L2"
+    index_type = "FLAT"
+
+    def __len__(self):
+        return len(self.ids)
+
+
 def test_http_build_index_ignores_non_ivf_n_clusters():
     from lynse.api.http_api.client_api import Collection
 
@@ -135,12 +145,35 @@ def test_http_build_index_ignores_non_ivf_n_clusters():
 
 class _FakeRustCollection:
     is_read_only = False
+    vector_dtype = "float32"
+    shape = (0, 2)
 
     def __init__(self):
         self.calls = []
 
     def build_index(self, index_mode, field_name="default", n_clusters=None):
         self.calls.append((index_mode, field_name, n_clusters))
+
+    def max_id(self):
+        return -1
+
+    def add_items(self, vectors, ids, fields):
+        self.calls.append(("add_items", vectors.copy(), list(ids), fields))
+
+    def upsert_items(self, ids, vectors, fields):
+        self.calls.append(("upsert_items", list(ids), vectors.copy(), fields))
+
+    def search(self, vector, **kwargs):
+        self.calls.append(("search", vector.copy(), kwargs))
+        return _FakeSearchResult()
+
+    def batch_search(self, vectors, **kwargs):
+        self.calls.append(("batch_search", vectors.copy(), kwargs))
+        return [_FakeSearchResult() for _ in range(vectors.shape[0])]
+
+    def retrieve_fields(self, ids):
+        self.calls.append(("retrieve_fields", list(ids)))
+        return []
 
 
 def test_local_build_index_ignores_non_ivf_n_clusters():
@@ -154,6 +187,48 @@ def test_local_build_index_ignores_non_ivf_n_clusters():
 
     coll.build_index("IVF-L2", field_name="image", n_clusters=128)
     assert rust.calls[-1] == ("IVF-L2", "image", 128)
+
+
+def test_local_wire_dtype_is_accepted_without_changing_local_float32_path():
+    from lynse.api.local_client import LocalCollection
+
+    rust = _FakeRustCollection()
+    coll = LocalCollection(object(), "db", "items", rust, dim=2)
+
+    coll.bulk_add_binary(
+        np.array([[1.0, 2.0]], dtype=np.float64),
+        enable_progress_bar=False,
+        wire_dtype="float16",
+    )
+    op, vectors, ids, fields = rust.calls[-1]
+    assert op == "add_items"
+    assert vectors.dtype == np.float32
+    assert ids == [0]
+    assert fields is None
+
+    coll.upsert_items(
+        [([3.0, 4.0], 42)],
+        enable_progress_bar=False,
+        wire_dtype="float16",
+    )
+    op, ids, vectors, fields = rust.calls[-1]
+    assert op == "upsert_items"
+    assert ids == [42]
+    assert vectors.dtype == np.float32
+    assert fields is None
+
+    coll.search(np.array([5.0, 6.0], dtype=np.float64), k=1, wire_dtype="float16")
+    op, vector, kwargs = rust.calls[-1]
+    assert op == "search"
+    assert vector.dtype == np.float32
+    assert kwargs["k"] == 1
+
+    coll.batch_search([[7.0, 8.0], [9.0, 10.0]], k=1, wire_dtype="float16")
+    op, vectors, kwargs = rust.calls[-1]
+    assert op == "batch_search"
+    assert vectors.dtype == np.float32
+    assert vectors.shape == (2, 2)
+    assert kwargs["k"] == 1
 
 
 def test_search_and_to_json_signatures_are_explicit():

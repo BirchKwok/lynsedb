@@ -3,12 +3,10 @@
 //! Partitions the vector space into clusters using K-means, then searches
 //! only the nearest clusters. Good balance of speed and recall for large datasets.
 
-use super::{IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
-use crate::distance::{self, compute_distance_f32, DistanceMetric};
+use super::{kmeans, IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
+use crate::distance::{compute_distance_f32, DistanceMetric};
 use crate::error::{LynseError, Result};
 use crate::quantizer::{self, Quantizer, QuantizerType};
-use rand::Rng;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -66,131 +64,6 @@ impl IVFIndex {
             trained: false,
         }
     }
-
-    /// Train centroids using K-means (Lloyd's algorithm).
-    ///
-    /// Uses subsampled KMeans++ init (O(K × min(N,10K))) and parallel Lloyd
-    /// assignment via rayon (O(max_iter × N × K) but parallelised).
-    fn train_centroids(&mut self, data: &[f32], n_vectors: usize, dim: usize) {
-        let n_centroids = self.n_centroids.min(n_vectors);
-        let max_iter = 20;
-
-        // ── Subsampled KMeans++ init ──────────────────────────────────────────
-        // Use at most 10K points so init is O(K × 10K) not O(K² × N).
-        let init_n = n_vectors.min(10_000);
-        let mut rng = rand::thread_rng();
-        let mut centroids = vec![0.0f32; n_centroids * dim];
-
-        let first = rng.gen_range(0..init_n);
-        centroids[..dim].copy_from_slice(&data[first * dim..(first + 1) * dim]);
-
-        let mut min_dists = vec![f32::MAX; init_n];
-        for c in 1..n_centroids {
-            // Incremental D² update: only need to check the *last* centroid added
-            let prev = c - 1;
-            for i in 0..init_n {
-                let d = compute_distance_f32(
-                    &data[i * dim..(i + 1) * dim],
-                    &centroids[prev * dim..(prev + 1) * dim],
-                    DistanceMetric::L2Squared,
-                );
-                if d < min_dists[i] {
-                    min_dists[i] = d;
-                }
-            }
-            let best = min_dists
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            centroids[c * dim..(c + 1) * dim].copy_from_slice(&data[best * dim..(best + 1) * dim]);
-        }
-
-        // ── Parallel Lloyd iterations ─────────────────────────────────────────
-        let mut assignments = vec![0usize; n_vectors];
-        for _iter in 0..max_iter {
-            // Parallel assignment across all N vectors
-            let new_assignments: Vec<usize> = (0..n_vectors)
-                .into_par_iter()
-                .map(|i| {
-                    let vec = &data[i * dim..(i + 1) * dim];
-                    let mut best_c = 0usize;
-                    let mut best_dist = f32::MAX;
-                    for c in 0..n_centroids {
-                        let d = compute_distance_f32(
-                            vec,
-                            &centroids[c * dim..(c + 1) * dim],
-                            DistanceMetric::L2Squared,
-                        );
-                        if d < best_dist {
-                            best_dist = d;
-                            best_c = c;
-                        }
-                    }
-                    best_c
-                })
-                .collect();
-
-            let changed = new_assignments
-                .iter()
-                .zip(&assignments)
-                .any(|(a, b)| a != b);
-            assignments = new_assignments;
-
-            // Update centroids
-            let mut sums = vec![0.0f32; n_centroids * dim];
-            let mut counts = vec![0u32; n_centroids];
-            for i in 0..n_vectors {
-                let c = assignments[i];
-                counts[c] += 1;
-                for d in 0..dim {
-                    sums[c * dim + d] += data[i * dim + d];
-                }
-            }
-            for c in 0..n_centroids {
-                if counts[c] > 0 {
-                    let inv = 1.0 / counts[c] as f32;
-                    for d in 0..dim {
-                        centroids[c * dim + d] = sums[c * dim + d] * inv;
-                    }
-                }
-            }
-
-            if !changed {
-                break;
-            }
-        }
-
-        self.centroids = centroids;
-        self.n_centroids = n_centroids;
-    }
-
-    /// Assign vectors to nearest clusters and build inverted lists.
-    fn assign_to_clusters(&mut self, data: &[f32], n_vectors: usize, dim: usize) {
-        self.inverted_lists.clear();
-        let n_centroids = self.centroids.len() / dim;
-
-        for i in 0..n_vectors {
-            let mut best_c = 0usize;
-            let mut best_dist = f32::MAX;
-            for c in 0..n_centroids {
-                let dist = compute_distance_f32(
-                    &data[i * dim..(i + 1) * dim],
-                    &self.centroids[c * dim..(c + 1) * dim],
-                    DistanceMetric::L2Squared,
-                );
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_c = c;
-                }
-            }
-            self.inverted_lists
-                .entry(best_c)
-                .or_insert_with(Vec::new)
-                .push(i);
-        }
-    }
 }
 
 impl VectorIndex for IVFIndex {
@@ -222,11 +95,12 @@ impl VectorIndex for IVFIndex {
             return Ok(());
         }
 
-        // Train centroids
-        self.train_centroids(&self.encoded_data.clone(), n_vectors, dim);
-
-        // Assign vectors to clusters
-        self.assign_to_clusters(&self.encoded_data.clone(), n_vectors, dim);
+        // Train centroids and assign vectors without cloning the encoded matrix.
+        let trained = kmeans::train_l2(&self.encoded_data, n_vectors, dim, self.n_centroids, 20);
+        self.centroids = trained.centroids;
+        self.n_centroids = trained.n_centroids;
+        self.inverted_lists =
+            kmeans::inverted_lists_from_assignments(&trained.assignments, self.n_centroids);
 
         self.trained = true;
         Ok(())
@@ -340,7 +214,14 @@ impl VectorIndex for IVFIndex {
         // Reassign to clusters
         if !self.encoded_data.is_empty() {
             let n = self.ids.len();
-            self.assign_to_clusters(&self.encoded_data.clone(), n, dim);
+            let assignments = kmeans::assign_l2(
+                &self.encoded_data[..n * dim],
+                &self.centroids,
+                dim,
+                self.n_centroids,
+            );
+            self.inverted_lists =
+                kmeans::inverted_lists_from_assignments(&assignments, self.n_centroids);
         } else {
             self.inverted_lists.clear();
         }
@@ -370,21 +251,16 @@ impl VectorIndex for IVFIndex {
 
         // Assign new vectors to clusters
         let n_centroids = self.centroids.len() / dim;
+        let half_norms = kmeans::centroid_half_norms(&self.centroids, dim, n_centroids);
         for i in 0..n_vectors {
             let vec_idx = old_count + i;
-            let mut best_c = 0usize;
-            let mut best_dist = f32::MAX;
-            for c in 0..n_centroids {
-                let dist = compute_distance_f32(
-                    &encoded_new[i * dim..(i + 1) * dim],
-                    &self.centroids[c * dim..(c + 1) * dim],
-                    DistanceMetric::L2Squared,
-                );
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_c = c;
-                }
-            }
+            let best_c = kmeans::nearest_l2_centroid(
+                &encoded_new[i * dim..(i + 1) * dim],
+                &self.centroids,
+                &half_norms,
+                dim,
+                n_centroids,
+            );
             self.inverted_lists
                 .entry(best_c)
                 .or_insert_with(Vec::new)

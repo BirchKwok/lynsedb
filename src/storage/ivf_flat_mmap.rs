@@ -11,9 +11,9 @@
 //! Target: < 0.5ms for 1M×128 IP top-10 with nprobe=10, 256 partitions.
 
 use crate::distance::{self, DistanceMetric};
+use crate::index::kmeans;
 use crate::storage::dtype::VectorDtype;
 use crate::storage::flat_mmap::FlatMmap;
-use rayon::prelude::*;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -52,14 +52,14 @@ impl IvfFlatMmap {
     /// - `dim`: vector dimension
     /// - `n_partitions`: number of IVF partitions (e.g., 256)
     /// - `n_iters`: KMeans iterations (e.g., 20)
-    /// - `metric`: distance metric used for search (KMeans uses matching metric)
+    /// - `metric`: search metric. IVF partition training uses shared L2 KMeans.
     pub fn build(
         data_path: &Path,
         data: &[f32],
         dim: usize,
         n_partitions: usize,
         n_iters: usize,
-        metric: DistanceMetric,
+        _metric: DistanceMetric,
     ) -> std::io::Result<Self> {
         let n_vectors = data.len() / dim;
         assert!(
@@ -67,17 +67,19 @@ impl IvfFlatMmap {
             "need at least n_partitions vectors"
         );
 
-        // Step 1: KMeans clustering (metric-aware)
-        let centroids = kmeans(data, dim, n_partitions, n_iters, metric);
+        // Step 1: shared IVF KMeans clustering. IVF partitioning uses L2
+        // Voronoi cells; search still applies the requested metric later.
+        let trained = kmeans::train_l2(data, n_vectors, dim, n_partitions, n_iters);
+        let centroids = trained.centroids;
         let routing_dims = select_routing_dims(&centroids, dim, n_partitions);
 
-        // Step 2: Assign each vector to nearest centroid (metric-aware)
-        let assignments = assign_partitions(data, &centroids, dim, n_partitions, metric);
+        // Step 2: Use the final assignments produced by shared KMeans.
+        let assignments = trained.assignments;
 
         // Step 3: Compute partition sizes and offsets
         let mut partition_sizes = vec![0usize; n_partitions];
         for &p in &assignments {
-            partition_sizes[p as usize] += 1;
+            partition_sizes[p] += 1;
         }
         let mut partition_offsets = vec![0usize; n_partitions + 1];
         for i in 0..n_partitions {
@@ -90,7 +92,7 @@ impl IvfFlatMmap {
         let mut write_pos = partition_offsets.clone(); // current write position per partition
 
         for vec_idx in 0..n_vectors {
-            let p = assignments[vec_idx] as usize;
+            let p = assignments[vec_idx];
             let dst_idx = write_pos[p];
             write_pos[p] += 1;
 
@@ -268,37 +270,7 @@ impl IvfFlatMmap {
     }
 }
 
-// ─── KMeans (metric-aware + fast KMeans++ init) ─────────────────────────────
-
-/// Fast deterministic PRNG (PCG-style LCG, 64-bit state).
-struct FastRng(u64);
-
-impl FastRng {
-    fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-
-    #[inline]
-    fn next_f64(&mut self) -> f64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (self.0 >> 33) as f64 / (1u64 << 31) as f64
-    }
-
-    /// Fisher-Yates partial shuffle: pick `count` random indices from 0..n.
-    fn sample_indices(&mut self, n: usize, count: usize) -> Vec<usize> {
-        let count = count.min(n);
-        let mut indices: Vec<usize> = (0..n).collect();
-        for i in 0..count {
-            let j = i + ((self.next_f64() * (n - i) as f64) as usize).min(n - i - 1);
-            indices.swap(i, j);
-        }
-        indices.truncate(count);
-        indices
-    }
-}
+// ─── Centroid Routing Helpers ───────────────────────────────────────────────
 
 #[inline]
 fn should_use_ip_routing(metric: DistanceMetric, dim: usize, k: usize) -> bool {
@@ -369,414 +341,6 @@ fn shortlist_insert(best: &mut [(f32, u32)], len: &mut usize, score: f32, id: u3
     if score > worst_score {
         best[worst_idx] = (score, id);
     }
-}
-
-fn assign_ip_shortlist(
-    data: &[f32],
-    centroids: &[f32],
-    dim: usize,
-    k: usize,
-    routing_dims: &[usize],
-    shortlist: usize,
-) -> Vec<u32> {
-    let shortlist = shortlist.min(k).max(1);
-    (0..data.len() / dim)
-        .into_par_iter()
-        .map(|i| {
-            let vec = &data[i * dim..(i + 1) * dim];
-            let mut candidates = vec![(f32::NEG_INFINITY, 0u32); shortlist];
-            let mut cand_len = 0usize;
-
-            for c in 0..k {
-                let centroid = &centroids[c * dim..(c + 1) * dim];
-                let coarse = coarse_ip_score(vec, centroid, routing_dims);
-                shortlist_insert(&mut candidates, &mut cand_len, coarse, c as u32);
-            }
-
-            let mut best_c = 0u32;
-            let mut best_dist = f32::MIN;
-            for &(_, c_idx) in &candidates[..cand_len] {
-                let centroid = &centroids[c_idx as usize * dim..(c_idx as usize + 1) * dim];
-                let d = distance::compute_distance_f32(vec, centroid, DistanceMetric::InnerProduct);
-                if d > best_dist {
-                    best_dist = d;
-                    best_c = c_idx;
-                }
-            }
-            best_c
-        })
-        .collect()
-}
-
-/// MiniBatchKMeans with fast KMeans++ initialization.
-///
-/// Memory-efficient: only O(batch_size × dim) per iteration, no N-size allocations.
-/// Prevents OOM on very large datasets while maintaining good clustering quality.
-///
-/// Optimizations:
-/// 1. Sampled KMeans++ init (subsample ~50K points, incremental min_dist)
-/// 2. L2 norm decomposition: ||x-c||² = ||c||² - 2·dot(x,c), saves 33% FLOPs
-/// 3. Mini-batch incremental centroid update (constant memory per iteration)
-/// 4. Parallel batch assignment via rayon
-fn kmeans(data: &[f32], dim: usize, k: usize, n_iters: usize, metric: DistanceMetric) -> Vec<f32> {
-    let n = data.len() / dim;
-    let ascending = metric.is_ascending();
-
-    // KMeans++ on subsample for fast init
-    let mut centroids = kmeans_pp_init_sampled(data, dim, k, metric);
-
-    // ── Phase 1: Fixed subsample iterations ──
-    // Sample ONCE, reuse for all iterations to avoid inter-iteration centroid oscillation.
-    // Memory: batch_size × dim × 4 bytes (~24MB at 50K × 128).
-    let batch_size = n.min(50_000);
-    let batch_data = if batch_size < n {
-        let mut rng = FastRng::new(123);
-        let indices = rng.sample_indices(n, batch_size);
-        let mut buf = vec![0.0f32; batch_size * dim];
-        for (bi, &idx) in indices.iter().enumerate() {
-            buf[bi * dim..(bi + 1) * dim].copy_from_slice(&data[idx * dim..(idx + 1) * dim]);
-        }
-        buf
-    } else {
-        data.to_vec()
-    };
-    let use_ip_routing = should_use_ip_routing(metric, dim, k);
-
-    // Subsample iterations: fast convergence on fixed subset
-    let subsample_iters = if batch_size < n {
-        n_iters.saturating_sub(2)
-    } else {
-        n_iters
-    };
-    for _iter in 0..subsample_iters {
-        let assignments = if use_ip_routing {
-            let routing_dims = select_routing_dims(&centroids, dim, k);
-            assign_ip_shortlist(
-                &batch_data,
-                &centroids,
-                dim,
-                k,
-                &routing_dims,
-                IP_ASSIGN_SHORTLIST,
-            )
-        } else if metric == DistanceMetric::L2Squared {
-            assign_l2_decomposed(&batch_data, &centroids, dim, k)
-        } else {
-            assign_partitions_inner(&batch_data, &centroids, dim, k, metric, ascending)
-        };
-
-        let mut sums = vec![0.0f32; k * dim];
-        let mut counts = vec![0u32; k];
-        for bi in 0..batch_size {
-            let c = assignments[bi] as usize;
-            counts[c] += 1;
-            let x_off = bi * dim;
-            let c_off = c * dim;
-            for d in 0..dim {
-                sums[c_off + d] += batch_data[x_off + d];
-            }
-        }
-        // Find the largest cluster for dead centroid re-initialization
-        let mut max_c = 0usize;
-        let mut max_count = 0u32;
-        for c in 0..k {
-            if counts[c] > max_count {
-                max_count = counts[c];
-                max_c = c;
-            }
-        }
-
-        for c in 0..k {
-            if counts[c] > 0 {
-                let inv = 1.0 / counts[c] as f32;
-                let c_off = c * dim;
-                for d in 0..dim {
-                    centroids[c_off + d] = sums[c_off + d] * inv;
-                }
-            } else if max_count > 1 {
-                // Re-initialize dead centroid: perturb the largest cluster's centroid
-                let c_off = c * dim;
-                let src_off = max_c * dim;
-                for d in 0..dim {
-                    centroids[c_off + d] = centroids[src_off + d] * (1.0 + 1e-4 * (d as f32));
-                }
-            }
-        }
-    }
-
-    // ── Phase 2: Chunked full-data refinement (OOM-safe) ──
-    // Process ALL data in chunks to refine centroids to true means.
-    // Memory per chunk: chunk_size × 4 bytes for assignments only.
-    let refine_iters = if batch_size < n {
-        2usize.min(n_iters)
-    } else {
-        0
-    };
-    let chunk_size = 100_000usize;
-
-    for _refine in 0..refine_iters {
-        let mut sums = vec![0.0f32; k * dim];
-        let mut counts = vec![0u32; k];
-        let routing_dims = if use_ip_routing {
-            select_routing_dims(&centroids, dim, k)
-        } else {
-            Vec::new()
-        };
-
-        for chunk_start in (0..n).step_by(chunk_size) {
-            let chunk_end = (chunk_start + chunk_size).min(n);
-            let chunk_data = &data[chunk_start * dim..chunk_end * dim];
-
-            let chunk_assignments = if use_ip_routing {
-                assign_ip_shortlist(
-                    chunk_data,
-                    &centroids,
-                    dim,
-                    k,
-                    &routing_dims,
-                    IP_ASSIGN_SHORTLIST,
-                )
-            } else if metric == DistanceMetric::L2Squared {
-                assign_l2_decomposed(chunk_data, &centroids, dim, k)
-            } else {
-                assign_partitions_inner(chunk_data, &centroids, dim, k, metric, ascending)
-            };
-
-            for (i, &c_idx) in chunk_assignments.iter().enumerate() {
-                let c = c_idx as usize;
-                counts[c] += 1;
-                let x_off = i * dim;
-                let c_off = c * dim;
-                let mut d = 0;
-                while d + 3 < dim {
-                    sums[c_off + d] += chunk_data[x_off + d];
-                    sums[c_off + d + 1] += chunk_data[x_off + d + 1];
-                    sums[c_off + d + 2] += chunk_data[x_off + d + 2];
-                    sums[c_off + d + 3] += chunk_data[x_off + d + 3];
-                    d += 4;
-                }
-                while d < dim {
-                    sums[c_off + d] += chunk_data[x_off + d];
-                    d += 1;
-                }
-            }
-        }
-
-        for c in 0..k {
-            if counts[c] > 0 {
-                let inv = 1.0 / counts[c] as f32;
-                let c_off = c * dim;
-                for d in 0..dim {
-                    centroids[c_off + d] = sums[c_off + d] * inv;
-                }
-            }
-        }
-    }
-
-    centroids
-}
-
-/// Fast L2 assignment using norm decomposition + SIMD dot product.
-///
-/// ||x-c||² = ||x||² + ||c||² - 2·dot(x,c)
-/// Since ||x||² is constant per vector, argmin only needs:
-///   argmin_j { ||c_j||²/2 - dot(x, c_j) }
-///
-/// Uses SIMD inner product (2 ops/elem) instead of full L2 (3 ops/elem).
-fn assign_l2_decomposed(data: &[f32], centroids: &[f32], dim: usize, k: usize) -> Vec<u32> {
-    let n = data.len() / dim;
-
-    // Precompute half centroid norms: ||c_j||² / 2
-    let half_c_norms: Vec<f32> = (0..k)
-        .map(|j| {
-            let c = &centroids[j * dim..(j + 1) * dim];
-            c.iter().map(|&v| v * v).sum::<f32>() * 0.5
-        })
-        .collect();
-
-    (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let x = &data[i * dim..(i + 1) * dim];
-            let mut best_c = 0u32;
-            let mut best_val = f32::MAX;
-
-            for j in 0..k {
-                let c = &centroids[j * dim..(j + 1) * dim];
-                // SIMD dot product — hand-tuned NEON, 2 ops/elem
-                let dot = distance::compute_distance_f32(x, c, DistanceMetric::InnerProduct);
-                let val = half_c_norms[j] - dot;
-                if val < best_val {
-                    best_val = val;
-                    best_c = j as u32;
-                }
-            }
-            best_c
-        })
-        .collect()
-}
-
-/// Fast KMeans++ initialization with two key optimizations:
-/// 1. Run on a subsample (default 50K) — reduces data passes
-/// 2. Incremental min_dist tracking — O(k×n_sample) instead of O(k²×n_sample)
-fn kmeans_pp_init_sampled(data: &[f32], dim: usize, k: usize, metric: DistanceMetric) -> Vec<f32> {
-    let n = data.len() / dim;
-    let ascending = metric.is_ascending();
-    let mut rng = FastRng::new(42);
-
-    // Subsample for init (cap at 50K or full data if smaller)
-    let sample_n = n.min(50_000);
-    let sample_indices = if sample_n >= n {
-        (0..n).collect::<Vec<_>>()
-    } else {
-        rng.sample_indices(n, sample_n)
-    };
-
-    // Gather sample data contiguously for cache efficiency
-    let mut sample_data = vec![0.0f32; sample_indices.len() * dim];
-    for (si, &orig_i) in sample_indices.iter().enumerate() {
-        sample_data[si * dim..(si + 1) * dim]
-            .copy_from_slice(&data[orig_i * dim..(orig_i + 1) * dim]);
-    }
-    let sn = sample_indices.len();
-
-    let mut centroids = vec![0.0f32; k * dim];
-
-    // Pick first centroid randomly from sample
-    let first = (rng.next_f64() * sn as f64) as usize % sn;
-    centroids[..dim].copy_from_slice(&sample_data[first * dim..(first + 1) * dim]);
-
-    // min_dist[i] = distance from sample point i to NEAREST existing centroid
-    // Initialize with distance to first centroid
-    let mut min_dist: Vec<f32> = (0..sn)
-        .into_par_iter()
-        .map(|i| {
-            let vec = &sample_data[i * dim..(i + 1) * dim];
-            let d = distance::compute_distance_f32(vec, &centroids[..dim], metric);
-            if ascending {
-                d
-            } else {
-                1.0 - d
-            } // convert to "farness" for IP
-        })
-        .collect();
-
-    for ci in 1..k {
-        // Weighted random selection (proportional to dist²)
-        let total: f64 = min_dist
-            .iter()
-            .map(|&d| {
-                let w = d.max(0.0) as f64;
-                w * w
-            })
-            .sum();
-
-        let chosen = if total <= 0.0 {
-            // Fallback: random
-            (rng.next_f64() * sn as f64) as usize % sn
-        } else {
-            let threshold = rng.next_f64() * total;
-            let mut cumulative = 0.0;
-            let mut pick = sn - 1;
-            for i in 0..sn {
-                let w = min_dist[i].max(0.0) as f64;
-                cumulative += w * w;
-                if cumulative >= threshold {
-                    pick = i;
-                    break;
-                }
-            }
-            pick
-        };
-
-        centroids[ci * dim..(ci + 1) * dim]
-            .copy_from_slice(&sample_data[chosen * dim..(chosen + 1) * dim]);
-
-        // Incrementally update min_dist: only check new centroid (O(sn×dim))
-        let new_cent = &centroids[ci * dim..(ci + 1) * dim];
-        let new_dists: Vec<f32> = (0..sn)
-            .into_par_iter()
-            .map(|i| {
-                let vec = &sample_data[i * dim..(i + 1) * dim];
-                let d = distance::compute_distance_f32(vec, new_cent, metric);
-                if ascending {
-                    d
-                } else {
-                    1.0 - d
-                }
-            })
-            .collect();
-
-        // Update min_dist = min(old_min, new_dist) — element-wise
-        for i in 0..sn {
-            if new_dists[i] < min_dist[i] {
-                min_dist[i] = new_dists[i];
-            }
-        }
-    }
-
-    centroids
-}
-
-/// Assign each vector to its nearest centroid (metric-aware, parallel).
-fn assign_partitions(
-    data: &[f32],
-    centroids: &[f32],
-    dim: usize,
-    n_partitions: usize,
-    metric: DistanceMetric,
-) -> Vec<u32> {
-    if should_use_ip_routing(metric, dim, n_partitions) {
-        let routing_dims = select_routing_dims(centroids, dim, n_partitions);
-        return assign_ip_shortlist(
-            data,
-            centroids,
-            dim,
-            n_partitions,
-            &routing_dims,
-            IP_ASSIGN_SHORTLIST,
-        );
-    }
-    if metric == DistanceMetric::L2Squared {
-        return assign_l2_decomposed(data, centroids, dim, n_partitions);
-    }
-    let ascending = metric.is_ascending();
-    assign_partitions_inner(data, centroids, dim, n_partitions, metric, ascending)
-}
-
-fn assign_partitions_inner(
-    data: &[f32],
-    centroids: &[f32],
-    dim: usize,
-    n_partitions: usize,
-    metric: DistanceMetric,
-    ascending: bool,
-) -> Vec<u32> {
-    let n = data.len() / dim;
-    (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let vec = &data[i * dim..(i + 1) * dim];
-            let mut best_c = 0u32;
-            let mut best_dist = if ascending { f32::MAX } else { f32::MIN };
-            for c in 0..n_partitions {
-                let centroid = &centroids[c * dim..(c + 1) * dim];
-                let d = distance::compute_distance_f32(vec, centroid, metric);
-                if ascending {
-                    if d < best_dist {
-                        best_dist = d;
-                        best_c = c as u32;
-                    }
-                } else {
-                    if d > best_dist {
-                        best_dist = d;
-                        best_c = c as u32;
-                    }
-                }
-            }
-            best_c
-        })
-        .collect()
 }
 
 /// Find nprobe nearest centroids to query.
@@ -951,8 +515,22 @@ mod tests {
         }
     }
 
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        #[inline]
+        fn next_f64(&mut self) -> f64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (self.0 >> 33) as f64 / (1u64 << 31) as f64
+        }
+    }
+
     fn generate_clustered_unit_vectors(n: usize, dim: usize, k: usize) -> Vec<f32> {
-        let mut rng = FastRng::new(7);
+        let mut rng = TestRng::new(7);
         let mut centers = vec![0.0f32; k * dim];
         for c in 0..k {
             let center = &mut centers[c * dim..(c + 1) * dim];
@@ -990,11 +568,10 @@ mod tests {
         let data = generate_clustered_unit_vectors(n, dim, k);
 
         // Warm up SIMD and rayon thread pool before timing.
-        let warm_centroids = kmeans(&data, dim, k, 2, metric);
+        let warm = kmeans::train_l2(&data, n, dim, k, 2);
+        let warm_centroids = warm.centroids;
         let warm_routing_dims = select_routing_dims(&warm_centroids, dim, k);
-        let warm_assignments =
-            assign_partitions(&data[..n_queries * dim], &warm_centroids, dim, k, metric);
-        black_box(warm_assignments);
+        black_box(warm.assignments);
         for i in 0..n_queries.min(128) {
             let query = &data[i * dim..(i + 1) * dim];
             black_box(find_nearest_centroids(
@@ -1009,12 +586,13 @@ mod tests {
         }
 
         let train_start = Instant::now();
-        let centroids = kmeans(&data, dim, k, n_iters, metric);
+        let trained = kmeans::train_l2(&data, n, dim, k, n_iters);
+        let centroids = trained.centroids;
         let routing_dims = select_routing_dims(&centroids, dim, k);
         let train_elapsed = train_start.elapsed();
 
         let assign_start = Instant::now();
-        let assignments = assign_partitions(&data, &centroids, dim, k, metric);
+        let assignments = kmeans::assign_l2(&data, &centroids, dim, k);
         let assign_elapsed = assign_start.elapsed();
         black_box(&assignments);
 
@@ -1043,7 +621,7 @@ mod tests {
         let query_us = query_elapsed.as_secs_f64() * 1e6 / n_queries.max(1) as f64;
 
         eprintln!(
-            "MINIBATCH_KMEANS_BASELINE n={} dim={} k={} iters={} nprobe={} train_ms={:.2} train_vec_per_s={:.0} assign_ms={:.2} assign_vec_per_s={:.0} query_ms={:.2} query_qps={:.0} query_us_per_query={:.2}",
+            "SHARED_KMEANS_BASELINE n={} dim={} k={} iters={} nprobe={} train_ms={:.2} train_vec_per_s={:.0} assign_ms={:.2} assign_vec_per_s={:.0} query_ms={:.2} query_qps={:.0} query_us_per_query={:.2}",
             n,
             dim,
             k,

@@ -8,13 +8,15 @@ Environment variables:
     LYNSE_BENCH_N=100000
     LYNSE_BENCH_DIM=128
     LYNSE_BENCH_K=256
+    LYNSE_BENCH_INDEX_K=256
     LYNSE_BENCH_QUERIES=2000
     LYNSE_BENCH_BATCH=256
     LYNSE_BENCH_NPROBE=1
+    LYNSE_BENCH_DTYPES=float32,float16
 
 Note:
-    `LYNSE_BENCH_K` controls the synthetic data cluster count. The current Rust
-    public IVF build path still uses a fixed 256 centroids internally.
+    `LYNSE_BENCH_K` controls the synthetic data cluster count. `LYNSE_BENCH_INDEX_K`
+    controls the IVF centroid count passed to the Rust public build path.
 """
 
 from __future__ import annotations
@@ -34,6 +36,11 @@ from lynse._backend import RustEngine
 def env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     return int(value) if value else default
+
+
+def env_list(name: str, default: str) -> list[str]:
+    value = os.getenv(name, default)
+    return [part.strip() for part in value.split(",") if part.strip()]
 
 
 def generate_clustered_unit_vectors(n: int, dim: int, k: int, seed: int = 7) -> np.ndarray:
@@ -59,14 +66,15 @@ def main() -> None:
     n = env_int("LYNSE_BENCH_N", 100_000)
     dim = env_int("LYNSE_BENCH_DIM", 128)
     k = env_int("LYNSE_BENCH_K", 256)
+    index_k = env_int("LYNSE_BENCH_INDEX_K", 256)
     n_queries = min(env_int("LYNSE_BENCH_QUERIES", 2_000), n)
     batch_size = max(1, env_int("LYNSE_BENCH_BATCH", 256))
-    nprobe = max(1, min(env_int("LYNSE_BENCH_NPROBE", 1), k))
+    nprobe = max(1, min(env_int("LYNSE_BENCH_NPROBE", 1), index_k))
+    dtypes = env_list("LYNSE_BENCH_DTYPES", "float32,float16")
 
-    index_k = 256
     print(
         f"IVF_BASELINE_CONFIG n={n} dim={dim} data_k={k} index_k={index_k} n_queries={n_queries} "
-        f"batch_size={batch_size} nprobe={nprobe} machine={platform.machine()} "
+        f"batch_size={batch_size} nprobe={nprobe} dtypes={','.join(dtypes)} machine={platform.machine()} "
         f"python={platform.python_version()} platform={platform.platform()}"
     )
 
@@ -74,50 +82,52 @@ def main() -> None:
     queries = vectors[:n_queries]
     ids = list(range(n))
 
-    root = tempfile.mkdtemp(prefix="lynse_ivf_baseline_")
-    try:
-        engine = RustEngine(root)
-        collection = engine.create_collection("bench", dim)
+    for dtype in dtypes:
+        root = tempfile.mkdtemp(prefix=f"lynse_ivf_baseline_{dtype}_")
+        try:
+            engine = RustEngine(root)
+            collection = engine.create_collection("bench", dim, dtypes=dtype)
 
-        t0 = time.perf_counter()
-        collection.add_items(vectors, ids)
-        ingest_s = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            collection.add_items(vectors, ids)
+            ingest_s = time.perf_counter() - t0
 
-        t1 = time.perf_counter()
-        collection.build_index("IVF")
-        build_s = time.perf_counter() - t1
+            t1 = time.perf_counter()
+            collection.build_index("IVF", n_clusters=index_k)
+            build_s = time.perf_counter() - t1
 
-        single_samples = []
-        for query in queries:
-            t = time.perf_counter()
-            result = collection.search(query, k=10, nprobe=nprobe)
-            single_samples.append(time.perf_counter() - t)
-            if len(result.ids) == 0:
-                raise RuntimeError("empty IVF result during baseline")
+            single_samples = []
+            for query in queries:
+                t = time.perf_counter()
+                result = collection.search(query, k=10, nprobe=nprobe)
+                single_samples.append(time.perf_counter() - t)
+                if len(result.ids) == 0:
+                    raise RuntimeError("empty IVF result during baseline")
 
-        t2 = time.perf_counter()
-        batch_result_count = 0
-        for start in range(0, n_queries, batch_size):
-            batch = queries[start : start + batch_size]
-            results = collection.batch_search(batch, k=10, nprobe=nprobe)
-            batch_result_count += len(results)
-        batch_s = time.perf_counter() - t2
+            t2 = time.perf_counter()
+            batch_result_count = 0
+            for start in range(0, n_queries, batch_size):
+                batch = queries[start : start + batch_size]
+                results = collection.batch_search(batch, k=10, nprobe=nprobe)
+                batch_result_count += len(results)
+            batch_s = time.perf_counter() - t2
 
-        print(
-            "IVF_BASELINE_RESULT "
-            f"ingest_ms={ingest_s * 1_000.0:.2f} "
-            f"build_ms={build_s * 1_000.0:.2f} "
-            f"build_vec_per_s={n / max(build_s, 1e-9):.0f} "
-            f"single_avg_ms={statistics.fmean(single_samples) * 1_000.0:.4f} "
-            f"single_p50_ms={percentile_ms(single_samples, 0.50):.4f} "
-            f"single_p95_ms={percentile_ms(single_samples, 0.95):.4f} "
-            f"single_p99_ms={percentile_ms(single_samples, 0.99):.4f} "
-            f"single_qps={n_queries / max(sum(single_samples), 1e-9):.0f} "
-            f"batch_ms={batch_s * 1_000.0:.2f} "
-            f"batch_qps={batch_result_count / max(batch_s, 1e-9):.0f}"
-        )
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+            print(
+                "IVF_BASELINE_RESULT "
+                f"dtype={dtype} "
+                f"ingest_ms={ingest_s * 1_000.0:.2f} "
+                f"build_ms={build_s * 1_000.0:.2f} "
+                f"build_vec_per_s={n / max(build_s, 1e-9):.0f} "
+                f"single_avg_ms={statistics.fmean(single_samples) * 1_000.0:.4f} "
+                f"single_p50_ms={percentile_ms(single_samples, 0.50):.4f} "
+                f"single_p95_ms={percentile_ms(single_samples, 0.95):.4f} "
+                f"single_p99_ms={percentile_ms(single_samples, 0.99):.4f} "
+                f"single_qps={n_queries / max(sum(single_samples), 1e-9):.0f} "
+                f"batch_ms={batch_s * 1_000.0:.2f} "
+                f"batch_qps={batch_result_count / max(batch_s, 1e-9):.0f}"
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ pub mod diskann;
 pub mod flat;
 pub mod hnsw;
 pub mod ivf;
+pub(crate) mod kmeans;
 
 use crate::distance::DistanceMetric;
 use crate::error::{LynseError, Result};
