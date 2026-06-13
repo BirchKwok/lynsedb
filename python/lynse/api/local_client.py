@@ -366,7 +366,8 @@ class LocalCollection:
                 Tuple[Union[List, Tuple, np.ndarray], int]
             ]],
             batch_size: int = 1000,
-            enable_progress_bar: bool = True
+            enable_progress_bar: bool = True,
+            wire_dtype: str = "float32",
     ):
         """
         Add multiple items to the collection.
@@ -375,6 +376,7 @@ class LocalCollection:
             vectors: List of tuples (vector, id, fields) or (vector, id).
             batch_size (int): The batch size. Default is 1000.
             enable_progress_bar (bool): Whether to enable the progress bar.
+            wire_dtype (str): Accepted for HTTP API parity; ignored for local calls.
 
         Returns:
             list: The IDs of the items added.
@@ -423,7 +425,8 @@ class LocalCollection:
             self,
             vectors: np.ndarray,
             batch_size: int = 50000,
-            enable_progress_bar: bool = True
+            enable_progress_bar: bool = True,
+            wire_dtype: str = "float32",
     ):
         """
         High-performance binary bulk add. Directly passes numpy arrays to Rust.
@@ -432,6 +435,7 @@ class LocalCollection:
             vectors (np.ndarray): 2D array of shape (n, dim), dtype float32.
             batch_size (int): Number of vectors per batch. Default is 50000.
             enable_progress_bar (bool): Whether to enable the progress bar.
+            wire_dtype (str): Accepted for HTTP API parity; ignored for local calls.
 
         Returns:
             int: Total number of vectors added.
@@ -489,13 +493,15 @@ class LocalCollection:
                 Tuple[Union[List, Tuple, np.ndarray], int]
             ]],
             batch_size: int = 1000,
-            enable_progress_bar: bool = True
+            enable_progress_bar: bool = True,
+            wire_dtype: str = "float32",
     ):
         """
         Insert or update multiple items by ID.
 
         Two-tuples ``(vector, id)`` update only the vector and preserve existing
         fields. Three-tuples ``(vector, id, field)`` replace fields for that ID.
+        ``wire_dtype`` is accepted for HTTP API parity and ignored locally.
         """
         total_batches = (len(vectors) + batch_size - 1) // batch_size
         ids = []
@@ -814,6 +820,7 @@ class LocalCollection:
             nprobe: int = 10,
             approx: bool = False,
             eps: float = 1e-4,
+            wire_dtype: str = "float32",
     ):
         """
         Search the collection for the vectors most similar to the given vector.
@@ -841,6 +848,7 @@ class LocalCollection:
             eps (float): Distance rounding tolerance when ``approx=True``
                 for supported metrics (default 1e-4). Ignored when
                 ``approx=False`` or the metric does not support approximation.
+            wire_dtype (str): Accepted for HTTP API parity; ignored for local calls.
 
         Returns:
             ResultView: Search results with ids, distances, and optional fields.
@@ -1048,6 +1056,7 @@ class LocalCollection:
             reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
             rerank_k: Optional[int] = None,
             rerank_with_fields: bool = False,
+            wire_dtype: str = "float32",
     ):
         """
         Batch search: search multiple query vectors.
@@ -1065,6 +1074,7 @@ class LocalCollection:
             rerank_k (int, optional): Keep top-N after rerank per query.
             rerank_with_fields (bool): Fetch candidate fields for reranker payload
                 even when ``return_fields=False``.
+            wire_dtype (str): Accepted for HTTP API parity; ignored for local calls.
 
         Returns:
             List[ResultView]: List of ResultView objects, one per query vector.
