@@ -222,36 +222,36 @@ pub fn hamming_u8(a: &[u8], b: &[u8]) -> u32 {
 #[inline(always)]
 pub fn inner_product_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
     debug_assert_eq!(query.len(), candidate_bits.len());
-    let mut sum = 0.0f64;
+    let mut sum = 0.0f32;
     for i in 0..query.len() {
-        sum += (query[i] as f64) * (f16::from_bits(candidate_bits[i]).to_f32() as f64);
+        sum += query[i] * f16::from_bits(candidate_bits[i]).to_f32();
     }
-    sum as f32
+    sum
 }
 
 /// Squared L2 distance between an f32 query and an f16-encoded candidate row.
 #[inline(always)]
 pub fn l2_squared_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
     debug_assert_eq!(query.len(), candidate_bits.len());
-    let mut sum = 0.0f64;
+    let mut sum = 0.0f32;
     for i in 0..query.len() {
         let cand = f16::from_bits(candidate_bits[i]).to_f32();
-        let diff = (query[i] - cand) as f64;
+        let diff = query[i] - cand;
         sum += diff * diff;
     }
-    sum as f32
+    sum
 }
 
 /// Cosine distance between an f32 query and an f16-encoded candidate row.
 #[inline(always)]
 pub fn cosine_distance_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
     debug_assert_eq!(query.len(), candidate_bits.len());
-    let mut dot = 0.0f64;
-    let mut norm_q = 0.0f64;
-    let mut norm_c = 0.0f64;
+    let mut dot = 0.0f32;
+    let mut norm_q = 0.0f32;
+    let mut norm_c = 0.0f32;
     for i in 0..query.len() {
-        let q = query[i] as f64;
-        let c = f16::from_bits(candidate_bits[i]).to_f32() as f64;
+        let q = query[i];
+        let c = f16::from_bits(candidate_bits[i]).to_f32();
         dot += q * c;
         norm_q += q * q;
         norm_c += c * c;
@@ -259,7 +259,7 @@ pub fn cosine_distance_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
     if norm_q == 0.0 || norm_c == 0.0 {
         1.0
     } else {
-        (1.0 - dot / (norm_q.sqrt() * norm_c.sqrt())) as f32
+        1.0 - dot / (norm_q.sqrt() * norm_c.sqrt())
     }
 }
 

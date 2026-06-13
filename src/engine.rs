@@ -6,7 +6,9 @@
 use crate::distance::DistanceMetric;
 use crate::error::{LynseError, Result};
 use crate::index::{self, SearchParams, VectorIndex};
-use crate::storage::dtype::{f16_bits_to_f32, VectorDtype};
+use crate::storage::dtype::{
+    decode_vector_bytes_to_f32, encode_f32_slice_as_le_bytes, f16_bits_to_f32, VectorDtype,
+};
 use crate::storage::field_store::FieldStore;
 use crate::storage::polarvec_mmap::{
     parse_bits, PolarVecIndex, DEFAULT_BITS as POLARVEC_DEFAULT_BITS,
@@ -43,7 +45,7 @@ const STORAGE_FORMAT_NAME: &str = "lynsedb-collection";
 const DATABASE_SNAPSHOT_FORMAT_NAME: &str = "lynsedb-database";
 const COLLECTION_EXPORT_FORMAT_NAME: &str = "lynsedb-collection-jsonl-binary-export";
 const STORAGE_FORMAT_VERSION: u32 = 2;
-const WAL_FORMAT_VERSION: u32 = 2;
+const WAL_FORMAT_VERSION: u32 = 3;
 
 #[cfg(test)]
 static SNAPSHOT_COPY_DELAY_MS: AtomicU64 = AtomicU64::new(0);
@@ -791,11 +793,7 @@ impl StorageManifest {
     fn current(name: &str, dimension: usize, chunk_size: usize, vector_dtype: VectorDtype) -> Self {
         Self {
             format: STORAGE_FORMAT_NAME.to_string(),
-            version: if vector_dtype == VectorDtype::F16 {
-                2
-            } else {
-                1
-            },
+            version: STORAGE_FORMAT_VERSION,
             collection_name: name.to_string(),
             dimension,
             chunk_size,
@@ -1423,11 +1421,16 @@ impl Collection {
             };
 
             let mut missing_vectors = Vec::new();
+            let mut missing_encoded_vectors = Vec::new();
             let mut missing_ids = Vec::new();
             let mut missing_fields = Vec::new();
             let mut existing_field_rows = Vec::new();
             let mut existing_field_user_ids = Vec::new();
             let mut existing_field_values = Vec::new();
+            let encoded_row_width = seg
+                .dim
+                .checked_mul(seg.dtype.byte_width())
+                .ok_or_else(|| LynseError::Storage("WAL row byte size overflows".to_string()))?;
 
             for (i, &user_id) in ids.iter().enumerate() {
                 if let Some(row) = self.reverse_id_map.get(&user_id).copied() {
@@ -1447,12 +1450,31 @@ impl Collection {
                     ));
                 }
                 missing_vectors.extend_from_slice(&seg.data[start..end]);
+                let encoded_start = i * encoded_row_width;
+                let encoded_end = encoded_start + encoded_row_width;
+                if encoded_end > seg.encoded_data.len() {
+                    return Err(LynseError::Storage(
+                        "WAL segment encoded vector payload is shorter than expected".to_string(),
+                    ));
+                }
+                missing_encoded_vectors
+                    .extend_from_slice(&seg.encoded_data[encoded_start..encoded_end]);
                 missing_ids.push(user_id);
                 missing_fields.push(seg.fields.get(i).cloned().unwrap_or_default());
             }
 
             if !missing_ids.is_empty() {
-                self.append_recovered_items(&missing_vectors, &missing_ids, &missing_fields)?;
+                if seg.dtype == self.vector_dtype {
+                    self.append_recovered_encoded_items(
+                        &missing_vectors,
+                        &missing_encoded_vectors,
+                        seg.dtype,
+                        &missing_ids,
+                        &missing_fields,
+                    )?;
+                } else {
+                    self.append_recovered_items(&missing_vectors, &missing_ids, &missing_fields)?;
+                }
                 recovered_any = true;
             }
             if !existing_field_user_ids.is_empty() {
@@ -1899,21 +1921,91 @@ impl Collection {
         Ok(())
     }
 
-    /// Add vectors with user-specified IDs and optional field metadata.
-    /// Data is first written to WAL for crash safety, then to main storage.
-    pub fn add_items(
+    fn append_recovered_encoded_items(
         &mut self,
-        vectors: &[f32],
+        decoded_vectors: &[f32],
+        encoded_vectors: &[u8],
+        vector_dtype: VectorDtype,
+        ids: &[u64],
+        fields: &[HashMap<String, serde_json::Value>],
+    ) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        if vector_dtype != self.vector_dtype {
+            return Err(LynseError::InvalidArgument(format!(
+                "recovered vector dtype {} does not match collection dtype {}",
+                vector_dtype.storage_name(),
+                self.vector_dtype.storage_name()
+            )));
+        }
+
+        let dim = self.meta.dimension;
+        let n_vectors = ids.len();
+        if decoded_vectors.len() != n_vectors * dim {
+            return Err(LynseError::DimensionMismatch {
+                expected: n_vectors * dim,
+                got: decoded_vectors.len(),
+            });
+        }
+        if fields.len() != n_vectors {
+            return Err(LynseError::InvalidArgument(format!(
+                "fields length ({}) must match recovered vector count ({})",
+                fields.len(),
+                n_vectors
+            )));
+        }
+
+        self.validate_new_ids(ids)?;
+        let start_row = self.validate_row_boundary()?;
+        let row_ids: Vec<u64> = (start_row as u64..start_row as u64 + n_vectors as u64).collect();
+
+        self.vector_store
+            .write_encoded_le_bytes(encoded_vectors, n_vectors, vector_dtype)?;
+        self.field_store.batch_store_at_ids(&row_ids, fields)?;
+        self.text_index.upsert_documents(ids, fields, false)?;
+
+        if let Some(ref mut idx) = self.index {
+            idx.insert(decoded_vectors, n_vectors, dim, &row_ids)?;
+        }
+
+        for (i, &user_id) in ids.iter().enumerate() {
+            self.id_map.push(user_id);
+            self.reverse_id_map.insert(user_id, start_row + i);
+        }
+        Self::append_id_map(&self.path, ids)?;
+
+        Ok(())
+    }
+
+    fn commit_add_items_encoded(
+        &mut self,
+        encoded_vectors: &[u8],
+        vector_dtype: VectorDtype,
+        decoded_vectors_for_index: Option<&[f32]>,
         n_vectors: usize,
         ids: &[u64],
         fields: Option<&[HashMap<String, serde_json::Value>]>,
     ) -> Result<()> {
         self.ensure_writable()?;
+        if vector_dtype != self.vector_dtype {
+            return Err(LynseError::InvalidArgument(format!(
+                "encoded vector dtype {} does not match collection dtype {}",
+                vector_dtype.storage_name(),
+                self.vector_dtype.storage_name()
+            )));
+        }
         let dim = self.meta.dimension;
-        if vectors.len() != n_vectors * dim {
+        let expected_bytes = n_vectors
+            .checked_mul(dim)
+            .and_then(|values| values.checked_mul(vector_dtype.byte_width()))
+            .ok_or_else(|| {
+                LynseError::InvalidArgument("encoded vector byte size overflows".to_string())
+            })?;
+        if encoded_vectors.len() != expected_bytes {
             return Err(LynseError::DimensionMismatch {
-                expected: dim,
-                got: vectors.len() / n_vectors,
+                expected: expected_bytes,
+                got: encoded_vectors.len(),
             });
         }
         if ids.len() != n_vectors {
@@ -1936,28 +2028,39 @@ impl Collection {
         let start_row = self.validate_row_boundary()?;
         let row_ids: Vec<u64> = (start_row as u64..start_row as u64 + n_vectors as u64).collect();
 
-        // Write to WAL first for crash safety
         let wal_fields: Vec<HashMap<String, serde_json::Value>> = match fields {
             Some(fl) => fl.to_vec(),
             None => Vec::new(),
         };
-        self.wal.write_log_data(vectors, dim, ids, &wal_fields)?;
+        self.wal
+            .write_log_encoded_data(encoded_vectors, dim, vector_dtype, ids, &wal_fields)?;
 
-        // Write vectors to main storage (single flat file, auto re-mmap)
-        self.vector_store.write(vectors)?;
+        self.vector_store
+            .write_encoded_le_bytes(encoded_vectors, n_vectors, vector_dtype)?;
 
-        // Store fields only when provided (skip empty metadata to avoid slow per-row I/O)
         if let Some(field_list) = fields {
             self.field_store.batch_store_at_ids(&row_ids, field_list)?;
             self.text_index.upsert_documents(ids, field_list, false)?;
         }
 
-        // Insert into index if exists (HNSW/IVF — Flat types use mmap directly)
         if let Some(ref mut idx) = self.index {
+            let decoded;
+            let vectors = match decoded_vectors_for_index {
+                Some(vectors) => vectors,
+                None => {
+                    decoded = decode_vector_bytes_to_f32(encoded_vectors, vector_dtype);
+                    decoded.as_slice()
+                }
+            };
+            if vectors.len() != n_vectors * dim {
+                return Err(LynseError::DimensionMismatch {
+                    expected: n_vectors * dim,
+                    got: vectors.len(),
+                });
+            }
             idx.insert(vectors, n_vectors, dim, &row_ids)?;
         }
 
-        // Update in-memory id_map and persist
         for (i, &user_id) in ids.iter().enumerate() {
             self.id_map.push(user_id);
             self.reverse_id_map.insert(user_id, start_row + i);
@@ -1965,6 +2068,48 @@ impl Collection {
         Self::append_id_map(&self.path, ids)?;
 
         Ok(())
+    }
+
+    pub(crate) fn add_items_encoded_vectors(
+        &mut self,
+        encoded_vectors: &[u8],
+        vector_dtype: VectorDtype,
+        n_vectors: usize,
+        ids: &[u64],
+        fields: Option<&[HashMap<String, serde_json::Value>]>,
+    ) -> Result<()> {
+        self.commit_add_items_encoded(encoded_vectors, vector_dtype, None, n_vectors, ids, fields)
+    }
+
+    /// Add vectors with user-specified IDs and optional field metadata.
+    /// Data is first written to WAL for crash safety, then to main storage.
+    pub fn add_items(
+        &mut self,
+        vectors: &[f32],
+        n_vectors: usize,
+        ids: &[u64],
+        fields: Option<&[HashMap<String, serde_json::Value>]>,
+    ) -> Result<()> {
+        let dim = self.meta.dimension;
+        if vectors.len() != n_vectors * dim {
+            return Err(LynseError::DimensionMismatch {
+                expected: dim,
+                got: if n_vectors == 0 {
+                    vectors.len()
+                } else {
+                    vectors.len() / n_vectors
+                },
+            });
+        }
+        let encoded_vectors = encode_f32_slice_as_le_bytes(vectors, self.vector_dtype);
+        self.commit_add_items_encoded(
+            &encoded_vectors,
+            self.vector_dtype,
+            Some(vectors),
+            n_vectors,
+            ids,
+            fields,
+        )
     }
 
     /// Create a named vector field stored independently from the primary vector.
@@ -3192,6 +3337,59 @@ impl Collection {
         } else {
             None
         };
+
+        if subset_indices.is_none()
+            && self.index.is_none()
+            && self.pq_index.is_none()
+            && self.rabitq_index.is_none()
+            && self.polarvec_index.is_none()
+            && !self.resolve_use_sq8()
+        {
+            let metric = self.resolve_metric();
+            let guard = self.vector_store.read_mmap()?;
+            if let Some(fm) = guard.as_ref() {
+                if fm.dtype() == VectorDtype::F16 {
+                    let tombstone_count = self.tombstone.read().len();
+                    let search_k = if tombstone_count == 0 {
+                        k
+                    } else {
+                        k.saturating_add(tombstone_count)
+                    };
+                    let all_data = fm.as_f32_cow();
+                    let (batch_rows, batch_dists) =
+                        crate::storage::flat_mmap::batch_exact_flat_search_f32(
+                            queries,
+                            n_queries,
+                            &all_data,
+                            dim,
+                            search_k,
+                            fm.len(),
+                            metric,
+                        );
+                    let results = batch_rows
+                        .into_iter()
+                        .zip(batch_dists)
+                        .map(|(rows, dists)| {
+                            let result_ids: Vec<u64> = rows
+                                .iter()
+                                .map(|&row| self.row_to_user_id(row as u64))
+                                .collect();
+                            let (result_ids, result_dists) =
+                                self.filter_tombstoned_limit(result_ids, dists, k);
+                            SearchResult {
+                                ids: result_ids,
+                                distances: result_dists,
+                                fields: Vec::new(),
+                                index_mode: self.index_mode.clone().unwrap_or("FLAT".into()),
+                                dimension: dim,
+                                k,
+                            }
+                        })
+                        .collect();
+                    return Ok(results);
+                }
+            }
+        }
 
         use rayon::prelude::*;
 
@@ -5313,6 +5511,65 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("does not match requested dtype"));
+    }
+
+    #[test]
+    fn f16_encoded_add_writes_half_width_wal_and_vectors() {
+        let tmp = TempDir::new().unwrap();
+        let mut coll =
+            Collection::open_with_dtype(tmp.path(), "col", 4, 100, VectorDtype::F16).unwrap();
+        let vectors = vec![1.0, 0.5, 0.0, -0.5, 2.0, 1.5, 1.0, 0.0];
+        let encoded = encode_f32_slice_as_le_bytes(&vectors, VectorDtype::F16);
+
+        coll.add_items_encoded_vectors(&encoded, VectorDtype::F16, 2, &[10, 11], None)
+            .unwrap();
+
+        assert_eq!(
+            std::fs::metadata(coll.vector_store.vectors_path())
+                .unwrap()
+                .len(),
+            16
+        );
+        let segments = coll.wal.get_segments().unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].dtype, VectorDtype::F16);
+        assert_eq!(segments[0].encoded_data.len(), vectors.len() * 2);
+        assert_eq!(segments[0].data, vectors);
+    }
+
+    #[test]
+    fn f16_collection_batch_search_reuses_decoded_candidates() {
+        let tmp = TempDir::new().unwrap();
+        let mut coll =
+            Collection::open_with_dtype(tmp.path(), "col", 4, 100, VectorDtype::F16).unwrap();
+        coll.add_items(
+            &[
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.5, 0.5, 0.0, 0.0,
+            ],
+            3,
+            &[10, 11, 12],
+            None,
+        )
+        .unwrap();
+
+        let results = coll
+            .batch_search(
+                &[
+                    1.0, 0.0, 0.0, 0.0, //
+                    0.0, 1.0, 0.0, 0.0,
+                ],
+                2,
+                2,
+                None,
+                10,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].ids, vec![10, 12]);
+        assert_eq!(results[1].ids, vec![11, 12]);
     }
 
     #[test]

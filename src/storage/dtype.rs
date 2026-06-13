@@ -96,3 +96,10 @@ pub fn decode_f32_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
         .collect()
 }
+
+pub fn decode_vector_bytes_to_f32(bytes: &[u8], dtype: VectorDtype) -> Vec<f32> {
+    match dtype {
+        VectorDtype::F32 => decode_f32_bytes_to_f32(bytes),
+        VectorDtype::F16 => decode_f16_bytes_to_f32(bytes),
+    }
+}

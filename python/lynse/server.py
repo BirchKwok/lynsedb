@@ -243,6 +243,12 @@ def _parse_args(argv=None):
         help="Path to JSON/YAML server config file",
     )
     parser.add_argument(
+        "--role",
+        choices=("single", "coordinator"),
+        default=_resolve_str("role", ("LYNSE_ROLE",), config, "single"),
+        help="Run as a normal single-node shard or as a lightweight cluster coordinator",
+    )
+    parser.add_argument(
         "--host",
         default=_resolve_str("host", ("LYNSE_HOST",), config, "127.0.0.1"),
         help="Bind address (default: 127.0.0.1 or LYNSE_HOST)",
@@ -361,11 +367,66 @@ def _parse_args(argv=None):
         default=_resolve_bool("audit_log", ("LYNSE_AUDIT_LOG",), config, True),
         help="Emit structured audit events for mutating server requests",
     )
+    parser.add_argument(
+        "--cluster-config",
+        default=_resolve_str("cluster_config", ("LYNSE_CLUSTER_CONFIG",), config, None),
+        help="Coordinator mode: path to cluster JSON config",
+    )
+    parser.add_argument(
+        "--cluster-state",
+        default=_resolve_str("cluster_state", ("LYNSE_CLUSTER_STATE",), config, None),
+        help="Coordinator mode: mutable cluster metadata state path",
+    )
+    parser.add_argument(
+        "--shard-api-key",
+        default=_resolve_str("shard_api_key", ("LYNSE_SHARD_API_KEY",), config, None),
+        help="Coordinator mode: API key used when forwarding requests to shards",
+    )
+    parser.add_argument(
+        "--health-interval-secs",
+        type=float,
+        default=float(_resolve_str("health_interval_secs", ("LYNSE_HEALTH_INTERVAL_SECS",), config, "1.0")),
+        help="Coordinator mode: shard health probe interval in seconds",
+    )
+    parser.add_argument(
+        "--health-failures",
+        type=_positive_int,
+        default=_resolve_int("health_failures", ("LYNSE_HEALTH_FAILURES",), config, 3),
+        help="Coordinator mode: consecutive failed health probes before failover",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = _parse_args(argv)
+
+    if args.role == "coordinator":
+        if not args.cluster_config and not args.cluster_state:
+            raise SystemExit(
+                "Coordinator mode requires --cluster-config on first start, "
+                "or --cluster-state when reusing an existing state file."
+            )
+        from .cluster import run_coordinator
+
+        print(
+            f"Starting LynseDB coordinator on {args.host}:{args.port} "
+            f"(state: {args.cluster_state or 'cluster_state.json'})"
+        )
+        try:
+            run_coordinator(
+                host=args.host,
+                port=args.port,
+                cluster_config=args.cluster_config,
+                cluster_state=args.cluster_state,
+                shard_api_key=args.shard_api_key,
+                request_timeout_secs=args.request_timeout_secs,
+                health_interval_secs=args.health_interval_secs,
+                health_failures=args.health_failures,
+            )
+        except KeyboardInterrupt:
+            print("\nCoordinator stopped.")
+            sys.exit(0)
+        return
 
     from ._backend import start_server
 

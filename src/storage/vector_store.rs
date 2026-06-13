@@ -128,19 +128,55 @@ impl VectorStore {
     /// The mmap cache is invalidated; it will be lazily re-created on next read.
     /// This makes writes fast: just a file append + counter update.
     pub fn write(&self, data: &[f32]) -> Result<()> {
-        let n_vectors = data.len() / self.dimension;
         if data.len() % self.dimension != 0 {
             return Err(LynseError::DimensionMismatch {
                 expected: self.dimension,
                 got: data.len() % self.dimension,
             });
         }
+        let n_vectors = data.len() / self.dimension;
         if n_vectors == 0 {
             return Ok(());
         }
 
-        // Raw byte append — no mmap involved
         let bytes = encode_f32_slice_as_le_bytes(data, self.dtype);
+        self.append_encoded_bytes(&bytes, n_vectors)
+    }
+
+    /// Append vectors that are already encoded as little-endian bytes for this store's dtype.
+    pub fn write_encoded_le_bytes(
+        &self,
+        data: &[u8],
+        n_vectors: usize,
+        dtype: VectorDtype,
+    ) -> Result<()> {
+        if dtype != self.dtype {
+            return Err(LynseError::InvalidArgument(format!(
+                "encoded vector dtype {} does not match store dtype {}",
+                dtype.storage_name(),
+                self.dtype.storage_name()
+            )));
+        }
+        let expected_bytes = n_vectors
+            .checked_mul(self.dimension)
+            .and_then(|values| values.checked_mul(dtype.byte_width()))
+            .ok_or_else(|| {
+                LynseError::InvalidArgument("encoded vector byte size overflows".into())
+            })?;
+        if data.len() != expected_bytes {
+            return Err(LynseError::DimensionMismatch {
+                expected: expected_bytes,
+                got: data.len(),
+            });
+        }
+        if n_vectors == 0 {
+            return Ok(());
+        }
+        self.append_encoded_bytes(data, n_vectors)
+    }
+
+    fn append_encoded_bytes(&self, bytes: &[u8], n_vectors: usize) -> Result<()> {
+        // Raw byte append — no mmap involved
         {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -298,7 +334,7 @@ impl VectorStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::dtype::VectorDtype;
+    use crate::storage::dtype::{encode_f32_slice_as_le_bytes, VectorDtype};
     use tempfile::TempDir;
 
     #[test]
@@ -402,5 +438,22 @@ mod tests {
         assert_eq!(ids, vec![0, 2]);
         assert!((dists[0] - 1.0).abs() < 1e-6);
         assert!((dists[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_write_encoded_f16_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let store = VectorStore::new(tmp.path(), 4, 100, VectorDtype::F16).unwrap();
+        let data = vec![1.0, 0.5, 0.0, -0.5, 2.0, 1.5, 1.0, 0.0];
+        let encoded = encode_f32_slice_as_le_bytes(&data, VectorDtype::F16);
+
+        store
+            .write_encoded_le_bytes(&encoded, 2, VectorDtype::F16)
+            .unwrap();
+
+        assert_eq!(std::fs::metadata(store.vectors_path()).unwrap().len(), 16);
+        assert_eq!(store.get_shape().unwrap(), (2, 4));
+        let guard = store.read_mmap().unwrap();
+        assert_eq!(guard.as_ref().unwrap().as_f32_cow().into_owned(), data);
     }
 }

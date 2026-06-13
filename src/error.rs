@@ -52,6 +52,7 @@ pub enum LynseError {
 
 pub type Result<T> = std::result::Result<T, LynseError>;
 
+#[cfg(feature = "python")]
 impl From<LynseError> for pyo3::PyErr {
     fn from(err: LynseError) -> pyo3::PyErr {
         match &err {

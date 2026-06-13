@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::DatabaseManager;
 use crate::error::LynseError;
+use crate::storage::dtype::VectorDtype;
 
 // ─── Shared application state ────────────────────────────────────────────────
 
@@ -652,8 +653,8 @@ fn audit_action_for_path(path: &str) -> Option<&'static str> {
         "/restore_collection" => Some("restore_collection"),
         "/import_collection" => Some("import_collection"),
         "/add_item" => Some("add_item"),
-        "/bulk_add_items" => Some("bulk_add_items"),
-        "/upsert_items" => Some("upsert_items"),
+        "/bulk_add_items" | "/bulk_add_items_binary" => Some("bulk_add_items"),
+        "/upsert_items" | "/upsert_items_binary" => Some("upsert_items"),
         "/bulk_add_binary" => Some("bulk_add_binary"),
         "/create_vector_field" => Some("create_vector_field"),
         "/add_named_vectors" => Some("add_named_vectors"),
@@ -1301,6 +1302,19 @@ struct BulkAddBinaryQuery {
     collection_name: String,
     dim: usize,
     n_vectors: usize,
+    vector_encoding: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BinaryItemsQuery {
+    database_name: String,
+    collection_name: String,
+    dim: usize,
+    n_vectors: usize,
+    vector_encoding: Option<String>,
+    ids_encoding: Option<String>,
+    ids_start: Option<u64>,
+    return_ids: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1308,6 +1322,7 @@ struct SearchBinaryQuery {
     database_name: String,
     collection_name: String,
     dim: usize,
+    vector_encoding: Option<String>,
     vector_field: Option<String>,
     k: Option<usize>,
     #[serde(rename = "where")]
@@ -1324,6 +1339,7 @@ struct BatchSearchBinaryQuery {
     collection_name: String,
     dim: usize,
     n_queries: usize,
+    vector_encoding: Option<String>,
     k: Option<usize>,
     #[serde(rename = "where")]
     where_expr: Option<String>,
@@ -1632,6 +1648,13 @@ fn openapi_routes() -> &'static [OpenApiRoute] {
         },
         OpenApiRoute {
             method: "post",
+            path: "/bulk_add_items_binary",
+            tag: "vectors",
+            summary: "Add vectors with compact binary body and explicit IDs",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "post",
             path: "/create_vector_field",
             tag: "vectors",
             summary: "Create named vector field",
@@ -1678,6 +1701,13 @@ fn openapi_routes() -> &'static [OpenApiRoute] {
             tag: "vectors",
             summary: "Upsert vectors",
             request_schema: Some("BulkAddItemsRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/upsert_items_binary",
+            tag: "vectors",
+            summary: "Upsert vectors with compact binary body and explicit IDs",
+            request_schema: None,
         },
         OpenApiRoute {
             method: "post",
@@ -2583,14 +2613,15 @@ async fn bulk_add_binary(
     if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "binary payload") {
         return limit_bad_request(e);
     }
-    let expected_bytes = match usize::try_from(expected_bytes_u64) {
-        Ok(bytes) => bytes,
-        Err(_) => return bad_request("Expected binary payload size exceeds usize"),
-    };
+    let expected_bytes =
+        match crate::rpc::encoded_vector_bytes(n_vectors * dim, query.vector_encoding.as_deref()) {
+            Ok(bytes) => bytes,
+            Err(_) => return bad_request("Expected binary payload size exceeds usize"),
+        };
 
     if body.len() != expected_bytes {
         return bad_request(&format!(
-            "Expected {} bytes ({} vectors × {} dim × 4), got {}",
+            "Expected {} encoded vector bytes ({} vectors × {} dim), got {}",
             expected_bytes,
             n_vectors,
             dim,
@@ -2598,9 +2629,11 @@ async fn bulk_add_binary(
         ));
     }
 
-    // Zero-copy reinterpret bytes as f32 slice
-    let float_slice: &[f32] =
-        unsafe { std::slice::from_raw_parts(body.as_ptr() as *const f32, n_vectors * dim) };
+    let vector_dtype = match crate::rpc::vector_dtype_for_encoding(query.vector_encoding.as_deref())
+    {
+        Ok(dtype) => dtype,
+        Err(e) => return bad_request(&e.to_string()),
+    };
 
     if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
         return error_response(&e.to_string());
@@ -2616,7 +2649,16 @@ async fn bulk_add_binary(
             .unwrap_or_else(|| coll.shape().map(|(n, _)| n).unwrap_or(0));
         let seq_ids: Vec<u64> = (start_id..start_id + n_vectors as u64).collect();
         validate_collection_insert(&limits, &coll, n_vectors as u64, expected_bytes_u64)?;
-        coll.add_items(float_slice, n_vectors, &seq_ids, None)?;
+        if vector_dtype == VectorDtype::F16 && coll.vector_dtype() == VectorDtype::F16 {
+            coll.add_items_encoded_vectors(&body, VectorDtype::F16, n_vectors, &seq_ids, None)?;
+        } else {
+            let float_data = crate::rpc::raw_vector_cow(
+                &body,
+                n_vectors * dim,
+                query.vector_encoding.as_deref(),
+            )?;
+            coll.add_items(float_data.as_ref(), n_vectors, &seq_ids, None)?;
+        }
         Ok(())
     });
 
@@ -2626,6 +2668,107 @@ async fn bulk_add_binary(
             "collection_name": query.collection_name,
             "n_vectors": n_vectors
         })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn bulk_add_items_binary(
+    state: web::Data<AppState>,
+    query: web::Query<BinaryItemsQuery>,
+    body: web::Bytes,
+) -> HttpResponse {
+    let dim = query.dim;
+    let n_vectors = query.n_vectors;
+    if n_vectors == 0 {
+        return bad_request("No items provided");
+    }
+    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "n_vectors") {
+        return limit_bad_request(e);
+    }
+    let vector_bytes = match checked_vector_bytes(n_vectors, dim) {
+        Ok(bytes) => bytes,
+        Err(e) => return limit_bad_request(e),
+    };
+    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "binary items") {
+        return limit_bad_request(e);
+    }
+
+    let vector_dtype = match crate::rpc::vector_dtype_for_encoding(query.vector_encoding.as_deref())
+    {
+        Ok(dtype) => dtype,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    let (encoded_vectors, ids, fields) =
+        match crate::rpc::split_encoded_binary_item_payload_with_ids(
+            &body,
+            n_vectors * dim,
+            n_vectors,
+            query.vector_encoding.as_deref(),
+            query.ids_encoding.as_deref(),
+            query.ids_start,
+        ) {
+            Ok(parsed) => parsed,
+            Err(e) => return bad_request(&e.to_string()),
+        };
+    if let Some(fields) = fields.as_ref() {
+        if fields.len() != n_vectors {
+            return bad_request(&format!(
+                "fields length ({}) must match n_vectors ({})",
+                fields.len(),
+                n_vectors
+            ));
+        }
+    }
+
+    if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
+        return error_response(&e.to_string());
+    }
+    let limits = state.limits;
+    let result = state.manager.with_database(&query.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&query.collection_name, dim, 100_000)?;
+        let mut coll = coll_arc.write();
+        validate_collection_insert(&limits, &coll, n_vectors as u64, vector_bytes)?;
+        let normalized_fields = crate::rpc::add_fields_from_payload(fields.as_ref());
+        if vector_dtype == VectorDtype::F16 && coll.vector_dtype() == VectorDtype::F16 {
+            coll.add_items_encoded_vectors(
+                encoded_vectors,
+                VectorDtype::F16,
+                n_vectors,
+                &ids,
+                normalized_fields.as_ref().map(|items| items.as_slice()),
+            )?;
+        } else {
+            let vectors = crate::rpc::raw_vector_cow(
+                encoded_vectors,
+                n_vectors * dim,
+                query.vector_encoding.as_deref(),
+            )?;
+            coll.add_items(
+                vectors.as_ref(),
+                n_vectors,
+                &ids,
+                normalized_fields.as_ref().map(|items| items.as_slice()),
+            )?;
+        }
+        Ok(ids)
+    });
+
+    match result {
+        Ok(ids) => {
+            if query.return_ids.unwrap_or(true) {
+                ApiResponse::success(serde_json::json!({
+                    "database_name": query.database_name,
+                    "collection_name": query.collection_name,
+                    "ids": ids
+                }))
+            } else {
+                ApiResponse::success(serde_json::json!({
+                    "database_name": query.database_name,
+                    "collection_name": query.collection_name,
+                    "n_vectors": n_vectors
+                }))
+            }
+        }
         Err(e) => error_response(&e.to_string()),
     }
 }
@@ -2849,6 +2992,86 @@ async fn add_sparse_vectors(
             "collection_name": body.collection_name,
             "ids": body.ids,
         })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn upsert_items_binary(
+    state: web::Data<AppState>,
+    query: web::Query<BinaryItemsQuery>,
+    body: web::Bytes,
+) -> HttpResponse {
+    let dim = query.dim;
+    let n_vectors = query.n_vectors;
+    if n_vectors == 0 {
+        return bad_request("No items provided");
+    }
+    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "n_vectors") {
+        return limit_bad_request(e);
+    }
+    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "binary items") {
+        return limit_bad_request(e);
+    }
+
+    let (vectors, ids, fields) = match crate::rpc::split_binary_item_payload_with_ids(
+        &body,
+        n_vectors * dim,
+        n_vectors,
+        query.vector_encoding.as_deref(),
+        query.ids_encoding.as_deref(),
+        query.ids_start,
+    ) {
+        Ok(parsed) => parsed,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    if let Some(fields) = fields.as_ref() {
+        if fields.len() != n_vectors {
+            return bad_request(&format!(
+                "fields length ({}) must match n_vectors ({})",
+                fields.len(),
+                n_vectors
+            ));
+        }
+    }
+    let mut seen_ids = HashSet::with_capacity(ids.len());
+    for &id in &ids {
+        if !seen_ids.insert(id) {
+            return bad_request(&format!("duplicate id {} within the same upsert batch", id));
+        }
+    }
+
+    if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
+        return error_response(&e.to_string());
+    }
+
+    let limits = state.limits;
+    let result = state.manager.with_database(&query.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&query.collection_name, dim, 100_000)?;
+        let mut coll = coll_arc.write();
+
+        let additional_vectors = ids.iter().filter(|&&id| !coll.is_id_exists(id)).count() as u64;
+        let additional_bytes = checked_vector_bytes(additional_vectors as usize, dim)?;
+        validate_collection_insert(&limits, &coll, additional_vectors, additional_bytes)?;
+        crate::rpc::upsert_binary_items(&mut coll, &ids, dim, vectors.as_ref(), fields.as_ref())?;
+        Ok(ids)
+    });
+
+    match result {
+        Ok(ids) => {
+            if query.return_ids.unwrap_or(true) {
+                ApiResponse::success(serde_json::json!({
+                    "database_name": query.database_name,
+                    "collection_name": query.collection_name,
+                    "ids": ids
+                }))
+            } else {
+                ApiResponse::success(serde_json::json!({
+                    "database_name": query.database_name,
+                    "collection_name": query.collection_name,
+                    "n_vectors": n_vectors
+                }))
+            }
+        }
         Err(e) => error_response(&e.to_string()),
     }
 }
@@ -4308,11 +4531,7 @@ async fn search_binary(
     body: web::Bytes,
 ) -> HttpResponse {
     let dim = query.dim;
-    let expected = match checked_vector_bytes(1, dim).and_then(|bytes| {
-        usize::try_from(bytes).map_err(|_| {
-            LynseError::InvalidArgument("Expected binary query size exceeds usize".into())
-        })
-    }) {
+    let expected = match crate::rpc::encoded_vector_bytes(dim, query.vector_encoding.as_deref()) {
         Ok(bytes) => bytes,
         Err(e) => return binary_bad_request(&e.to_string()),
     };
@@ -4320,7 +4539,10 @@ async fn search_binary(
         return binary_bad_request(&format!("Expected {} bytes, got {}", expected, body.len()));
     }
 
-    let vector: &[f32] = unsafe { std::slice::from_raw_parts(body.as_ptr() as *const f32, dim) };
+    let vector = match crate::rpc::raw_vector_cow(&body, dim, query.vector_encoding.as_deref()) {
+        Ok(values) => values,
+        Err(e) => return binary_bad_request(&e.to_string()),
+    };
 
     let k = query.k.unwrap_or(10);
     if let Err(e) = validate_top_k(&state.limits, k, "k") {
@@ -4343,9 +4565,16 @@ async fn search_binary(
         let coll_arc = engine.get_or_open_collection(&query.collection_name, 0, 100_000)?;
         let coll = coll_arc.read();
         let sr = if vector_field == "default" {
-            coll.search(vector, k, filter, nprobe, approx, eps)?
+            coll.search(vector.as_ref(), k, filter, nprobe, approx, eps)?
         } else {
-            coll.search_vector_field_with_options(vector_field, vector, k, filter, approx, eps)?
+            coll.search_vector_field_with_options(
+                vector_field,
+                vector.as_ref(),
+                k,
+                filter,
+                approx,
+                eps,
+            )?
         };
 
         let fields_data = if return_fields && !sr.ids.is_empty() {
@@ -4381,17 +4610,14 @@ async fn batch_search_binary(
     if let Err(e) = validate_batch_vectors(&state.limits, nq, "n_queries") {
         return binary_bad_request(&e.to_string());
     }
-    let expected = match checked_vector_bytes(nq, dim).and_then(|bytes| {
-        usize::try_from(bytes).map_err(|_| {
-            LynseError::InvalidArgument("Expected binary payload size exceeds usize".into())
-        })
-    }) {
-        Ok(bytes) => bytes,
-        Err(e) => return binary_bad_request(&e.to_string()),
-    };
+    let expected =
+        match crate::rpc::encoded_vector_bytes(nq * dim, query.vector_encoding.as_deref()) {
+            Ok(bytes) => bytes,
+            Err(e) => return binary_bad_request(&e.to_string()),
+        };
     if body.len() != expected {
         return binary_bad_request(&format!(
-            "Expected {} bytes ({} queries × {} dim × 4), got {}",
+            "Expected {} encoded vector bytes ({} queries × {} dim), got {}",
             expected,
             nq,
             dim,
@@ -4399,7 +4625,10 @@ async fn batch_search_binary(
         ));
     }
 
-    let flat: &[f32] = unsafe { std::slice::from_raw_parts(body.as_ptr() as *const f32, nq * dim) };
+    let flat = match crate::rpc::raw_vector_cow(&body, nq * dim, query.vector_encoding.as_deref()) {
+        Ok(values) => values,
+        Err(e) => return binary_bad_request(&e.to_string()),
+    };
 
     let k = query.k.unwrap_or(10);
     if let Err(e) = validate_top_k(&state.limits, k, "k") {
@@ -4419,7 +4648,7 @@ async fn batch_search_binary(
         let coll_arc = engine.get_or_open_collection(&query.collection_name, 0, 100_000)?;
         let coll = coll_arc.read();
 
-        let results = coll.batch_search(flat, nq, k, filter.as_deref(), nprobe)?;
+        let results = coll.batch_search(flat.as_ref(), nq, k, filter.as_deref(), nprobe)?;
 
         // Encode: [4B n_queries][per-query binary block]
         let mut buf = Vec::with_capacity(4 + results.len() * (4 + k * 12 + 4));
@@ -4532,6 +4761,10 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/show_collections", web::post().to(show_collections))
         .route("/add_item", web::post().to(add_item))
         .route("/bulk_add_items", web::post().to(bulk_add_items))
+        .route(
+            "/bulk_add_items_binary",
+            web::post().to(bulk_add_items_binary),
+        )
         .route("/create_vector_field", web::post().to(create_vector_field))
         .route("/list_vector_fields", web::post().to(list_vector_fields))
         .route("/add_named_vectors", web::post().to(add_named_vectors))
@@ -4545,6 +4778,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
             web::post().to(remove_vector_field_index),
         )
         .route("/upsert_items", web::post().to(upsert_items))
+        .route("/upsert_items_binary", web::post().to(upsert_items_binary))
         .route("/bulk_add_binary", web::post().to(bulk_add_binary))
         .route("/search", web::post().to(search))
         .route("/search_profile", web::post().to(search_profile))
@@ -4638,6 +4872,29 @@ pub fn run_server(
             runtime_cfg.limits.max_collection_vector_bytes,
             runtime_cfg.audit_log_enabled
         );
+
+        if std::env::var("LYNSE_DISABLE_INTERNAL_RPC")
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+        {
+            log::info!("LynseDB internal RPC disabled by LYNSE_DISABLE_INTERNAL_RPC");
+        } else {
+            let rpc_host = host.to_string();
+            let rpc_port = crate::rpc::derive_rpc_port(port);
+            let rpc_manager = Arc::clone(&manager);
+            let rpc_api_key = (*api_key).clone();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    crate::rpc::run_rpc_server(rpc_host, rpc_port, rpc_manager, rpc_api_key).await
+                {
+                    log::warn!(
+                        "LynseDB internal RPC unavailable on derived port {}: {}",
+                        rpc_port,
+                        e
+                    );
+                }
+            });
+        }
 
         let app_manager = Arc::clone(&manager);
         let app_metrics = Arc::clone(&metrics);

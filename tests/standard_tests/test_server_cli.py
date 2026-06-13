@@ -133,3 +133,26 @@ def test_parse_server_governance_limits_from_cli():
     assert args.max_collection_vectors == 56
     assert args.max_collection_vector_bytes == 789
     assert args.audit_log is False
+
+
+def test_parse_coordinator_args():
+    args = _parse_args(
+        [
+            "serve",
+            "--role",
+            "coordinator",
+            "--cluster-config",
+            "/tmp/cluster.json",
+            "--cluster-state",
+            "/tmp/cluster-state.json",
+            "--health-interval-secs",
+            "0.5",
+            "--health-failures",
+            "2",
+        ]
+    )
+    assert args.role == "coordinator"
+    assert args.cluster_config == "/tmp/cluster.json"
+    assert args.cluster_state == "/tmp/cluster-state.json"
+    assert args.health_interval_secs == 0.5
+    assert args.health_failures == 2

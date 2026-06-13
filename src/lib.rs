@@ -14,14 +14,18 @@ pub mod distance;
 pub mod engine;
 pub mod error;
 pub mod index;
+#[cfg(feature = "python")]
 pub mod python;
 pub mod quantizer;
+pub mod rpc;
 pub mod server;
 pub mod storage;
 
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 /// Python module definition
+#[cfg(feature = "python")]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     python::register_module(m)?;

@@ -9,6 +9,9 @@
 //! - Iterator-based replay for recovery
 
 use crate::error::{LynseError, Result};
+use crate::storage::dtype::{
+    decode_vector_bytes_to_f32, encode_f32_slice_as_le_bytes, VectorDtype,
+};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -20,7 +23,7 @@ use std::time::Instant;
 
 /// File header: version(u64) + chunk_size(u64) + flush_interval_ms(u64) + count_rows(u64)
 const HEADER_SIZE: usize = 32; // 4 * 8 bytes
-const WAL_VERSION: u64 = 2;
+const WAL_VERSION: u64 = 3;
 
 /// Segment header: data_size(u64) + record_count(u64) + status(u8) + data_dim(u64)
 const SEGMENT_HEADER_SIZE: usize = 25; // 8 + 8 + 1 + 8
@@ -37,14 +40,16 @@ const WRITE_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB
 
 /// In-memory buffer that accumulates vectors + fields before flushing to disk.
 struct WALBuffer {
-    /// Accumulated f32 vector data (flattened)
-    data: Vec<Vec<f32>>,
+    /// Accumulated encoded vector data (flattened, little-endian)
+    data: Vec<Vec<u8>>,
     /// User-facing IDs for each vector.
     ids: Vec<u64>,
     /// Accumulated field metadata per vector
     fields: Vec<HashMap<String, serde_json::Value>>,
     /// Dimension of vectors (set on first append)
     dim: usize,
+    /// Vector dtype used by the encoded data.
+    dtype: VectorDtype,
     /// Total number of records buffered
     size: usize,
 }
@@ -56,48 +61,61 @@ impl WALBuffer {
             ids: Vec::new(),
             fields: Vec::new(),
             dim: 0,
+            dtype: VectorDtype::F32,
             size: 0,
         }
     }
 
-    fn append(
+    fn append_encoded(
         &mut self,
-        data: &[f32],
+        data: &[u8],
         dim: usize,
+        dtype: VectorDtype,
         ids: &[u64],
         fields: &[HashMap<String, serde_json::Value>],
-    ) {
+    ) -> Result<()> {
         if self.dim == 0 {
             self.dim = dim;
+            self.dtype = dtype;
+        } else if self.dim != dim || self.dtype != dtype {
+            return Err(LynseError::InvalidArgument(
+                "WAL buffer cannot mix vector dimensions or dtypes".to_string(),
+            ));
         }
         self.data.push(data.to_vec());
         self.ids.extend_from_slice(ids);
         self.fields.extend(fields.iter().cloned());
         self.size += ids.len();
+        Ok(())
     }
 
     /// Return concatenated data + fields, consuming the buffer contents.
     fn take(
         &mut self,
     ) -> Option<(
-        Vec<f32>,
+        Vec<u8>,
         usize,
+        VectorDtype,
         Vec<u64>,
         Vec<HashMap<String, serde_json::Value>>,
     )> {
         if self.size == 0 {
             return None;
         }
-        let mut concatenated: Vec<f32> = Vec::new();
+        let byte_len: usize = self.data.iter().map(Vec::len).sum();
+        let mut concatenated: Vec<u8> = Vec::with_capacity(byte_len);
         for chunk in &self.data {
             concatenated.extend_from_slice(chunk);
         }
         let ids = std::mem::take(&mut self.ids);
         let fields = std::mem::take(&mut self.fields);
         let dim = self.dim;
+        let dtype = self.dtype;
         self.data.clear();
         self.size = 0;
-        Some((concatenated, dim, ids, fields))
+        self.dim = 0;
+        self.dtype = VectorDtype::F32;
+        Some((concatenated, dim, dtype, ids, fields))
     }
 
     fn clear(&mut self) {
@@ -106,6 +124,7 @@ impl WALBuffer {
         self.fields.clear();
         self.size = 0;
         self.dim = 0;
+        self.dtype = VectorDtype::F32;
     }
 }
 
@@ -115,6 +134,10 @@ impl WALBuffer {
 pub struct WALSegment {
     /// Vector data as flat f32 slice, shape = (n_vectors, dim)
     pub data: Vec<f32>,
+    /// Original encoded vector payload from the WAL segment.
+    pub encoded_data: Vec<u8>,
+    /// Dtype used by the encoded WAL payload.
+    pub dtype: VectorDtype,
     /// User-facing IDs for each vector.
     pub ids: Vec<u64>,
     /// Dimension of each vector
@@ -236,6 +259,13 @@ impl WALStorage {
         u64::from_le_bytes(buf)
     }
 
+    fn get_file_version(file_path: &Path) -> Option<u64> {
+        let mut f = File::open(file_path).ok()?;
+        let mut buf = [0u8; 8];
+        f.read_exact(&mut buf).ok()?;
+        Some(u64::from_le_bytes(buf))
+    }
+
     // ── Public API ──
 
     /// Write vector data + fields to the WAL (buffered).
@@ -243,6 +273,18 @@ impl WALStorage {
         &self,
         data: &[f32],
         dim: usize,
+        ids: &[u64],
+        fields: &[HashMap<String, serde_json::Value>],
+    ) -> Result<()> {
+        self.write_log_data_with_dtype(data, dim, VectorDtype::F32, ids, fields)
+    }
+
+    /// Write f32 vector data to the WAL, encoded with the requested dtype.
+    pub fn write_log_data_with_dtype(
+        &self,
+        data: &[f32],
+        dim: usize,
+        dtype: VectorDtype,
         ids: &[u64],
         fields: &[HashMap<String, serde_json::Value>],
     ) -> Result<()> {
@@ -273,6 +315,52 @@ impl WALStorage {
             )));
         }
 
+        let encoded = encode_f32_slice_as_le_bytes(data, dtype);
+        self.write_log_encoded_data(&encoded, dim, dtype, ids, fields)
+    }
+
+    /// Write already-encoded little-endian vector bytes to the WAL.
+    pub fn write_log_encoded_data(
+        &self,
+        data: &[u8],
+        dim: usize,
+        dtype: VectorDtype,
+        ids: &[u64],
+        fields: &[HashMap<String, serde_json::Value>],
+    ) -> Result<()> {
+        if dim == 0 {
+            return Err(LynseError::InvalidArgument(
+                "WAL write requires a non-zero vector dimension".to_string(),
+            ));
+        }
+        let row_width = dim
+            .checked_mul(dtype.byte_width())
+            .ok_or_else(|| LynseError::InvalidArgument("WAL row byte size overflows".into()))?;
+        if row_width == 0 || data.len() % row_width != 0 {
+            return Err(LynseError::DimensionMismatch {
+                expected: row_width,
+                got: data.len() % row_width,
+            });
+        }
+        let n_vectors = data.len() / row_width;
+        if ids.len() != n_vectors {
+            return Err(LynseError::InvalidArgument(format!(
+                "ids length ({}) must match WAL vector count ({})",
+                ids.len(),
+                n_vectors
+            )));
+        }
+        if !fields.is_empty() && fields.len() != n_vectors {
+            return Err(LynseError::InvalidArgument(format!(
+                "fields length ({}) must match WAL vector count ({})",
+                fields.len(),
+                n_vectors
+            )));
+        }
+        if n_vectors == 0 {
+            return Ok(());
+        }
+
         let normalized_fields;
         let fields = if fields.is_empty() {
             normalized_fields = vec![HashMap::new(); n_vectors];
@@ -288,7 +376,7 @@ impl WALStorage {
             self.initialize_wal_file(&mut inner)?;
         }
 
-        inner.buffer.append(data, dim, ids, fields);
+        inner.buffer.append_encoded(data, dim, dtype, ids, fields)?;
 
         if inner.buffer.size >= BUFFER_FLUSH_SIZE
             || inner.last_flush.elapsed().as_millis() as u64 >= self.flush_interval_ms
@@ -374,6 +462,12 @@ impl WALStorage {
                 continue;
             }
             let version = u64::from_le_bytes(file_data[0..8].try_into().unwrap());
+            if version != WAL_VERSION {
+                return Err(LynseError::Storage(format!(
+                    "unsupported WAL version {}; expected {}",
+                    version, WAL_VERSION
+                )));
+            }
 
             let mut pos = HEADER_SIZE;
 
@@ -407,7 +501,25 @@ impl WALStorage {
                     break;
                 }
 
-                // Read vector data: data_len(u64) + data_bytes
+                let dtype = {
+                    if pos >= file_data.len() {
+                        break;
+                    }
+                    let code = file_data[pos];
+                    pos += 1;
+                    match code {
+                        1 => VectorDtype::F32,
+                        2 => VectorDtype::F16,
+                        other => {
+                            return Err(LynseError::Storage(format!(
+                                "unsupported WAL vector dtype code {}",
+                                other
+                            )));
+                        }
+                    }
+                };
+
+                // Read vector data: data_len(u64) + encoded data_bytes
                 if pos + 8 > file_data.len() {
                     break;
                 }
@@ -421,12 +533,15 @@ impl WALStorage {
                 let vec_bytes = &file_data[pos..pos + vec_data_size];
                 pos += vec_data_size;
 
-                // Reinterpret as f32
-                let n_floats = vec_data_size / 4;
-                let mut float_data = vec![0.0f32; n_floats];
-                for (i, chunk) in vec_bytes.chunks_exact(4).enumerate() {
-                    float_data[i] = f32::from_le_bytes(chunk.try_into().unwrap());
+                if vec_data_size % dtype.byte_width() != 0 {
+                    return Err(LynseError::Storage(format!(
+                        "WAL vector payload size {} is not aligned to {} bytes",
+                        vec_data_size,
+                        dtype.byte_width()
+                    )));
                 }
+                let n_floats = vec_data_size / dtype.byte_width();
+                let float_data = decode_vector_bytes_to_f32(vec_bytes, dtype);
 
                 // Read fields: fields_len(u64) + fields_bytes (JSON)
                 if pos + 8 > file_data.len() {
@@ -446,27 +561,23 @@ impl WALStorage {
                 let fields: Vec<HashMap<String, serde_json::Value>> =
                     serde_json::from_slice(fields_bytes).unwrap_or_default();
 
-                let ids = if version >= 2 {
-                    if pos + 8 > file_data.len() {
-                        break;
-                    }
-                    let ids_size =
-                        u64::from_le_bytes(file_data[pos..pos + 8].try_into().unwrap()) as usize;
-                    pos += 8;
+                if pos + 8 > file_data.len() {
+                    break;
+                }
+                let ids_size =
+                    u64::from_le_bytes(file_data[pos..pos + 8].try_into().unwrap()) as usize;
+                pos += 8;
 
-                    if pos + ids_size > file_data.len() {
-                        break;
-                    }
-                    let ids_bytes = &file_data[pos..pos + ids_size];
-                    pos += ids_size;
+                if pos + ids_size > file_data.len() {
+                    break;
+                }
+                let ids_bytes = &file_data[pos..pos + ids_size];
+                pos += ids_size;
 
-                    ids_bytes
-                        .chunks_exact(8)
-                        .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                let ids = ids_bytes
+                    .chunks_exact(8)
+                    .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+                    .collect();
 
                 let n_vectors = if data_dim > 0 {
                     n_floats / data_dim
@@ -476,6 +587,8 @@ impl WALStorage {
 
                 segments.push(WALSegment {
                     data: float_data,
+                    encoded_data: vec_bytes.to_vec(),
+                    dtype,
                     ids,
                     dim: data_dim,
                     n_vectors,
@@ -550,6 +663,16 @@ impl WALStorage {
         if inner.initialized {
             return Ok(());
         }
+        if self.wal_file.exists() {
+            if let Some(version) = Self::get_file_version(&self.wal_file) {
+                if version != WAL_VERSION {
+                    return Err(LynseError::Storage(format!(
+                        "WAL file version {} is not supported; expected {}",
+                        version, WAL_VERSION
+                    )));
+                }
+            }
+        }
         if !self.wal_file.exists() {
             let mut f = File::create(&self.wal_file)?;
             // Write header: version + chunk_size + flush_interval_ms + count_rows(0)
@@ -582,7 +705,7 @@ impl WALStorage {
         self.maybe_rotate_wal(inner)?;
 
         let taken = inner.buffer.take();
-        let (data, dim, ids, fields) = match taken {
+        let (data_bytes, dim, dtype, ids, fields) = match taken {
             Some(t) => t,
             None => return Ok(()),
         };
@@ -592,10 +715,7 @@ impl WALStorage {
             serde_json::to_vec(&fields).map_err(|e| LynseError::Serialization(e.to_string()))?;
         let ids_bytes: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
 
-        // Vector data as raw LE f32 bytes
-        let data_bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
-
-        let total_size = 8 + data_bytes.len() + 8 + fields_bytes.len() + 8 + ids_bytes.len();
+        let total_size = 1 + 8 + data_bytes.len() + 8 + fields_bytes.len() + 8 + ids_bytes.len();
         let record_count = ids.len();
 
         // Write segment header
@@ -605,6 +725,13 @@ impl WALStorage {
         header.push(SEGMENT_STATUS_COMMITTED); // status
         header.extend_from_slice(&(dim as u64).to_le_bytes()); // data_dim
         self.write_to_buffer(inner, &header);
+
+        // Write vector dtype for WAL v3+.
+        let dtype_code = match dtype {
+            VectorDtype::F32 => 1u8,
+            VectorDtype::F16 => 2u8,
+        };
+        self.write_to_buffer(inner, &[dtype_code]);
 
         // Write vector data: length + bytes
         self.write_to_buffer(inner, &(data_bytes.len() as u64).to_le_bytes());
@@ -739,7 +866,9 @@ mod tests {
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].n_vectors, 2);
         assert_eq!(segments[0].dim, 4);
+        assert_eq!(segments[0].dtype, VectorDtype::F32);
         assert_eq!(segments[0].data, vectors);
+        assert_eq!(segments[0].encoded_data.len(), vectors.len() * 4);
         assert_eq!(segments[0].ids, ids);
         assert_eq!(segments[0].fields.len(), 2);
 
@@ -787,5 +916,24 @@ mod tests {
         assert_eq!(segments[0].ids, ids);
         assert_eq!(segments[0].fields.len(), 2);
         assert!(segments[0].fields.iter().all(|fields| fields.is_empty()));
+    }
+
+    #[test]
+    fn test_wal_f16_payload_stays_half_width() {
+        let tmp = TempDir::new().unwrap();
+        let wal = WALStorage::new("test_col", 100_000, tmp.path(), 5000).unwrap();
+
+        let dim = 4;
+        let vectors = vec![1.0, 0.5, 0.0, -0.5, 2.0, 1.5, 1.0, 0.0];
+        let ids = vec![1, 2];
+        wal.write_log_data_with_dtype(&vectors, dim, VectorDtype::F16, &ids, &[])
+            .unwrap();
+
+        let segments = wal.get_segments().unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].dtype, VectorDtype::F16);
+        assert_eq!(segments[0].n_vectors, 2);
+        assert_eq!(segments[0].encoded_data.len(), vectors.len() * 2);
+        assert_eq!(segments[0].data, vectors);
     }
 }

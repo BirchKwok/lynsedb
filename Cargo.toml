@@ -12,8 +12,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Python bindings
-pyo3 = { version = "0.26", features = ["extension-module"] }
-numpy = "0.26"
+pyo3 = { version = "0.26", optional = true }
+numpy = { version = "0.26", optional = true }
 
 # Storage backends
 apexbase = { version = "1.19.0", default-features = false }
@@ -62,6 +62,8 @@ half = "2"
 [features]
 default = []
 avx512 = []
+python = ["dep:pyo3", "dep:numpy"]
+extension-module = ["python", "pyo3/extension-module"]
 
 
 [profile.release]

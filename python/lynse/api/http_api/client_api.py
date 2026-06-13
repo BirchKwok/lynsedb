@@ -11,6 +11,7 @@ import httpx
 
 from tqdm import trange
 
+from ...cluster import _encode_fields_binary, _encode_ids_for_wire, _normalize_vector_encoding
 from ...api import logger
 from ...utils.asserts import raise_if
 from ...utils.poster import Poster
@@ -614,6 +615,12 @@ class Collection:
 
         self._mesosphere_list = queue.Queue()
         self._lock = Lock()
+        self._cluster_mode = False
+        try:
+            response = self._session.get(f'{self._uri}/cluster_info')
+            self._cluster_mode = response.status_code == 200
+        except Exception:
+            self._cluster_mode = False
 
     @property
     def vector_dtype(self) -> str:
@@ -668,7 +675,7 @@ class Collection:
             ExecutionError: If the server returns an error.
         """
         if buffer_size is True:
-            buffer_size = 1000
+            buffer_size = 0 if self._cluster_mode else 1000
         else:
             if buffer_size is False:
                 buffer_size = 0
@@ -778,6 +785,83 @@ class Collection:
 
         return items
 
+    @staticmethod
+    def _prepare_binary_items(vectors, *, upsert: bool, wire_dtype: str = "float32"):
+        rows = []
+        ids = []
+        fields = []
+        has_field_payload = False
+        dim = None
+
+        for item in vectors:
+            raise_if(TypeError, not isinstance(item, tuple), 'Each item must be a tuple of vector, '
+                                                             'ID, and fields(optional).')
+            vec_len = len(item)
+            if vec_len not in (2, 3):
+                raise TypeError('Each item must be a tuple of vector, ID, and fields(optional).')
+
+            vector = np.asarray(item[0], dtype=np.float32).ravel()
+            if dim is None:
+                dim = int(vector.size)
+            elif int(vector.size) != dim:
+                raise ValueError("all vectors in a binary batch must have the same dimension")
+            rows.append(vector)
+
+            item_id = int(item[1])
+            if item_id < 0:
+                raise ValueError("item IDs must be non-negative")
+            ids.append(item_id)
+
+            if upsert:
+                if vec_len == 3:
+                    field = item[2]
+                    has_field_payload = True
+                    fields.append(field if field is not None else None)
+                else:
+                    fields.append(None)
+            else:
+                field = item[2] if vec_len == 3 else {}
+                field = field or {}
+                if not isinstance(field, dict):
+                    raise TypeError("field payload entries must be dict or None")
+                if field:
+                    has_field_payload = True
+                fields.append(field)
+
+        if not rows:
+            return b"", 0, 0, [], {"ids_encoding": "raw"}
+
+        matrix = np.vstack(rows).astype(np.float32, copy=False)
+        matrix = np.ascontiguousarray(matrix, dtype=np.float32)
+        vector_encoding = _normalize_vector_encoding(wire_dtype)
+        id_raw, id_params = _encode_ids_for_wire(ids)
+        if vector_encoding == "float16":
+            vector_payload = np.ascontiguousarray(matrix, dtype="<f2").tobytes()
+            id_params["vector_encoding"] = "float16"
+        else:
+            vector_payload = matrix.tobytes()
+            id_params["vector_encoding"] = "float32"
+        payload = vector_payload + id_raw
+        if has_field_payload:
+            payload += _encode_fields_binary(fields)
+        return payload, matrix.shape[0], matrix.shape[1], ids, id_params
+
+    def _post_binary_items(self, endpoint: str, payload: bytes, n_vectors: int, dim: int, id_params: dict):
+        params = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "dim": dim,
+            "n_vectors": n_vectors,
+            "return_ids": "false",
+            **id_params,
+        }
+        return self._session.post(
+            f'{self._uri}/{endpoint}',
+            params=params,
+            content=payload,
+            headers={'Content-Type': 'application/octet-stream'},
+        )
+
     def bulk_add_items(
             self,
             vectors: List[Union[
@@ -785,7 +869,8 @@ class Collection:
                 Tuple[Union[List, Tuple, np.ndarray], int]
             ]],
             batch_size: int = 1000,
-            enable_progress_bar: bool = True
+            enable_progress_bar: bool = True,
+            wire_dtype: str = "float32",
     ):
         """
         Add multiple items to the collection.
@@ -822,19 +907,35 @@ class Collection:
             end = (i + 1) * batch_size
             items = vectors[start:end]
 
-            items_after_checking = self._check_bulk_add_items(items)
-
-            data = {
-                "database_name": self._database_name,
-                "collection_name": self._collection_name,
-                "items": items_after_checking,
-            }
-
-            response = self._session.post(uri, json=data)
+            payload, n_vecs, dim, local_ids, id_params = self._prepare_binary_items(
+                items,
+                upsert=False,
+                wire_dtype=wire_dtype,
+            )
+            response = self._post_binary_items(
+                "bulk_add_items_binary",
+                payload,
+                n_vecs,
+                dim,
+                id_params,
+            )
 
             if response.status_code == 200:
                 self.COMMIT_FLAG = False
-                ids.extend(response.json()['params']['ids'])
+                ids.extend(local_ids)
+            elif response.status_code in (404, 405):
+                items_after_checking = self._check_bulk_add_items(items)
+                data = {
+                    "database_name": self._database_name,
+                    "collection_name": self._collection_name,
+                    "items": items_after_checking,
+                }
+                response = self._session.post(uri, json=data)
+                if response.status_code == 200:
+                    self.COMMIT_FLAG = False
+                    ids.extend(response.json()['params']['ids'])
+                else:
+                    raise_error_response(response)
             else:
                 raise_error_response(response)
 
@@ -875,7 +976,8 @@ class Collection:
                 Tuple[Union[List, Tuple, np.ndarray], int]
             ]],
             batch_size: int = 1000,
-            enable_progress_bar: bool = True
+            enable_progress_bar: bool = True,
+            wire_dtype: str = "float32",
     ):
         """
         Insert or update multiple items by ID.
@@ -896,18 +998,35 @@ class Collection:
             start = i * batch_size
             end = (i + 1) * batch_size
             items = vectors[start:end]
-            items_after_checking = self._check_upsert_items(items)
-
-            data = {
-                "database_name": self._database_name,
-                "collection_name": self._collection_name,
-                "items": items_after_checking,
-            }
-            response = self._session.post(uri, json=data)
+            payload, n_vecs, dim, local_ids, id_params = self._prepare_binary_items(
+                items,
+                upsert=True,
+                wire_dtype=wire_dtype,
+            )
+            response = self._post_binary_items(
+                "upsert_items_binary",
+                payload,
+                n_vecs,
+                dim,
+                id_params,
+            )
 
             if response.status_code == 200:
                 self.COMMIT_FLAG = False
-                ids.extend(response.json()['params']['ids'])
+                ids.extend(local_ids)
+            elif response.status_code in (404, 405):
+                items_after_checking = self._check_upsert_items(items)
+                data = {
+                    "database_name": self._database_name,
+                    "collection_name": self._collection_name,
+                    "items": items_after_checking,
+                }
+                response = self._session.post(uri, json=data)
+                if response.status_code == 200:
+                    self.COMMIT_FLAG = False
+                    ids.extend(response.json()['params']['ids'])
+                else:
+                    raise_error_response(response)
             else:
                 raise_error_response(response)
 
@@ -917,16 +1036,19 @@ class Collection:
             self,
             vectors: np.ndarray,
             batch_size: int = 50000,
-            enable_progress_bar: bool = True
+            enable_progress_bar: bool = True,
+            wire_dtype: str = "float32",
     ):
         """
-        High-performance binary bulk add. Sends raw f32 bytes instead of JSON.
+        High-performance binary bulk add. Sends raw vector bytes instead of JSON.
         Use this when adding vectors without fields for maximum throughput.
 
         Parameters:
             vectors (np.ndarray): 2D array of shape (n, dim), dtype float32.
             batch_size (int): Number of vectors per batch. Default is 50000.
             enable_progress_bar (bool): Whether to enable the progress bar.
+            wire_dtype (str): "float32" for lossless transfer or "float16" for
+                half-size lossy transfer.
 
         Returns:
             int: Total number of vectors added.
@@ -936,6 +1058,7 @@ class Collection:
         if vectors.ndim == 1:
             vectors = vectors.reshape(1, -1)
         vectors = np.ascontiguousarray(vectors, dtype=np.float32)
+        vector_encoding = _normalize_vector_encoding(wire_dtype)
 
         n_total, dim = vectors.shape
         total_batches = (n_total + batch_size - 1) // batch_size
@@ -951,14 +1074,19 @@ class Collection:
             end = min((i + 1) * batch_size, n_total)
             batch = vectors[start:end]
             n_vecs = batch.shape[0]
+            if vector_encoding == "float16":
+                body = np.ascontiguousarray(batch, dtype="<f2").tobytes()
+            else:
+                body = batch.tobytes()
 
             uri = (f'{self._uri}/bulk_add_binary'
                    f'?database_name={self._database_name}'
                    f'&collection_name={self._collection_name}'
-                   f'&dim={dim}&n_vectors={n_vecs}')
+                   f'&dim={dim}&n_vectors={n_vecs}'
+                   f'&vector_encoding={vector_encoding}')
 
             response = self._session.post(
-                uri, content=batch.tobytes(),
+                uri, content=body,
                 headers={'Content-Type': 'application/octet-stream'}
             )
 
@@ -1387,6 +1515,7 @@ class Collection:
             nprobe: int = 10,
             approx: bool = False,
             eps: float = 1e-4,
+            wire_dtype: str = "float32",
     ):
         """
         Search the collection using compact binary protocol.
@@ -1398,6 +1527,11 @@ class Collection:
 
         vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
         dim = len(vec)
+        vector_encoding = _normalize_vector_encoding(wire_dtype)
+        if vector_encoding == "float16":
+            body = np.ascontiguousarray(vec, dtype="<f2").tobytes()
+        else:
+            body = vec.tobytes()
 
         params = {
             'database_name': self._database_name,
@@ -1405,6 +1539,7 @@ class Collection:
             'dim': dim,
             'k': k,
             'return_fields': str(return_fields).lower(),
+            'vector_encoding': vector_encoding,
         }
         if where is not None:
             params['where'] = where
@@ -1419,7 +1554,7 @@ class Collection:
 
         uri = f'{self._uri}/search_binary'
         response = self._session.post(
-            uri, params=params, content=vec.tobytes(),
+            uri, params=params, content=body,
             headers={'Content-Type': 'application/octet-stream'},
         )
 
@@ -1439,6 +1574,7 @@ class Collection:
             nprobe: int = 10,
             approx: bool = False,
             eps: float = 1e-4,
+            wire_dtype: str = "float32",
     ):
         """
         Search the database for the vectors most similar to the given vector.
@@ -1491,6 +1627,7 @@ class Collection:
             nprobe=nprobe,
             approx=approx,
             eps=eps,
+            wire_dtype=wire_dtype,
         )
         ids, dists, fields, _ = _decode_search_binary(buf)
         ids, dists, reranked_fields = apply_external_rerank(
@@ -1744,6 +1881,7 @@ class Collection:
             reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
             rerank_k: Optional[int] = None,
             rerank_with_fields: bool = False,
+            wire_dtype: str = "float32",
     ):
         """
         Batch search: search multiple query vectors in a single request.
@@ -1770,6 +1908,11 @@ class Collection:
         if vecs.ndim == 1:
             vecs = vecs.reshape(1, -1)
         n_queries, dim = vecs.shape
+        vector_encoding = _normalize_vector_encoding(wire_dtype)
+        if vector_encoding == "float16":
+            body = np.ascontiguousarray(vecs, dtype="<f2").tobytes()
+        else:
+            body = vecs.tobytes()
         send_return_fields = should_fetch_fields(
             return_fields=return_fields,
             reranker=reranker,
@@ -1784,13 +1927,14 @@ class Collection:
             'k': k,
             'return_fields': str(send_return_fields).lower(),
             'nprobe': nprobe,
+            'vector_encoding': vector_encoding,
         }
         if where is not None:
             params['where'] = where
 
         uri = f'{self._uri}/batch_search_binary'
         response = self._session.post(
-            uri, params=params, content=vecs.tobytes(),
+            uri, params=params, content=body,
             headers={'Content-Type': 'application/octet-stream'},
         )
 

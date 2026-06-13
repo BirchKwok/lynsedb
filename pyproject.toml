@@ -46,6 +46,6 @@ homepage = "https://github.com/BirchKwok/LynseDB"
 lynse = "lynse.server:main"
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+features = ["extension-module"]
 module-name = "lynse._core"
 python-source = "python"

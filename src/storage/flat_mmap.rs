@@ -614,6 +614,33 @@ fn exact_flat_search(
     }
 }
 
+pub(crate) fn batch_exact_flat_search_f32(
+    queries: &[f32],
+    n_queries: usize,
+    candidates: &[f32],
+    dim: usize,
+    k: usize,
+    n: usize,
+    metric: DistanceMetric,
+) -> (Vec<Vec<u32>>, Vec<Vec<f32>>) {
+    let results: Vec<(Vec<u32>, Vec<f32>)> = (0..n_queries)
+        .into_par_iter()
+        .map(|q| {
+            let start = q * dim;
+            let end = start + dim;
+            exact_flat_search(&queries[start..end], candidates, dim, k, n, metric)
+        })
+        .collect();
+
+    let mut all_ids = Vec::with_capacity(n_queries);
+    let mut all_dists = Vec::with_capacity(n_queries);
+    for (ids, dists) in results {
+        all_ids.push(ids);
+        all_dists.push(dists);
+    }
+    (all_ids, all_dists)
+}
+
 fn exact_flat_search_f16(
     query: &[f32],
     candidates: &[u16],
