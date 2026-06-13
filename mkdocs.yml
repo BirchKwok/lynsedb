@@ -90,6 +90,7 @@ nav:
     - Backup and maintenance: tutorials/operations.md
     - Troubleshooting: tutorials/troubleshooting.md
   - Concepts:
+    - Release Notes: releases.md
     - ResultView: result_view.md
     - Production roadmap: production_roadmap.md
   - API Reference:
