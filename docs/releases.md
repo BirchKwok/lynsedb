@@ -2,7 +2,7 @@
 
 This page documents the major features and improvements in each version of LynseDB. Only versions with the `v` prefix are official releases.
 
-## v0.4.0 (Upcoming)
+## v0.4.0
 
 **Key Features:**
 - 🔧 **Refactored IVFIndex**: Shared KMeans implementation for improved code reusability and maintainability
