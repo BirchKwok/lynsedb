@@ -122,7 +122,7 @@ jobs:
             target: aarch64
             # manylinux2014's aarch64 cross-GCC is too old for libmimalloc-sys.
             manylinux: "2_28"
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64
             manylinux: auto
           - os: macos-14
