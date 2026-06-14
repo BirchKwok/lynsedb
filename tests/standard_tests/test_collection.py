@@ -37,6 +37,20 @@ class TestAddItem:
         assert collection.shape[0] == 10_000
         assert collection._mesosphere_list.empty()
 
+    def test_add_is_immediately_readable_before_commit(self, collection):
+        vec = np.zeros(DIM, dtype=np.float32)
+        vec[0] = 1.0
+
+        collection.add(ids="pending-id", vectors=vec, fields={"tag": "pending"})
+
+        result = collection.search(vector=vec, k=1, return_fields=True)
+        assert result.ids.tolist() == ["pending-id"]
+        assert result.fields[0]["tag"] == "pending"
+
+        by_id = collection.query_vectors(filter_ids=["pending-id"])
+        assert by_id.ids.tolist() == ["pending-id"]
+        assert np.allclose(by_id.vectors[0], vec)
+
     def test_insert_session_commits_automatically(self, collection):
         with collection.insert_session() as session:
             session.add(ids=99, vectors=np.random.rand(DIM).astype(np.float32))
@@ -300,6 +314,27 @@ class TestInsertSession:
             for i in range(10):
                 session.add(ids=i, vectors=np.random.rand(DIM).astype(np.float32))
         assert collection.shape[0] == 10
+
+    def test_session_merges_single_adds_into_batches(self, collection):
+        original_add = collection.add
+        calls = []
+
+        def tracked_add(*args, **kwargs):
+            calls.append(args[0])
+            return original_add(*args, **kwargs)
+
+        collection.add = tracked_add
+        with collection.insert_session() as session:
+            for i in range(2500):
+                session.add(
+                    ids=i,
+                    vectors=np.random.rand(DIM).astype(np.float32),
+                    fields={"order": i},
+                    batch_size=1000,
+                )
+
+        assert len(calls) == 3
+        assert collection.shape[0] == 2500
 
     def test_session_exception_discards_pending_buffer(self, collection):
         with pytest.raises(ValueError):

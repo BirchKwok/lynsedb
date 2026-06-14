@@ -18,7 +18,7 @@ use crate::storage::pq_mmap::{parse_n_subspaces, PQIndex, DEFAULT_OVERSAMPLE as 
 use crate::storage::rabitq_mmap::{RaBitQIndex, DEFAULT_OVERSAMPLE as RABITQ_OVERSAMPLE};
 use crate::storage::vector_store::VectorStore;
 use crate::storage::wal::WALStorage;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(unix)]
@@ -39,6 +39,9 @@ const VECTOR_FIELDS_DIR: &str = "vector_fields";
 const VECTOR_FIELDS_MANIFEST_FILE: &str = "manifest.json";
 const DEFAULT_VECTOR_FIELD_NAME: &str = "default";
 const EXTERNAL_ID_MAP_FILE: &str = "external_id_map.json";
+const EXTERNAL_ID_MAP_DELTA_FILE: &str = "external_id_map.delta.jsonl";
+const EXTERNAL_ID_MAP_BIN_FILE: &str = "external_id_map.bin";
+const EXTERNAL_ID_MAP_DELTA_BIN_FILE: &str = "external_id_map.delta.bin";
 const EXTERNAL_ID_MAP_VERSION: u32 = 1;
 const SPARSE_VECTORS_FILE: &str = "sparse_vectors.jsonl";
 const TEXT_INDEX_FILE: &str = "text_index.json";
@@ -47,7 +50,9 @@ const STORAGE_FORMAT_NAME: &str = "lynsedb-collection";
 const DATABASE_SNAPSHOT_FORMAT_NAME: &str = "lynsedb-database";
 const COLLECTION_EXPORT_FORMAT_NAME: &str = "lynsedb-collection-jsonl-binary-export";
 const STORAGE_FORMAT_VERSION: u32 = 2;
-const WAL_FORMAT_VERSION: u32 = 3;
+const WAL_FORMAT_VERSION: u32 = 4;
+const PENDING_INGEST_FLUSH_ROWS: usize = 10_000;
+const PENDING_INGEST_FLUSH_BYTES: usize = 32 * 1024 * 1024;
 
 #[cfg(test)]
 static SNAPSHOT_COPY_DELAY_MS: AtomicU64 = AtomicU64::new(0);
@@ -70,6 +75,7 @@ pub struct Collection {
     vector_store: VectorStore,
     field_store: FieldStore,
     wal: WALStorage,
+    pending_ingest: Mutex<PendingIngestBuffer>,
     index: Option<Box<dyn VectorIndex>>,
     index_mode: Option<String>,
     /// Fingerprint of the last index sync (for incremental updates)
@@ -109,6 +115,90 @@ pub enum ExternalId {
     String(String),
 }
 
+#[derive(Default)]
+struct PendingIngestBuffer {
+    encoded_vectors: Vec<u8>,
+    vectors: Vec<f32>,
+    ids: Vec<u64>,
+    row_offsets: Vec<u64>,
+    vector_dtype: VectorDtype,
+    dim: usize,
+}
+
+#[derive(Clone)]
+struct PendingIngestSnapshot {
+    vectors: Vec<f32>,
+    row_offsets: Vec<u64>,
+}
+
+impl PendingIngestBuffer {
+    fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    fn encoded_bytes(&self) -> usize {
+        self.encoded_vectors.len()
+    }
+
+    fn append(
+        &mut self,
+        encoded_vectors: &[u8],
+        decoded_vectors: &[f32],
+        vector_dtype: VectorDtype,
+        dim: usize,
+        ids: &[u64],
+        row_offsets: &[u64],
+    ) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        if self.dim == 0 {
+            self.dim = dim;
+            self.vector_dtype = vector_dtype;
+        } else if self.dim != dim || self.vector_dtype != vector_dtype {
+            return Err(LynseError::InvalidArgument(
+                "pending ingest buffer cannot mix vector dimensions or dtypes".to_string(),
+            ));
+        }
+        self.encoded_vectors.extend_from_slice(encoded_vectors);
+        self.vectors.extend_from_slice(decoded_vectors);
+        self.ids.extend_from_slice(ids);
+        self.row_offsets.extend_from_slice(row_offsets);
+        Ok(())
+    }
+
+    fn should_flush(&self) -> bool {
+        self.len() >= PENDING_INGEST_FLUSH_ROWS
+            || self.encoded_bytes() >= PENDING_INGEST_FLUSH_BYTES
+    }
+
+    fn snapshot(&self) -> PendingIngestSnapshot {
+        PendingIngestSnapshot {
+            vectors: self.vectors.clone(),
+            row_offsets: self.row_offsets.clone(),
+        }
+    }
+
+    fn take(&mut self) -> Option<(Vec<u8>, VectorDtype, usize, Vec<u64>)> {
+        if self.is_empty() {
+            return None;
+        }
+        let encoded_vectors = std::mem::take(&mut self.encoded_vectors);
+        let ids = std::mem::take(&mut self.ids);
+        self.vectors.clear();
+        self.row_offsets.clear();
+        let dtype = self.vector_dtype;
+        let dim = self.dim;
+        self.vector_dtype = VectorDtype::default();
+        self.dim = 0;
+        Some((encoded_vectors, dtype, dim, ids))
+    }
+}
+
 impl ExternalId {
     fn validate(&self) -> Result<()> {
         match self {
@@ -140,6 +230,78 @@ struct ExternalIdMapFile {
 struct ExternalIdEntry {
     internal_id: u64,
     external_id: ExternalId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExternalIdMapBinaryFile {
+    version: u32,
+    next_internal_id: u64,
+    entries: Vec<ExternalIdBinaryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExternalIdBinaryEntry {
+    internal_id: u64,
+    external_id: ExternalIdBinary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ExternalIdBinary {
+    Int(u64),
+    String(String),
+}
+
+impl From<ExternalId> for ExternalIdBinary {
+    fn from(value: ExternalId) -> Self {
+        match value {
+            ExternalId::Int(value) => Self::Int(value),
+            ExternalId::String(value) => Self::String(value),
+        }
+    }
+}
+
+impl From<ExternalIdBinary> for ExternalId {
+    fn from(value: ExternalIdBinary) -> Self {
+        match value {
+            ExternalIdBinary::Int(value) => Self::Int(value),
+            ExternalIdBinary::String(value) => Self::String(value),
+        }
+    }
+}
+
+impl From<&ExternalIdMapFile> for ExternalIdMapBinaryFile {
+    fn from(value: &ExternalIdMapFile) -> Self {
+        Self {
+            version: value.version,
+            next_internal_id: value.next_internal_id,
+            entries: value
+                .entries
+                .iter()
+                .cloned()
+                .map(|entry| ExternalIdBinaryEntry {
+                    internal_id: entry.internal_id,
+                    external_id: ExternalIdBinary::from(entry.external_id),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<ExternalIdMapBinaryFile> for ExternalIdMapFile {
+    fn from(value: ExternalIdMapBinaryFile) -> Self {
+        Self {
+            version: value.version,
+            next_internal_id: value.next_internal_id,
+            entries: value
+                .entries
+                .into_iter()
+                .map(|entry| ExternalIdEntry {
+                    internal_id: entry.internal_id,
+                    external_id: ExternalId::from(entry.external_id),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -863,6 +1025,7 @@ impl Collection {
     /// Get vector store info for zero-copy mmap access from Python.
     /// Returns (path, n_vectors, dimension).
     pub fn vector_store_info(&self) -> Result<(String, usize, usize)> {
+        self.flush_pending_ingest()?;
         let (n, dim) = self.shape()?;
         let path = self.vector_store.vectors_path();
         Ok((path.to_string_lossy().to_string(), n as usize, dim))
@@ -991,6 +1154,7 @@ impl Collection {
             vector_store,
             field_store,
             wal,
+            pending_ingest: Mutex::new(PendingIngestBuffer::default()),
             index,
             index_mode,
             last_sync_fingerprint,
@@ -1653,6 +1817,39 @@ impl Collection {
         path.join(EXTERNAL_ID_MAP_FILE)
     }
 
+    fn external_id_map_delta_path(path: &Path) -> PathBuf {
+        path.join(EXTERNAL_ID_MAP_DELTA_FILE)
+    }
+
+    fn external_id_map_bin_path(path: &Path) -> PathBuf {
+        path.join(EXTERNAL_ID_MAP_BIN_FILE)
+    }
+
+    fn external_id_map_delta_bin_path(path: &Path) -> PathBuf {
+        path.join(EXTERNAL_ID_MAP_DELTA_BIN_FILE)
+    }
+
+    fn serialize_external_id_map_binary(file: &ExternalIdMapFile) -> Result<Vec<u8>> {
+        let binary = ExternalIdMapBinaryFile::from(file);
+        bincode::serialize(&binary).map_err(|e| LynseError::Serialization(e.to_string()))
+    }
+
+    fn deserialize_external_id_map_binary(bytes: &[u8]) -> Result<ExternalIdMapFile> {
+        let binary: ExternalIdMapBinaryFile =
+            bincode::deserialize(bytes).map_err(|e| LynseError::Serialization(e.to_string()))?;
+        Ok(ExternalIdMapFile::from(binary))
+    }
+
+    fn validate_external_id_map_version(version: u32) -> Result<()> {
+        if version > EXTERNAL_ID_MAP_VERSION {
+            return Err(LynseError::Storage(format!(
+                "external ID map version {} is newer than supported version {}",
+                version, EXTERNAL_ID_MAP_VERSION
+            )));
+        }
+        Ok(())
+    }
+
     fn write_external_id_map(&self) -> Result<()> {
         let mut internal_ids: Vec<u64> = self.internal_to_external_id.keys().copied().collect();
         internal_ids.sort_unstable();
@@ -1662,6 +1859,7 @@ impl Collection {
                 self.internal_to_external_id
                     .get(&internal_id)
                     .cloned()
+                    .filter(|external_id| !matches!(external_id, ExternalId::Int(value) if *value == internal_id))
                     .map(|external_id| ExternalIdEntry {
                         internal_id,
                         external_id,
@@ -1673,26 +1871,139 @@ impl Collection {
             next_internal_id: self.next_internal_id,
             entries,
         };
-        let bytes = serde_json::to_vec_pretty(&file)
-            .map_err(|e| LynseError::Serialization(e.to_string()))?;
-        Self::atomic_write_file(&Self::external_id_map_path(&self.path), &bytes)
+        let bytes = Self::serialize_external_id_map_binary(&file)?;
+        Self::atomic_write_file(&Self::external_id_map_bin_path(&self.path), &bytes)?;
+        for stale_path in [
+            Self::external_id_map_delta_bin_path(&self.path),
+            Self::external_id_map_path(&self.path),
+            Self::external_id_map_delta_path(&self.path),
+        ] {
+            if stale_path.exists() {
+                std::fs::remove_file(stale_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn append_external_id_map_delta(&self, entries: Vec<ExternalIdEntry>) -> Result<()> {
+        let entries: Vec<ExternalIdEntry> = entries
+            .into_iter()
+            .filter(|entry| {
+                !matches!(entry.external_id, ExternalId::Int(value) if value == entry.internal_id)
+            })
+            .collect();
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let file = ExternalIdMapFile {
+            version: EXTERNAL_ID_MAP_VERSION,
+            next_internal_id: self.next_internal_id,
+            entries,
+        };
+        let bytes = Self::serialize_external_id_map_binary(&file)?;
+        let len = bytes.len() as u64;
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(Self::external_id_map_delta_bin_path(&self.path))?;
+        f.write_all(&len.to_le_bytes())?;
+        f.write_all(&bytes)?;
+        f.flush()?;
+        Ok(())
     }
 
     fn load_external_id_map_file(path: &Path) -> Result<Option<ExternalIdMapFile>> {
-        let map_path = Self::external_id_map_path(path);
-        if !map_path.exists() {
+        let map_bin_path = Self::external_id_map_bin_path(path);
+        let map_json_path = Self::external_id_map_path(path);
+        let delta_bin_path = Self::external_id_map_delta_bin_path(path);
+        let delta_json_path = Self::external_id_map_delta_path(path);
+        if !map_bin_path.exists()
+            && !map_json_path.exists()
+            && !delta_bin_path.exists()
+            && !delta_json_path.exists()
+        {
             return Ok(None);
         }
-        let bytes = std::fs::read(&map_path)?;
-        let file: ExternalIdMapFile =
-            serde_json::from_slice(&bytes).map_err(|e| LynseError::Serialization(e.to_string()))?;
-        if file.version > EXTERNAL_ID_MAP_VERSION {
-            return Err(LynseError::Storage(format!(
-                "external ID map version {} is newer than supported version {}",
-                file.version, EXTERNAL_ID_MAP_VERSION
-            )));
+        let mut next_internal_id = 0;
+        let mut entries_by_internal_id: BTreeMap<u64, ExternalId> = BTreeMap::new();
+
+        if map_bin_path.exists() {
+            let bytes = std::fs::read(&map_bin_path)?;
+            let file = Self::deserialize_external_id_map_binary(&bytes)?;
+            Self::validate_external_id_map_version(file.version)?;
+            next_internal_id = next_internal_id.max(file.next_internal_id);
+            for entry in file.entries {
+                entries_by_internal_id.insert(entry.internal_id, entry.external_id);
+            }
+        } else if map_json_path.exists() {
+            let bytes = std::fs::read(&map_json_path)?;
+            let file: ExternalIdMapFile = serde_json::from_slice(&bytes)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?;
+            Self::validate_external_id_map_version(file.version)?;
+            next_internal_id = next_internal_id.max(file.next_internal_id);
+            for entry in file.entries {
+                entries_by_internal_id.insert(entry.internal_id, entry.external_id);
+            }
         }
-        Ok(Some(file))
+
+        if delta_bin_path.exists() {
+            let bytes = std::fs::read(&delta_bin_path)?;
+            let mut cursor = 0usize;
+            while cursor < bytes.len() {
+                if bytes.len() - cursor < std::mem::size_of::<u64>() {
+                    return Err(LynseError::Storage(
+                        "external ID map delta is truncated".to_string(),
+                    ));
+                }
+                let mut len_bytes = [0u8; 8];
+                len_bytes.copy_from_slice(&bytes[cursor..cursor + 8]);
+                cursor += 8;
+                let len = u64::from_le_bytes(len_bytes) as usize;
+                if bytes.len() - cursor < len {
+                    return Err(LynseError::Storage(
+                        "external ID map delta frame is truncated".to_string(),
+                    ));
+                }
+                let file = Self::deserialize_external_id_map_binary(&bytes[cursor..cursor + len])?;
+                cursor += len;
+                Self::validate_external_id_map_version(file.version)?;
+                next_internal_id = next_internal_id.max(file.next_internal_id);
+                for entry in file.entries {
+                    entries_by_internal_id.insert(entry.internal_id, entry.external_id);
+                }
+            }
+        }
+
+        if delta_json_path.exists() {
+            let text = std::fs::read_to_string(&delta_json_path)?;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let file: ExternalIdMapFile = serde_json::from_str(line)
+                    .map_err(|e| LynseError::Serialization(e.to_string()))?;
+                Self::validate_external_id_map_version(file.version)?;
+                next_internal_id = next_internal_id.max(file.next_internal_id);
+                for entry in file.entries {
+                    entries_by_internal_id.insert(entry.internal_id, entry.external_id);
+                }
+            }
+        }
+
+        let entries = entries_by_internal_id
+            .into_iter()
+            .map(|(internal_id, external_id)| ExternalIdEntry {
+                internal_id,
+                external_id,
+            })
+            .collect();
+        Ok(Some(ExternalIdMapFile {
+            version: EXTERNAL_ID_MAP_VERSION,
+            next_internal_id,
+            entries,
+        }))
     }
 
     fn rebuild_external_lookup(
@@ -2039,6 +2350,110 @@ impl Collection {
         (out_ids, out_dists)
     }
 
+    fn pending_search(
+        &self,
+        query: &[f32],
+        k: usize,
+        subset_indices: Option<&[u64]>,
+        metric: DistanceMetric,
+    ) -> (Vec<u64>, Vec<f32>) {
+        if k == 0 {
+            return (Vec::new(), Vec::new());
+        }
+        let snapshot = {
+            let pending = self.pending_ingest.lock();
+            if pending.is_empty() {
+                return (Vec::new(), Vec::new());
+            }
+            pending.snapshot()
+        };
+        let dim = self.meta.dimension;
+        if snapshot.vectors.is_empty() || snapshot.row_offsets.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let (data, row_offsets) = if let Some(subset) = subset_indices {
+            let subset: HashSet<u64> = subset.iter().copied().collect();
+            let mut data = Vec::new();
+            let mut row_offsets = Vec::new();
+            for (idx, &row) in snapshot.row_offsets.iter().enumerate() {
+                if subset.contains(&row) {
+                    let start = idx * dim;
+                    let end = start + dim;
+                    if end <= snapshot.vectors.len() {
+                        data.extend_from_slice(&snapshot.vectors[start..end]);
+                        row_offsets.push(row);
+                    }
+                }
+            }
+            (data, row_offsets)
+        } else {
+            (snapshot.vectors, snapshot.row_offsets)
+        };
+
+        if row_offsets.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let (indices, dists) = crate::distance::top_k_search(query, &data, dim, k, metric);
+        let rows = indices
+            .iter()
+            .filter_map(|&idx| row_offsets.get(idx as usize).copied())
+            .collect();
+        (rows, dists)
+    }
+
+    fn merge_row_results(
+        &self,
+        left_ids: Vec<u64>,
+        left_dists: Vec<f32>,
+        right_ids: Vec<u64>,
+        right_dists: Vec<f32>,
+        limit: usize,
+        metric: DistanceMetric,
+    ) -> (Vec<u64>, Vec<f32>) {
+        if right_ids.is_empty() {
+            return (left_ids, left_dists);
+        }
+        if left_ids.is_empty() {
+            return (right_ids, right_dists);
+        }
+
+        let ascending = metric.is_ascending();
+        let mut best: HashMap<u64, f32> = HashMap::new();
+        for (id, dist) in left_ids.into_iter().zip(left_dists) {
+            best.insert(id, dist);
+        }
+        for (id, dist) in right_ids.into_iter().zip(right_dists) {
+            match best.get_mut(&id) {
+                Some(existing) => {
+                    let better = if ascending {
+                        dist < *existing
+                    } else {
+                        dist > *existing
+                    };
+                    if better {
+                        *existing = dist;
+                    }
+                }
+                None => {
+                    best.insert(id, dist);
+                }
+            }
+        }
+
+        let mut pairs: Vec<(u64, f32)> = best.into_iter().collect();
+        if ascending {
+            pairs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        if pairs.len() > limit {
+            pairs.truncate(limit);
+        }
+        pairs.into_iter().unzip()
+    }
+
     /// Load the last sync fingerprint from disk.
     fn load_sync_fingerprint(collection_path: &Path) -> Option<String> {
         let fp_path = collection_path.join("sync_fingerprint");
@@ -2167,6 +2582,55 @@ impl Collection {
         Ok(n_rows)
     }
 
+    fn pending_len(&self) -> usize {
+        self.pending_ingest.lock().len()
+    }
+
+    fn validate_logical_row_boundary(&self) -> Result<usize> {
+        let (n_rows, _) = self.vector_store.get_shape()?;
+        let n_rows = n_rows as usize;
+        let pending_rows = self.pending_len();
+        let logical_rows = n_rows
+            .checked_add(pending_rows)
+            .ok_or_else(|| LynseError::Storage("logical row count overflows".to_string()))?;
+        if logical_rows != self.id_map.len() {
+            return Err(LynseError::Storage(format!(
+                "logical row count (persisted {} + pending {}) does not match id_map length ({})",
+                n_rows,
+                pending_rows,
+                self.id_map.len()
+            )));
+        }
+        Ok(logical_rows)
+    }
+
+    fn flush_pending_ingest(&self) -> Result<()> {
+        let snapshot = {
+            let pending = self.pending_ingest.lock();
+            if pending.is_empty() {
+                return Ok(());
+            }
+            (
+                pending.encoded_vectors.clone(),
+                pending.vector_dtype,
+                pending.dim,
+                pending.ids.clone(),
+            )
+        };
+        let (encoded_vectors, vector_dtype, dim, ids) = snapshot;
+        if dim != self.meta.dimension {
+            return Err(LynseError::DimensionMismatch {
+                expected: self.meta.dimension,
+                got: dim,
+            });
+        }
+        self.vector_store
+            .write_encoded_le_bytes(&encoded_vectors, ids.len(), vector_dtype)?;
+        Self::append_id_map(&self.path, &ids)?;
+        let _ = self.pending_ingest.lock().take();
+        Ok(())
+    }
+
     fn append_recovered_items(
         &mut self,
         vectors: &[f32],
@@ -2287,7 +2751,7 @@ impl Collection {
         Ok(())
     }
 
-    fn commit_add_items_encoded(
+    fn buffer_add_items_encoded(
         &mut self,
         encoded_vectors: &[u8],
         vector_dtype: VectorDtype,
@@ -2333,8 +2797,12 @@ impl Collection {
                 )));
             }
         }
+        if n_vectors == 0 {
+            return Ok(());
+        }
+
         self.validate_new_ids(ids)?;
-        let start_row = self.validate_row_boundary()?;
+        let start_row = self.validate_logical_row_boundary()?;
         let row_ids: Vec<u64> = (start_row as u64..start_row as u64 + n_vectors as u64).collect();
 
         let wal_fields: Vec<HashMap<String, serde_json::Value>> = match fields {
@@ -2344,8 +2812,20 @@ impl Collection {
         self.wal
             .write_log_encoded_data(encoded_vectors, dim, vector_dtype, ids, &wal_fields)?;
 
-        self.vector_store
-            .write_encoded_le_bytes(encoded_vectors, n_vectors, vector_dtype)?;
+        let decoded;
+        let vectors = match decoded_vectors_for_index {
+            Some(vectors) => vectors,
+            None => {
+                decoded = decode_vector_bytes_to_f32(encoded_vectors, vector_dtype);
+                decoded.as_slice()
+            }
+        };
+        if vectors.len() != n_vectors * dim {
+            return Err(LynseError::DimensionMismatch {
+                expected: n_vectors * dim,
+                got: vectors.len(),
+            });
+        }
 
         if let Some(field_list) = fields {
             self.field_store.batch_store_at_ids(&row_ids, field_list)?;
@@ -2353,20 +2833,6 @@ impl Collection {
         }
 
         if let Some(ref mut idx) = self.index {
-            let decoded;
-            let vectors = match decoded_vectors_for_index {
-                Some(vectors) => vectors,
-                None => {
-                    decoded = decode_vector_bytes_to_f32(encoded_vectors, vector_dtype);
-                    decoded.as_slice()
-                }
-            };
-            if vectors.len() != n_vectors * dim {
-                return Err(LynseError::DimensionMismatch {
-                    expected: n_vectors * dim,
-                    got: vectors.len(),
-                });
-            }
             idx.insert(vectors, n_vectors, dim, &row_ids)?;
         }
 
@@ -2381,8 +2847,15 @@ impl Collection {
                 self.next_internal_id = self.next_internal_id.max(user_id.saturating_add(1));
             }
         }
-        Self::append_id_map(&self.path, ids)?;
-        self.write_external_id_map()?;
+
+        let should_flush = {
+            let mut pending = self.pending_ingest.lock();
+            pending.append(encoded_vectors, vectors, vector_dtype, dim, ids, &row_ids)?;
+            pending.should_flush()
+        };
+        if should_flush {
+            self.flush_pending_ingest()?;
+        }
 
         Ok(())
     }
@@ -2395,7 +2868,7 @@ impl Collection {
         ids: &[u64],
         fields: Option<&[HashMap<String, serde_json::Value>]>,
     ) -> Result<()> {
-        self.commit_add_items_encoded(encoded_vectors, vector_dtype, None, n_vectors, ids, fields)
+        self.buffer_add_items_encoded(encoded_vectors, vector_dtype, None, n_vectors, ids, fields)
     }
 
     /// Add vectors with user-specified IDs and optional field metadata.
@@ -2419,7 +2892,7 @@ impl Collection {
             });
         }
         let encoded_vectors = encode_f32_slice_as_le_bytes(vectors, self.vector_dtype);
-        self.commit_add_items_encoded(
+        self.buffer_add_items_encoded(
             &encoded_vectors,
             self.vector_dtype,
             Some(vectors),
@@ -2475,17 +2948,27 @@ impl Collection {
         let prev_external_to_internal = self.external_to_internal_id.clone();
         let prev_internal_to_external = self.internal_to_external_id.clone();
 
-        for (external_id, &internal_id) in external_ids.iter().zip(internal_ids.iter()) {
+        let delta_entries: Vec<ExternalIdEntry> = external_ids
+            .iter()
+            .cloned()
+            .zip(internal_ids.iter().copied())
+            .map(|(external_id, internal_id)| ExternalIdEntry {
+                internal_id,
+                external_id,
+            })
+            .collect();
+
+        for entry in &delta_entries {
             self.external_to_internal_id
-                .insert(external_id.clone(), internal_id);
+                .insert(entry.external_id.clone(), entry.internal_id);
             self.internal_to_external_id
-                .insert(internal_id, external_id.clone());
+                .insert(entry.internal_id, entry.external_id.clone());
         }
 
-        self.write_external_id_map()?;
+        self.append_external_id_map_delta(delta_entries)?;
 
         let encoded_vectors = encode_f32_slice_as_le_bytes(vectors, self.vector_dtype);
-        let result = self.commit_add_items_encoded(
+        let result = self.buffer_add_items_encoded(
             &encoded_vectors,
             self.vector_dtype,
             Some(vectors),
@@ -2873,6 +3356,7 @@ impl Collection {
     /// Flush pending WAL bytes and fsync collection files without clearing WAL.
     pub fn flush(&self) -> Result<()> {
         self.ensure_writable()?;
+        self.flush_pending_ingest()?;
         self.wal.flush()?;
         self.sync_collection_files()
     }
@@ -2882,6 +3366,7 @@ impl Collection {
         self.ensure_writable()?;
         self.text_index.write_to_disk_if_present()?;
         self.flush()?;
+        self.write_external_id_map()?;
         self.wal.cleanup()?;
         self.sync_collection_files()
     }
@@ -2934,6 +3419,7 @@ impl Collection {
         n_clusters: Option<usize>,
     ) -> Result<()> {
         self.ensure_writable()?;
+        self.flush_pending_ingest()?;
         let dim = self.meta.dimension;
         let upper = index_type.to_uppercase();
 
@@ -3200,16 +3686,7 @@ impl Collection {
             let metric = collection_metric;
             let guard = self.vector_store.read_mmap()?;
             match guard.as_ref() {
-                None => {
-                    return Ok(SearchResult {
-                        ids: Vec::new(),
-                        distances: Vec::new(),
-                        fields: Vec::new(),
-                        index_mode: self.index_mode.clone().unwrap_or("flat-ip".into()),
-                        dimension: dim,
-                        k,
-                    });
-                }
+                None => (vec![], vec![]),
                 Some(fm) => {
                     let use_sq8 = self.resolve_use_sq8();
                     let (indices, dists) = fm.search(query, search_k, metric, use_sq8, approx_cfg);
@@ -3218,6 +3695,21 @@ impl Collection {
                 }
             }
         };
+
+        let (pending_ids, pending_dists) = self.pending_search(
+            query,
+            search_k,
+            search_params.subset_indices.as_deref(),
+            collection_metric,
+        );
+        let (result_ids, result_dists) = self.merge_row_results(
+            result_ids,
+            result_dists,
+            pending_ids,
+            pending_dists,
+            search_k,
+            collection_metric,
+        );
 
         let result_ids: Vec<u64> = result_ids
             .iter()
@@ -3722,6 +4214,16 @@ impl Collection {
                 expected: dim * n_queries,
                 got: queries.len(),
             });
+        }
+
+        if self.pending_len() > 0 {
+            let mut results = Vec::with_capacity(n_queries);
+            for i in 0..n_queries {
+                let start = i * dim;
+                let query = &queries[start..start + dim];
+                results.push(self.search(query, k, where_expr, nprobe, false, 1e-4)?);
+            }
+            return Ok(results);
         }
 
         // Pre-compute filter once (shared across all queries)
@@ -4256,6 +4758,7 @@ impl Collection {
         fields: Option<&[HashMap<String, serde_json::Value>]>,
     ) -> Result<()> {
         self.ensure_writable()?;
+        self.flush_pending_ingest()?;
         let dim = self.meta.dimension;
         if vectors.len() != n_vectors * dim {
             return Err(LynseError::DimensionMismatch {
@@ -4425,7 +4928,8 @@ impl Collection {
 
     /// Get collection shape (n_vectors, dimension).
     pub fn shape(&self) -> Result<(u64, usize)> {
-        self.vector_store.get_shape()
+        let (n, dim) = self.vector_store.get_shape()?;
+        Ok((n + self.pending_len() as u64, dim))
     }
 
     /// Get vector dimension.
@@ -4507,6 +5011,7 @@ impl Collection {
         &self,
         n: usize,
     ) -> Result<(Vec<f32>, Vec<u64>, Vec<HashMap<String, serde_json::Value>>)> {
+        self.flush_pending_ingest()?;
         let dim = self.meta.dimension;
         let guard = self.vector_store.read_mmap()?;
         let (data, user_ids) = match guard.as_ref() {
@@ -4534,6 +5039,7 @@ impl Collection {
         &self,
         n: usize,
     ) -> Result<(Vec<f32>, Vec<u64>, Vec<HashMap<String, serde_json::Value>>)> {
+        self.flush_pending_ingest()?;
         let dim = self.meta.dimension;
         let guard = self.vector_store.read_mmap()?;
         let (data, user_ids, row_start) = match guard.as_ref() {
@@ -4608,6 +5114,14 @@ impl Collection {
         ids: &[u64],
     ) -> Result<(Vec<f32>, Vec<HashMap<String, serde_json::Value>>)> {
         let dim = self.meta.dimension;
+        let pending_snapshot = {
+            let pending = self.pending_ingest.lock();
+            if pending.is_empty() {
+                None
+            } else {
+                Some(pending.snapshot())
+            }
+        };
         let guard = self.vector_store.read_mmap()?;
 
         let mut result_data: Vec<f32> = vec![0.0f32; ids.len() * dim];
@@ -4628,6 +5142,34 @@ impl Collection {
                     if src_end <= all_data.len() {
                         let dst = &mut result_data[out_pos * dim..(out_pos + 1) * dim];
                         dst.copy_from_slice(&all_data[src_start..src_end]);
+                    }
+                } else if let Some(snapshot) = pending_snapshot.as_ref() {
+                    if let Some(pending_pos) = snapshot
+                        .row_offsets
+                        .iter()
+                        .position(|&pending_row| pending_row == row as u64)
+                    {
+                        let src_start = pending_pos * dim;
+                        let src_end = src_start + dim;
+                        if src_end <= snapshot.vectors.len() {
+                            let dst = &mut result_data[out_pos * dim..(out_pos + 1) * dim];
+                            dst.copy_from_slice(&snapshot.vectors[src_start..src_end]);
+                        }
+                    }
+                }
+            }
+        } else if let Some(snapshot) = pending_snapshot.as_ref() {
+            for (out_pos, &row) in row_offsets.iter().enumerate() {
+                if let Some(pending_pos) = snapshot
+                    .row_offsets
+                    .iter()
+                    .position(|&pending_row| pending_row == row)
+                {
+                    let src_start = pending_pos * dim;
+                    let src_end = src_start + dim;
+                    if src_end <= snapshot.vectors.len() {
+                        let dst = &mut result_data[out_pos * dim..(out_pos + 1) * dim];
+                        dst.copy_from_slice(&snapshot.vectors[src_start..src_end]);
                     }
                 }
             }
@@ -4719,6 +5261,7 @@ impl Collection {
     /// Returns the number of vectors physically removed.
     pub fn compact(&mut self) -> Result<usize> {
         self.ensure_writable()?;
+        self.flush_pending_ingest()?;
         let dim = self.meta.dimension;
 
         let tombstoned_user_ids: HashSet<u64> = self.tombstone.read().clone();
@@ -4862,6 +5405,7 @@ impl Collection {
                 export_path.display()
             )));
         }
+        self.flush_pending_ingest()?;
 
         let tmp_path = Self::make_temp_sibling(export_path)?;
         if tmp_path.exists() {
@@ -5199,17 +5743,34 @@ fn tokenize_text_fields(
 ) -> HashMap<String, HashMap<String, u32>> {
     let mut field_terms = HashMap::new();
     for (field, value) in fields {
-        let mut text = String::new();
-        append_searchable_json_text(value, &mut text);
         let mut counts = HashMap::new();
-        for token in tokenize_text(&text) {
-            *counts.entry(token).or_insert(0) += 1;
-        }
+        append_searchable_json_terms(value, &mut counts);
         if !counts.is_empty() {
             field_terms.insert(field.clone(), counts);
         }
     }
     field_terms
+}
+
+fn append_searchable_json_terms(value: &serde_json::Value, counts: &mut HashMap<String, u32>) {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+        serde_json::Value::String(v) => {
+            for token in tokenize_text(v) {
+                *counts.entry(token).or_insert(0) += 1;
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                append_searchable_json_terms(value, counts);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                append_searchable_json_terms(value, counts);
+            }
+        }
+    }
 }
 
 fn text_doc_allowed(
@@ -5877,6 +6438,9 @@ mod tests {
                 internal_ids
             );
             coll.checkpoint().unwrap();
+            let collection_path = tmp.path().join("col");
+            assert!(collection_path.join(EXTERNAL_ID_MAP_BIN_FILE).exists());
+            assert!(!collection_path.join(EXTERNAL_ID_MAP_FILE).exists());
         }
 
         let coll = Collection::open(tmp.path(), "col", 3, 100).unwrap();
@@ -5890,6 +6454,43 @@ mod tests {
             coll.external_ids_for_internal_ids(&result.ids),
             vec![ExternalId::String("doc-a".into()), ExternalId::Int(42)]
         );
+    }
+
+    #[test]
+    fn legacy_json_external_id_map_still_loads() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut coll = Collection::open(tmp.path(), "col", 3, 100).unwrap();
+            coll.add_items(&[1.0, 0.0, 0.0], 1, &[0], None).unwrap();
+            coll.checkpoint().unwrap();
+        }
+
+        let legacy = ExternalIdMapFile {
+            version: EXTERNAL_ID_MAP_VERSION,
+            next_internal_id: 1,
+            entries: vec![ExternalIdEntry {
+                internal_id: 0,
+                external_id: ExternalId::String("legacy-doc".into()),
+            }],
+        };
+        let collection_path = tmp.path().join("col");
+        let _ = std::fs::remove_file(collection_path.join(EXTERNAL_ID_MAP_BIN_FILE));
+        let _ = std::fs::remove_file(collection_path.join(EXTERNAL_ID_MAP_DELTA_BIN_FILE));
+        std::fs::write(
+            collection_path.join(EXTERNAL_ID_MAP_FILE),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let coll = Collection::open(tmp.path(), "col", 3, 100).unwrap();
+        let external_id = ExternalId::String("legacy-doc".into());
+        assert!(coll.is_external_id_exists(&external_id));
+        assert_eq!(
+            coll.internal_ids_for_external_ids(&[external_id.clone()])
+                .unwrap(),
+            vec![0]
+        );
+        assert_eq!(coll.external_ids_for_internal_ids(&[0]), vec![external_id]);
     }
 
     #[test]
@@ -5948,6 +6549,7 @@ mod tests {
 
         coll.add_items_encoded_vectors(&encoded, VectorDtype::F16, 2, &[10, 11], None)
             .unwrap();
+        coll.flush().unwrap();
 
         assert_eq!(
             std::fs::metadata(coll.vector_store.vectors_path())
@@ -6600,6 +7202,35 @@ mod tests {
         assert_eq!(coll.shape().unwrap(), (2, 4));
         assert!(coll.is_id_exists(100));
         assert!(coll.is_id_exists(200));
+        assert!(!coll.has_uncommitted_data());
+    }
+
+    #[test]
+    fn uncommitted_wal_reopen_preserves_string_external_ids() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+            let vectors = vec![1.0, 0.0, 0.0, 0.0];
+            let ids = vec![ExternalId::String("doc-a".into())];
+            coll.add_records(&vectors, 1, &ids, None).unwrap();
+            assert!(coll.has_uncommitted_data());
+            let collection_path = tmp.path().join("col");
+            assert!(collection_path
+                .join(EXTERNAL_ID_MAP_DELTA_BIN_FILE)
+                .exists());
+            assert!(!collection_path.join(EXTERNAL_ID_MAP_DELTA_FILE).exists());
+        }
+
+        let coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        let external_id = ExternalId::String("doc-a".into());
+        assert_eq!(coll.shape().unwrap(), (1, 4));
+        assert!(coll.is_external_id_exists(&external_id));
+        assert_eq!(
+            coll.internal_ids_for_external_ids(&[external_id.clone()])
+                .unwrap(),
+            vec![0]
+        );
+        assert_eq!(coll.external_ids_for_internal_ids(&[0]), vec![external_id]);
         assert!(!coll.has_uncommitted_data());
     }
 

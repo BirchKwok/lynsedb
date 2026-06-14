@@ -100,6 +100,16 @@ fn normalize_f64_bits(f: f64) -> u64 {
     }
 }
 
+#[inline]
+fn denormalize_f64_bits(bits: u64) -> f64 {
+    let raw = if bits >> 63 == 0 {
+        !bits
+    } else {
+        bits & !(1u64 << 63)
+    };
+    f64::from_bits(raw)
+}
+
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone)]
 enum RangeKey {
     Number(u64),
@@ -344,7 +354,9 @@ impl FieldIndex {
             serde_json::Value::Object(_) => {}
             _ => {
                 self.insert(field.to_string(), IndexKey::from_json(value), ext_id);
-                if let Some(key) = RangeKey::from_json(value) {
+                if matches!(self.index.get(field), Some(FieldIndexType::DenseInt(_))) {
+                    self.range_index.remove(field);
+                } else if let Some(key) = RangeKey::from_json(value) {
                     self.range_index
                         .entry(field.to_string())
                         .or_default()
@@ -427,6 +439,30 @@ impl FieldIndex {
 
     fn get_range(&self, field: &str, op: RangeOp, key: &RangeKey) -> Option<Vec<u64>> {
         use std::ops::Bound::{Excluded, Included, Unbounded};
+
+        if let (Some(FieldIndexType::DenseInt(vec)), RangeKey::Number(bits)) =
+            (self.index.get(field), key)
+        {
+            let min = self.int_ranges.get(field).map(|(m, _, _)| *m).unwrap_or(0);
+            let threshold = denormalize_f64_bits(*bits);
+            let mut ids = Vec::new();
+            for (offset, value_ids) in vec.iter().enumerate() {
+                if value_ids.is_empty() {
+                    continue;
+                }
+                let value = (min + offset as i64) as f64;
+                let matches = match op {
+                    RangeOp::Lt => value < threshold,
+                    RangeOp::Lte => value <= threshold,
+                    RangeOp::Gt => value > threshold,
+                    RangeOp::Gte => value >= threshold,
+                };
+                if matches {
+                    ids.extend(value_ids.iter().copied());
+                }
+            }
+            return Some(ids);
+        }
 
         let map = self.range_index.get(field)?;
         let range = match op {
@@ -749,9 +785,11 @@ impl FieldStore {
 
         let mut ids = Vec::new();
         let mut rows: Vec<HashMap<String, apexbase::data::Value>> = Vec::new();
-        let mut stored_fields: Vec<HashMap<String, serde_json::Value>> = Vec::new();
+        let mut field_indices: Vec<usize> = Vec::new();
 
-        for (&ext_id, fields) in external_ids.iter().zip(fields_list.iter()) {
+        for (field_idx, (&ext_id, fields)) in
+            external_ids.iter().zip(fields_list.iter()).enumerate()
+        {
             if fields.is_empty() {
                 continue;
             }
@@ -767,7 +805,7 @@ impl FieldStore {
 
             ids.push(ext_id);
             rows.push(row);
-            stored_fields.push(fields.clone());
+            field_indices.push(field_idx);
         }
 
         if ids.is_empty() {
@@ -790,9 +828,10 @@ impl FieldStore {
             let mut map = self.apex_id_map.write();
             let mut cache = self.cache.write();
             let mut idx = self.field_eq_index.write();
-            for ((&ext_id, &apex_id), flds) in
-                ids.iter().zip(apex_ids.iter()).zip(stored_fields.iter())
+            for ((&ext_id, &apex_id), &field_idx) in
+                ids.iter().zip(apex_ids.iter()).zip(field_indices.iter())
             {
+                let flds = &fields_list[field_idx];
                 if ext_id as usize >= map.len() {
                     map.resize(ext_id as usize + 1, TOMBSTONE);
                 }
@@ -2128,6 +2167,34 @@ mod tests {
         assert_eq!(
             idx.get("order", &high).map(|ids| ids.as_slice()),
             Some(&[149_999][..])
+        );
+    }
+
+    #[test]
+    fn dense_int_range_queries_do_not_need_btree_range_index() {
+        let mut idx = FieldIndex::default();
+        for i in 0..2_000u64 {
+            idx.insert_value("order", &serde_json::json!(i), i);
+        }
+
+        assert!(!idx.range_index.contains_key("order"));
+        assert_eq!(
+            idx.get_range(
+                "order",
+                RangeOp::Gte,
+                &RangeKey::Number(normalize_f64_bits(1_998.0))
+            )
+            .unwrap(),
+            vec![1_998, 1_999]
+        );
+        assert_eq!(
+            idx.get_range(
+                "order",
+                RangeOp::Lt,
+                &RangeKey::Number(normalize_f64_bits(2.0))
+            )
+            .unwrap(),
+            vec![0, 1]
         );
     }
 

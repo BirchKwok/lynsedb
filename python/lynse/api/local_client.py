@@ -14,7 +14,6 @@ import numpy as np
 from tqdm import trange
 
 from ..utils.utils import collection_repr
-from ..utils.utils import thread_local
 from .._backend import DatabaseManager, Collection, SearchResult, _normalize_sparse_vector
 from ..result_view import ResultView, _parse_index_mode
 from .rerank import apply_external_rerank, should_fetch_fields
@@ -363,8 +362,6 @@ class LocalCollection:
                     stored_fields[start:end],
                 ))
 
-        if getattr(thread_local, "caller_name", None) != "DataInsertionSession":
-            self._rust_coll.flush()
         self.COMMIT_FLAG = False
         return added_ids[0] if single_id else added_ids
 

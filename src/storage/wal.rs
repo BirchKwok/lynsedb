@@ -13,6 +13,7 @@ use crate::storage::dtype::{
     decode_vector_bytes_to_f32, encode_f32_slice_as_le_bytes, VectorDtype,
 };
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -23,7 +24,8 @@ use std::time::Instant;
 
 /// File header: version(u64) + chunk_size(u64) + flush_interval_ms(u64) + count_rows(u64)
 const HEADER_SIZE: usize = 32; // 4 * 8 bytes
-const WAL_VERSION: u64 = 3;
+const WAL_VERSION_JSON_FIELDS: u64 = 3;
+const WAL_VERSION: u64 = 4;
 
 /// Segment header: data_size(u64) + record_count(u64) + status(u8) + data_dim(u64)
 const SEGMENT_HEADER_SIZE: usize = 25; // 8 + 8 + 1 + 8
@@ -35,6 +37,96 @@ const SEGMENT_STATUS_COMMITTED: u8 = 1;
 const MAX_WAL_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
 const BUFFER_FLUSH_SIZE: usize = 10_000;
 const WRITE_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum WalFieldValue {
+    Null,
+    Bool(bool),
+    I64(i64),
+    U64(u64),
+    F64(f64),
+    String(String),
+    Array(Vec<WalFieldValue>),
+    Object(Vec<(String, WalFieldValue)>),
+}
+
+fn json_to_wal_field_value(value: &serde_json::Value) -> WalFieldValue {
+    match value {
+        serde_json::Value::Null => WalFieldValue::Null,
+        serde_json::Value::Bool(value) => WalFieldValue::Bool(*value),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                WalFieldValue::I64(value)
+            } else if let Some(value) = value.as_u64() {
+                WalFieldValue::U64(value)
+            } else if let Some(value) = value.as_f64() {
+                WalFieldValue::F64(value)
+            } else {
+                WalFieldValue::Null
+            }
+        }
+        serde_json::Value::String(value) => WalFieldValue::String(value.clone()),
+        serde_json::Value::Array(values) => {
+            WalFieldValue::Array(values.iter().map(json_to_wal_field_value).collect())
+        }
+        serde_json::Value::Object(values) => WalFieldValue::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), json_to_wal_field_value(value)))
+                .collect(),
+        ),
+    }
+}
+
+fn wal_field_value_to_json(value: WalFieldValue) -> serde_json::Value {
+    match value {
+        WalFieldValue::Null => serde_json::Value::Null,
+        WalFieldValue::Bool(value) => serde_json::Value::Bool(value),
+        WalFieldValue::I64(value) => serde_json::Value::Number(value.into()),
+        WalFieldValue::U64(value) => serde_json::Value::Number(value.into()),
+        WalFieldValue::F64(value) => serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        WalFieldValue::String(value) => serde_json::Value::String(value),
+        WalFieldValue::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(wal_field_value_to_json).collect())
+        }
+        WalFieldValue::Object(values) => {
+            let object = values
+                .into_iter()
+                .map(|(key, value)| (key, wal_field_value_to_json(value)))
+                .collect();
+            serde_json::Value::Object(object)
+        }
+    }
+}
+
+fn serialize_wal_fields(fields: &[HashMap<String, serde_json::Value>]) -> Result<Vec<u8>> {
+    let binary_fields: Vec<HashMap<String, WalFieldValue>> = fields
+        .iter()
+        .map(|field| {
+            field
+                .iter()
+                .map(|(key, value)| (key.clone(), json_to_wal_field_value(value)))
+                .collect()
+        })
+        .collect();
+    bincode::serialize(&binary_fields).map_err(|e| LynseError::Serialization(e.to_string()))
+}
+
+fn deserialize_wal_fields(bytes: &[u8]) -> Result<Vec<HashMap<String, serde_json::Value>>> {
+    let binary_fields: Vec<HashMap<String, WalFieldValue>> =
+        bincode::deserialize(bytes).map_err(|e| LynseError::Serialization(e.to_string()))?;
+    Ok(binary_fields
+        .into_iter()
+        .map(|field| {
+            field
+                .into_iter()
+                .map(|(key, value)| (key, wal_field_value_to_json(value)))
+                .collect()
+        })
+        .collect())
+}
 
 // ─── WAL Buffer ──────────────────────────────────────────────────────────────
 
@@ -462,10 +554,10 @@ impl WALStorage {
                 continue;
             }
             let version = u64::from_le_bytes(file_data[0..8].try_into().unwrap());
-            if version != WAL_VERSION {
+            if version != WAL_VERSION && version != WAL_VERSION_JSON_FIELDS {
                 return Err(LynseError::Storage(format!(
-                    "unsupported WAL version {}; expected {}",
-                    version, WAL_VERSION
+                    "unsupported WAL version {}; expected {} or {}",
+                    version, WAL_VERSION_JSON_FIELDS, WAL_VERSION
                 )));
             }
 
@@ -543,7 +635,7 @@ impl WALStorage {
                 let n_floats = vec_data_size / dtype.byte_width();
                 let float_data = decode_vector_bytes_to_f32(vec_bytes, dtype);
 
-                // Read fields: fields_len(u64) + fields_bytes (JSON)
+                // Read fields: fields_len(u64) + fields_bytes
                 if pos + 8 > file_data.len() {
                     break;
                 }
@@ -557,9 +649,19 @@ impl WALStorage {
                 let fields_bytes = &file_data[pos..pos + fields_size];
                 pos += fields_size;
 
-                // Deserialize fields (msgpack-compatible JSON)
-                let fields: Vec<HashMap<String, serde_json::Value>> =
-                    serde_json::from_slice(fields_bytes).unwrap_or_default();
+                let fields: Vec<HashMap<String, serde_json::Value>> = if version
+                    == WAL_VERSION_JSON_FIELDS
+                {
+                    serde_json::from_slice(fields_bytes).map_err(|e| {
+                        LynseError::Serialization(format!("failed to decode WAL JSON fields: {e}"))
+                    })?
+                } else {
+                    deserialize_wal_fields(fields_bytes).map_err(|e| {
+                        LynseError::Serialization(format!(
+                            "failed to decode WAL binary fields: {e}"
+                        ))
+                    })?
+                };
 
                 if pos + 8 > file_data.len() {
                     break;
@@ -665,10 +767,18 @@ impl WALStorage {
         }
         if self.wal_file.exists() {
             if let Some(version) = Self::get_file_version(&self.wal_file) {
-                if version != WAL_VERSION {
+                if version == WAL_VERSION_JSON_FIELDS {
+                    if Self::get_file_row_count(&self.wal_file) == 0 {
+                        fs::remove_file(&self.wal_file)?;
+                    } else {
+                        return Err(LynseError::Storage(
+                            "WAL v3 has pending rows; reopen the collection to recover it before writing WAL v4".to_string(),
+                        ));
+                    }
+                } else if version != WAL_VERSION {
                     return Err(LynseError::Storage(format!(
-                        "WAL file version {} is not supported; expected {}",
-                        version, WAL_VERSION
+                        "WAL file version {} is not supported; expected {} or {}",
+                        version, WAL_VERSION_JSON_FIELDS, WAL_VERSION
                     )));
                 }
             }
@@ -710,9 +820,7 @@ impl WALStorage {
             None => return Ok(()),
         };
 
-        // Serialize fields as JSON (compatible with Python msgpack for simple types)
-        let fields_bytes =
-            serde_json::to_vec(&fields).map_err(|e| LynseError::Serialization(e.to_string()))?;
+        let fields_bytes = serialize_wal_fields(&fields)?;
         let ids_bytes: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
 
         let total_size = 1 + 8 + data_bytes.len() + 8 + fields_bytes.len() + 8 + ids_bytes.len();
@@ -875,6 +983,50 @@ mod tests {
         // Cleanup
         wal.cleanup().unwrap();
         assert!(!wal.has_uncommitted_data());
+    }
+
+    #[test]
+    fn test_wal_v3_json_fields_can_be_read() {
+        let tmp = TempDir::new().unwrap();
+        let wal = WALStorage::new("test_col", 100_000, tmp.path(), 5000).unwrap();
+        let wal_path = wal.log_dir().join("test_col.000000.wal");
+
+        let dim = 2usize;
+        let vectors = [1.0f32, 2.0];
+        let vec_bytes: Vec<u8> = vectors.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let fields = vec![HashMap::from([(
+            "label".to_string(),
+            serde_json::json!("legacy"),
+        )])];
+        let fields_bytes = serde_json::to_vec(&fields).unwrap();
+        let ids_bytes = 7u64.to_le_bytes();
+        let data_size = 1 + 8 + vec_bytes.len() + 8 + fields_bytes.len() + 8 + ids_bytes.len();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&WAL_VERSION_JSON_FIELDS.to_le_bytes());
+        bytes.extend_from_slice(&100_000u64.to_le_bytes());
+        bytes.extend_from_slice(&5000u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&(data_size as u64).to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.push(SEGMENT_STATUS_COMMITTED);
+        bytes.extend_from_slice(&(dim as u64).to_le_bytes());
+        bytes.push(1);
+        bytes.extend_from_slice(&(vec_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&vec_bytes);
+        bytes.extend_from_slice(&(fields_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&fields_bytes);
+        bytes.extend_from_slice(&(ids_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&ids_bytes);
+        fs::write(wal_path, bytes).unwrap();
+
+        let segments = wal.get_segments().unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].ids, vec![7]);
+        assert_eq!(
+            segments[0].fields[0].get("label"),
+            Some(&serde_json::json!("legacy"))
+        );
     }
 
     #[test]
