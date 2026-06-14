@@ -1,4 +1,5 @@
 """Tests for VectorDBClient and LocalClient (database-level API)."""
+import numpy as np
 import pytest
 
 import lynse
@@ -55,6 +56,43 @@ class TestLocalClient:
             "col_desc", dim=DIM, drop_if_exists=True, description="my desc"
         )
         assert coll is not None
+
+    def test_require_collection_without_dim_infers_from_first_vectors(self, db):
+        coll = db.require_collection("lazy_dim_col", drop_if_exists=True)
+        assert coll.shape == (0, 0)
+
+        vectors = np.random.rand(2, 5).astype(np.float32)
+        coll.add(ids=["a", "b"], vectors=vectors)
+
+        assert coll.shape == (2, 5)
+        assert db._manager.get_collection_config(db.database_name, "lazy_dim_col")["dim"] == 5
+
+    def test_require_collection_without_dim_documents_use_default_embedding_dim(
+        self, db, monkeypatch
+    ):
+        from lynse.api import local_client as local_client_module
+
+        def fake_embed_documents(documents):
+            docs = list(documents)
+            return np.ones((len(docs), 512), dtype=np.float32)
+
+        monkeypatch.setattr(local_client_module, "embed_documents", fake_embed_documents)
+
+        coll = db.require_collection("lazy_doc_col", drop_if_exists=True)
+        coll.add(ids="doc-1", documents="hello")
+
+        assert coll.shape == (1, 512)
+        assert db._manager.get_collection_config(db.database_name, "lazy_doc_col")["dim"] == 512
+
+    def test_require_existing_collection_without_dim_preserves_dimension(self, db):
+        db.require_collection("existing_lazy_open", dim=DIM, drop_if_exists=True)
+        coll = db.require_collection("existing_lazy_open")
+
+        assert coll.shape == (0, DIM)
+        assert (
+            db._manager.get_collection_config(db.database_name, "existing_lazy_open")["dim"]
+            == DIM
+        )
 
     def test_get_collection(self, db, collection):
         fetched = db.get_collection("test_col")

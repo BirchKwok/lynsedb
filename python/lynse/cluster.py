@@ -555,7 +555,7 @@ class ClusterState:
                 return existing
             bucket_to_group = [group_names[i % len(group_names)] for i in range(bucket_count)]
             coll = {
-                "dim": int(dim),
+                "dim": int(dim or 0),
                 "chunk_size": 100000,
                 "description": description,
                 "dtypes": dtypes or "float32",
@@ -583,6 +583,16 @@ class ClusterState:
             coll = self.data.get("collections", {}).get(self.collection_key(db_name, coll_name))
             if coll is not None:
                 coll["index_mode"] = index_mode
+                self.bump_epoch()
+                self.save()
+
+    def update_collection_dim_if_unset(self, db_name: str, coll_name: str, dim: int) -> None:
+        if not dim:
+            return
+        with self._lock:
+            coll = self.data.get("collections", {}).get(self.collection_key(db_name, coll_name))
+            if coll is not None and int(coll.get("dim") or 0) == 0:
+                coll["dim"] = int(dim)
                 self.bump_epoch()
                 self.save()
 
@@ -1104,10 +1114,11 @@ class ClusterCoordinator:
         db_name = body["database_name"]
         coll_name = body["collection_name"]
         self.broadcast_json("/required_collection", body)
+        dim = body.get("dim")
         coll = self.state.upsert_collection(
             db_name,
             coll_name,
-            int(body["dim"]),
+            int(dim or 0),
             body.get("description"),
             body.get("dtypes") or "float32",
             bool(body.get("drop_if_exists", False)),
@@ -1194,6 +1205,8 @@ class ClusterCoordinator:
             raise ValueError("ids length must match vectors length")
         if fields is not None and len(fields) != len(ids):
             raise ValueError("fields length must match ids length")
+        if vectors:
+            self.state.update_collection_dim_if_unset(db_name, coll_name, len(vectors[0]))
 
         grouped: dict[str, dict[str, Any]] = {}
         for idx, item_id in enumerate(ids):
@@ -1239,6 +1252,8 @@ class ClusterCoordinator:
             raise ValueError("ids length must match vectors length")
         if fields is not None and len(fields) != len(ids):
             raise ValueError("fields length must match ids length")
+        if vectors:
+            self.state.update_collection_dim_if_unset(db_name, coll_name, len(vectors[0]))
 
         grouped: dict[str, dict[str, Any]] = {}
         for idx, item_id in enumerate(ids):
@@ -1278,6 +1293,7 @@ class ClusterCoordinator:
         dim = int(params["dim"])
         n_vectors = int(params["n_vectors"])
         vector_encoding = _normalize_vector_encoding(params.get("vector_encoding"))
+        self.state.update_collection_dim_if_unset(db_name, coll_name, dim)
         vector_raw, ids, fields, _ = _split_binary_items_payload(
             body,
             n_vectors,

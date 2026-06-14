@@ -501,13 +501,17 @@ fn validate_collection_insert(
     limits: &ServerLimits,
     coll: &crate::engine::Collection,
     additional_vectors: u64,
-    _request_vector_bytes: u64,
+    request_vector_bytes: u64,
 ) -> Result<(), LynseError> {
     let (current_vectors, dim) = coll.shape()?;
-    let additional_vector_bytes = additional_vectors
-        .checked_mul(dim as u64)
-        .and_then(|values| values.checked_mul(coll.vector_dtype().byte_width() as u64))
-        .ok_or_else(|| LynseError::InvalidArgument("collection vector bytes overflow".into()))?;
+    let additional_vector_bytes = if dim == 0 {
+        request_vector_bytes
+    } else {
+        additional_vectors
+            .checked_mul(dim as u64)
+            .and_then(|values| values.checked_mul(coll.vector_dtype().byte_width() as u64))
+            .ok_or_else(|| LynseError::InvalidArgument("collection vector bytes overflow".into()))?
+    };
     validate_collection_vector_count(limits, current_vectors, additional_vectors)?;
     validate_collection_vector_bytes(
         limits,
@@ -1025,7 +1029,7 @@ struct RestoreDatabaseRequest {
 struct RequireCollectionRequest {
     database_name: String,
     collection_name: String,
-    dim: usize,
+    dim: Option<usize>,
     drop_if_exists: Option<bool>,
     description: Option<String>,
     dtypes: Option<String>,
@@ -2449,7 +2453,7 @@ async fn required_collection(
     match state.manager.require_collection_with_dtype(
         &body.database_name,
         &body.collection_name,
-        body.dim,
+        body.dim.unwrap_or(0),
         100_000,
         drop_if_exists,
         body.description.as_deref(),
@@ -2621,7 +2625,7 @@ async fn add_records(
     }
     let limits = state.limits;
     let result = state.manager.with_database(&body.database_name, |engine| {
-        let coll_arc = engine.get_or_open_collection(&body.collection_name, dim, 100_000)?;
+        let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
         let mut coll = coll_arc.write();
         validate_collection_insert(&limits, &coll, n_vectors as u64, vector_bytes)?;
         coll.add_records(&flat_vectors, n_vectors, &body.ids, fields)?;
@@ -2688,7 +2692,7 @@ async fn upsert_records(
     }
     let limits = state.limits;
     let result = state.manager.with_database(&body.database_name, |engine| {
-        let coll_arc = engine.get_or_open_collection(&body.collection_name, dim, 100_000)?;
+        let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
         let mut coll = coll_arc.write();
 
         let existing_positions: Vec<usize> = body
@@ -2820,7 +2824,7 @@ async fn bulk_add_binary(
     let limits = state.limits;
     // bulk_add_binary has no user IDs in the binary protocol — assign sequential from current max
     let result = state.manager.with_database(&query.database_name, |engine| {
-        let coll_arc = engine.get_or_open_collection(&query.collection_name, dim, 100_000)?;
+        let coll_arc = engine.get_or_open_collection(&query.collection_name, 0, 100_000)?;
         let mut coll = coll_arc.write();
         let start_id = coll
             .max_id()

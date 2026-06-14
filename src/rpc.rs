@@ -512,7 +512,7 @@ fn handle_binary_items(
     manager.get_or_open_database(&meta.database_name)?;
     let ids_for_write = ids.clone();
     manager.with_database(&meta.database_name, |engine| {
-        let coll_arc = engine.get_or_open_collection(&meta.collection_name, meta.dim, 100_000)?;
+        let coll_arc = engine.get_or_open_collection(&meta.collection_name, 0, 100_000)?;
         let mut coll = coll_arc.write();
         if upsert {
             let vectors = raw_vector_cow(

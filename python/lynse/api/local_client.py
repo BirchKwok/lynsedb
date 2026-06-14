@@ -62,7 +62,8 @@ class LocalClient:
 
         Parameters:
             collection (str): The name of the collection.
-            dim (int): The dimension of the vectors.
+            dim (int): Optional vector dimension. If omitted for a new
+                collection, LynseDB infers it from the first inserted vectors.
             n_threads (int): The number of threads. Default is 10.
             warm_up (bool): Whether to warm up. Default is False.
             drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
@@ -306,6 +307,16 @@ class LocalCollection:
     def is_read_only(self) -> bool:
         return self._rust_coll.is_read_only
 
+    def _refresh_dim_from_backend(self):
+        dim = getattr(self._rust_coll, "dimension", None)
+        if dim is None:
+            shape = getattr(self._rust_coll, "shape", None)
+            if shape is not None and len(shape) >= 2:
+                dim = shape[1]
+        if dim:
+            self._init_params['dim'] = dim
+        return dim
+
     @property
     def vector_dtype(self) -> str:
         return self._rust_coll.vector_dtype
@@ -361,6 +372,7 @@ class LocalCollection:
                     external_ids[start:end],
                     stored_fields[start:end],
                 ))
+            self._refresh_dim_from_backend()
 
         self.COMMIT_FLAG = False
         return added_ids[0] if single_id else added_ids
@@ -376,6 +388,7 @@ class LocalCollection:
             fields = [item.get('field', {}) for item in items]
             has_fields = any(f for f in fields)
             self._rust_coll.add_items(vectors, ids, fields if has_fields else None)
+            self._refresh_dim_from_backend()
             self.COMMIT_FLAG = False
             self._mesosphere_list = queue.Queue()
 
@@ -443,6 +456,7 @@ class LocalCollection:
             n_batch = batch.shape[0]
             seq_ids = list(range(start_id, start_id + n_batch))
             self._rust_coll.add_items(batch, seq_ids, None)
+            self._refresh_dim_from_backend()
             start_id += n_batch
             self.COMMIT_FLAG = False
             added += n_batch
@@ -505,6 +519,7 @@ class LocalCollection:
                         new_ids,
                         [batch_fields[i] for i in new_positions] if batch_fields is not None else None,
                     )
+            self._refresh_dim_from_backend()
 
         self.COMMIT_FLAG = False
         return external_ids[0] if single_id else external_ids

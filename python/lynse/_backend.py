@@ -158,13 +158,18 @@ class DatabaseManager:
         self,
         db_name: str,
         collection_name: str,
-        dim: int,
+        dim: Optional[int],
         drop_if_exists: bool = False,
         description: Optional[str] = None,
         dtypes: str = "float32",
     ) -> None:
         self._manager.require_collection(
-            db_name, collection_name, dim, drop_if_exists, description, dtypes
+            db_name,
+            collection_name,
+            0 if dim is None else dim,
+            drop_if_exists,
+            description,
+            dtypes,
         )
 
     def drop_collection(self, db_name: str, collection_name: str) -> None:
@@ -206,10 +211,10 @@ class DatabaseManager:
         self,
         db_name: str,
         collection_name: str,
-        dim: int,
+        dim: Optional[int],
     ) -> "Collection":
         """Get a PyCollection directly from the database manager."""
-        coll = self._manager.get_collection(db_name, collection_name, dim)
+        coll = self._manager.get_collection(db_name, collection_name, 0 if dim is None else dim)
         return Collection(coll)
 
     def get_collection_config(

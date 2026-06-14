@@ -1318,12 +1318,12 @@ impl PyDatabaseManager {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-    #[pyo3(signature = (db_name, collection_name, dim, drop_if_exists=None, description=None, dtypes=None))]
+    #[pyo3(signature = (db_name, collection_name, dim=None, drop_if_exists=None, description=None, dtypes=None))]
     fn require_collection(
         &self,
         db_name: &str,
         collection_name: &str,
-        dim: usize,
+        dim: Option<usize>,
         drop_if_exists: Option<bool>,
         description: Option<&str>,
         dtypes: Option<&str>,
@@ -1332,7 +1332,7 @@ impl PyDatabaseManager {
             .require_collection_with_dtype(
                 db_name,
                 collection_name,
-                dim,
+                dim.unwrap_or(0),
                 100_000,
                 drop_if_exists.unwrap_or(false),
                 description,

@@ -174,9 +174,8 @@ class HTTPClient:
 
         Parameters:
             collection (str): The name of the collection.
-            dim (int): The dimension of the vectors. Default is None.
-                When creating a new collection, the dimension of the vectors must be specified.
-                When loading an existing collection, the dimension of the vectors is automatically loaded.
+            dim (int): Optional vector dimension. If omitted for a new
+                collection, LynseDB infers it from the first inserted vectors.
             n_threads (int): The number of threads. Default is 10.
             warm_up (bool): Whether to warm up. Default is False.
             drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
@@ -590,7 +589,7 @@ class Collection:
             uri (str): The URI of the server.
             database_name (str): The name of the database.
             collection_name (str): The name of the collection.
-            dim (int): The dimension of the vectors.
+            dim (int): Optional vector dimension.
             chunk_size (int): The chunk size.
             description (str): Optional collection description.
             n_threads (int): The number of threads.
@@ -631,6 +630,10 @@ class Collection:
             self._cluster_mode = response.status_code == 200
         except Exception:
             self._cluster_mode = False
+
+    def _set_dim_if_known(self, dim):
+        if dim:
+            self._init_params['dim'] = int(dim)
 
     @property
     def vector_dtype(self) -> str:
@@ -702,6 +705,7 @@ class Collection:
                 response = self._session.post(uri, json=data)
                 if response.status_code == 200:
                     self.COMMIT_FLAG = False
+                    self._set_dim_if_known(vec_array.shape[1])
                     added_ids.extend(response.json()['params']['ids'])
                 else:
                     raise_error_response(response)
@@ -819,6 +823,7 @@ class Collection:
                 response = self._session.post(uri, json=data)
                 if response.status_code == 200:
                     self.COMMIT_FLAG = False
+                    self._set_dim_if_known(vec_array.shape[1])
                     returned_ids.extend(response.json()['params']['ids'])
                 else:
                     raise_error_response(response)
@@ -885,6 +890,7 @@ class Collection:
 
             if response.status_code == 200:
                 self.COMMIT_FLAG = False
+                self._set_dim_if_known(dim)
                 added += n_vecs
             else:
                 raise_error_response(response)
@@ -907,6 +913,9 @@ class Collection:
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
             self.COMMIT_FLAG = False
+            vectors = data.get("vectors") or []
+            if vectors:
+                self._set_dim_if_known(len(vectors[0]))
             self._mesosphere_list = queue.Queue()
         else:
             raise_error_response(response)

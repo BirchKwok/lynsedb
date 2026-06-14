@@ -1229,7 +1229,7 @@ impl Collection {
         let manifest_path = Self::storage_manifest_path(collection_path);
         if manifest_path.exists() {
             let bytes = std::fs::read(&manifest_path)?;
-            let manifest: StorageManifest = serde_json::from_slice(&bytes)
+            let mut manifest: StorageManifest = serde_json::from_slice(&bytes)
                 .map_err(|e| LynseError::Serialization(e.to_string()))?;
 
             if manifest.format != STORAGE_FORMAT_NAME {
@@ -1250,7 +1250,10 @@ impl Collection {
                     manifest.collection_name, name
                 )));
             }
-            if dimension != 0 && manifest.dimension != dimension {
+            if dimension != 0 && manifest.dimension == 0 {
+                manifest.dimension = dimension;
+                Self::write_storage_manifest(&manifest_path, &manifest)?;
+            } else if dimension != 0 && manifest.dimension != dimension {
                 return Err(LynseError::DimensionMismatch {
                     expected: manifest.dimension,
                     got: dimension,
@@ -1275,12 +1278,6 @@ impl Collection {
             return Ok(manifest);
         }
 
-        if dimension == 0 {
-            return Err(LynseError::InvalidArgument(
-                "dimension is required when creating a new collection".to_string(),
-            ));
-        }
-
         let vector_dtype = requested_dtype.unwrap_or_default();
         let manifest = StorageManifest::current(name, dimension, chunk_size, vector_dtype);
         Self::write_storage_manifest(&manifest_path, &manifest)?;
@@ -1292,6 +1289,129 @@ impl Collection {
             .map_err(|e| LynseError::Serialization(e.to_string()))?;
         Self::atomic_write_file(path, &json)?;
         Ok(())
+    }
+
+    fn update_parent_collection_config_dimension(&self, dimension: usize) -> Result<()> {
+        let Some(db_path) = self.path.parent() else {
+            return Ok(());
+        };
+        let config_path = db_path.join("collections.json");
+        if !config_path.exists() {
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(&config_path)?;
+        let mut configs: HashMap<String, CollectionConfig> =
+            serde_json::from_str(&content).unwrap_or_default();
+        let Some(config) = configs.get_mut(&self.meta.name) else {
+            return Ok(());
+        };
+        if config.dim == dimension {
+            return Ok(());
+        }
+
+        config.dim = dimension;
+        let json = serde_json::to_vec_pretty(&configs)
+            .map_err(|e| LynseError::Serialization(e.to_string()))?;
+        Self::atomic_write_file(&config_path, &json)
+    }
+
+    fn initialize_dimension_if_needed(&mut self, dimension: usize) -> Result<()> {
+        if dimension == 0 {
+            return Err(LynseError::InvalidArgument(
+                "vector dimension must be greater than zero".to_string(),
+            ));
+        }
+        if self.meta.dimension == dimension {
+            return Ok(());
+        }
+        if self.meta.dimension != 0 {
+            return Err(LynseError::DimensionMismatch {
+                expected: self.meta.dimension,
+                got: dimension,
+            });
+        }
+
+        let (stored_rows, _) = self.vector_store.get_shape()?;
+        if stored_rows != 0 || self.pending_len() != 0 || !self.id_map.is_empty() {
+            return Err(LynseError::Storage(
+                "cannot initialize dimension for a collection that already contains data"
+                    .to_string(),
+            ));
+        }
+
+        let manifest = StorageManifest::current(
+            &self.meta.name,
+            dimension,
+            self.meta.chunk_size,
+            self.vector_dtype,
+        );
+        Self::write_storage_manifest(&Self::storage_manifest_path(&self.path), &manifest)?;
+        self.meta.dimension = dimension;
+        self.vector_store = VectorStore::new(
+            &self.path,
+            dimension,
+            self.meta.chunk_size,
+            self.vector_dtype,
+        )?;
+        self.update_parent_collection_config_dimension(dimension)?;
+        Ok(())
+    }
+
+    fn infer_dimension_from_f32(&mut self, vectors: &[f32], n_vectors: usize) -> Result<usize> {
+        if n_vectors == 0 {
+            if !vectors.is_empty() {
+                return Err(LynseError::InvalidArgument(
+                    "vectors must be empty when n_vectors is zero".to_string(),
+                ));
+            }
+            return Ok(self.meta.dimension);
+        }
+        if vectors.len() % n_vectors != 0 {
+            return Err(LynseError::InvalidArgument(format!(
+                "vector value count ({}) must be divisible by n_vectors ({})",
+                vectors.len(),
+                n_vectors
+            )));
+        }
+        let dimension = vectors.len() / n_vectors;
+        self.initialize_dimension_if_needed(dimension)?;
+        Ok(dimension)
+    }
+
+    fn infer_dimension_from_encoded(
+        &mut self,
+        encoded_vectors: &[u8],
+        vector_dtype: VectorDtype,
+        n_vectors: usize,
+    ) -> Result<usize> {
+        if n_vectors == 0 {
+            if !encoded_vectors.is_empty() {
+                return Err(LynseError::InvalidArgument(
+                    "encoded vectors must be empty when n_vectors is zero".to_string(),
+                ));
+            }
+            return Ok(self.meta.dimension);
+        }
+
+        let width = vector_dtype.byte_width();
+        if encoded_vectors.len() % width != 0 {
+            return Err(LynseError::InvalidArgument(format!(
+                "encoded vector byte count ({}) is not aligned to dtype width ({})",
+                encoded_vectors.len(),
+                width
+            )));
+        }
+        let values = encoded_vectors.len() / width;
+        if values % n_vectors != 0 {
+            return Err(LynseError::InvalidArgument(format!(
+                "encoded vector value count ({}) must be divisible by n_vectors ({})",
+                values, n_vectors
+            )));
+        }
+        let dimension = values / n_vectors;
+        self.initialize_dimension_if_needed(dimension)?;
+        Ok(dimension)
     }
 
     fn vector_fields_root(collection_path: &Path) -> PathBuf {
@@ -2768,7 +2888,7 @@ impl Collection {
                 self.vector_dtype.storage_name()
             )));
         }
-        let dim = self.meta.dimension;
+        let dim = self.infer_dimension_from_encoded(encoded_vectors, vector_dtype, n_vectors)?;
         let expected_bytes = n_vectors
             .checked_mul(dim)
             .and_then(|values| values.checked_mul(vector_dtype.byte_width()))
@@ -2880,7 +3000,8 @@ impl Collection {
         ids: &[u64],
         fields: Option<&[HashMap<String, serde_json::Value>]>,
     ) -> Result<()> {
-        let dim = self.meta.dimension;
+        self.ensure_writable()?;
+        let dim = self.infer_dimension_from_f32(vectors, n_vectors)?;
         if vectors.len() != n_vectors * dim {
             return Err(LynseError::DimensionMismatch {
                 expected: dim,
@@ -2914,7 +3035,7 @@ impl Collection {
         fields: Option<&[HashMap<String, serde_json::Value>]>,
     ) -> Result<Vec<u64>> {
         self.ensure_writable()?;
-        let dim = self.meta.dimension;
+        let dim = self.infer_dimension_from_f32(vectors, n_vectors)?;
         if vectors.len() != n_vectors * dim {
             return Err(LynseError::DimensionMismatch {
                 expected: dim,
@@ -4759,7 +4880,7 @@ impl Collection {
     ) -> Result<()> {
         self.ensure_writable()?;
         self.flush_pending_ingest()?;
-        let dim = self.meta.dimension;
+        let dim = self.infer_dimension_from_f32(vectors, n_vectors)?;
         if vectors.len() != n_vectors * dim {
             return Err(LynseError::DimensionMismatch {
                 expected: dim,
@@ -8096,21 +8217,22 @@ impl DatabaseManager {
             })?;
         }
 
-        self.with_database(db_name, |engine| {
-            let _ = engine.get_or_open_collection_with_dtype(
+        let effective_dim = self.with_database(db_name, |engine| {
+            let coll = engine.get_or_open_collection_with_dtype(
                 collection_name,
                 dim,
                 chunk_size,
                 Some(vector_dtype),
             )?;
-            Ok(())
+            let dimension = coll.read().dimension();
+            Ok(dimension)
         })?;
 
         // Save collection config
         self.save_collection_config(
             db_name,
             collection_name,
-            dim,
+            effective_dim,
             chunk_size,
             description,
             Some(vector_dtype),
