@@ -341,7 +341,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../deployment/cluster-example/" class="md-tabs__link">
+        <a href="../deployment/cluster-deployment/" class="md-tabs__link">
           
   
   
@@ -1183,6 +1183,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#within-v01x" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Within v0.1.x
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#from-v00x-to-v010" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1599,14 +1610,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../deployment/cluster-example/" class="md-nav__link">
+      <a href="../deployment/cluster-deployment/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Cluster example
+    Cluster deployment
   
 
     
@@ -1698,142 +1709,208 @@
 <h1 id="release-notes">Release Notes<a class="headerlink" href="#release-notes" title="Permanent link">&para;</a></h1>
 <p>This page documents the major features and improvements in each version of LynseDB. Only versions with the <code>v</code> prefix are official releases.</p>
 <h2 id="v040">v0.4.0<a class="headerlink" href="#v040" title="Permanent link">&para;</a></h2>
+<p><strong>Major Release - Cluster Coordination, Transport, and API Consistency</strong></p>
 <p><strong>Key Features:</strong>
-- 🔧 <strong>Refactored IVFIndex</strong>: Shared KMeans implementation for improved code reusability and maintainability
-- 🌐 <strong>Enhanced LocalCollection</strong>: Added wire_dtype parameter support for better HTTP API compatibility
-- 🐍 <strong>Improved Python Bindings</strong>: Refactored bindings architecture and enhanced cluster functionality
-- 📚 <strong>Enhanced Documentation</strong>: Expanded index documentation with more naming variants and examples</p>
+- 🌐 <strong>Lightweight Cluster Mode</strong>: Added a coordinator role for sharding remote HTTP deployments across multiple shard groups. The coordinator owns collection metadata, routes IDs with stable hash buckets, fans out searches, merges results, and can mirror writes to active replicas.
+- 🔁 <strong>Shard Failover Foundations</strong>: Added coordinator state tracking, health checks, replica states, primary promotion behavior, and <code>/cluster_info</code> diagnostics for cluster operations.
+- ⚡ <strong>Internal Cluster RPC</strong>: Added a private length-prefixed TCP RPC path between coordinator and shard nodes for hot shard operations including ping, search, batch search, binary add, upsert, delete, and restore, with HTTP fallback when RPC is unavailable.
+- 📦 <strong>Compact Binary Transport Improvements</strong>: Extended binary client/server paths for high-throughput writes and searches, including float16 wire encoding support for remote calls.
+- 🧭 <strong>Consistent Python API Signatures</strong>: Aligned local and HTTP collection method signatures, removed public <code>**kwargs</code> surfaces, and made parameter behavior explicit across local and remote clients.
+- 🔧 <strong>IVFIndex Refactor</strong>: Moved IVF training and assignment to a shared KMeans implementation used by both in-memory IVF and mmap-backed IVF storage.
+- 🧪 <strong>Index Parameter Handling</strong>: <code>n_clusters</code> is now accepted by the Python API for all index modes but is only sent to or used by IVF indexes. Non-IVF indexes ignore it for easier generic tuning code.
+- 🌐 <strong>Local/HTTP Parity for <code>wire_dtype</code></strong>: Local collection methods now accept <code>wire_dtype</code> for API compatibility while continuing to use the direct numpy float32 path locally.
+- 📚 <strong>Cluster Deployment Documentation</strong>: Added a full cluster deployment and maintenance guide covering local clusters, production layout, coordinator state, health checks, promotion, recovery, backup, and upgrade notes.</p>
 <p><strong>Improvements:</strong>
-- Better resource management in indexing
-- Improved cluster operation capabilities
-- More comprehensive index documentation</p>
+- Refined Python binding structure around records, embeddings, reranking, result views, sessions, and HTTP client behavior.
+- Added server CLI support for coordinator mode, cluster config/state paths, shard API keys, and cluster health tuning.
+- Expanded index documentation with canonical names, aliases, metric variants, binary metric variants, IVF tuning guidance, and troubleshooting notes.
+- Updated quickstart, client reference, HTTP API docs, tutorials, performance tuning, and operations documentation to reflect the current API surface.
+- Added transport benchmarking utilities for measuring client/server and cluster paths.
+- Improved CI release workflow with tag resolution and version checking steps.</p>
+<p><strong>Testing:</strong>
+- Added standard cluster tests covering state initialization, ID routing, replica state changes, binary item preparation, and coordinator behavior.
+- Added explicit API parameter tests to keep local and HTTP collection signatures aligned and verify <code>n_clusters</code> and <code>wire_dtype</code> behavior.
+- Expanded collection, search, metadata index, Docker API, and server CLI coverage for the v0.4.0 API surface.</p>
+<p><strong>Compatibility Notes:</strong>
+- No required data migration is expected from v0.3.0 for single-node local or HTTP deployments.
+- Existing single-node <code>VectorDBClient</code> usage continues to work. Cluster mode is opt-in via <code>lynse serve --role coordinator</code>.
+- Applications that passed extra unsupported keyword arguments to public Python methods should switch to the documented explicit parameters.</p>
 <hr />
 <h2 id="v030">v0.3.0<a class="headerlink" href="#v030" title="Permanent link">&para;</a></h2>
 <p><strong>Major Release - Float16 Support and Advanced Indexing</strong></p>
 <p><strong>Key Features:</strong>
-- ✨ <strong>Float16 Support</strong>: Added native float16 (f16) vector storage for 50% memory reduction
-- 📊 <strong>PolarVec Enhancement</strong>: Metric-aware auxiliary storage for improved quantization
-- 🔍 <strong>Enhanced Index Management</strong>: Improved field-specific indexing options
-- 📖 <strong>Documentation Updates</strong>: New tutorials and comprehensive guides</p>
+- ✨ <strong>Float16 Vector Storage</strong>: Added native <code>float16</code>/<code>f16</code> storage in <code>FlatMmap</code> and <code>VectorStore</code>, reducing dense vector storage size by roughly half for collections that can tolerate half-precision storage.
+- 📊 <strong>Metric-Aware PolarVec</strong>: Enhanced PolarVec auxiliary storage with metric-aware data so quantized search can better match the active distance metric.
+- 📚 <strong>Documentation Refresh</strong>: Reworked README positioning, quickstart material, tutorials, deployment docs, production roadmap, and API references for the Rust-backed API introduced in v0.2.x.
+- 🧰 <strong>Documentation Release Workflow</strong>: Improved docs CI with explicit version input, concurrency control, and existing docs-branch fetching for versioned documentation publishing.</p>
 <p><strong>Improvements:</strong>
-- Better resource management in vector storage
-- Enhanced snapshot functionality
-- Improved index building and search documentation
-- Optimized metadata filtering</p>
+- Updated package versions to <code>0.3.0</code> across Cargo, Python package metadata, and runtime <code>__version__</code>.
+- Clarified embedded mode versus HTTP service mode in the user-facing documentation.
+- Expanded tutorials for adding vectors, searching and filtering, indexing, named/sparse/hybrid retrieval, operations, and production tuning.
+- Removed outdated README badges and aligned docs with the current supported platform policy.</p>
+<p><strong>Compatibility Notes:</strong>
+- Existing <code>float32</code> collections remain the default and require no migration.
+- New half-precision collections should be created explicitly with <code>dtypes="float16"</code>.
+- Consider rebuilding PolarVec indexes after upgrading if you want the metric-aware auxiliary data generated by this release.</p>
 <hr />
 <h2 id="v020">v0.2.0<a class="headerlink" href="#v020" title="Permanent link">&para;</a></h2>
 <p><strong>Major Release - Rust Architecture and Advanced Features</strong></p>
 <p><strong>Key Features:</strong>
-- 🏗️ <strong>Rust-First Architecture</strong>: Complete restructuring to Rust-first with simplified Python API
-- 🎯 <strong>Advanced Quantization</strong>: Added PQ (Product Quantization), RaBitQ, and PolarVec index modes with two-pass search
-- 📦 <strong>Mmap-backed Storage</strong>: Memory-mapped vector storage for efficient large-scale data handling
-- 🗂️ <strong>IVF_FLAT Indexing</strong>: Inverted File index with flat quantization support
-- ✍️ <strong>Write-Ahead Logging (WAL)</strong>: Durability and crash recovery support
-- 🔎 <strong>Approximate Search</strong>: Approximate search capabilities with configurable precision
-- 📊 <strong>Optimized Field Indexing</strong>: In-memory field index and apex_id_map for fast queries
-- 🎯 <strong>Optimized Filtered Search</strong>: Dual-strategy filtered search for better performance</p>
+- 🏗️ <strong>Rust-First Architecture</strong>: Rebuilt LynseDB around a Rust storage/search backend exposed through PyO3, with a simplified Python API for embedded and remote usage.
+- 🧭 <strong>Unified <code>VectorDBClient</code> Entry Point</strong>: Introduced one high-level client that selects local embedded mode for filesystem paths and HTTP mode for remote URLs.
+- 🚀 <strong>Optimized Rust HNSW Path</strong>: Added a Rust core with optimized HNSW search and removed the Python fallback execution paths.
+- 📦 <strong>Mmap-Backed Storage</strong>: Added memory-mapped vector storage, custom binary storage protocols, append-friendly vector files, and WAL-backed durability.
+- 🗂️ <strong>Index Families</strong>: Added Flat, HNSW, IVF, DiskANN, PQ, RaBitQ, and PolarVec index families, including IVF_FLAT storage and two-pass quantized search paths.
+- 🔎 <strong>Approximate Search</strong>: Added configurable approximate search with <code>approx</code> and <code>eps</code> for supported flat metrics.
+- 🧮 <strong>Metadata, Text, and Hybrid Retrieval</strong>: Enhanced SQL-like filtering, numeric equality and <code>IN</code> filters, inverted text indexing, BM25, sparse vector search, and hybrid retrieval.
+- 🧩 <strong>Named Vector Fields</strong>: Added support for multiple vector fields per record, enabling multimodal records and field-specific indexes.
+- 🛠️ <strong>Operations Surface</strong>: Added snapshots, restore, export/import, compaction, HTTP health/readiness/metrics/OpenAPI surfaces, API-key auth, Docker, systemd, and Kubernetes examples.
+- 🪵 <strong>Observability Hooks</strong>: Added slow query alerts and audit logging capabilities.
+- 🧪 <strong>ResultView API</strong>: Added structured result objects with NumPy arrays and conversion helpers for downstream processing.</p>
 <p><strong>Improvements:</strong>
-- Removed Python fallback implementations for better performance
-- Enhanced query capabilities with numeric equality and IN filters
-- Improved context management and resource handling
-- Better integration between Python and Rust components
-- Comprehensive testing for metadata indexing and search functionality
-- API method signature improvements and documentation enhancements
-- Observability improvements: slow query alerts and audit logging capabilities</p>
+- Improved context management and resource cleanup in <code>VectorDBClient</code>, database managers, vector storage, and field storage.
+- Added in-memory field indexes and apex ID mapping for faster metadata-filtered query paths.
+- Optimized filtered search with a dual strategy that can choose between prefiltering and vector-first execution.
+- Updated dependencies, internalized assertion helpers, and reorganized the package layout under the Rust-backed <code>python/lynse</code> tree.
+- Dropped native Windows support. Windows users should run LynseDB through WSL 2 or Docker.
+- Added benchmark scripts for flat search, filtered search, IVF/KMeans, approximate search, and client query paths.</p>
+<p><strong>Testing:</strong>
+- Added comprehensive tests for the Rust backend, collection operations, database operations, metadata indexes, search, result views, Docker API behavior, and server CLI behavior.
+- Updated CI to run on version tags and refreshed Python versions used by workflows.</p>
+<p><strong>Compatibility Notes:</strong>
+- This is the largest compatibility boundary in the project history. Data and code built for the pure Python v0.1.x implementation should be validated before production migration.
+- Native Windows installs are no longer supported from this release forward.
+- HNSW remains available, but storage layout, server behavior, and many implementation details changed substantially.</p>
 <hr />
 <h2 id="v016">v0.1.6<a class="headerlink" href="#v016" title="Permanent link">&para;</a></h2>
 <p><strong>Final Stability Release - Pure Python</strong></p>
 <p><strong>Key Features:</strong>
-- Finalized v0.1 series with Python implementation
-- Performance optimizations and bug fixes
-- Resource management improvements</p>
+- 🐛 <strong>Trie Query Fix</strong>: Fixed <code>AttributeError: 'Trie' object has no attribute '_search_single'</code> in the pure Python metadata/indexing path.
+- 📦 <strong>Final v0.1.x Package Version</strong>: Marked the final pure Python release before the Rust-backed v0.2.0 architecture.</p>
+<p><strong>Improvements:</strong>
+- Kept the lightweight pure Python client/server-optional behavior stable for users not ready to move to v0.2.x.
+- Preserved the existing Python 3.9+ install and Docker-oriented documentation flow.</p>
+<p><strong>Compatibility Notes:</strong>
+- Recommended maintenance release for users staying on the pure Python v0.1 line.</p>
 <hr />
 <h2 id="v015">v0.1.5<a class="headerlink" href="#v015" title="Permanent link">&para;</a></h2>
 <p><strong>Maintenance Release - Pure Python</strong></p>
 <p><strong>Key Features:</strong>
-- Workflow improvements
-- Testing enhancements
-- Documentation updates</p>
+- 🔧 <strong>Workflow Improvements</strong>: Iterated on documentation and release workflows, including versioned docs publishing experiments with <code>mike</code>.
+- 🧱 <strong>Chunk Size Guardrails</strong>: Added range limits around chunk sizing to reduce invalid storage configuration behavior.
+- 📝 <strong>API Naming Cleanup</strong>: Renamed a function parameter for clearer API usage.</p>
+<p><strong>Improvements:</strong>
+- Updated documentation content and site publishing configuration.
+- Continued cleanup of CI workflows around docs and package release automation.</p>
 <hr />
 <h2 id="v014">v0.1.4<a class="headerlink" href="#v014" title="Permanent link">&para;</a></h2>
 <p><strong>Performance Release - Pure Python</strong></p>
 <p><strong>Key Features:</strong>
-- 🛡️ <strong>Safer MMAP Reading</strong>: Improved memory-mapped file reading strategy for better stability</p>
+- 🛡️ <strong>Safer MMAP Reading</strong>: Continued hardening of memory-mapped file reading to avoid unstable reads and improve cross-platform behavior.</p>
+<p><strong>Improvements:</strong>
+- Follow-up refinements to the safer mmap strategy introduced in v0.1.3.</p>
 <hr />
 <h2 id="v013">v0.1.3<a class="headerlink" href="#v013" title="Permanent link">&para;</a></h2>
 <p><strong>Bug Fix Release - Pure Python</strong></p>
 <p><strong>Key Features:</strong>
-- 🛡️ <strong>Enhanced MMAP Reading</strong>: Improved memory-mapped file reading strategy
-- Better error handling</p>
+- 🛡️ <strong>Enhanced MMAP Reading</strong>: Replaced the original <code>.npy</code> mmap reading path with a safer strategy for vector file access.
+- 📄 <strong>Documentation CI Setup</strong>: Added and refined docs publishing workflow pieces, MkDocs configuration, and site assets.
+- 📦 <strong>Version File</strong>: Added a <code>VERSION</code> file and release workflow support around versioned package/docs builds.</p>
+<p><strong>Improvements:</strong>
+- Updated dependencies in <code>requirements.txt</code>.
+- Performed code style cleanup and removed unnecessary code.
+- Iterated heavily on release and documentation workflows to support future tagged releases.</p>
 <hr />
 <h2 id="v012">v0.1.2<a class="headerlink" href="#v012" title="Permanent link">&para;</a></h2>
 <p><strong>Compatibility Release - Pure Python</strong></p>
 <p><strong>Key Features:</strong>
-- 🐛 <strong>Warning Fixes</strong>: Fixed deprecation warnings
-- Improved Python compatibility</p>
+- 🐛 <strong>Warning Fixes</strong>: Fixed a Python <code>DeprecationWarning</code> caused by an invalid escape sequence.
+- 🪟 <strong>Windows MMAP Follow-Up</strong>: Continued testing and fixes around mmap-related Windows failures.</p>
+<p><strong>Improvements:</strong>
+- Removed unnecessary code after the mmap compatibility pass.</p>
 <hr />
 <h2 id="v011">v0.1.1<a class="headerlink" href="#v011" title="Permanent link">&para;</a></h2>
 <p><strong>Stability Release - Pure Python</strong></p>
 <p><strong>Key Features:</strong>
-- 🔒 <strong>Resource Management</strong>: Used context managers to prevent unclosed mmap file errors
-- ⚙️ <strong>File Handling</strong>: Added logic to handle PermissionError during file deletion
-- 🔄 <strong>Thread Safety</strong>: Implemented thread locks to prevent race conditions
-- Windows compatibility improvements</p>
+- 🔒 <strong>Resource Management</strong>: Used context managers to prevent errors caused by unclosed mmap files.
+- ⚙️ <strong>Safer File Deletion</strong>: Added logic to wait for handle release when file deletion hits <code>PermissionError</code>.
+- 🔄 <strong>Thread Safety</strong>: Added thread locks to reduce race conditions in the pure Python storage path.
+- 🪟 <strong>Windows Validation</strong>: Tested core functionality under Windows and fixed Windows-specific mmap/file-handle behavior.</p>
+<p><strong>Improvements:</strong>
+- Cleaned up unnecessary code.
+- Improved tests and CI workflow coverage for early pure Python behavior.</p>
 <hr />
 <h2 id="v010">v0.1.0<a class="headerlink" href="#v010" title="Permanent link">&para;</a></h2>
 <p><strong>Major Release - Python Implementation with HNSW</strong></p>
 <p><strong>Key Features:</strong>
-- 🐍 <strong>Python Core</strong>: Pure Python implementation of vector search
-- 🌐 <strong>HNSW Algorithm</strong>: Hierarchical Navigable Small World index implementation
-- 🗄️ <strong>Storage Backend</strong>: Efficient vector storage and retrieval
-- 📦 <strong>File-based Storage</strong>: Support for memory-mapped file access
-- 🔍 <strong>Metadata Filtering</strong>: Support for filtering during search
-- 📐 <strong>Common Metrics</strong>: L2, Cosine, and other distance metrics</p>
+- 🐍 <strong>Pure Python Core</strong>: Established LynseDB as a lightweight vector database implemented in Python with local embedded usage and optional HTTP deployment.
+- 🌐 <strong>HNSW Indexing</strong>: Added the main HNSW-based vector index for approximate nearest-neighbor search.
+- 🗄️ <strong>Storage Layer</strong>: Added file-backed vector storage, memory-mapped access, ID tracking, and persistence primitives.
+- 🔍 <strong>Metadata Filtering</strong>: Added FieldExpression-style metadata filtering and field indexing for filtered vector search.
+- 📐 <strong>Distance Metrics</strong>: Supported common vector distance metrics including L2 and cosine-oriented workflows.
+- 🧵 <strong>Single-Process Native API</strong>: Documented the native Python API as best suited for single-process use, with HTTP mode recommended for process-safe deployments.</p>
 <p><strong>Improvements:</strong>
-- Foundation of vector database functionality
-- Python-first API design
-- Support for multiprocessing</p>
+- Built the initial Python-first API around simple database, collection, insert, and search workflows.
+- Added early tests, Docker usage notes, and MkDocs documentation.
+- Clarified early project limitations: backward compatibility was not yet guaranteed and million-scale or smaller workloads were recommended.</p>
 <hr />
 <h2 id="v002">v0.0.2<a class="headerlink" href="#v002" title="Permanent link">&para;</a></h2>
 <p><strong>Early Release - Bug Fixes</strong></p>
 <p><strong>Key Features:</strong>
-- 🐛 <strong>FileNotFoundError Fix</strong>: Fixed file not found error (#9)
-- Initial stability improvements</p>
+- 🐛 <strong>FileNotFoundError Fix</strong>: Fixed a <code>FileNotFoundError</code> issue reported in #9.
+- 📦 <strong>Early Package Stabilization</strong>: Continued preparing the Python package for basic installation and use.</p>
+<p><strong>Improvements:</strong>
+- Small stability fixes on top of the initial public package.</p>
 <hr />
 <h2 id="v001">v0.0.1<a class="headerlink" href="#v001" title="Permanent link">&para;</a></h2>
 <p><strong>Initial Release - Foundation</strong></p>
 <p><strong>Features:</strong>
-- Basic vector database functionality
-- Python-first API design
-- Support for common distance metrics (L2, Cosine)
-- Metadata filtering capabilities
-- Initial documentation and examples</p>
+- 🐍 <strong>Initial Python Package</strong>: First public LynseDB package and repository foundation.
+- 🔎 <strong>Basic Vector Database Workflows</strong>: Provided early APIs for adding vectors, storing records, and running vector similarity search.
+- 📐 <strong>Core Distance Support</strong>: Included common distance workflows such as L2 and cosine-oriented search.
+- 🧾 <strong>Metadata Filtering Foundations</strong>: Introduced the first metadata filtering capabilities.
+- 📚 <strong>Initial Documentation</strong>: Added README, installation instructions, Docker notes, and early examples.</p>
+<p><strong>Compatibility Notes:</strong>
+- Early v0.0.x releases were experimental and not guaranteed to be backward compatible.</p>
 <hr />
 <h2 id="migration-guide">Migration Guide<a class="headerlink" href="#migration-guide" title="Permanent link">&para;</a></h2>
 <h3 id="from-v030-to-v040">From v0.3.0 to v0.4.0<a class="headerlink" href="#from-v030-to-v040" title="Permanent link">&para;</a></h3>
 <ul>
-<li>IVFIndex refactoring is internal; no API changes required</li>
-<li>HTTP API compatibility improved; wire_dtype parameter now supported</li>
-<li>Cluster functionality enhanced; no breaking changes</li>
+<li>Single-node local and HTTP deployments do not require a storage migration.</li>
+<li>Cluster mode is new and opt-in. Start ordinary LynseDB HTTP servers as shards, then run a coordinator with <code>lynse serve --role coordinator --cluster-config ... --cluster-state ...</code>.</li>
+<li>Keep the coordinator <code>cluster_state.json</code> on persistent storage and back it up together with all shard data directories.</li>
+<li>If shard nodes use <code>--api-key</code>, pass the same secret to the coordinator with <code>--shard-api-key</code>.</li>
+<li><code>wire_dtype</code> is now accepted by local and HTTP write/search methods for signature parity. Local calls still use direct numpy arrays; remote calls can use compact wire encodings.</li>
+<li><code>n_clusters</code> remains meaningful only for IVF indexes. Passing it to non-IVF indexes is allowed and ignored by the Python API.</li>
+<li>Public Python methods now use explicit signatures. Replace any calls that depended on arbitrary <code>**kwargs</code> forwarding with documented parameters.</li>
+<li>The IVFIndex refactor is internal; existing IVF index names and search behavior remain compatible.</li>
 </ul>
 <h3 id="from-v020-to-v030">From v0.2.0 to v0.3.0<a class="headerlink" href="#from-v020-to-v030" title="Permanent link">&para;</a></h3>
 <ul>
-<li>Float16 vectors are now available; specify <code>dtype=float16</code> when creating collections</li>
+<li>Float16 vectors are now available; specify <code>dtypes="float16"</code> when creating collections</li>
 <li>PolarVec index is improved; consider rebuilding indices for better performance</li>
 <li>All existing APIs remain compatible</li>
 </ul>
 <h3 id="from-v01x-to-v020">From v0.1.x to v0.2.0<a class="headerlink" href="#from-v01x-to-v020" title="Permanent link">&para;</a></h3>
 <ul>
-<li><strong>Major architectural change</strong>: Migration from pure Python to Rust backend</li>
-<li>HNSW index remains the default; API remains similar for backwards compatibility</li>
-<li>Significant performance improvements (2.4x faster HNSW)</li>
-<li>Some API changes due to architecture shift; please review migration guide</li>
+<li><strong>Major architectural change</strong>: v0.2.0 migrates from the pure Python implementation to the Rust-backed storage and search engine.</li>
+<li>Validate existing v0.1.x data on a staging copy before upgrading production deployments.</li>
+<li>Review client code that uses low-level pure Python modules; the recommended entry point is now <code>lynse.VectorDBClient</code>.</li>
+<li>HNSW remains available, but storage layout, persistence behavior, and server behavior changed substantially.</li>
+<li>Native Windows installs are no longer supported. Use WSL 2 or Docker on Windows.</li>
+<li>Rebuild indexes after migration so they are created by the Rust-backed index implementations.</li>
+</ul>
+<h3 id="within-v01x">Within v0.1.x<a class="headerlink" href="#within-v01x" title="Permanent link">&para;</a></h3>
+<ul>
+<li>v0.1.1 through v0.1.6 are pure Python maintenance releases.</li>
+<li>Upgrade within the v0.1 line for safer mmap handling, Windows file-handle fixes, chunk-size guardrails, workflow updates, and the Trie query fix.</li>
+<li>No intentional major API migration is documented within the v0.1.x line, but early releases did not guarantee strict backward compatibility.</li>
 </ul>
 <h3 id="from-v00x-to-v010">From v0.0.x to v0.1.0<a class="headerlink" href="#from-v00x-to-v010" title="Permanent link">&para;</a></h3>
 <ul>
-<li>Complete rewrite with Rust core; some API changes may occur</li>
-<li>HNSW index replaces previous indexing methods</li>
-<li>Major performance improvements with improved resource management</li>
+<li>The v0.1 series standardizes the pure Python client and storage API.</li>
+<li>HNSW becomes the main vector index.</li>
+<li>Expect API cleanup and resource-management improvements compared with early v0.0 releases.</li>
 </ul>
 <hr />
 <h2 id="support">Support<a class="headerlink" href="#support" title="Permanent link">&para;</a></h2>

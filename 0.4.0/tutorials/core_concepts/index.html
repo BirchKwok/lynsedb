@@ -341,7 +341,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../deployment/cluster-example/" class="md-tabs__link">
+        <a href="../../deployment/cluster-deployment/" class="md-tabs__link">
           
   
   
@@ -1516,14 +1516,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../deployment/cluster-example/" class="md-nav__link">
+      <a href="../../deployment/cluster-deployment/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Cluster example
+    Cluster deployment
   
 
     
@@ -1696,7 +1696,7 @@ into this collection must have <code>dim</code> values.</p>
 <tr>
 <td>ID</td>
 <td>yes</td>
-<td>User-provided integer ID, unique inside the collection.</td>
+<td>Public string or non-negative integer ID, unique inside the collection.</td>
 </tr>
 <tr>
 <td>primary vector</td>
@@ -1706,7 +1706,7 @@ into this collection must have <code>dim</code> values.</p>
 <tr>
 <td>metadata field</td>
 <td>no</td>
-<td>JSON-like dict used for filters, text search, and display.</td>
+<td>JSON-like dict used for filters, BM25 search, and display.</td>
 </tr>
 <tr>
 <td>named vectors</td>
@@ -1721,34 +1721,32 @@ into this collection must have <code>dim</code> values.</p>
 </tbody>
 </table>
 <p>Example:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">with</span> <span class="n">collection</span><span class="o">.</span><span class="n">insert_session</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span>
-</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>        <span class="p">[</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">,</span> <span class="mf">0.3</span><span class="p">,</span> <span class="mf">0.4</span><span class="p">],</span>
-</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>        <span class="nb">id</span><span class="o">=</span><span class="mi">1001</span><span class="p">,</span>
-</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>        <span class="n">field</span><span class="o">=</span><span class="p">{</span>
-</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>            <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;vector database intro&quot;</span><span class="p">,</span>
-</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>            <span class="s2">&quot;lang&quot;</span><span class="p">:</span> <span class="s2">&quot;en&quot;</span><span class="p">,</span>
-</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>            <span class="s2">&quot;tenant&quot;</span><span class="p">:</span> <span class="s2">&quot;acme&quot;</span><span class="p">,</span>
-</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>            <span class="s2">&quot;published&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
-</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>            <span class="s2">&quot;tags&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;vector&quot;</span><span class="p">,</span> <span class="s2">&quot;python&quot;</span><span class="p">],</span>
-</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>            <span class="s2">&quot;created_at&quot;</span><span class="p">:</span> <span class="s2">&quot;2026-06-05&quot;</span><span class="p">,</span>
-</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>        <span class="p">},</span>
-</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>    <span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">add</span><span class="p">(</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    <span class="n">ids</span><span class="o">=</span><span class="s2">&quot;doc-1001&quot;</span><span class="p">,</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="n">vectors</span><span class="o">=</span><span class="p">[</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">,</span> <span class="mf">0.3</span><span class="p">,</span> <span class="mf">0.4</span><span class="p">],</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    <span class="n">fields</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>        <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;vector database intro&quot;</span><span class="p">,</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>        <span class="s2">&quot;lang&quot;</span><span class="p">:</span> <span class="s2">&quot;en&quot;</span><span class="p">,</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>        <span class="s2">&quot;tenant&quot;</span><span class="p">:</span> <span class="s2">&quot;acme&quot;</span><span class="p">,</span>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>        <span class="s2">&quot;published&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>        <span class="s2">&quot;tags&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;vector&quot;</span><span class="p">,</span> <span class="s2">&quot;python&quot;</span><span class="p">],</span>
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>        <span class="s2">&quot;created_at&quot;</span><span class="p">:</span> <span class="s2">&quot;2026-06-05&quot;</span><span class="p">,</span>
+</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>    <span class="p">},</span>
+</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="ids">IDs<a class="headerlink" href="#ids" title="Permanent link">&para;</a></h2>
-<p>IDs are external IDs owned by your application. They are not auto-generated by
-<code>add_item()</code> or <code>bulk_add_items()</code>.</p>
+<p>IDs passed to <code>add()</code> are public external IDs owned by your application. LynseDB
+keeps those IDs stable and maps them to internal monotonic integer IDs allocated
+by the Rust backend.</p>
 <p>Good ID practice:</p>
 <ul>
-<li>use integers;</li>
+<li>use strings or non-negative integers;</li>
 <li>keep IDs unique within one collection;</li>
-<li>prefer incrementing IDs for predictable storage layout;</li>
-<li>store your source document ID or chunk ID in metadata when you need a string
-  business identifier.</li>
+<li>use strings for natural IDs such as <code>"doc-123#chunk-4"</code>;</li>
+<li>store source document IDs, chunk numbers, and display payloads in metadata
+  when they are useful for filtering or rendering;</li>
+<li>do not depend on internal IDs for application logic.</li>
 </ul>
-<p><code>bulk_add_binary()</code> is the exception: it assigns sequential IDs after the
-current maximum ID because it is optimized for dense arrays without per-row
-metadata.</p>
 <h2 id="metadata-fields">Metadata fields<a class="headerlink" href="#metadata-fields" title="Permanent link">&para;</a></h2>
 <p>Fields are JSON-like dictionaries:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">field</span> <span class="o">=</span> <span class="p">{</span>
@@ -1763,7 +1761,7 @@ metadata.</p>
 <ul>
 <li>result display;</li>
 <li>filters through <code>where=...</code>;</li>
-<li>BM25 text search;</li>
+<li>BM25 search;</li>
 <li>reranker payloads;</li>
 <li>application bookkeeping.</li>
 </ul>
@@ -1836,9 +1834,14 @@ quality or extra reranking work for lower memory or disk use.</p>
 </span></code></pre></div>
 <p>Use attributes for program logic and <code>to_list()</code> for row-shaped display.</p>
 <h2 id="commits-and-durability">Commits and durability<a class="headerlink" href="#commits-and-durability" title="Permanent link">&para;</a></h2>
-<p>Writes are buffered. In everyday code, prefer <code>insert_session()</code>:</p>
+<p><code>add()</code> is the simple write-through path. For grouped ingestion, prefer
+<code>insert_session()</code>:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">with</span> <span class="n">collection</span><span class="o">.</span><span class="n">insert_session</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>    <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">([</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">,</span> <span class="mf">0.3</span><span class="p">,</span> <span class="mf">0.4</span><span class="p">],</span> <span class="nb">id</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>    <span class="n">session</span><span class="o">.</span><span class="n">add</span><span class="p">(</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>        <span class="n">ids</span><span class="o">=</span><span class="s2">&quot;doc-1&quot;</span><span class="p">,</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>        <span class="n">vectors</span><span class="o">=</span><span class="p">[</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">,</span> <span class="mf">0.3</span><span class="p">,</span> <span class="mf">0.4</span><span class="p">],</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>        <span class="n">fields</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;first row&quot;</span><span class="p">},</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>    <span class="p">)</span>
 </span></code></pre></div>
 <p>The session commits when the block succeeds. If the block raises an exception,
 pending buffered writes from that session are discarded and the original

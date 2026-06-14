@@ -341,7 +341,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../deployment/cluster-example/" class="md-tabs__link">
+        <a href="../../deployment/cluster-deployment/" class="md-tabs__link">
           
   
   
@@ -1566,14 +1566,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../deployment/cluster-example/" class="md-nav__link">
+      <a href="../../deployment/cluster-deployment/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Cluster example
+    Cluster deployment
   
 
     
@@ -1673,7 +1673,7 @@ deletes, compaction, and monitoring.</p>
 </span></code></pre></div>
 <p>Use <code>commit()</code> after normal write batches:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">with</span> <span class="n">collection</span><span class="o">.</span><span class="n">insert_session</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">([</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">,</span> <span class="mf">0.3</span><span class="p">,</span> <span class="mf">0.4</span><span class="p">],</span> <span class="nb">id</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    <span class="n">session</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">ids</span><span class="o">=</span><span class="s2">&quot;ops-example&quot;</span><span class="p">,</span> <span class="n">vectors</span><span class="o">=</span><span class="p">[</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">,</span> <span class="mf">0.3</span><span class="p">,</span> <span class="mf">0.4</span><span class="p">])</span>
 </span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
 </span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="c1"># committed automatically by the session</span>
 </span></code></pre></div>
@@ -1760,18 +1760,18 @@ payloads.</p>
 usually easier to inspect and transform.</p>
 <h2 id="soft-delete-and-restore">Soft delete and restore<a class="headerlink" href="#soft-delete-and-restore" title="Permanent link">&para;</a></h2>
 <p>Deletes are logical tombstones:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">delete_items</span><span class="p">([</span><span class="mi">10</span><span class="p">,</span> <span class="mi">11</span><span class="p">])</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">delete</span><span class="p">([</span><span class="mi">10</span><span class="p">,</span> <span class="mi">11</span><span class="p">])</span>
 </span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">list_deleted_ids</span><span class="p">())</span>
 </span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>
-</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="n">collection</span><span class="o">.</span><span class="n">restore_items</span><span class="p">([</span><span class="mi">10</span><span class="p">])</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="n">collection</span><span class="o">.</span><span class="n">restore</span><span class="p">([</span><span class="mi">10</span><span class="p">])</span>
 </span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">list_deleted_ids</span><span class="p">())</span>
 </span></code></pre></div>
 <p>Soft-deleted IDs are excluded from search and query results.</p>
 <p>Deletion lifecycle:</p>
 <ol>
-<li><code>delete_items()</code> tombstones rows.</li>
+<li><code>delete()</code> tombstones rows.</li>
 <li>Search and query exclude tombstoned IDs.</li>
-<li><code>restore_items()</code> can bring tombstoned IDs back.</li>
+<li><code>restore()</code> can bring tombstoned IDs back.</li>
 <li><code>compact()</code> physically removes tombstoned rows.</li>
 </ol>
 <p>After compaction, removed rows cannot be restored from the collection itself.

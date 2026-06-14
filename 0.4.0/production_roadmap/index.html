@@ -341,7 +341,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../deployment/cluster-example/" class="md-tabs__link">
+        <a href="../deployment/cluster-deployment/" class="md-tabs__link">
           
   
   
@@ -1571,14 +1571,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../deployment/cluster-example/" class="md-nav__link">
+      <a href="../deployment/cluster-deployment/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Cluster example
+    Cluster deployment
   
 
     
@@ -1801,7 +1801,7 @@ undefined durability or ID semantics.</p>
 <li>[x] Add insert duplicate-ID validation.</li>
 <li>[x] Add tests for reopen after uncommitted vector-only and custom-ID batches.</li>
 <li>[x] Add tests documenting duplicate insert behavior.</li>
-<li>[x] Add explicit <code>upsert_items</code> after insert behavior is stable.</li>
+<li>[x] Add explicit <code>upsert</code> after insert behavior is stable.</li>
 <li>[x] Add reopen tests for upserted vectors, IDs, fields, and tombstones.</li>
 <li>[x] Extend crash/reopen coverage to persisted index files.</li>
 <li>[x] Ensure index metadata and index files are atomically swapped.</li>
@@ -1844,9 +1844,9 @@ undefined durability or ID semantics.</p>
 <h2 id="milestone-5-immediate-coding-queue">Milestone 5 Immediate Coding Queue<a class="headerlink" href="#milestone-5-immediate-coding-queue" title="Permanent link">&para;</a></h2>
 <ul>
 <li>[x] Add <code>/search_profile</code> with filter matches, estimated scanned vectors, index path, and timing data.</li>
-<li>[x] Add baseline BM25 metadata text search over current field rows.</li>
-<li>[x] Add hybrid vector/text search with RRF and weighted fusion.</li>
-<li>[x] Expose query profile, text search, and hybrid search through local and HTTP clients.</li>
+<li>[x] Add baseline BM25 metadata search over current field rows.</li>
+<li>[x] Add hybrid vector/BM25 search with RRF and weighted fusion.</li>
+<li>[x] Expose query profile, BM25 search, and hybrid search through local and HTTP clients.</li>
 <li>[x] Add named vector fields per record.</li>
 <li>[x] Allow each vector field to define its own dimension, metric, and index.</li>
 <li>[x] Add sparse vector storage and sparse inner-product search.</li>

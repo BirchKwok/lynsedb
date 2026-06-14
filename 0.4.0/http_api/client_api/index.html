@@ -16,7 +16,7 @@
         <link rel="prev" href="../serve_api/collection_ops/">
       
       
-        <link rel="next" href="../../deployment/cluster-example/">
+        <link rel="next" href="../../deployment/cluster-deployment/">
       
       
         
@@ -341,7 +341,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../deployment/cluster-example/" class="md-tabs__link">
+        <a href="../../deployment/cluster-deployment/" class="md-tabs__link">
           
   
   
@@ -1444,14 +1444,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../deployment/cluster-example/" class="md-nav__link">
+      <a href="../../deployment/cluster-deployment/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Cluster example
+    Cluster deployment
   
 
     
@@ -1617,16 +1617,16 @@ name:</p>
 <h2 id="http-collection">HTTP Collection<a class="headerlink" href="#http-collection" title="Permanent link">&para;</a></h2>
 <p>The remote <code>Collection</code> class mirrors the local collection API:</p>
 <ul>
-<li>writes: <code>add_item</code>, <code>bulk_add_items</code>, <code>bulk_add_binary</code>, <code>upsert_item</code>,
-  <code>upsert_items</code>, <code>commit</code>, <code>flush</code>, <code>checkpoint</code>, <code>close</code>;</li>
+<li>writes: <code>add</code>, <code>upsert</code>, <code>commit</code>, <code>flush</code>,
+  <code>checkpoint</code>, <code>close</code>;</li>
 <li>indexes: <code>build_index</code>, <code>remove_index</code>;</li>
 <li>named/sparse vectors: <code>create_vector_field</code>, <code>list_vector_fields</code>,
   <code>add_named_vectors</code>, <code>add_sparse_vectors</code>;</li>
 <li>search: <code>search</code>, <code>batch_search</code>, <code>search_range</code>, <code>search_profile</code>,
-  <code>search_sparse</code>, <code>text_search</code>, <code>hybrid_search</code>;</li>
+  <code>search_sparse</code>, <code>bm25_search</code>, <code>hybrid_search</code>;</li>
 <li>query/data access: <code>query</code>, <code>query_vectors</code>, <code>head</code>, <code>tail</code>, <code>read_by_only_id</code>,
   <code>list_fields</code>, <code>is_id_exists</code>, <code>max_id</code>, <code>shape</code>, <code>stats</code>, <code>index_mode</code>;</li>
-<li>maintenance: <code>delete_items</code>, <code>restore_items</code>, <code>list_deleted_ids</code>, <code>compact</code>,
+<li>maintenance: <code>delete</code>, <code>restore</code>, <code>list_deleted_ids</code>, <code>compact</code>,
   <code>snapshot_to</code>, <code>export_to</code>, <code>update_description</code>.</li>
 </ul>
 <p>The HTTP Python client uses the same explicit method signatures and parameter

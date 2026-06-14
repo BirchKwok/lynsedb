@@ -341,7 +341,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../deployment/cluster-example/" class="md-tabs__link">
+        <a href="../deployment/cluster-deployment/" class="md-tabs__link">
           
   
   
@@ -1486,14 +1486,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../deployment/cluster-example/" class="md-nav__link">
+      <a href="../deployment/cluster-deployment/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Cluster example
+    Cluster deployment
   
 
     
@@ -1760,24 +1760,12 @@ high-level API.</p>
 <td>Context manager that commits on success and discards pending buffered writes on exception.</td>
 </tr>
 <tr>
-<td><code>add_item(vector, id, *, field=None, buffer_size=True)</code></td>
-<td>Add one dense vector with optional metadata.</td>
+<td><code>add(ids, *, vectors=None, documents=None, fields=None, batch_size=1000, wire_dtype="float32")</code></td>
+<td>Add one or more records. Provide vectors directly, or provide documents without vectors to trigger lazy default embedding. IDs may be strings or non-negative integers.</td>
 </tr>
 <tr>
-<td><code>bulk_add_items(vectors, batch_size=1000, enable_progress_bar=True)</code></td>
-<td>Add <code>(vector, id)</code> or <code>(vector, id, field)</code> tuples.</td>
-</tr>
-<tr>
-<td><code>bulk_add_binary(vectors, batch_size=50000, enable_progress_bar=True)</code></td>
-<td>Add a dense <code>float32</code> array without metadata in the same call; IDs are assigned sequentially after <code>max_id</code>.</td>
-</tr>
-<tr>
-<td><code>upsert_item(vector, id, *, field=None)</code></td>
-<td>Insert or update one row.</td>
-</tr>
-<tr>
-<td><code>upsert_items(vectors, batch_size=1000, enable_progress_bar=True)</code></td>
-<td>Insert or update many rows.</td>
+<td><code>upsert(ids, *, vectors, fields=None, batch_size=1000, wire_dtype="float32")</code></td>
+<td>Insert or update one or more records by public ID.</td>
 </tr>
 <tr>
 <td><code>commit()</code></td>
@@ -1842,8 +1830,8 @@ high-level API.</p>
 </thead>
 <tbody>
 <tr>
-<td><code>search(vector, k=10, *, where=None, return_fields=False, vector_field="default", reranker=None, rerank_k=None, rerank_with_fields=False, nprobe=10, approx=False, eps=1e-4)</code></td>
-<td>Dense vector search.</td>
+<td><code>search(vector=None, k=10, *, document=None, where=None, return_fields=False, vector_field="default", reranker=None, rerank_k=None, rerank_with_fields=False, nprobe=10, approx=False, eps=1e-4, wire_dtype="float32")</code></td>
+<td>Dense vector search, or semantic document search when <code>document</code> is provided instead of <code>vector</code>.</td>
 </tr>
 <tr>
 <td><code>batch_search(vectors, k=10, *, where=None, return_fields=False, nprobe=10, reranker=None, rerank_k=None, rerank_with_fields=False)</code></td>
@@ -1862,7 +1850,7 @@ high-level API.</p>
 <td>Sparse inner-product search.</td>
 </tr>
 <tr>
-<td><code>text_search(text, k=10, *, text_fields=None, where=None, return_fields=False, reranker=None, rerank_k=None, rerank_with_fields=True)</code></td>
+<td><code>bm25_search(text, k=10, *, text_fields=None, where=None, return_fields=False, reranker=None, rerank_k=None, rerank_with_fields=True)</code></td>
 <td>BM25 search over metadata fields.</td>
 </tr>
 <tr>
@@ -1926,7 +1914,7 @@ high-level API.</p>
 </tr>
 <tr>
 <td><code>max_id</code></td>
-<td>Highest stored external ID.</td>
+<td>Highest internal numeric ID, mainly for diagnostics.</td>
 </tr>
 <tr>
 <td><code>shape</code></td>
@@ -1971,11 +1959,11 @@ high-level API.</p>
 </thead>
 <tbody>
 <tr>
-<td><code>delete_items(ids)</code></td>
+<td><code>delete(ids)</code></td>
 <td>Soft-delete IDs.</td>
 </tr>
 <tr>
-<td><code>restore_items(ids)</code></td>
+<td><code>restore(ids)</code></td>
 <td>Restore soft-deleted IDs.</td>
 </tr>
 <tr>

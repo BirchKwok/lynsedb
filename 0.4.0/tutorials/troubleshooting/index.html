@@ -341,7 +341,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../deployment/cluster-example/" class="md-tabs__link">
+        <a href="../../deployment/cluster-deployment/" class="md-tabs__link">
           
   
   
@@ -1873,14 +1873,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../deployment/cluster-example/" class="md-nav__link">
+      <a href="../../deployment/cluster-deployment/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Cluster example
+    Cluster deployment
   
 
     
@@ -2054,9 +2054,8 @@ scripts.</p>
 <p>For a different embedding model dimension, create a different collection or a
 named vector field with that dimension.</p>
 <h3 id="duplicate-id-error">Duplicate ID error<a class="headerlink" href="#duplicate-id-error" title="Permanent link">&para;</a></h3>
-<p><code>add_item()</code> and <code>bulk_add_items()</code> expect new IDs. Use upsert to replace or
-insert by ID:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">upsert_item</span><span class="p">(</span><span class="n">vector</span><span class="p">,</span> <span class="nb">id</span><span class="o">=</span><span class="mi">123</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;updated&quot;</span><span class="p">})</span>
+<p><code>add()</code> expects new public IDs. Use upsert to replace or insert by ID:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">upsert</span><span class="p">(</span><span class="n">ids</span><span class="o">=</span><span class="mi">123</span><span class="p">,</span> <span class="n">vectors</span><span class="o">=</span><span class="n">vector</span><span class="p">,</span> <span class="n">fields</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;updated&quot;</span><span class="p">})</span>
 </span><span id="__span-16-2"><a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a><span class="n">collection</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
 </span></code></pre></div>
 <p>Check existing IDs:</p>
@@ -2066,11 +2065,10 @@ insert by ID:</p>
 <h3 id="writes-are-not-visible-as-expected">Writes are not visible as expected<a class="headerlink" href="#writes-are-not-visible-as-expected" title="Permanent link">&para;</a></h3>
 <p>Use <code>insert_session()</code> or call <code>commit()</code>:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-18-1"><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="k">with</span> <span class="n">collection</span><span class="o">.</span><span class="n">insert_session</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-18-2"><a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>    <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="p">,</span> <span class="nb">id</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+</span><span id="__span-18-2"><a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>    <span class="n">session</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">ids</span><span class="o">=</span><span class="s2">&quot;doc-1&quot;</span><span class="p">,</span> <span class="n">vectors</span><span class="o">=</span><span class="n">vector</span><span class="p">)</span>
 </span><span id="__span-18-3"><a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>
 </span><span id="__span-18-4"><a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="c1"># or</span>
-</span><span id="__span-18-5"><a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a><span class="n">collection</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="p">,</span> <span class="nb">id</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">buffer_size</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
-</span><span id="__span-18-6"><a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a><span class="n">collection</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
+</span><span id="__span-18-5"><a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a><span class="n">collection</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">ids</span><span class="o">=</span><span class="s2">&quot;doc-2&quot;</span><span class="p">,</span> <span class="n">vectors</span><span class="o">=</span><span class="n">vector</span><span class="p">)</span>
 </span></code></pre></div>
 <p>For backup or shutdown, call:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-19-1"><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">checkpoint</span><span class="p">()</span>
@@ -2164,7 +2162,7 @@ higher-is-better scores.</p>
 <h2 id="http-server-limits">HTTP server limits<a class="headerlink" href="#http-server-limits" title="Permanent link">&para;</a></h2>
 <h3 id="request-rejected-because-it-is-too-large">Request rejected because it is too large<a class="headerlink" href="#request-rejected-because-it-is-too-large" title="Permanent link">&para;</a></h3>
 <p>Lower your client batch size:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-32-1"><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">bulk_add_items</span><span class="p">(</span><span class="n">items</span><span class="p">,</span> <span class="n">batch_size</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span> <span class="n">enable_progress_bar</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-32-1"><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">ids</span><span class="o">=</span><span class="n">ids</span><span class="p">,</span> <span class="n">vectors</span><span class="o">=</span><span class="n">vectors</span><span class="p">,</span> <span class="n">fields</span><span class="o">=</span><span class="n">fields</span><span class="p">,</span> <span class="n">batch_size</span><span class="o">=</span><span class="mi">1000</span><span class="p">)</span>
 </span></code></pre></div>
 <p>Or increase server limits:</p>
 <div class="language-shell highlight"><pre><span></span><code><span id="__span-33-1"><a id="__codelineno-33-1" name="__codelineno-33-1" href="#__codelineno-33-1"></a>lynse<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
@@ -2185,7 +2183,7 @@ higher-is-better scores.</p>
 <h2 id="deletes-and-compaction">Deletes and compaction<a class="headerlink" href="#deletes-and-compaction" title="Permanent link">&para;</a></h2>
 <h3 id="deleted-rows-still-take-disk-space">Deleted rows still take disk space<a class="headerlink" href="#deleted-rows-still-take-disk-space" title="Permanent link">&para;</a></h3>
 <p>Deletes are soft deletes:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-34-1"><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">delete_items</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">])</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-34-1"><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">delete</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">])</span>
 </span><span id="__span-34-2"><a id="__codelineno-34-2" name="__codelineno-34-2" href="#__codelineno-34-2"></a><span class="n">collection</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
 </span></code></pre></div>
 <p>Physically remove tombstoned rows during maintenance:</p>
@@ -2195,7 +2193,7 @@ higher-is-better scores.</p>
 <p>After compaction, rows cannot be restored from the collection itself.</p>
 <h3 id="deleted-row-appears-again">Deleted row appears again<a class="headerlink" href="#deleted-row-appears-again" title="Permanent link">&para;</a></h3>
 <p>It may have been restored:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-36-1"><a id="__codelineno-36-1" name="__codelineno-36-1" href="#__codelineno-36-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">restore_items</span><span class="p">([</span><span class="mi">1</span><span class="p">])</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-36-1"><a id="__codelineno-36-1" name="__codelineno-36-1" href="#__codelineno-36-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">restore</span><span class="p">([</span><span class="mi">1</span><span class="p">])</span>
 </span></code></pre></div>
 <p>Inspect tombstones:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-37-1"><a id="__codelineno-37-1" name="__codelineno-37-1" href="#__codelineno-37-1"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">list_deleted_ids</span><span class="p">())</span>

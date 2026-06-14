@@ -78,7 +78,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#tutorial-add-vectors" class="md-skip">
+        <a href="#tutorial-add-vectors-and-documents" class="md-skip">
           Skip to content
         </a>
       
@@ -341,7 +341,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../deployment/cluster-example/" class="md-tabs__link">
+        <a href="../../deployment/cluster-deployment/" class="md-tabs__link">
           
   
   
@@ -706,10 +706,21 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#ids-and-vectors" class="md-nav__link">
+  <a href="#ids-and-internal-ids" class="md-nav__link">
     <span class="md-ellipsis">
       
-        IDs and vectors
+        IDs and Internal IDs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#vector-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Vector Types
       
     </span>
   </a>
@@ -720,7 +731,7 @@
   <a href="#metadata-field-design" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Metadata field design
+        Metadata Field Design
       
     </span>
   </a>
@@ -728,10 +739,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#add-one-item" class="md-nav__link">
+  <a href="#add-one-row" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Add one item
+        Add One Row
       
     </span>
   </a>
@@ -739,10 +750,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#add-many-items" class="md-nav__link">
+  <a href="#add-many-rows" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Add many items
+        Add Many Rows
       
     </span>
   </a>
@@ -750,10 +761,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#buffer-control" class="md-nav__link">
+  <a href="#add-documents-with-automatic-embedding" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Buffer control
+        Add Documents With Automatic Embedding
       
     </span>
   </a>
@@ -761,10 +772,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#high-throughput-dense-ingestion" class="md-nav__link">
+  <a href="#streaming-or-high-throughput-ingestion" class="md-nav__link">
     <span class="md-ellipsis">
       
-        High-throughput dense ingestion
+        Streaming or High-Throughput Ingestion
       
     </span>
   </a>
@@ -772,10 +783,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#add-metadata-later" class="md-nav__link">
+  <a href="#update-existing-rows" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Add metadata later
+        Update Existing Rows
       
     </span>
   </a>
@@ -786,7 +797,7 @@
   <a href="#commit-and-durability" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Commit and durability
+        Commit and Durability
       
     </span>
   </a>
@@ -797,7 +808,7 @@
   <a href="#common-ingestion-checks" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Common ingestion checks
+        Common Ingestion Checks
       
     </span>
   </a>
@@ -808,7 +819,7 @@
   <a href="#common-ingestion-errors" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Common ingestion errors
+        Common Ingestion Errors
       
     </span>
   </a>
@@ -819,7 +830,7 @@
   <a href="#ingestion-recipe-for-production" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Ingestion recipe for production
+        Ingestion Recipe for Production
       
     </span>
   </a>
@@ -1527,14 +1538,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../deployment/cluster-example/" class="md-nav__link">
+      <a href="../../deployment/cluster-deployment/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Cluster example
+    Cluster deployment
   
 
     
@@ -1623,9 +1634,10 @@
   
 
 
-<h1 id="tutorial-add-vectors">Tutorial: Add Vectors<a class="headerlink" href="#tutorial-add-vectors" title="Permanent link">&para;</a></h1>
-<p>This tutorial covers write patterns, commit behavior, IDs, metadata fields, and
-high-throughput ingestion.</p>
+<h1 id="tutorial-add-vectors-and-documents">Tutorial: Add Vectors and Documents<a class="headerlink" href="#tutorial-add-vectors-and-documents" title="Permanent link">&para;</a></h1>
+<p>This tutorial covers the current write path in LynseDB: one public <code>add()</code>
+entry point for dense vectors, documents that should be embedded automatically,
+IDs, metadata fields, batching, and durability.</p>
 <h2 id="setup">Setup<a class="headerlink" href="#setup" title="Permanent link">&para;</a></h2>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">lynse</span>
@@ -1634,28 +1646,39 @@ high-throughput ingestion.</p>
 </span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="n">db</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">create_database</span><span class="p">(</span><span class="s2">&quot;ingest_demo&quot;</span><span class="p">,</span> <span class="n">drop_if_exists</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
 </span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="n">collection</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">require_collection</span><span class="p">(</span><span class="s2">&quot;items&quot;</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span> <span class="n">drop_if_exists</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
 </span></code></pre></div>
-<h2 id="ids-and-vectors">IDs and vectors<a class="headerlink" href="#ids-and-vectors" title="Permanent link">&para;</a></h2>
-<p>LynseDB uses your integer IDs as stable external IDs. IDs should be unique inside
-one collection. Incrementing IDs are recommended because they keep storage
-layout predictable and make debugging easier.</p>
+<h2 id="ids-and-internal-ids">IDs and Internal IDs<a class="headerlink" href="#ids-and-internal-ids" title="Permanent link">&para;</a></h2>
+<p><code>add()</code> requires a public ID for every row. Public IDs can be non-negative
+integers or non-empty strings:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">ids</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;manual-001#0&quot;</span><span class="p">,</span> <span class="s2">&quot;manual-001#1&quot;</span><span class="p">,</span> <span class="mi">42</span><span class="p">]</span>
+</span></code></pre></div>
+<p>LynseDB stores these as external IDs. The Rust backend assigns a separate
+monotonic internal integer ID for storage and clustering. This keeps the storage
+layout simple while letting applications use natural IDs such as document
+chunks, UUIDs, or existing numeric keys.</p>
+<p>Good ID practice:</p>
+<ul>
+<li>keep public IDs unique inside one collection;</li>
+<li>use stable IDs from your source system when possible;</li>
+<li>use strings for composite IDs such as <code>"doc-123#chunk-4"</code>;</li>
+<li>do not depend on internal IDs for application logic.</li>
+</ul>
+<h2 id="vector-types">Vector Types<a class="headerlink" href="#vector-types" title="Permanent link">&para;</a></h2>
 <p>Dense vectors are stored as <code>float32</code> by default. Use <code>dtypes="float16"</code> when
 you want half-precision vector storage:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">collection</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">require_collection</span><span class="p">(</span><span class="s2">&quot;items_f16&quot;</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span> <span class="n">dtypes</span><span class="o">=</span><span class="s2">&quot;float16&quot;</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">collection</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">require_collection</span><span class="p">(</span><span class="s2">&quot;items_f16&quot;</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span> <span class="n">dtypes</span><span class="o">=</span><span class="s2">&quot;float16&quot;</span><span class="p">)</span>
 </span></code></pre></div>
 <p>Convert arrays before insertion when you control the embedding pipeline:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">vector</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">vector</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
 </span></code></pre></div>
 <p>If your embedding model returns Python lists, <code>float64</code>, or <code>float16</code> arrays,
 LynseDB accepts them through the Python API and computes distances in <code>float32</code>.
 For <code>float16</code> collections, stored vectors are quantized to half precision on
-write:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">embedding</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">embedding</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
-</span></code></pre></div>
+write.</p>
 <p>Check dimensions at the boundary of your embedding pipeline:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">if</span> <span class="n">embedding</span><span class="o">.</span><span class="n">shape</span> <span class="o">!=</span> <span class="p">(</span><span class="mi">128</span><span class="p">,):</span>
-</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;expected a 128-dimensional vector, got </span><span class="si">{</span><span class="n">embedding</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">if</span> <span class="n">vector</span><span class="o">.</span><span class="n">shape</span> <span class="o">!=</span> <span class="p">(</span><span class="mi">128</span><span class="p">,):</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;expected a 128-dimensional vector, got </span><span class="si">{</span><span class="n">vector</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 </span></code></pre></div>
-<h2 id="metadata-field-design">Metadata field design<a class="headerlink" href="#metadata-field-design" title="Permanent link">&para;</a></h2>
+<h2 id="metadata-field-design">Metadata Field Design<a class="headerlink" href="#metadata-field-design" title="Permanent link">&para;</a></h2>
 <p>Fields are optional, but they are usually what make retrieval useful:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">field</span> <span class="o">=</span> <span class="p">{</span>
 </span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="s2">&quot;doc_id&quot;</span><span class="p">:</span> <span class="s2">&quot;manual-001&quot;</span><span class="p">,</span>
@@ -1674,130 +1697,124 @@ write:</p>
 <li>keep field value types stable across rows;</li>
 <li>store dates as ISO-8601 strings;</li>
 <li>keep very large raw documents outside LynseDB when you only need short chunks;</li>
-<li>use arrays for tags and <code>CONTAINS</code> filters;</li>
-<li>use a string source ID in metadata if your application ID is not an integer.</li>
+<li>use arrays for tags and <code>CONTAINS</code> filters.</li>
 </ul>
-<h2 id="add-one-item">Add one item<a class="headerlink" href="#add-one-item" title="Permanent link">&para;</a></h2>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">with</span> <span class="n">collection</span><span class="o">.</span><span class="n">insert_session</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>    <span class="n">inserted_id</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span>
-</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>        <span class="n">vector</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
-</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>        <span class="nb">id</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
-</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>        <span class="n">field</span><span class="o">=</span><span class="p">{</span>
-</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>            <span class="s2">&quot;category&quot;</span><span class="p">:</span> <span class="s2">&quot;docs&quot;</span><span class="p">,</span>
-</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>            <span class="s2">&quot;score&quot;</span><span class="p">:</span> <span class="mf">0.91</span><span class="p">,</span>
-</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>            <span class="s2">&quot;published&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
-</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>            <span class="s2">&quot;tags&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;vector&quot;</span><span class="p">,</span> <span class="s2">&quot;python&quot;</span><span class="p">],</span>
-</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>            <span class="s2">&quot;created_at&quot;</span><span class="p">:</span> <span class="s2">&quot;2026-06-02&quot;</span><span class="p">,</span>
-</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>        <span class="p">},</span>
-</span><span id="__span-6-12"><a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>    <span class="p">)</span>
-</span><span id="__span-6-13"><a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a>
-</span><span id="__span-6-14"><a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a><span class="nb">print</span><span class="p">(</span><span class="n">inserted_id</span><span class="p">)</span>
+<h2 id="add-one-row">Add One Row<a class="headerlink" href="#add-one-row" title="Permanent link">&para;</a></h2>
+<p>Use <code>add()</code> for both single-row and multi-row insertion:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">inserted</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">add</span><span class="p">(</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>    <span class="n">ids</span><span class="o">=</span><span class="s2">&quot;manual-001#3&quot;</span><span class="p">,</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>    <span class="n">vectors</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>    <span class="n">fields</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>        <span class="s2">&quot;category&quot;</span><span class="p">:</span> <span class="s2">&quot;docs&quot;</span><span class="p">,</span>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>        <span class="s2">&quot;score&quot;</span><span class="p">:</span> <span class="mf">0.91</span><span class="p">,</span>
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>        <span class="s2">&quot;published&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>        <span class="s2">&quot;tags&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;vector&quot;</span><span class="p">,</span> <span class="s2">&quot;python&quot;</span><span class="p">],</span>
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>        <span class="s2">&quot;created_at&quot;</span><span class="p">:</span> <span class="s2">&quot;2026-06-02&quot;</span><span class="p">,</span>
+</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>    <span class="p">},</span>
+</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a><span class="p">)</span>
+</span><span id="__span-6-12"><a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>
+</span><span id="__span-6-13"><a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a><span class="nb">print</span><span class="p">(</span><span class="n">inserted</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Single inputs are normalized to one-row batches. The write is flushed for the
+batch before <code>add()</code> returns.</p>
+<h2 id="add-many-rows">Add Many Rows<a class="headerlink" href="#add-many-rows" title="Permanent link">&para;</a></h2>
+<p>Pass lists or NumPy arrays when inserting many vectors:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="n">ids</span> <span class="o">=</span> <span class="p">[</span><span class="sa">f</span><span class="s2">&quot;item-</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1000</span><span class="p">)]</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">vectors</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="mi">1000</span><span class="p">,</span> <span class="mi">128</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">fields</span> <span class="o">=</span> <span class="p">[</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>    <span class="p">{</span><span class="s2">&quot;category&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;cat_</span><span class="si">{</span><span class="n">i</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">3</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;score&quot;</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">i</span><span class="p">)</span> <span class="o">/</span> <span class="mf">100.0</span><span class="p">}</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1000</span><span class="p">)</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="p">]</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="n">inserted</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">add</span><span class="p">(</span>
+</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>    <span class="n">ids</span><span class="o">=</span><span class="n">ids</span><span class="p">,</span>
+</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>    <span class="n">vectors</span><span class="o">=</span><span class="n">vectors</span><span class="p">,</span>
+</span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a>    <span class="n">fields</span><span class="o">=</span><span class="n">fields</span><span class="p">,</span>
+</span><span id="__span-7-12"><a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>    <span class="n">batch_size</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span>
+</span><span id="__span-7-13"><a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="p">)</span>
+</span><span id="__span-7-14"><a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a>
+</span><span id="__span-7-15"><a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="nb">print</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">inserted</span><span class="p">))</span>
+</span></code></pre></div>
+<p><code>batch_size</code> controls how the client splits large calls. Use a batch size that
+fits memory comfortably and keeps request payloads reasonable in HTTP mode.</p>
+<h2 id="add-documents-with-automatic-embedding">Add Documents With Automatic Embedding<a class="headerlink" href="#add-documents-with-automatic-embedding" title="Permanent link">&para;</a></h2>
+<p>When you pass <code>documents</code> without <code>vectors</code>, LynseDB embeds the text for you:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">add</span><span class="p">(</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>    <span class="n">ids</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;doc-pineapple&quot;</span><span class="p">,</span> <span class="s2">&quot;doc-orange&quot;</span><span class="p">],</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>    <span class="n">documents</span><span class="o">=</span><span class="p">[</span>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>        <span class="s2">&quot;This is a document about pineapple recipes.&quot;</span><span class="p">,</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>        <span class="s2">&quot;This is a document about oranges and citrus fruit.&quot;</span><span class="p">,</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>    <span class="p">],</span>
+</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>    <span class="n">fields</span><span class="o">=</span><span class="p">[</span>
+</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>        <span class="p">{</span><span class="s2">&quot;category&quot;</span><span class="p">:</span> <span class="s2">&quot;food&quot;</span><span class="p">,</span> <span class="s2">&quot;lang&quot;</span><span class="p">:</span> <span class="s2">&quot;en&quot;</span><span class="p">},</span>
+</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>        <span class="p">{</span><span class="s2">&quot;category&quot;</span><span class="p">:</span> <span class="s2">&quot;food&quot;</span><span class="p">,</span> <span class="s2">&quot;lang&quot;</span><span class="p">:</span> <span class="s2">&quot;en&quot;</span><span class="p">},</span>
+</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>    <span class="p">],</span>
+</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>The lightweight embedding dependency is installed lazily only when this path is
+used, or when you call vector search with a document query. The raw text is also
+stored in the row field as <code>document</code> so it can be returned, filtered, or used
+for BM25 search.</p>
+<p>Search with text directly:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">search</span><span class="p">(</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>    <span class="n">document</span><span class="o">=</span><span class="s2">&quot;pineapple recipes&quot;</span><span class="p">,</span>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>    <span class="n">k</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>    <span class="n">return_fields</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="p">)</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">ids</span><span class="p">)</span>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">fields</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Use <code>bm25_search()</code> when you explicitly want lexical BM25 retrieval instead of
+embedding search:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">lexical</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">bm25_search</span><span class="p">(</span><span class="s2">&quot;pineapple recipes&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">return_fields</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span></code></pre></div>
+<h2 id="streaming-or-high-throughput-ingestion">Streaming or High-Throughput Ingestion<a class="headerlink" href="#streaming-or-high-throughput-ingestion" title="Permanent link">&para;</a></h2>
+<p>For larger pipelines, group writes with <code>insert_session()</code> and call <code>add()</code> per
+batch:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="n">batch_ids</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="n">batch_vectors</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="n">batch_fields</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="k">with</span> <span class="n">collection</span><span class="o">.</span><span class="n">insert_session</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>    <span class="k">for</span> <span class="n">source_id</span><span class="p">,</span> <span class="n">embedding</span><span class="p">,</span> <span class="n">metadata</span> <span class="ow">in</span> <span class="n">embedding_stream</span><span class="p">:</span>
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>        <span class="n">batch_ids</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">source_id</span><span class="p">)</span>
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>        <span class="n">batch_vectors</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">embedding</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">))</span>
+</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>        <span class="n">batch_fields</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">metadata</span><span class="p">)</span>
+</span><span id="__span-11-10"><a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>
+</span><span id="__span-11-11"><a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a>        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">batch_ids</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1000</span><span class="p">:</span>
+</span><span id="__span-11-12"><a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a>            <span class="n">session</span><span class="o">.</span><span class="n">add</span><span class="p">(</span>
+</span><span id="__span-11-13"><a id="__codelineno-11-13" name="__codelineno-11-13" href="#__codelineno-11-13"></a>                <span class="n">ids</span><span class="o">=</span><span class="n">batch_ids</span><span class="p">,</span>
+</span><span id="__span-11-14"><a id="__codelineno-11-14" name="__codelineno-11-14" href="#__codelineno-11-14"></a>                <span class="n">vectors</span><span class="o">=</span><span class="n">batch_vectors</span><span class="p">,</span>
+</span><span id="__span-11-15"><a id="__codelineno-11-15" name="__codelineno-11-15" href="#__codelineno-11-15"></a>                <span class="n">fields</span><span class="o">=</span><span class="n">batch_fields</span><span class="p">,</span>
+</span><span id="__span-11-16"><a id="__codelineno-11-16" name="__codelineno-11-16" href="#__codelineno-11-16"></a>                <span class="n">batch_size</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span>
+</span><span id="__span-11-17"><a id="__codelineno-11-17" name="__codelineno-11-17" href="#__codelineno-11-17"></a>            <span class="p">)</span>
+</span><span id="__span-11-18"><a id="__codelineno-11-18" name="__codelineno-11-18" href="#__codelineno-11-18"></a>            <span class="n">batch_ids</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+</span><span id="__span-11-19"><a id="__codelineno-11-19" name="__codelineno-11-19" href="#__codelineno-11-19"></a>            <span class="n">batch_vectors</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+</span><span id="__span-11-20"><a id="__codelineno-11-20" name="__codelineno-11-20" href="#__codelineno-11-20"></a>            <span class="n">batch_fields</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+</span><span id="__span-11-21"><a id="__codelineno-11-21" name="__codelineno-11-21" href="#__codelineno-11-21"></a>
+</span><span id="__span-11-22"><a id="__codelineno-11-22" name="__codelineno-11-22" href="#__codelineno-11-22"></a>    <span class="k">if</span> <span class="n">batch_ids</span><span class="p">:</span>
+</span><span id="__span-11-23"><a id="__codelineno-11-23" name="__codelineno-11-23" href="#__codelineno-11-23"></a>        <span class="n">session</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">ids</span><span class="o">=</span><span class="n">batch_ids</span><span class="p">,</span> <span class="n">vectors</span><span class="o">=</span><span class="n">batch_vectors</span><span class="p">,</span> <span class="n">fields</span><span class="o">=</span><span class="n">batch_fields</span><span class="p">)</span>
 </span></code></pre></div>
 <p><code>insert_session()</code> commits when the block succeeds. If an exception is raised,
-pending buffered writes in that session are discarded.</p>
-<h2 id="add-many-items">Add many items<a class="headerlink" href="#add-many-items" title="Permanent link">&para;</a></h2>
-<p>Use <code>bulk_add_items()</code> when each row has metadata:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="n">items</span> <span class="o">=</span> <span class="p">[</span>
-</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>    <span class="p">(</span>
-</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>        <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
-</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>        <span class="n">i</span><span class="p">,</span>
-</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>        <span class="p">{</span><span class="s2">&quot;category&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;cat_</span><span class="si">{</span><span class="n">i</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">3</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;score&quot;</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">i</span><span class="p">)</span> <span class="o">/</span> <span class="mf">100.0</span><span class="p">},</span>
-</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>    <span class="p">)</span>
-</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">1002</span><span class="p">)</span>
-</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="p">]</span>
-</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>
-</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="k">with</span> <span class="n">collection</span><span class="o">.</span><span class="n">insert_session</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a>    <span class="n">ids</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">bulk_add_items</span><span class="p">(</span>
-</span><span id="__span-7-12"><a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>        <span class="n">items</span><span class="p">,</span>
-</span><span id="__span-7-13"><a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a>        <span class="n">batch_size</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span>
-</span><span id="__span-7-14"><a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a>        <span class="n">enable_progress_bar</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-7-15"><a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a>    <span class="p">)</span>
-</span><span id="__span-7-16"><a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a>
-</span><span id="__span-7-17"><a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a><span class="nb">print</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">ids</span><span class="p">))</span>
-</span></code></pre></div>
-<p>Tuple shape can be <code>(vector, id, field)</code> or <code>(vector, id)</code>.</p>
-<p>For generators or streams, accumulate manageable batches before calling
-<code>bulk_add_items()</code>:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="n">batch</span> <span class="o">=</span> <span class="p">[]</span>
-</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">next_id</span> <span class="o">=</span> <span class="mi">10_000</span>
-</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>
-</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="k">for</span> <span class="n">embedding</span><span class="p">,</span> <span class="n">metadata</span> <span class="ow">in</span> <span class="n">embedding_stream</span><span class="p">:</span>
-</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>    <span class="n">batch</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">embedding</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span> <span class="n">next_id</span><span class="p">,</span> <span class="n">metadata</span><span class="p">))</span>
-</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>    <span class="n">next_id</span> <span class="o">+=</span> <span class="mi">1</span>
-</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>
-</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">batch</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1000</span><span class="p">:</span>
-</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>        <span class="k">with</span> <span class="n">collection</span><span class="o">.</span><span class="n">insert_session</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>            <span class="n">session</span><span class="o">.</span><span class="n">bulk_add_items</span><span class="p">(</span><span class="n">batch</span><span class="p">,</span> <span class="n">enable_progress_bar</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
-</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>        <span class="n">batch</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
-</span><span id="__span-8-12"><a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a>
-</span><span id="__span-8-13"><a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a><span class="k">if</span> <span class="n">batch</span><span class="p">:</span>
-</span><span id="__span-8-14"><a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a>    <span class="k">with</span> <span class="n">collection</span><span class="o">.</span><span class="n">insert_session</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-8-15"><a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a>        <span class="n">session</span><span class="o">.</span><span class="n">bulk_add_items</span><span class="p">(</span><span class="n">batch</span><span class="p">,</span> <span class="n">enable_progress_bar</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
-</span></code></pre></div>
-<h2 id="buffer-control">Buffer control<a class="headerlink" href="#buffer-control" title="Permanent link">&para;</a></h2>
-<p><code>add_item()</code> is buffered by default. You can tune or disable buffering:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="k">with</span> <span class="n">collection</span><span class="o">.</span><span class="n">insert_session</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>    <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="mi">128</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span> <span class="nb">id</span><span class="o">=</span><span class="mi">2001</span><span class="p">,</span> <span class="n">buffer_size</span><span class="o">=</span><span class="mi">5000</span><span class="p">)</span>
-</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>    <span class="n">session</span><span class="o">.</span><span class="n">add_item</span><span class="p">(</span><span class="n">vector</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">128</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span> <span class="nb">id</span><span class="o">=</span><span class="mi">2002</span><span class="p">,</span> <span class="n">buffer_size</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
-</span></code></pre></div>
-<ul>
-<li><code>buffer_size=True</code> uses the client default batch size.</li>
-<li><code>buffer_size=False</code> writes the item immediately.</li>
-<li><code>buffer_size=&lt;int&gt;</code> flushes whenever the buffer reaches that size.</li>
-</ul>
-<p>Prefer the default buffering for normal ingestion. Disable buffering only when
-you need the item to be sent to storage immediately.</p>
-<h2 id="high-throughput-dense-ingestion">High-throughput dense ingestion<a class="headerlink" href="#high-throughput-dense-ingestion" title="Permanent link">&para;</a></h2>
-<p>Use <code>bulk_add_binary()</code> for large arrays when you do not need per-row metadata in
-the same call. IDs are assigned automatically after the current max ID.</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">vectors</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="mi">100_000</span><span class="p">,</span> <span class="mi">128</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
-</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
-</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="n">added</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">bulk_add_binary</span><span class="p">(</span>
-</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>    <span class="n">vectors</span><span class="p">,</span>
-</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>    <span class="n">batch_size</span><span class="o">=</span><span class="mi">50_000</span><span class="p">,</span>
-</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>    <span class="n">enable_progress_bar</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="p">)</span>
-</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="n">collection</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
-</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>
-</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="nb">print</span><span class="p">(</span><span class="n">added</span><span class="p">)</span>
-</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span>
-</span></code></pre></div>
-<p><code>bulk_add_binary()</code> does not take fields in the same call. It assigns sequential
-integer IDs starting after the current <code>max_id</code>. Use it for benchmarks, dense
-feature caches, or pipelines where metadata is stored elsewhere.</p>
-<p>If you need exact IDs and fields, use <code>bulk_add_items()</code> instead.</p>
-<h2 id="add-metadata-later">Add metadata later<a class="headerlink" href="#add-metadata-later" title="Permanent link">&para;</a></h2>
-<p>If you inserted vectors first and want to replace or add metadata later, use
-upsert methods:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">upsert_items</span><span class="p">(</span>
-</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>    <span class="p">[</span>
-</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>        <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span> <span class="mi">3001</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;category&quot;</span><span class="p">:</span> <span class="s2">&quot;updated&quot;</span><span class="p">}),</span>
-</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>        <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span> <span class="mi">3002</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;category&quot;</span><span class="p">:</span> <span class="s2">&quot;updated&quot;</span><span class="p">}),</span>
-</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>    <span class="p">],</span>
-</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>    <span class="n">enable_progress_bar</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="p">)</span>
-</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="n">collection</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
-</span></code></pre></div>
-<p>Two-tuples <code>(vector, id)</code> update only vectors and preserve existing fields.
-Three-tuples <code>(vector, id, field)</code> replace the row fields.</p>
-<p>Use <code>upsert_item()</code> for one row:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">upsert_item</span><span class="p">(</span>
-</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>    <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
-</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>    <span class="nb">id</span><span class="o">=</span><span class="mi">3001</span><span class="p">,</span>
-</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>    <span class="n">field</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;category&quot;</span><span class="p">:</span> <span class="s2">&quot;single-update&quot;</span><span class="p">},</span>
+pending writes from that session are discarded.</p>
+<h2 id="update-existing-rows">Update Existing Rows<a class="headerlink" href="#update-existing-rows" title="Permanent link">&para;</a></h2>
+<p>Use upsert methods only when you intentionally want to replace existing rows:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">upsert</span><span class="p">(</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>    <span class="n">ids</span><span class="o">=</span><span class="s2">&quot;manual-001#3&quot;</span><span class="p">,</span>
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>    <span class="n">vectors</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="mi">128</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>    <span class="n">fields</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;category&quot;</span><span class="p">:</span> <span class="s2">&quot;updated&quot;</span><span class="p">},</span>
 </span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="p">)</span>
 </span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="n">collection</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
 </span></code></pre></div>
-<p>Inside one <code>upsert_items()</code> batch, duplicate IDs are rejected so one batch has a
-clear final state.</p>
-<h2 id="commit-and-durability">Commit and durability<a class="headerlink" href="#commit-and-durability" title="Permanent link">&para;</a></h2>
+<p><code>add()</code> rejects duplicate public IDs so accidental repeated ingestion is visible
+early. <code>upsert()</code> is the explicit replacement path.</p>
+<h2 id="commit-and-durability">Commit and Durability<a class="headerlink" href="#commit-and-durability" title="Permanent link">&para;</a></h2>
 <p>Use these calls explicitly in services:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>       <span class="c1"># flush client and storage buffers</span>
 </span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="n">collection</span><span class="o">.</span><span class="n">checkpoint</span><span class="p">()</span>  <span class="c1"># force a durable checkpoint</span>
 </span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="n">collection</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>       <span class="c1"># flush and close this handle</span>
 </span></code></pre></div>
-<p><code>commit()</code> is enough for normal write batches. <code>checkpoint()</code> is useful before
-backups or controlled shutdowns.</p>
 <p>The practical rule:</p>
 <table>
 <thead>
@@ -1808,8 +1825,12 @@ backups or controlled shutdowns.</p>
 </thead>
 <tbody>
 <tr>
+<td><code>add()</code></td>
+<td>You want a simple write-through batch.</td>
+</tr>
+<tr>
 <td><code>insert_session()</code></td>
-<td>You want automatic commit on success and discard on exception.</td>
+<td>You want grouped ingestion with automatic commit on success.</td>
 </tr>
 <tr>
 <td><code>commit()</code></td>
@@ -1829,14 +1850,14 @@ backups or controlled shutdowns.</p>
 </tr>
 </tbody>
 </table>
-<h2 id="common-ingestion-checks">Common ingestion checks<a class="headerlink" href="#common-ingestion-checks" title="Permanent link">&para;</a></h2>
+<h2 id="common-ingestion-checks">Common Ingestion Checks<a class="headerlink" href="#common-ingestion-checks" title="Permanent link">&para;</a></h2>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span>       <span class="c1"># (n_vectors, dim)</span>
-</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">max_id</span><span class="p">)</span>      <span class="c1"># highest external ID</span>
-</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">is_id_exists</span><span class="p">(</span><span class="mi">1</span><span class="p">))</span>
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">max_id</span><span class="p">)</span>      <span class="c1"># highest internal numeric ID, mostly diagnostic</span>
+</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">is_id_exists</span><span class="p">(</span><span class="s2">&quot;manual-001#3&quot;</span><span class="p">))</span>
 </span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">stats</span><span class="p">())</span>
 </span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">list_fields</span><span class="p">())</span>
 </span></code></pre></div>
-<h2 id="common-ingestion-errors">Common ingestion errors<a class="headerlink" href="#common-ingestion-errors" title="Permanent link">&para;</a></h2>
+<h2 id="common-ingestion-errors">Common Ingestion Errors<a class="headerlink" href="#common-ingestion-errors" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
 <tr>
@@ -1853,8 +1874,8 @@ backups or controlled shutdowns.</p>
 </tr>
 <tr>
 <td>duplicate ID error</td>
-<td>The ID already exists and you used <code>add_item()</code> or <code>bulk_add_items()</code>.</td>
-<td>Use a new ID or use <code>upsert_item()</code> / <code>upsert_items()</code>.</td>
+<td>The public ID already exists and you used <code>add()</code>.</td>
+<td>Use a new ID or use <code>upsert()</code>.</td>
 </tr>
 <tr>
 <td>missing metadata in results</td>
@@ -1873,16 +1894,16 @@ backups or controlled shutdowns.</p>
 </tr>
 </tbody>
 </table>
-<h2 id="ingestion-recipe-for-production">Ingestion recipe for production<a class="headerlink" href="#ingestion-recipe-for-production" title="Permanent link">&para;</a></h2>
+<h2 id="ingestion-recipe-for-production">Ingestion Recipe for Production<a class="headerlink" href="#ingestion-recipe-for-production" title="Permanent link">&para;</a></h2>
 <ol>
 <li>Generate embeddings in <code>float32</code>, or choose <code>dtypes="float16"</code> when storage
    footprint matters more than full precision.</li>
-<li>Assign stable integer IDs.</li>
-<li>Store source identifiers, tenant, language, timestamps, and display text in
+<li>Assign stable public IDs as strings or non-negative integers.</li>
+<li>Store tenant, language, timestamps, display text, and reranking payloads in
    metadata fields.</li>
-<li>Insert in batches with <code>insert_session()</code> and <code>bulk_add_items()</code>.</li>
+<li>Insert in batches with <code>add()</code> or <code>insert_session().add()</code>.</li>
 <li>Call <code>build_index()</code> or rebuild the index after a large load.</li>
-<li>Run a few known queries and filters.</li>
+<li>Run a few known vector, document, BM25, and filter queries.</li>
 <li>Call <code>checkpoint()</code> before snapshot or controlled shutdown.</li>
 </ol>
 

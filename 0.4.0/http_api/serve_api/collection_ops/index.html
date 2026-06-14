@@ -341,7 +341,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../../deployment/cluster-example/" class="md-tabs__link">
+        <a href="../../../deployment/cluster-deployment/" class="md-tabs__link">
           
   
   
@@ -1488,14 +1488,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../deployment/cluster-example/" class="md-nav__link">
+      <a href="../../../deployment/cluster-deployment/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Cluster example
+    Cluster deployment
   
 
     
@@ -1685,27 +1685,15 @@ custom client or debugging raw HTTP calls.</p>
 <tbody>
 <tr>
 <td><code>POST</code></td>
-<td><code>/add_item</code></td>
-<td><code>vector</code>, <code>id</code>, <code>field</code></td>
-<td>Add one vector.</td>
-</tr>
-<tr>
-<td><code>POST</code></td>
-<td><code>/bulk_add_items</code></td>
-<td><code>items</code></td>
-<td>Add many vectors with optional fields.</td>
-</tr>
-<tr>
-<td><code>POST</code></td>
-<td><code>/bulk_add_binary</code></td>
-<td>binary payload</td>
-<td>Add dense vectors through compact binary protocol.</td>
-</tr>
-<tr>
-<td><code>POST</code></td>
-<td><code>/upsert_items</code></td>
+<td><code>/add</code></td>
 <td><code>ids</code>, <code>vectors</code>, <code>fields</code></td>
-<td>Insert or update many rows.</td>
+<td>Add one or more records with string or integer public IDs.</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/upsert</code></td>
+<td><code>ids</code>, <code>vectors</code>, <code>fields</code></td>
+<td>Insert or update one or more records by public ID.</td>
 </tr>
 <tr>
 <td><code>POST</code></td>
@@ -1816,8 +1804,8 @@ custom client or debugging raw HTTP calls.</p>
 <tr>
 <td><code>POST</code></td>
 <td><code>/search</code></td>
-<td><code>vector</code>, <code>k</code>, <code>where</code>, <code>return_fields</code>, <code>nprobe</code>, <code>field_name</code>, <code>approx</code>, <code>eps</code></td>
-<td>Vector search.</td>
+<td><code>vector</code> or <code>document</code>, <code>k</code>, <code>where</code>, <code>return_fields</code>, <code>nprobe</code>, <code>field_name</code>, <code>approx</code>, <code>eps</code></td>
+<td>Vector search, or document search with automatic embedding.</td>
 </tr>
 <tr>
 <td><code>POST</code></td>
@@ -1851,7 +1839,7 @@ custom client or debugging raw HTTP calls.</p>
 </tr>
 <tr>
 <td><code>POST</code></td>
-<td><code>/text_search</code></td>
+<td><code>/bm25_search</code></td>
 <td><code>text</code>, <code>text_fields</code>, <code>k</code>, <code>where</code></td>
 <td>BM25 search over metadata fields.</td>
 </tr>
@@ -1931,7 +1919,7 @@ custom client or debugging raw HTTP calls.</p>
 <td><code>POST</code></td>
 <td><code>/max_id</code></td>
 <td>none</td>
-<td>Return max external ID.</td>
+<td>Return max internal numeric ID.</td>
 </tr>
 </tbody>
 </table>
@@ -1948,13 +1936,13 @@ custom client or debugging raw HTTP calls.</p>
 <tbody>
 <tr>
 <td><code>POST</code></td>
-<td><code>/delete_items</code></td>
+<td><code>/delete</code></td>
 <td><code>ids</code></td>
 <td>Soft-delete IDs.</td>
 </tr>
 <tr>
 <td><code>POST</code></td>
-<td><code>/restore_items</code></td>
+<td><code>/restore</code></td>
 <td><code>ids</code></td>
 <td>Restore soft-deleted IDs.</td>
 </tr>
