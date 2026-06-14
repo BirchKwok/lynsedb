@@ -152,11 +152,10 @@ named vector field with that dimension.
 
 ### Duplicate ID error
 
-`add_item()` and `bulk_add_items()` expect new IDs. Use upsert to replace or
-insert by ID:
+`add()` expects new public IDs. Use upsert to replace or insert by ID:
 
 ```python
-collection.upsert_item(vector, id=123, field={"title": "updated"})
+collection.upsert(ids=123, vectors=vector, fields={"title": "updated"})
 collection.commit()
 ```
 
@@ -173,11 +172,10 @@ Use `insert_session()` or call `commit()`:
 
 ```python
 with collection.insert_session() as session:
-    session.add_item(vector, id=1)
+    session.add(ids="doc-1", vectors=vector)
 
 # or
-collection.add_item(vector, id=2, buffer_size=False)
-collection.commit()
+collection.add(ids="doc-2", vectors=vector)
 ```
 
 For backup or shutdown, call:
@@ -331,7 +329,7 @@ collection.search_sparse({42: 1.0}, k=10)
 Lower your client batch size:
 
 ```python
-collection.bulk_add_items(items, batch_size=1000, enable_progress_bar=False)
+collection.add(ids=ids, vectors=vectors, fields=fields, batch_size=1000)
 ```
 
 Or increase server limits:
@@ -362,7 +360,7 @@ Set a limit to `0` only when you intentionally want to disable that guardrail.
 Deletes are soft deletes:
 
 ```python
-collection.delete_items([1, 2, 3])
+collection.delete([1, 2, 3])
 collection.commit()
 ```
 
@@ -380,7 +378,7 @@ After compaction, rows cannot be restored from the collection itself.
 It may have been restored:
 
 ```python
-collection.restore_items([1])
+collection.restore([1])
 ```
 
 Inspect tombstones:

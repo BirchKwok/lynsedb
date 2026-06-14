@@ -16,7 +16,7 @@ Use `commit()` after normal write batches:
 
 ```python
 with collection.insert_session() as session:
-    session.add_item([0.1, 0.2, 0.3, 0.4], id=1)
+    session.add(ids="ops-example", vectors=[0.1, 0.2, 0.3, 0.4])
 
 # committed automatically by the session
 ```
@@ -119,10 +119,10 @@ usually easier to inspect and transform.
 Deletes are logical tombstones:
 
 ```python
-collection.delete_items([10, 11])
+collection.delete([10, 11])
 print(collection.list_deleted_ids())
 
-collection.restore_items([10])
+collection.restore([10])
 print(collection.list_deleted_ids())
 ```
 
@@ -130,9 +130,9 @@ Soft-deleted IDs are excluded from search and query results.
 
 Deletion lifecycle:
 
-1. `delete_items()` tombstones rows.
+1. `delete()` tombstones rows.
 2. Search and query exclude tombstoned IDs.
-3. `restore_items()` can bring tombstoned IDs back.
+3. `restore()` can bring tombstoned IDs back.
 4. `compact()` physically removes tombstoned rows.
 
 After compaction, removed rows cannot be restored from the collection itself.

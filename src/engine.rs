@@ -38,6 +38,8 @@ const COLLECTION_EXPORT_METADATA_FILE: &str = "metadata.jsonl";
 const VECTOR_FIELDS_DIR: &str = "vector_fields";
 const VECTOR_FIELDS_MANIFEST_FILE: &str = "manifest.json";
 const DEFAULT_VECTOR_FIELD_NAME: &str = "default";
+const EXTERNAL_ID_MAP_FILE: &str = "external_id_map.json";
+const EXTERNAL_ID_MAP_VERSION: u32 = 1;
 const SPARSE_VECTORS_FILE: &str = "sparse_vectors.jsonl";
 const TEXT_INDEX_FILE: &str = "text_index.json";
 const TEXT_INDEX_FORMAT_VERSION: u32 = 1;
@@ -86,11 +88,58 @@ pub struct Collection {
     /// User-facing ID map: id_map[row_offset] = user_id.
     /// Persisted to id_map.bin. Backfilled with sequential IDs for backward compat.
     id_map: Vec<u64>,
-    /// Reverse map: user_id → row_offset. Rebuilt from id_map on load.
+    /// Reverse map: internal_id → row_offset. Rebuilt from id_map on load.
     reverse_id_map: HashMap<u64, usize>,
+    /// Public external ID → internal numeric ID.
+    external_to_internal_id: HashMap<ExternalId, u64>,
+    /// Internal numeric ID → public external ID.
+    internal_to_external_id: HashMap<u64, ExternalId>,
+    /// Next automatically assigned internal ID.
+    next_internal_id: u64,
     /// Holds the collection-level writer lock until close/drop.
     lock: Option<FileLock>,
     read_only: bool,
+}
+
+/// Public user-facing record ID.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ExternalId {
+    Int(u64),
+    String(String),
+}
+
+impl ExternalId {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::String(value) if value.is_empty() => Err(LynseError::InvalidArgument(
+                "string IDs cannot be empty".to_string(),
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl std::fmt::Display for ExternalId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Int(value) => write!(f, "{value}"),
+            Self::String(value) => write!(f, "{value}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExternalIdMapFile {
+    version: u32,
+    next_internal_id: u64,
+    entries: Vec<ExternalIdEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExternalIdEntry {
+    internal_id: u64,
+    external_id: ExternalId,
 }
 
 #[cfg(unix)]
@@ -954,6 +1003,9 @@ impl Collection {
             tombstone,
             id_map: Vec::new(),
             reverse_id_map: HashMap::new(),
+            external_to_internal_id: HashMap::new(),
+            internal_to_external_id: HashMap::new(),
+            next_internal_id: 0,
             lock: Some(lock),
             read_only: mode == OpenMode::ReadOnly,
         };
@@ -964,16 +1016,23 @@ impl Collection {
             // id_map is the authoritative set of fully applied rows.
             let id_map_repaired = coll.initialize_id_map_for_open()?;
 
+            // Load external IDs before WAL replay because public IDs are
+            // persisted before the WAL in the record add path.
+            coll.load_external_id_map_for_recovery()?;
+
             // Recover any uncommitted WAL data on startup.
             let recovered_wal = coll.recover_wal()?;
 
-            if id_map_repaired || recovered_wal {
+            let external_map_repaired = coll.repair_external_id_map_for_open()?;
+
+            if id_map_repaired || recovered_wal || external_map_repaired {
                 if let Some(mode) = coll.index_mode.clone() {
                     coll.build_index(&mode)?;
                 }
             }
         } else {
             coll.initialize_id_map_for_read_only()?;
+            coll.initialize_external_id_map_for_read_only()?;
             if coll.has_uncommitted_data() {
                 return Err(LynseError::Storage(
                     "collection has uncommitted WAL data; open it writable to recover before using read-only mode".to_string(),
@@ -1590,6 +1649,164 @@ impl Collection {
         Ok(())
     }
 
+    fn external_id_map_path(path: &Path) -> PathBuf {
+        path.join(EXTERNAL_ID_MAP_FILE)
+    }
+
+    fn write_external_id_map(&self) -> Result<()> {
+        let mut internal_ids: Vec<u64> = self.internal_to_external_id.keys().copied().collect();
+        internal_ids.sort_unstable();
+        let entries = internal_ids
+            .into_iter()
+            .filter_map(|internal_id| {
+                self.internal_to_external_id
+                    .get(&internal_id)
+                    .cloned()
+                    .map(|external_id| ExternalIdEntry {
+                        internal_id,
+                        external_id,
+                    })
+            })
+            .collect();
+        let file = ExternalIdMapFile {
+            version: EXTERNAL_ID_MAP_VERSION,
+            next_internal_id: self.next_internal_id,
+            entries,
+        };
+        let bytes = serde_json::to_vec_pretty(&file)
+            .map_err(|e| LynseError::Serialization(e.to_string()))?;
+        Self::atomic_write_file(&Self::external_id_map_path(&self.path), &bytes)
+    }
+
+    fn load_external_id_map_file(path: &Path) -> Result<Option<ExternalIdMapFile>> {
+        let map_path = Self::external_id_map_path(path);
+        if !map_path.exists() {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(&map_path)?;
+        let file: ExternalIdMapFile =
+            serde_json::from_slice(&bytes).map_err(|e| LynseError::Serialization(e.to_string()))?;
+        if file.version > EXTERNAL_ID_MAP_VERSION {
+            return Err(LynseError::Storage(format!(
+                "external ID map version {} is newer than supported version {}",
+                file.version, EXTERNAL_ID_MAP_VERSION
+            )));
+        }
+        Ok(Some(file))
+    }
+
+    fn rebuild_external_lookup(
+        &mut self,
+        file: Option<ExternalIdMapFile>,
+        persist_if_repaired: bool,
+    ) -> Result<bool> {
+        let live_internal_ids: HashSet<u64> = self.id_map.iter().copied().collect();
+        let mut external_to_internal = HashMap::new();
+        let mut internal_to_external = HashMap::new();
+        let mut repaired = false;
+
+        if let Some(file) = file {
+            self.next_internal_id = file.next_internal_id;
+            for entry in file.entries {
+                if !live_internal_ids.contains(&entry.internal_id) {
+                    repaired = true;
+                    continue;
+                }
+                entry.external_id.validate()?;
+                if internal_to_external.contains_key(&entry.internal_id)
+                    || external_to_internal.contains_key(&entry.external_id)
+                {
+                    repaired = true;
+                    continue;
+                }
+                external_to_internal.insert(entry.external_id.clone(), entry.internal_id);
+                internal_to_external.insert(entry.internal_id, entry.external_id);
+            }
+        }
+
+        for &internal_id in &self.id_map {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                internal_to_external.entry(internal_id)
+            {
+                let external_id = ExternalId::Int(internal_id);
+                entry.insert(external_id.clone());
+                external_to_internal.insert(external_id, internal_id);
+                repaired = true;
+            }
+        }
+
+        let min_next = self
+            .id_map
+            .iter()
+            .copied()
+            .max()
+            .map(|id| id.saturating_add(1))
+            .unwrap_or(0);
+        if self.next_internal_id < min_next {
+            self.next_internal_id = min_next;
+            repaired = true;
+        }
+
+        self.external_to_internal_id = external_to_internal;
+        self.internal_to_external_id = internal_to_external;
+
+        if repaired && persist_if_repaired && !self.read_only {
+            self.write_external_id_map()?;
+        }
+        Ok(repaired)
+    }
+
+    fn load_external_id_map_for_recovery(&mut self) -> Result<()> {
+        self.external_to_internal_id.clear();
+        self.internal_to_external_id.clear();
+        self.next_internal_id = self
+            .id_map
+            .iter()
+            .copied()
+            .max()
+            .map(|id| id.saturating_add(1))
+            .unwrap_or(0);
+
+        let Some(file) = Self::load_external_id_map_file(&self.path)? else {
+            return Ok(());
+        };
+        self.next_internal_id = file.next_internal_id;
+        for entry in file.entries {
+            entry.external_id.validate()?;
+            if self
+                .external_to_internal_id
+                .insert(entry.external_id.clone(), entry.internal_id)
+                .is_some()
+                || self
+                    .internal_to_external_id
+                    .insert(entry.internal_id, entry.external_id)
+                    .is_some()
+            {
+                return Err(LynseError::Storage(
+                    "external ID map contains duplicate entries".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn repair_external_id_map_for_open(&mut self) -> Result<bool> {
+        let entries = self
+            .internal_to_external_id
+            .iter()
+            .map(|(&internal_id, external_id)| ExternalIdEntry {
+                internal_id,
+                external_id: external_id.clone(),
+            })
+            .collect();
+        let file = ExternalIdMapFile {
+            version: EXTERNAL_ID_MAP_VERSION,
+            next_internal_id: self.next_internal_id,
+            entries,
+        };
+        self.rebuild_external_lookup(Some(file), true)
+    }
+
     /// Initialize id_map before WAL replay.
     ///
     /// If id_map exists, it is treated as the durable row boundary. Extra vector
@@ -1654,6 +1871,12 @@ impl Collection {
         Ok(())
     }
 
+    fn initialize_external_id_map_for_read_only(&mut self) -> Result<()> {
+        let file = Self::load_external_id_map_file(&self.path)?;
+        self.rebuild_external_lookup(file, false)?;
+        Ok(())
+    }
+
     fn ensure_writable(&self) -> Result<()> {
         if self.read_only {
             return Err(LynseError::InvalidArgument(
@@ -1665,6 +1888,15 @@ impl Collection {
 
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    fn allocate_internal_ids(&mut self, n: usize) -> Result<Vec<u64>> {
+        let start = self.next_internal_id;
+        let end = start
+            .checked_add(n as u64)
+            .ok_or_else(|| LynseError::InvalidArgument("internal ID allocation overflow".into()))?;
+        self.next_internal_id = end;
+        Ok((start..end).collect())
     }
 
     /// Append new user IDs to id_map.bin (sequential write, no rewrite).
@@ -1695,6 +1927,47 @@ impl Collection {
     /// Check if a user ID exists in the collection.
     pub fn is_id_exists(&self, user_id: u64) -> bool {
         self.reverse_id_map.contains_key(&user_id)
+    }
+
+    pub fn is_external_id_exists(&self, external_id: &ExternalId) -> bool {
+        self.external_to_internal_id.contains_key(external_id)
+    }
+
+    pub fn internal_id_for_external_id(&self, external_id: &ExternalId) -> Option<u64> {
+        self.external_to_internal_id.get(external_id).copied()
+    }
+
+    pub fn internal_ids_for_external_ids(&self, external_ids: &[ExternalId]) -> Result<Vec<u64>> {
+        external_ids
+            .iter()
+            .map(|external_id| {
+                self.internal_id_for_external_id(external_id)
+                    .ok_or_else(|| {
+                        LynseError::InvalidArgument(format!(
+                            "external id {} does not exist",
+                            external_id
+                        ))
+                    })
+            })
+            .collect()
+    }
+
+    pub fn external_id_for_internal_id(&self, internal_id: u64) -> ExternalId {
+        self.internal_to_external_id
+            .get(&internal_id)
+            .cloned()
+            .unwrap_or(ExternalId::Int(internal_id))
+    }
+
+    pub fn external_ids_for_internal_ids(&self, internal_ids: &[u64]) -> Vec<ExternalId> {
+        internal_ids
+            .iter()
+            .map(|&internal_id| self.external_id_for_internal_id(internal_id))
+            .collect()
+    }
+
+    pub fn all_internal_ids(&self) -> Vec<u64> {
+        self.id_map.clone()
     }
 
     /// Return the maximum user ID in the collection, or None if empty.
@@ -1861,6 +2134,26 @@ impl Collection {
         Ok(())
     }
 
+    fn validate_new_external_ids(&self, external_ids: &[ExternalId]) -> Result<()> {
+        let mut seen = HashSet::with_capacity(external_ids.len());
+        for external_id in external_ids {
+            external_id.validate()?;
+            if !seen.insert(external_id.clone()) {
+                return Err(LynseError::InvalidArgument(format!(
+                    "duplicate external id {} within the same insert batch",
+                    external_id
+                )));
+            }
+            if self.external_to_internal_id.contains_key(external_id) {
+                return Err(LynseError::InvalidArgument(format!(
+                    "external id {} already exists",
+                    external_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_row_boundary(&self) -> Result<usize> {
         let (n_rows, _) = self.vector_store.get_shape()?;
         let n_rows = n_rows as usize;
@@ -1915,8 +2208,16 @@ impl Collection {
         for (i, &user_id) in ids.iter().enumerate() {
             self.id_map.push(user_id);
             self.reverse_id_map.insert(user_id, start_row + i);
+            if !self.internal_to_external_id.contains_key(&user_id) {
+                let external_id = ExternalId::Int(user_id);
+                self.internal_to_external_id
+                    .insert(user_id, external_id.clone());
+                self.external_to_internal_id.insert(external_id, user_id);
+                self.next_internal_id = self.next_internal_id.max(user_id.saturating_add(1));
+            }
         }
         Self::append_id_map(&self.path, ids)?;
+        self.write_external_id_map()?;
 
         Ok(())
     }
@@ -1972,8 +2273,16 @@ impl Collection {
         for (i, &user_id) in ids.iter().enumerate() {
             self.id_map.push(user_id);
             self.reverse_id_map.insert(user_id, start_row + i);
+            if !self.internal_to_external_id.contains_key(&user_id) {
+                let external_id = ExternalId::Int(user_id);
+                self.internal_to_external_id
+                    .insert(user_id, external_id.clone());
+                self.external_to_internal_id.insert(external_id, user_id);
+                self.next_internal_id = self.next_internal_id.max(user_id.saturating_add(1));
+            }
         }
         Self::append_id_map(&self.path, ids)?;
+        self.write_external_id_map()?;
 
         Ok(())
     }
@@ -2064,8 +2373,16 @@ impl Collection {
         for (i, &user_id) in ids.iter().enumerate() {
             self.id_map.push(user_id);
             self.reverse_id_map.insert(user_id, start_row + i);
+            if !self.internal_to_external_id.contains_key(&user_id) {
+                let external_id = ExternalId::Int(user_id);
+                self.internal_to_external_id
+                    .insert(user_id, external_id.clone());
+                self.external_to_internal_id.insert(external_id, user_id);
+                self.next_internal_id = self.next_internal_id.max(user_id.saturating_add(1));
+            }
         }
         Self::append_id_map(&self.path, ids)?;
+        self.write_external_id_map()?;
 
         Ok(())
     }
@@ -2110,6 +2427,82 @@ impl Collection {
             ids,
             fields,
         )
+    }
+
+    /// Add records with public string/integer external IDs.
+    ///
+    /// Internal numeric IDs are assigned by the collection allocator and are the
+    /// only IDs used by vector storage, indexes, tombstones, and WAL replay.
+    pub fn add_records(
+        &mut self,
+        vectors: &[f32],
+        n_vectors: usize,
+        external_ids: &[ExternalId],
+        fields: Option<&[HashMap<String, serde_json::Value>]>,
+    ) -> Result<Vec<u64>> {
+        self.ensure_writable()?;
+        let dim = self.meta.dimension;
+        if vectors.len() != n_vectors * dim {
+            return Err(LynseError::DimensionMismatch {
+                expected: dim,
+                got: if n_vectors == 0 {
+                    vectors.len()
+                } else {
+                    vectors.len() / n_vectors
+                },
+            });
+        }
+        if external_ids.len() != n_vectors {
+            return Err(LynseError::InvalidArgument(format!(
+                "ids length ({}) must match n_vectors ({})",
+                external_ids.len(),
+                n_vectors
+            )));
+        }
+        if let Some(field_list) = fields {
+            if field_list.len() != n_vectors {
+                return Err(LynseError::InvalidArgument(format!(
+                    "fields length ({}) must match n_vectors ({})",
+                    field_list.len(),
+                    n_vectors
+                )));
+            }
+        }
+
+        self.validate_new_external_ids(external_ids)?;
+        let prev_next_internal_id = self.next_internal_id;
+        let internal_ids = self.allocate_internal_ids(n_vectors)?;
+        let prev_external_to_internal = self.external_to_internal_id.clone();
+        let prev_internal_to_external = self.internal_to_external_id.clone();
+
+        for (external_id, &internal_id) in external_ids.iter().zip(internal_ids.iter()) {
+            self.external_to_internal_id
+                .insert(external_id.clone(), internal_id);
+            self.internal_to_external_id
+                .insert(internal_id, external_id.clone());
+        }
+
+        self.write_external_id_map()?;
+
+        let encoded_vectors = encode_f32_slice_as_le_bytes(vectors, self.vector_dtype);
+        let result = self.commit_add_items_encoded(
+            &encoded_vectors,
+            self.vector_dtype,
+            Some(vectors),
+            n_vectors,
+            &internal_ids,
+            fields,
+        );
+
+        if let Err(err) = result {
+            self.next_internal_id = prev_next_internal_id;
+            self.external_to_internal_id = prev_external_to_internal;
+            self.internal_to_external_id = prev_internal_to_external;
+            let _ = self.write_external_id_map();
+            return Err(err);
+        }
+
+        Ok(internal_ids)
     }
 
     /// Create a named vector field stored independently from the primary vector.
@@ -5465,6 +5858,38 @@ mod tests {
 
         let err = coll.add_items(&vectors, 1, &[42], None).unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn external_ids_are_allocated_and_persisted() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut coll = Collection::open(tmp.path(), "col", 3, 100).unwrap();
+            let ids = vec![ExternalId::String("doc-a".into()), ExternalId::Int(42)];
+            let vectors = vec![
+                1.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0,
+            ];
+            let internal_ids = coll.add_records(&vectors, 2, &ids, None).unwrap();
+            assert_eq!(internal_ids, vec![0, 1]);
+            assert_eq!(
+                coll.internal_ids_for_external_ids(&ids).unwrap(),
+                internal_ids
+            );
+            coll.checkpoint().unwrap();
+        }
+
+        let coll = Collection::open(tmp.path(), "col", 3, 100).unwrap();
+        assert!(coll.is_external_id_exists(&ExternalId::String("doc-a".into())));
+        assert!(coll.is_external_id_exists(&ExternalId::Int(42)));
+
+        let result = coll
+            .search(&[1.0, 0.0, 0.0], 2, None, 10, false, 1e-4)
+            .unwrap();
+        assert_eq!(
+            coll.external_ids_for_internal_ids(&result.ids),
+            vec![ExternalId::String("doc-a".into()), ExternalId::Int(42)]
+        );
     }
 
     #[test]

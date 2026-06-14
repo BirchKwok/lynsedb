@@ -47,7 +47,7 @@ class ResultView:
     """Unified result container for LynseDB query / search / head / tail operations.
 
     Holds any combination of:
-      - ``ids``        — ``np.ndarray[int64]``
+      - ``ids``        — ``np.ndarray[int64]`` or ``np.ndarray[object]``
       - ``distances``  — ``np.ndarray[float32]``
       - ``vectors``    — ``np.ndarray[float32]`` with shape ``(n, dim)``
       - ``fields``     — ``list[dict]``
@@ -326,7 +326,7 @@ class ResultView:
         for i in range(n):
             entry: Dict[str, Any] = {}
             if self._ids is not None:
-                entry["id"] = int(self._ids[i])
+                entry["id"] = _python_scalar(self._ids[i])
             if self._distances is not None:
                 entry["distance"] = float(self._distances[i])
             if self._vectors is not None:
@@ -415,18 +415,18 @@ class ResultView:
         d: Dict[str, Any] = {}
         if self._result_type == "search":
             if self._ids is not None:
-                d["id"] = pl.Series("id", self._ids, dtype=pl.Int64)
+                d["id"] = _polars_id_series(pl, self._ids)
             if self._distances is not None:
                 d["distance"] = pl.Series("distance", self._distances, dtype=pl.Float32)
         elif self._result_type == "data":
             if self._ids is not None:
-                d["id"] = pl.Series("id", self._ids, dtype=pl.Int64)
+                d["id"] = _polars_id_series(pl, self._ids)
             if self._vectors is not None:
                 d["vector"] = pl.Series("vector", self._vectors.tolist())
         else:
             if self._ids is not None:
-                arr = self._ids if isinstance(self._ids, np.ndarray) else np.array(self._ids, dtype=np.int64)
-                d["id"] = pl.Series("id", arr, dtype=pl.Int64)
+                arr = self._ids if isinstance(self._ids, np.ndarray) else np.array(self._ids)
+                d["id"] = _polars_id_series(pl, arr)
 
         if self._fields:
             all_keys: set = set()
@@ -453,12 +453,12 @@ class ResultView:
         arrays = {}
         if self._result_type == "search":
             if self._ids is not None:
-                arrays["id"] = pa.array(self._ids, type=pa.int64())
+                arrays["id"] = _arrow_id_array(pa, self._ids)
             if self._distances is not None:
                 arrays["distance"] = pa.array(self._distances, type=pa.float32())
         elif self._result_type == "data":
             if self._ids is not None:
-                arrays["id"] = pa.array(self._ids, type=pa.int64())
+                arrays["id"] = _arrow_id_array(pa, self._ids)
             if self._vectors is not None:
                 dim = self._vectors.shape[1] if self._vectors.ndim == 2 else 0
                 flat = self._vectors.ravel()
@@ -470,8 +470,8 @@ class ResultView:
                 arrays["vector"] = list_arr
         else:
             if self._ids is not None:
-                arr = self._ids if isinstance(self._ids, np.ndarray) else np.array(self._ids, dtype=np.int64)
-                arrays["id"] = pa.array(arr, type=pa.int64())
+                arr = self._ids if isinstance(self._ids, np.ndarray) else np.array(self._ids)
+                arrays["id"] = _arrow_id_array(pa, arr)
 
         if self._fields:
             all_keys: set = set()
@@ -494,6 +494,29 @@ def _compact_array_repr(arr) -> str:
     if arr is None:
         return "None"
     return repr(arr)
+
+
+def _python_scalar(value):
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _ids_are_integral(ids) -> bool:
+    arr = ids if isinstance(ids, np.ndarray) else np.array(ids)
+    return arr.dtype.kind in {"i", "u"}
+
+
+def _polars_id_series(pl, ids):
+    if _ids_are_integral(ids):
+        return pl.Series("id", ids, dtype=pl.Int64)
+    return pl.Series("id", [_python_scalar(value) for value in ids], dtype=pl.Utf8)
+
+
+def _arrow_id_array(pa, ids):
+    if _ids_are_integral(ids):
+        return pa.array(ids, type=pa.int64())
+    return pa.array([_python_scalar(value) for value in ids], type=pa.string())
 
 
 def _compact_fields_repr(fields: list, max_items: int = 3) -> str:

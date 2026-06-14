@@ -28,7 +28,7 @@ workloads.
   switch to the HTTP server only when multiple workers or services need shared
   access.
 - **Retrieval beyond dense vectors**: supports metadata filters, named vector
-  fields, sparse vectors, BM25 text search, and hybrid search.
+  fields, sparse vectors, BM25 search, and hybrid search.
 - **Deployment basics included**: API key auth, health checks, readiness checks,
   Prometheus metrics, OpenAPI schema, snapshots, restore, export/import, Docker,
   systemd, and Kubernetes examples.
@@ -70,14 +70,19 @@ client = lynse.VectorDBClient(uri="./lynsedb-data")
 db = client.create_database("demo", drop_if_exists=True)
 collection = db.require_collection("documents", dim=4, drop_if_exists=True)
 
-items = [
-    ([0.10, 0.20, 0.30, 0.40], 1, {"title": "LynseDB intro", "lang": "en"}),
-    ([0.11, 0.19, 0.29, 0.39], 2, {"title": "Vector guide", "lang": "en"}),
-    ([0.80, 0.10, 0.20, 0.10], 3, {"title": "French note", "lang": "fr"}),
-]
-
-with collection.insert_session() as session:
-    session.bulk_add_items(items, enable_progress_bar=False)
+collection.add(
+    ids=["intro", "guide", "note-fr"],
+    vectors=[
+        [0.10, 0.20, 0.30, 0.40],
+        [0.11, 0.19, 0.29, 0.39],
+        [0.80, 0.10, 0.20, 0.10],
+    ],
+    fields=[
+        {"title": "LynseDB intro", "lang": "en"},
+        {"title": "Vector guide", "lang": "en"},
+        {"title": "French note", "lang": "fr"},
+    ],
+)
 
 collection.build_index("FLAT-L2")
 
@@ -143,7 +148,7 @@ curl http://127.0.0.1:7637/openapi.json
 - Named vector fields for multimodal records, such as text and image embeddings
   on the same item.
 - Sparse vector search for feature-weight retrieval.
-- BM25 text search over metadata fields.
+- BM25 search over metadata fields.
 - Hybrid search with vector and text candidates.
 - `ResultView` return objects with NumPy arrays plus list, JSON, and dataframe
   conversion helpers.

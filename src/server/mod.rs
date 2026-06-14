@@ -3,7 +3,7 @@
 //! Provides a RESTful API using actix-web, replacing the Python Flask server.
 //! All endpoints are compatible with the existing HTTPClient Python class.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::{ready, Future, Ready};
 use std::io::Write;
 use std::path::Path;
@@ -18,7 +18,7 @@ use actix_web::http::header::{HeaderMap, HeaderName, HeaderValue};
 use actix_web::{web, App, HttpResponse, HttpServer};
 use serde::{Deserialize, Serialize};
 
-use crate::engine::DatabaseManager;
+use crate::engine::{DatabaseManager, ExternalId};
 use crate::error::LynseError;
 use crate::storage::dtype::VectorDtype;
 
@@ -652,9 +652,8 @@ fn audit_action_for_path(path: &str) -> Option<&'static str> {
         "/export_collection" => Some("export_collection"),
         "/restore_collection" => Some("restore_collection"),
         "/import_collection" => Some("import_collection"),
-        "/add_item" => Some("add_item"),
-        "/bulk_add_items" | "/bulk_add_items_binary" => Some("bulk_add_items"),
-        "/upsert_items" | "/upsert_items_binary" => Some("upsert_items"),
+        "/add" => Some("add"),
+        "/upsert" => Some("upsert"),
         "/bulk_add_binary" => Some("bulk_add_binary"),
         "/create_vector_field" => Some("create_vector_field"),
         "/add_named_vectors" => Some("add_named_vectors"),
@@ -668,8 +667,8 @@ fn audit_action_for_path(path: &str) -> Option<&'static str> {
         "/update_collection_description" | "/update_description" => Some("update_description"),
         "/build_index" => Some("build_index"),
         "/remove_index" => Some("remove_index"),
-        "/delete_items" => Some("delete_items"),
-        "/restore_items" => Some("restore_items"),
+        "/delete" => Some("delete"),
+        "/restore" => Some("restore"),
         "/compact" => Some("compact"),
         _ => None,
     }
@@ -1074,31 +1073,12 @@ struct ImportCollectionRequest {
 }
 
 #[derive(Deserialize)]
-struct AddItemRequest {
+struct AddRecordsRequest {
     database_name: String,
     collection_name: String,
-    item: AddItemData,
-}
-
-#[derive(Deserialize)]
-struct AddItemData {
-    vector: Vec<f32>,
-    id: Option<u64>,
-    field: Option<HashMap<String, serde_json::Value>>,
-}
-
-#[derive(Deserialize)]
-struct BulkAddItemsRequest {
-    database_name: String,
-    collection_name: String,
-    items: Vec<BulkItemData>,
-}
-
-#[derive(Deserialize)]
-struct BulkItemData {
-    vector: Vec<f32>,
-    id: Option<u64>,
-    field: Option<HashMap<String, serde_json::Value>>,
+    ids: Vec<ExternalId>,
+    vectors: Vec<Vec<f32>>,
+    fields: Option<Vec<HashMap<String, serde_json::Value>>>,
 }
 
 #[derive(Deserialize)]
@@ -1118,7 +1098,7 @@ struct AddNamedVectorsRequest {
     collection_name: String,
     field_name: String,
     vectors: Vec<Vec<f32>>,
-    ids: Vec<u64>,
+    ids: Vec<ExternalId>,
 }
 
 #[derive(Deserialize)]
@@ -1132,7 +1112,7 @@ struct AddSparseVectorsRequest {
     database_name: String,
     collection_name: String,
     vectors: Vec<SparseVectorData>,
-    ids: Vec<u64>,
+    ids: Vec<ExternalId>,
 }
 
 #[derive(Deserialize)]
@@ -1231,7 +1211,6 @@ struct BatchSearchRequest {
 struct CommitRequest {
     database_name: String,
     collection_name: String,
-    items: Option<Vec<BulkItemData>>,
 }
 
 #[derive(Deserialize)]
@@ -1255,7 +1234,7 @@ struct QueryRequest {
     collection_name: String,
     #[serde(rename = "where")]
     where_expr: Option<String>,
-    filter_ids: Option<Vec<u64>>,
+    filter_ids: Option<Vec<ExternalId>>,
     return_ids_only: Option<bool>,
 }
 
@@ -1265,14 +1244,14 @@ struct QueryVectorsRequest {
     collection_name: String,
     #[serde(rename = "where")]
     where_expr: Option<String>,
-    filter_ids: Option<Vec<u64>>,
+    filter_ids: Option<Vec<ExternalId>>,
 }
 
 #[derive(Deserialize)]
 struct DeleteItemsRequest {
     database_name: String,
     collection_name: String,
-    ids: Vec<u64>,
+    ids: Vec<ExternalId>,
 }
 
 #[derive(Deserialize)]
@@ -1303,18 +1282,6 @@ struct BulkAddBinaryQuery {
     dim: usize,
     n_vectors: usize,
     vector_encoding: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct BinaryItemsQuery {
-    database_name: String,
-    collection_name: String,
-    dim: usize,
-    n_vectors: usize,
-    vector_encoding: Option<String>,
-    ids_encoding: Option<String>,
-    ids_start: Option<u64>,
-    return_ids: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1358,7 +1325,7 @@ struct HeadTailBinaryQuery {
 struct IsIdExistsRequest {
     database_name: String,
     collection_name: String,
-    id: u64,
+    id: ExternalId,
 }
 
 #[derive(Deserialize)]
@@ -1455,6 +1422,65 @@ fn sparse_vector_entries(vector: &SparseVectorData) -> Result<Vec<(u32, f32)>, L
         .copied()
         .zip(vector.values.iter().copied())
         .collect())
+}
+
+fn internal_ids_for_external(
+    coll: &crate::engine::Collection,
+    ids: &[ExternalId],
+) -> Result<Vec<u64>, LynseError> {
+    coll.internal_ids_for_external_ids(ids)
+}
+
+fn existing_internal_ids_for_external(
+    coll: &crate::engine::Collection,
+    ids: &[ExternalId],
+) -> Vec<u64> {
+    ids.iter()
+        .filter_map(|external_id| coll.internal_id_for_external_id(external_id))
+        .collect()
+}
+
+fn external_ids_json(coll: &crate::engine::Collection, ids: &[u64]) -> serde_json::Value {
+    serde_json::json!(coll.external_ids_for_internal_ids(ids))
+}
+
+fn external_ids_vec(coll: &crate::engine::Collection, ids: &[u64]) -> Vec<ExternalId> {
+    coll.external_ids_for_internal_ids(ids)
+}
+
+fn external_ids_from_json(value: &serde_json::Value) -> Result<Vec<ExternalId>, LynseError> {
+    match value {
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .map(|id| vec![ExternalId::Int(id)])
+            .ok_or_else(|| {
+                LynseError::InvalidArgument("id must be a non-negative integer or string".into())
+            }),
+        serde_json::Value::String(value) => {
+            if value.is_empty() {
+                Err(LynseError::InvalidArgument(
+                    "string IDs cannot be empty".into(),
+                ))
+            } else {
+                Ok(vec![ExternalId::String(value.clone())])
+            }
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                let mut ids = external_ids_from_json(value)?;
+                if ids.len() != 1 {
+                    return Err(LynseError::InvalidArgument(
+                        "nested ID arrays are not supported".into(),
+                    ));
+                }
+                Ok(ids.pop().unwrap())
+            })
+            .collect(),
+        _ => Err(LynseError::InvalidArgument(
+            "id must be a string/int ID or a list of string/int IDs".into(),
+        )),
+    }
 }
 
 // ─── Database operation handlers ─────────────────────────────────────────────
@@ -1634,24 +1660,10 @@ fn openapi_routes() -> &'static [OpenApiRoute] {
         },
         OpenApiRoute {
             method: "post",
-            path: "/add_item",
+            path: "/add",
             tag: "vectors",
-            summary: "Add one vector",
-            request_schema: Some("AddItemRequest"),
-        },
-        OpenApiRoute {
-            method: "post",
-            path: "/bulk_add_items",
-            tag: "vectors",
-            summary: "Add vectors in bulk",
-            request_schema: Some("BulkAddItemsRequest"),
-        },
-        OpenApiRoute {
-            method: "post",
-            path: "/bulk_add_items_binary",
-            tag: "vectors",
-            summary: "Add vectors with compact binary body and explicit IDs",
-            request_schema: None,
+            summary: "Add records",
+            request_schema: Some("AddRecordsRequest"),
         },
         OpenApiRoute {
             method: "post",
@@ -1697,17 +1709,10 @@ fn openapi_routes() -> &'static [OpenApiRoute] {
         },
         OpenApiRoute {
             method: "post",
-            path: "/upsert_items",
+            path: "/upsert",
             tag: "vectors",
-            summary: "Upsert vectors",
-            request_schema: Some("BulkAddItemsRequest"),
-        },
-        OpenApiRoute {
-            method: "post",
-            path: "/upsert_items_binary",
-            tag: "vectors",
-            summary: "Upsert vectors with compact binary body and explicit IDs",
-            request_schema: None,
+            summary: "Upsert records",
+            request_schema: Some("AddRecordsRequest"),
         },
         OpenApiRoute {
             method: "post",
@@ -1729,6 +1734,13 @@ fn openapi_routes() -> &'static [OpenApiRoute] {
             tag: "query",
             summary: "Vector search with query profile",
             request_schema: Some("SearchProfileRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/bm25_search",
+            tag: "query",
+            summary: "BM25 metadata text search",
+            request_schema: Some("TextSearchRequest"),
         },
         OpenApiRoute {
             method: "post",
@@ -1942,14 +1954,14 @@ fn openapi_routes() -> &'static [OpenApiRoute] {
         },
         OpenApiRoute {
             method: "post",
-            path: "/delete_items",
+            path: "/delete",
             tag: "vectors",
             summary: "Delete vectors",
             request_schema: Some("DeleteItemsRequest"),
         },
         OpenApiRoute {
             method: "post",
-            path: "/restore_items",
+            path: "/restore",
             tag: "vectors",
             summary: "Restore deleted vectors",
             request_schema: Some("DeleteItemsRequest"),
@@ -2063,8 +2075,7 @@ fn openapi_schemas() -> serde_json::Value {
         "ExportCollectionRequest": object_schema(&["database_name", "collection_name", "export_path"]),
         "RestoreCollectionRequest": object_schema(&["database_name", "collection_name", "snapshot_path", "overwrite"]),
         "ImportCollectionRequest": object_schema(&["database_name", "collection_name", "export_path", "overwrite"]),
-        "AddItemRequest": object_schema(&["database_name", "collection_name", "item"]),
-        "BulkAddItemsRequest": object_schema(&["database_name", "collection_name", "items"]),
+        "AddRecordsRequest": object_schema(&["database_name", "collection_name", "ids", "vectors", "fields"]),
         "CreateVectorFieldRequest": object_schema(&["database_name", "collection_name", "field_name", "dim", "metric", "index_mode", "dtypes"]),
         "AddNamedVectorsRequest": object_schema(&["database_name", "collection_name", "field_name", "vectors", "ids"]),
         "AddSparseVectorsRequest": object_schema(&["database_name", "collection_name", "vectors", "ids"]),
@@ -2075,7 +2086,7 @@ fn openapi_schemas() -> serde_json::Value {
         "SparseSearchRequest": object_schema(&["database_name", "collection_name", "vector", "k", "where", "return_fields"]),
         "HybridSearchRequest": object_schema(&["database_name", "collection_name", "vector", "text", "text_fields", "k", "where", "fusion", "vector_weight", "text_weight", "rrf_k", "candidate_limit", "return_fields", "nprobe"]),
         "BatchSearchRequest": object_schema(&["database_name", "collection_name", "vectors", "k", "where", "return_fields", "nprobe"]),
-        "CommitRequest": object_schema(&["database_name", "collection_name", "items"]),
+        "CommitRequest": object_schema(&["database_name", "collection_name"]),
         "UpdateDescriptionRequest": object_schema(&["database_name", "collection_name", "description"]),
         "BuildIndexRequest": object_schema(&["database_name", "collection_name", "index_mode", "n_clusters"]),
         "HeadTailRequest": object_schema(&["database_name", "collection_name", "n"]),
@@ -2560,37 +2571,205 @@ async fn show_collections(
     }
 }
 
-async fn add_item(state: web::Data<AppState>, body: web::Json<AddItemRequest>) -> HttpResponse {
-    let dim = body.item.vector.len();
-    let vectors = body.item.vector.clone();
-    let fields = body.item.field.clone().map(|f| vec![f]);
-    let limits = state.limits;
-    let vector_bytes = match checked_vector_bytes(1, dim) {
+async fn add_records(
+    state: web::Data<AppState>,
+    body: web::Json<AddRecordsRequest>,
+) -> HttpResponse {
+    if body.ids.is_empty() {
+        return bad_request("ids cannot be empty");
+    }
+    if body.vectors.is_empty() {
+        return bad_request("vectors cannot be empty");
+    }
+    if body.ids.len() != body.vectors.len() {
+        return bad_request("ids length must match vectors length");
+    }
+    let dim = body.vectors[0].len();
+    if dim == 0 {
+        return bad_request("vectors cannot be empty");
+    }
+    let n_vectors = body.vectors.len();
+    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "vectors") {
+        return limit_bad_request(e);
+    }
+    let vector_bytes = match checked_vector_bytes(n_vectors, dim) {
         Ok(bytes) => bytes,
         Err(e) => return limit_bad_request(e),
+    };
+    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "vectors") {
+        return limit_bad_request(e);
+    }
+    let mut flat_vectors = Vec::with_capacity(n_vectors * dim);
+    for vector in &body.vectors {
+        if vector.len() != dim {
+            return bad_request("all vectors in a batch must have the same dimension");
+        }
+        flat_vectors.extend_from_slice(vector);
+    }
+    let fields = match body.fields.as_ref() {
+        Some(fields) => {
+            if fields.len() != n_vectors {
+                return bad_request("fields length must match vectors length");
+            }
+            Some(fields.as_slice())
+        }
+        None => None,
     };
 
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
         return error_response(&e.to_string());
     }
+    let limits = state.limits;
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, dim, 100_000)?;
         let mut coll = coll_arc.write();
-        let user_id = body.item.id.unwrap_or_else(|| {
-            coll.max_id()
-                .map(|max_id| max_id + 1)
-                .unwrap_or_else(|| coll.shape().map(|(n, _)| n).unwrap_or(0))
-        });
-        validate_collection_insert(&limits, &coll, 1, vector_bytes)?;
-        coll.add_items(&vectors, 1, &[user_id], fields.as_deref())?;
-        Ok(user_id)
+        validate_collection_insert(&limits, &coll, n_vectors as u64, vector_bytes)?;
+        coll.add_records(&flat_vectors, n_vectors, &body.ids, fields)?;
+        Ok(body.ids.clone())
     });
 
     match result {
-        Ok(user_id) => ApiResponse::success(serde_json::json!({
+        Ok(ids) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name,
             "collection_name": body.collection_name,
-            "item": { "id": user_id }
+            "ids": ids
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn upsert_records(
+    state: web::Data<AppState>,
+    body: web::Json<AddRecordsRequest>,
+) -> HttpResponse {
+    if body.ids.is_empty() {
+        return bad_request("ids cannot be empty");
+    }
+    if body.vectors.is_empty() {
+        return bad_request("vectors cannot be empty");
+    }
+    if body.ids.len() != body.vectors.len() {
+        return bad_request("ids length must match vectors length");
+    }
+    let dim = body.vectors[0].len();
+    if dim == 0 {
+        return bad_request("vectors cannot be empty");
+    }
+    let n_vectors = body.vectors.len();
+    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "vectors") {
+        return limit_bad_request(e);
+    }
+    let _vector_bytes = match checked_vector_bytes(n_vectors, dim) {
+        Ok(bytes) => bytes,
+        Err(e) => return limit_bad_request(e),
+    };
+    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "vectors") {
+        return limit_bad_request(e);
+    }
+    let mut flat_vectors = Vec::with_capacity(n_vectors * dim);
+    for vector in &body.vectors {
+        if vector.len() != dim {
+            return bad_request("all vectors in a batch must have the same dimension");
+        }
+        flat_vectors.extend_from_slice(vector);
+    }
+    let fields = match body.fields.as_ref() {
+        Some(fields) => {
+            if fields.len() != n_vectors {
+                return bad_request("fields length must match vectors length");
+            }
+            Some(fields.as_slice())
+        }
+        None => None,
+    };
+
+    if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
+        return error_response(&e.to_string());
+    }
+    let limits = state.limits;
+    let result = state.manager.with_database(&body.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&body.collection_name, dim, 100_000)?;
+        let mut coll = coll_arc.write();
+
+        let existing_positions: Vec<usize> = body
+            .ids
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, external_id)| {
+                coll.internal_id_for_external_id(external_id)
+                    .map(|internal_id| (idx, internal_id))
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+        let existing_internal_ids: Vec<u64> = body
+            .ids
+            .iter()
+            .filter_map(|external_id| coll.internal_id_for_external_id(external_id))
+            .collect();
+        let new_positions: Vec<usize> = body
+            .ids
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, external_id)| {
+                if coll.internal_id_for_external_id(external_id).is_none() {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let additional_vectors = new_positions.len() as u64;
+        let additional_bytes = checked_vector_bytes(additional_vectors as usize, dim)?;
+        validate_collection_insert(&limits, &coll, additional_vectors, additional_bytes)?;
+
+        if !existing_positions.is_empty() {
+            let mut existing_vectors = Vec::with_capacity(existing_positions.len() * dim);
+            for &idx in &existing_positions {
+                existing_vectors.extend_from_slice(&body.vectors[idx]);
+            }
+            let existing_fields = fields.map(|all_fields| {
+                existing_positions
+                    .iter()
+                    .map(|&idx| all_fields[idx].clone())
+                    .collect::<Vec<_>>()
+            });
+            coll.upsert_items(
+                &existing_internal_ids,
+                &existing_vectors,
+                existing_positions.len(),
+                existing_fields.as_deref(),
+            )?;
+        }
+
+        if !new_positions.is_empty() {
+            let mut new_vectors = Vec::with_capacity(new_positions.len() * dim);
+            let mut new_ids = Vec::with_capacity(new_positions.len());
+            for &idx in &new_positions {
+                new_vectors.extend_from_slice(&body.vectors[idx]);
+                new_ids.push(body.ids[idx].clone());
+            }
+            let new_fields = fields.map(|all_fields| {
+                new_positions
+                    .iter()
+                    .map(|&idx| all_fields[idx].clone())
+                    .collect::<Vec<_>>()
+            });
+            coll.add_records(
+                &new_vectors,
+                new_positions.len(),
+                &new_ids,
+                new_fields.as_deref(),
+            )?;
+        }
+        Ok(body.ids.clone())
+    });
+
+    match result {
+        Ok(ids) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "ids": ids
         })),
         Err(e) => error_response(&e.to_string()),
     }
@@ -2667,184 +2846,6 @@ async fn bulk_add_binary(
             "database_name": query.database_name,
             "collection_name": query.collection_name,
             "n_vectors": n_vectors
-        })),
-        Err(e) => error_response(&e.to_string()),
-    }
-}
-
-async fn bulk_add_items_binary(
-    state: web::Data<AppState>,
-    query: web::Query<BinaryItemsQuery>,
-    body: web::Bytes,
-) -> HttpResponse {
-    let dim = query.dim;
-    let n_vectors = query.n_vectors;
-    if n_vectors == 0 {
-        return bad_request("No items provided");
-    }
-    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "n_vectors") {
-        return limit_bad_request(e);
-    }
-    let vector_bytes = match checked_vector_bytes(n_vectors, dim) {
-        Ok(bytes) => bytes,
-        Err(e) => return limit_bad_request(e),
-    };
-    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "binary items") {
-        return limit_bad_request(e);
-    }
-
-    let vector_dtype = match crate::rpc::vector_dtype_for_encoding(query.vector_encoding.as_deref())
-    {
-        Ok(dtype) => dtype,
-        Err(e) => return bad_request(&e.to_string()),
-    };
-    let (encoded_vectors, ids, fields) =
-        match crate::rpc::split_encoded_binary_item_payload_with_ids(
-            &body,
-            n_vectors * dim,
-            n_vectors,
-            query.vector_encoding.as_deref(),
-            query.ids_encoding.as_deref(),
-            query.ids_start,
-        ) {
-            Ok(parsed) => parsed,
-            Err(e) => return bad_request(&e.to_string()),
-        };
-    if let Some(fields) = fields.as_ref() {
-        if fields.len() != n_vectors {
-            return bad_request(&format!(
-                "fields length ({}) must match n_vectors ({})",
-                fields.len(),
-                n_vectors
-            ));
-        }
-    }
-
-    if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
-        return error_response(&e.to_string());
-    }
-    let limits = state.limits;
-    let result = state.manager.with_database(&query.database_name, |engine| {
-        let coll_arc = engine.get_or_open_collection(&query.collection_name, dim, 100_000)?;
-        let mut coll = coll_arc.write();
-        validate_collection_insert(&limits, &coll, n_vectors as u64, vector_bytes)?;
-        let normalized_fields = crate::rpc::add_fields_from_payload(fields.as_ref());
-        if vector_dtype == VectorDtype::F16 && coll.vector_dtype() == VectorDtype::F16 {
-            coll.add_items_encoded_vectors(
-                encoded_vectors,
-                VectorDtype::F16,
-                n_vectors,
-                &ids,
-                normalized_fields.as_ref().map(|items| items.as_slice()),
-            )?;
-        } else {
-            let vectors = crate::rpc::raw_vector_cow(
-                encoded_vectors,
-                n_vectors * dim,
-                query.vector_encoding.as_deref(),
-            )?;
-            coll.add_items(
-                vectors.as_ref(),
-                n_vectors,
-                &ids,
-                normalized_fields.as_ref().map(|items| items.as_slice()),
-            )?;
-        }
-        Ok(ids)
-    });
-
-    match result {
-        Ok(ids) => {
-            if query.return_ids.unwrap_or(true) {
-                ApiResponse::success(serde_json::json!({
-                    "database_name": query.database_name,
-                    "collection_name": query.collection_name,
-                    "ids": ids
-                }))
-            } else {
-                ApiResponse::success(serde_json::json!({
-                    "database_name": query.database_name,
-                    "collection_name": query.collection_name,
-                    "n_vectors": n_vectors
-                }))
-            }
-        }
-        Err(e) => error_response(&e.to_string()),
-    }
-}
-
-async fn bulk_add_items(
-    state: web::Data<AppState>,
-    body: web::Json<BulkAddItemsRequest>,
-) -> HttpResponse {
-    if body.items.is_empty() {
-        return bad_request("No items provided");
-    }
-
-    let dim = body.items[0].vector.len();
-    let n_vectors = body.items.len();
-    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "items") {
-        return limit_bad_request(e);
-    }
-    let vector_bytes = match checked_vector_bytes(n_vectors, dim) {
-        Ok(bytes) => bytes,
-        Err(e) => return limit_bad_request(e),
-    };
-    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "items") {
-        return limit_bad_request(e);
-    }
-    let mut flat_vectors: Vec<f32> = Vec::with_capacity(n_vectors * dim);
-    let mut fields: Vec<HashMap<String, serde_json::Value>> = Vec::with_capacity(n_vectors);
-    let mut ids: Vec<Option<u64>> = Vec::with_capacity(n_vectors);
-
-    for item in &body.items {
-        if item.vector.len() != dim {
-            return bad_request("all vectors in a batch must have the same dimension");
-        }
-        flat_vectors.extend_from_slice(&item.vector);
-        fields.push(item.field.clone().unwrap_or_default());
-        ids.push(item.id);
-    }
-
-    let has_fields = fields.iter().any(|f| !f.is_empty());
-
-    if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
-    }
-    let limits = state.limits;
-    let result = state.manager.with_database(&body.database_name, |engine| {
-        let coll_arc = engine.get_or_open_collection(&body.collection_name, dim, 100_000)?;
-        let mut coll = coll_arc.write();
-        let mut next_id = coll.max_id().map(|max_id| max_id + 1).unwrap_or(0);
-        let mut reserved = HashSet::with_capacity(n_vectors);
-        let mut resolved_ids = Vec::with_capacity(n_vectors);
-        for opt_id in &ids {
-            if let Some(id) = opt_id {
-                reserved.insert(*id);
-                resolved_ids.push(*id);
-            } else {
-                while coll.is_id_exists(next_id) || reserved.contains(&next_id) {
-                    next_id += 1;
-                }
-                resolved_ids.push(next_id);
-                reserved.insert(next_id);
-                next_id += 1;
-            }
-        }
-        validate_collection_insert(&limits, &coll, n_vectors as u64, vector_bytes)?;
-        if has_fields {
-            coll.add_items(&flat_vectors, n_vectors, &resolved_ids, Some(&fields))?;
-        } else {
-            coll.add_items(&flat_vectors, n_vectors, &resolved_ids, None)?;
-        }
-        Ok(resolved_ids)
-    });
-
-    match result {
-        Ok(resolved_ids) => ApiResponse::success(serde_json::json!({
-            "database_name": body.database_name,
-            "collection_name": body.collection_name,
-            "ids": resolved_ids
         })),
         Err(e) => error_response(&e.to_string()),
     }
@@ -2943,8 +2944,9 @@ async fn add_named_vectors(
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
         let mut coll = coll_arc.write();
+        let internal_ids = internal_ids_for_external(&coll, &body.ids)?;
         validate_collection_vector_bytes(&limits, coll.estimated_vector_bytes()?, vector_bytes)?;
-        coll.add_named_vectors(&body.field_name, &flat_vectors, n_vectors, &body.ids)
+        coll.add_named_vectors(&body.field_name, &flat_vectors, n_vectors, &internal_ids)
     });
 
     match result {
@@ -2983,7 +2985,10 @@ async fn add_sparse_vectors(
         &state.manager,
         &body.database_name,
         &body.collection_name,
-        |coll| coll.add_sparse_vectors(&body.ids, &vectors),
+        |coll| {
+            let internal_ids = internal_ids_for_external(coll, &body.ids)?;
+            coll.add_sparse_vectors(&internal_ids, &vectors)
+        },
     );
 
     match result {
@@ -2992,86 +2997,6 @@ async fn add_sparse_vectors(
             "collection_name": body.collection_name,
             "ids": body.ids,
         })),
-        Err(e) => error_response(&e.to_string()),
-    }
-}
-
-async fn upsert_items_binary(
-    state: web::Data<AppState>,
-    query: web::Query<BinaryItemsQuery>,
-    body: web::Bytes,
-) -> HttpResponse {
-    let dim = query.dim;
-    let n_vectors = query.n_vectors;
-    if n_vectors == 0 {
-        return bad_request("No items provided");
-    }
-    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "n_vectors") {
-        return limit_bad_request(e);
-    }
-    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "binary items") {
-        return limit_bad_request(e);
-    }
-
-    let (vectors, ids, fields) = match crate::rpc::split_binary_item_payload_with_ids(
-        &body,
-        n_vectors * dim,
-        n_vectors,
-        query.vector_encoding.as_deref(),
-        query.ids_encoding.as_deref(),
-        query.ids_start,
-    ) {
-        Ok(parsed) => parsed,
-        Err(e) => return bad_request(&e.to_string()),
-    };
-    if let Some(fields) = fields.as_ref() {
-        if fields.len() != n_vectors {
-            return bad_request(&format!(
-                "fields length ({}) must match n_vectors ({})",
-                fields.len(),
-                n_vectors
-            ));
-        }
-    }
-    let mut seen_ids = HashSet::with_capacity(ids.len());
-    for &id in &ids {
-        if !seen_ids.insert(id) {
-            return bad_request(&format!("duplicate id {} within the same upsert batch", id));
-        }
-    }
-
-    if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
-        return error_response(&e.to_string());
-    }
-
-    let limits = state.limits;
-    let result = state.manager.with_database(&query.database_name, |engine| {
-        let coll_arc = engine.get_or_open_collection(&query.collection_name, dim, 100_000)?;
-        let mut coll = coll_arc.write();
-
-        let additional_vectors = ids.iter().filter(|&&id| !coll.is_id_exists(id)).count() as u64;
-        let additional_bytes = checked_vector_bytes(additional_vectors as usize, dim)?;
-        validate_collection_insert(&limits, &coll, additional_vectors, additional_bytes)?;
-        crate::rpc::upsert_binary_items(&mut coll, &ids, dim, vectors.as_ref(), fields.as_ref())?;
-        Ok(ids)
-    });
-
-    match result {
-        Ok(ids) => {
-            if query.return_ids.unwrap_or(true) {
-                ApiResponse::success(serde_json::json!({
-                    "database_name": query.database_name,
-                    "collection_name": query.collection_name,
-                    "ids": ids
-                }))
-            } else {
-                ApiResponse::success(serde_json::json!({
-                    "database_name": query.database_name,
-                    "collection_name": query.collection_name,
-                    "n_vectors": n_vectors
-                }))
-            }
-        }
         Err(e) => error_response(&e.to_string()),
     }
 }
@@ -3138,103 +3063,6 @@ async fn remove_vector_field_index(
     }
 }
 
-async fn upsert_items(
-    state: web::Data<AppState>,
-    body: web::Json<BulkAddItemsRequest>,
-) -> HttpResponse {
-    if body.items.is_empty() {
-        return bad_request("No items provided");
-    }
-
-    let dim = body.items[0].vector.len();
-    let n_vectors = body.items.len();
-    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "items") {
-        return limit_bad_request(e);
-    }
-    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "items") {
-        return limit_bad_request(e);
-    }
-    for item in &body.items {
-        if item.vector.len() != dim {
-            return bad_request("all vectors in a batch must have the same dimension");
-        }
-    }
-
-    if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
-    }
-
-    let limits = state.limits;
-    let result = state.manager.with_database(&body.database_name, |engine| {
-        let coll_arc = engine.get_or_open_collection(&body.collection_name, dim, 100_000)?;
-        let mut coll = coll_arc.write();
-
-        let mut vectors_with_fields = Vec::new();
-        let mut ids_with_fields = Vec::new();
-        let mut fields_with_fields = Vec::new();
-        let mut vectors_without_fields = Vec::new();
-        let mut ids_without_fields = Vec::new();
-        let mut returned_ids = Vec::with_capacity(body.items.len());
-        let mut seen_ids = HashSet::with_capacity(body.items.len());
-
-        for item in &body.items {
-            let user_id = item.id.ok_or_else(|| {
-                LynseError::InvalidArgument("upsert_items requires every item to include id".into())
-            })?;
-            if !seen_ids.insert(user_id) {
-                return Err(LynseError::InvalidArgument(format!(
-                    "duplicate id {} within the same upsert batch",
-                    user_id
-                )));
-            }
-            returned_ids.push(user_id);
-            if let Some(field) = item.field.clone() {
-                vectors_with_fields.extend_from_slice(&item.vector);
-                ids_with_fields.push(user_id);
-                fields_with_fields.push(field);
-            } else {
-                vectors_without_fields.extend_from_slice(&item.vector);
-                ids_without_fields.push(user_id);
-            }
-        }
-
-        let additional_vectors = returned_ids
-            .iter()
-            .filter(|&&id| !coll.is_id_exists(id))
-            .count() as u64;
-        let additional_bytes = checked_vector_bytes(additional_vectors as usize, dim)?;
-        validate_collection_insert(&limits, &coll, additional_vectors, additional_bytes)?;
-
-        if !ids_without_fields.is_empty() {
-            coll.upsert_items(
-                &ids_without_fields,
-                &vectors_without_fields,
-                ids_without_fields.len(),
-                None,
-            )?;
-        }
-        if !ids_with_fields.is_empty() {
-            coll.upsert_items(
-                &ids_with_fields,
-                &vectors_with_fields,
-                ids_with_fields.len(),
-                Some(&fields_with_fields),
-            )?;
-        }
-
-        Ok(returned_ids)
-    });
-
-    match result {
-        Ok(ids) => ApiResponse::success(serde_json::json!({
-            "database_name": body.database_name,
-            "collection_name": body.collection_name,
-            "ids": ids
-        })),
-        Err(e) => error_response(&e.to_string()),
-    }
-}
-
 async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> HttpResponse {
     let k = body.k.unwrap_or(10);
     if let Err(e) = validate_top_k(&state.limits, k, "k") {
@@ -3276,12 +3104,12 @@ async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> H
             Vec::new()
         };
 
-        Ok((sr, fields_data))
+        let external_ids = external_ids_vec(&coll, &sr.ids);
+        Ok((sr, external_ids, fields_data))
     });
 
     match result {
-        Ok((sr, fields_data)) => {
-            let ids: Vec<i64> = sr.ids.iter().map(|&id| id as i64).collect();
+        Ok((sr, ids, fields_data)) => {
             let scores = sr.distances;
             let fields: Vec<HashMap<String, serde_json::Value>> = if return_fields {
                 fields_data
@@ -3334,26 +3162,24 @@ async fn search_profile(
             } else {
                 Vec::new()
             };
-            Ok((sr, fields_data, profile))
+            let external_ids = external_ids_vec(coll, &sr.ids);
+            Ok((sr, external_ids, fields_data, profile))
         },
     );
 
     match result {
-        Ok((sr, fields_data, profile)) => {
-            let ids: Vec<i64> = sr.ids.iter().map(|&id| id as i64).collect();
-            ApiResponse::success(serde_json::json!({
-                "database_name": body.database_name,
-                "collection_name": body.collection_name,
-                "items": {
-                    "k": k,
-                    "ids": ids,
-                    "scores": sr.distances,
-                    "fields": if return_fields { fields_data } else { Vec::new() },
-                    "index": sr.index_mode,
-                },
-                "profile": profile,
-            }))
-        }
+        Ok((sr, ids, fields_data, profile)) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "items": {
+                "k": k,
+                "ids": ids,
+                "scores": sr.distances,
+                "fields": if return_fields { fields_data } else { Vec::new() },
+                "index": sr.index_mode,
+            },
+            "profile": profile,
+        })),
         Err(e) => error_response(&e.to_string()),
     }
 }
@@ -3380,25 +3206,23 @@ async fn text_search(
             } else {
                 Vec::new()
             };
-            Ok((sr, fields_data))
+            let external_ids = external_ids_vec(coll, &sr.ids);
+            Ok((sr, external_ids, fields_data))
         },
     );
 
     match result {
-        Ok((sr, fields_data)) => {
-            let ids: Vec<i64> = sr.ids.iter().map(|&id| id as i64).collect();
-            ApiResponse::success(serde_json::json!({
-                "database_name": body.database_name,
-                "collection_name": body.collection_name,
-                "items": {
-                    "k": k,
-                    "ids": ids,
-                    "scores": sr.distances,
-                    "fields": if return_fields { fields_data } else { Vec::new() },
-                    "index": sr.index_mode,
-                }
-            }))
-        }
+        Ok((sr, ids, fields_data)) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "items": {
+                "k": k,
+                "ids": ids,
+                "scores": sr.distances,
+                "fields": if return_fields { fields_data } else { Vec::new() },
+                "index": sr.index_mode,
+            }
+        })),
         Err(e) => error_response(&e.to_string()),
     }
 }
@@ -3429,25 +3253,23 @@ async fn sparse_search(
             } else {
                 Vec::new()
             };
-            Ok((sr, fields_data))
+            let external_ids = external_ids_vec(coll, &sr.ids);
+            Ok((sr, external_ids, fields_data))
         },
     );
 
     match result {
-        Ok((sr, fields_data)) => {
-            let ids: Vec<i64> = sr.ids.iter().map(|&id| id as i64).collect();
-            ApiResponse::success(serde_json::json!({
-                "database_name": body.database_name,
-                "collection_name": body.collection_name,
-                "items": {
-                    "k": k,
-                    "ids": ids,
-                    "scores": sr.distances,
-                    "fields": if return_fields { fields_data } else { Vec::new() },
-                    "index": sr.index_mode,
-                }
-            }))
-        }
+        Ok((sr, ids, fields_data)) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "items": {
+                "k": k,
+                "ids": ids,
+                "scores": sr.distances,
+                "fields": if return_fields { fields_data } else { Vec::new() },
+                "index": sr.index_mode,
+            }
+        })),
         Err(e) => error_response(&e.to_string()),
     }
 }
@@ -3499,26 +3321,24 @@ async fn hybrid_search(
             } else {
                 Vec::new()
             };
-            Ok((sr, fields_data))
+            let external_ids = external_ids_vec(coll, &sr.ids);
+            Ok((sr, external_ids, fields_data))
         },
     );
 
     match result {
-        Ok((sr, fields_data)) => {
-            let ids: Vec<i64> = sr.ids.iter().map(|&id| id as i64).collect();
-            ApiResponse::success(serde_json::json!({
-                "database_name": body.database_name,
-                "collection_name": body.collection_name,
-                "items": {
-                    "k": k,
-                    "ids": ids,
-                    "scores": sr.distances,
-                    "fields": if return_fields { fields_data } else { Vec::new() },
-                    "index": sr.index_mode,
-                    "fusion": fusion,
-                }
-            }))
-        }
+        Ok((sr, ids, fields_data)) => ApiResponse::success(serde_json::json!({
+            "database_name": body.database_name,
+            "collection_name": body.collection_name,
+            "items": {
+                "k": k,
+                "ids": ids,
+                "scores": sr.distances,
+                "fields": if return_fields { fields_data } else { Vec::new() },
+                "index": sr.index_mode,
+                "fusion": fusion,
+            }
+        })),
         Err(e) => error_response(&e.to_string()),
     }
 }
@@ -3567,7 +3387,7 @@ async fn batch_search(
 
         let mut all_results = Vec::with_capacity(results.len());
         for sr in &results {
-            let ids: Vec<i64> = sr.ids.iter().map(|&id| id as i64).collect();
+            let ids = external_ids_vec(&coll, &sr.ids);
             let fields_data = if return_fields && !sr.ids.is_empty() {
                 coll.retrieve_fields(&sr.ids)?
             } else {
@@ -3594,75 +3414,11 @@ async fn batch_search(
 }
 
 async fn commit(state: web::Data<AppState>, body: web::Json<CommitRequest>) -> HttpResponse {
-    if let Some(ref items) = body.items {
-        if let Err(e) = validate_batch_vectors(&state.limits, items.len(), "items") {
-            return limit_bad_request(e);
-        }
-        if let Some(first) = items.first() {
-            let dim = first.vector.len();
-            if let Err(e) = validate_request_vector_bytes(&state.limits, items.len(), dim, "items")
-            {
-                return limit_bad_request(e);
-            }
-            for item in items {
-                if item.vector.len() != dim {
-                    return bad_request("all vectors in a batch must have the same dimension");
-                }
-            }
-        }
-    }
-
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
         return error_response(&e.to_string());
     }
-    let limits = state.limits;
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
-
-        // Add pending items if any
-        if let Some(ref items) = body.items {
-            if !items.is_empty() {
-                let dim = items[0].vector.len();
-                let n_vectors = items.len();
-                let vector_bytes = checked_vector_bytes(n_vectors, dim)?;
-                let mut flat_vectors: Vec<f32> = Vec::with_capacity(n_vectors * dim);
-                let mut fields: Vec<HashMap<String, serde_json::Value>> =
-                    Vec::with_capacity(n_vectors);
-
-                let mut requested_ids: Vec<Option<u64>> = Vec::with_capacity(n_vectors);
-                for item in items.iter() {
-                    flat_vectors.extend_from_slice(&item.vector);
-                    fields.push(item.field.clone().unwrap_or_default());
-                    requested_ids.push(item.id);
-                }
-
-                let has_fields = fields.iter().any(|f| !f.is_empty());
-                let mut coll = coll_arc.write();
-                let mut next_id = coll.max_id().map(|max_id| max_id + 1).unwrap_or(0);
-                let mut reserved = HashSet::with_capacity(n_vectors);
-                let mut item_ids: Vec<u64> = Vec::with_capacity(n_vectors);
-                for opt_id in &requested_ids {
-                    if let Some(id) = opt_id {
-                        reserved.insert(*id);
-                        item_ids.push(*id);
-                    } else {
-                        while coll.is_id_exists(next_id) || reserved.contains(&next_id) {
-                            next_id += 1;
-                        }
-                        item_ids.push(next_id);
-                        reserved.insert(next_id);
-                        next_id += 1;
-                    }
-                }
-                validate_collection_insert(&limits, &coll, n_vectors as u64, vector_bytes)?;
-                if has_fields {
-                    coll.add_items(&flat_vectors, n_vectors, &item_ids, Some(&fields))?;
-                } else {
-                    coll.add_items(&flat_vectors, n_vectors, &item_ids, None)?;
-                }
-            }
-        }
-
         let coll = coll_arc.read();
         coll.commit()?;
         Ok(())
@@ -3962,7 +3718,7 @@ async fn head(state: web::Data<AppState>, body: web::Json<HeadTailRequest>) -> H
             let vectors: Vec<Vec<f32>> = (0..n_vecs)
                 .map(|i| data[i * dim_..(i + 1) * dim_].to_vec())
                 .collect();
-            let ids: Vec<i64> = user_ids.iter().map(|&id| id as i64).collect();
+            let ids = external_ids_vec(coll, &user_ids);
 
             Ok((vectors, ids, fields))
         },
@@ -3996,7 +3752,7 @@ async fn tail(state: web::Data<AppState>, body: web::Json<HeadTailRequest>) -> H
             let vectors: Vec<Vec<f32>> = (0..n_vecs)
                 .map(|i| data[i * dim_..(i + 1) * dim_].to_vec())
                 .collect();
-            let ids: Vec<i64> = user_ids.iter().map(|&id| id as i64).collect();
+            let ids = external_ids_vec(coll, &user_ids);
 
             Ok((vectors, ids, fields))
         },
@@ -4048,18 +3804,16 @@ async fn query(state: web::Data<AppState>, body: web::Json<QueryRequest>) -> Htt
             if let Some(expr) = filter_expr {
                 if return_ids_only {
                     let ids = coll.query_fields(expr)?;
-                    return Ok(serde_json::json!(ids
-                        .iter()
-                        .map(|&id| id as i64)
-                        .collect::<Vec<i64>>()));
+                    return Ok(external_ids_json(coll, &ids));
                 }
                 let (ids, fields) = coll.query_with_fields(expr)?;
-                let records: Vec<serde_json::Value> = ids
+                let external_ids = external_ids_vec(coll, &ids);
+                let records: Vec<serde_json::Value> = external_ids
                     .iter()
                     .zip(fields.iter())
-                    .map(|(&id, f)| {
+                    .map(|(external_id, f)| {
                         let mut rec = f.clone();
-                        rec.insert("id".to_string(), serde_json::json!(id as i64));
+                        rec.insert("id".to_string(), serde_json::json!(external_id));
                         serde_json::json!(rec)
                     })
                     .collect();
@@ -4067,26 +3821,22 @@ async fn query(state: web::Data<AppState>, body: web::Json<QueryRequest>) -> Htt
             }
 
             let ids = if let Some(ref filter_ids) = body.filter_ids {
-                filter_ids.clone()
+                internal_ids_for_external(coll, filter_ids)?
             } else {
-                // Return all IDs
-                let (n, _) = coll.shape()?;
-                (0..n).collect()
+                coll.all_internal_ids()
             };
 
             if return_ids_only {
-                Ok(serde_json::json!(ids
-                    .iter()
-                    .map(|&id| id as i64)
-                    .collect::<Vec<i64>>()))
+                Ok(external_ids_json(coll, &ids))
             } else {
                 let fields = coll.retrieve_fields(&ids)?;
-                let records: Vec<serde_json::Value> = ids
+                let external_ids = external_ids_vec(coll, &ids);
+                let records: Vec<serde_json::Value> = external_ids
                     .iter()
                     .zip(fields.iter())
-                    .map(|(&id, f)| {
+                    .map(|(external_id, f)| {
                         let mut rec = f.clone();
-                        rec.insert("id".to_string(), serde_json::json!(id as i64));
+                        rec.insert("id".to_string(), serde_json::json!(external_id));
                         serde_json::json!(rec)
                     })
                     .collect();
@@ -4126,10 +3876,9 @@ async fn query_vectors(
             let ids = if let Some(expr) = filter_expr {
                 coll.query_fields(expr)?
             } else if let Some(ref filter_ids) = body.filter_ids {
-                filter_ids.clone()
+                internal_ids_for_external(coll, filter_ids)?
             } else {
-                let (n, _) = coll.shape()?;
-                (0..n).collect()
+                coll.all_internal_ids()
             };
 
             let (flat_data, fields) = coll.read_vectors_by_ids(&ids)?;
@@ -4137,7 +3886,7 @@ async fn query_vectors(
             let vectors: Vec<Vec<f32>> = (0..n_vecs)
                 .map(|i| flat_data[i * dim..(i + 1) * dim].to_vec())
                 .collect();
-            let id_list: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
+            let id_list = external_ids_vec(coll, &ids);
 
             Ok((vectors, id_list, fields))
         },
@@ -4157,29 +3906,11 @@ async fn read_by_only_id(
     state: web::Data<AppState>,
     body: web::Json<ReadByIdRequest>,
 ) -> HttpResponse {
-    // Parse id field: can be single int or list of ints
-    let ids: Vec<u64> = match &body.id {
-        serde_json::Value::Number(n) => {
-            if let Some(id) = n.as_u64() {
-                vec![id]
-            } else {
-                return bad_request("Invalid id");
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            let mut ids = Vec::with_capacity(arr.len());
-            for v in arr {
-                if let Some(id) = v.as_u64() {
-                    ids.push(id);
-                } else {
-                    return bad_request("Invalid id in list");
-                }
-            }
-            ids
-        }
-        _ => return bad_request("id must be an integer or list of integers"),
+    let external_ids = match external_ids_from_json(&body.id) {
+        Ok(ids) => ids,
+        Err(e) => return bad_request(&e.to_string()),
     };
-    if let Err(e) = validate_batch_vectors(&state.limits, ids.len(), "ids") {
+    if let Err(e) = validate_batch_vectors(&state.limits, external_ids.len(), "ids") {
         return limit_bad_request(e);
     }
 
@@ -4188,13 +3919,14 @@ async fn read_by_only_id(
         &body.database_name,
         &body.collection_name,
         |coll| {
+            let ids = internal_ids_for_external(coll, &external_ids)?;
             let dim = coll.meta.dimension;
             let (flat_data, fields) = coll.read_vectors_by_ids(&ids)?;
             let n_vecs = if dim > 0 { flat_data.len() / dim } else { 0 };
             let vectors: Vec<Vec<f32>> = (0..n_vecs)
                 .map(|i| flat_data[i * dim..(i + 1) * dim].to_vec())
                 .collect();
-            let id_list: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
+            let id_list = external_ids_vec(coll, &ids);
             Ok((vectors, id_list, fields))
         },
     );
@@ -4209,7 +3941,7 @@ async fn read_by_only_id(
     }
 }
 
-async fn delete_items(
+async fn delete_records(
     state: web::Data<AppState>,
     body: web::Json<DeleteItemsRequest>,
 ) -> HttpResponse {
@@ -4220,7 +3952,10 @@ async fn delete_items(
         &state.manager,
         &body.database_name,
         &body.collection_name,
-        |coll| coll.delete_items(&body.ids),
+        |coll| {
+            let internal_ids = existing_internal_ids_for_external(coll, &body.ids);
+            coll.delete_items(&internal_ids)
+        },
     );
     match result {
         Ok(_) => ApiResponse::success(serde_json::json!({
@@ -4232,7 +3967,7 @@ async fn delete_items(
     }
 }
 
-async fn restore_items(
+async fn restore_records(
     state: web::Data<AppState>,
     body: web::Json<DeleteItemsRequest>,
 ) -> HttpResponse {
@@ -4243,7 +3978,10 @@ async fn restore_items(
         &state.manager,
         &body.database_name,
         &body.collection_name,
-        |coll| coll.restore_items(&body.ids),
+        |coll| {
+            let internal_ids = existing_internal_ids_for_external(coll, &body.ids);
+            coll.restore_items(&internal_ids)
+        },
     );
     match result {
         Ok(_) => ApiResponse::success(serde_json::json!({
@@ -4263,7 +4001,7 @@ async fn list_deleted_ids(
         &state.manager,
         &body.database_name,
         &body.collection_name,
-        |coll| Ok(coll.list_deleted_ids()),
+        |coll| Ok(external_ids_vec(coll, &coll.list_deleted_ids())),
     );
     match result {
         Ok(ids) => ApiResponse::success(serde_json::json!({
@@ -4289,7 +4027,10 @@ async fn search_range(
         &state.manager,
         &body.database_name,
         &body.collection_name,
-        |coll| coll.search_range(&body.vector, body.threshold, body.max_results),
+        |coll| {
+            let (ids, dists) = coll.search_range(&body.vector, body.threshold, body.max_results)?;
+            Ok((external_ids_vec(coll, &ids), dists))
+        },
     );
     match result {
         Ok((ids, dists)) => ApiResponse::success(serde_json::json!({
@@ -4351,7 +4092,7 @@ async fn is_id_exists(
         &state.manager,
         &body.database_name,
         &body.collection_name,
-        |coll| Ok(coll.is_id_exists(body.id)),
+        |coll| Ok(coll.is_external_id_exists(&body.id)),
     );
 
     match result {
@@ -4759,12 +4500,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/restore_collection", web::post().to(restore_collection))
         .route("/import_collection", web::post().to(import_collection))
         .route("/show_collections", web::post().to(show_collections))
-        .route("/add_item", web::post().to(add_item))
-        .route("/bulk_add_items", web::post().to(bulk_add_items))
-        .route(
-            "/bulk_add_items_binary",
-            web::post().to(bulk_add_items_binary),
-        )
+        .route("/add", web::post().to(add_records))
         .route("/create_vector_field", web::post().to(create_vector_field))
         .route("/list_vector_fields", web::post().to(list_vector_fields))
         .route("/add_named_vectors", web::post().to(add_named_vectors))
@@ -4777,11 +4513,11 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
             "/remove_vector_field_index",
             web::post().to(remove_vector_field_index),
         )
-        .route("/upsert_items", web::post().to(upsert_items))
-        .route("/upsert_items_binary", web::post().to(upsert_items_binary))
+        .route("/upsert", web::post().to(upsert_records))
         .route("/bulk_add_binary", web::post().to(bulk_add_binary))
         .route("/search", web::post().to(search))
         .route("/search_profile", web::post().to(search_profile))
+        .route("/bm25_search", web::post().to(text_search))
         .route("/text_search", web::post().to(text_search))
         .route("/sparse_search", web::post().to(sparse_search))
         .route("/hybrid_search", web::post().to(hybrid_search))
@@ -4824,8 +4560,8 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/is_id_exists", web::post().to(is_id_exists))
         .route("/max_id", web::post().to(max_id))
         .route("/read_by_only_id", web::post().to(read_by_only_id))
-        .route("/delete_items", web::post().to(delete_items))
-        .route("/restore_items", web::post().to(restore_items))
+        .route("/delete", web::post().to(delete_records))
+        .route("/restore", web::post().to(restore_records))
         .route("/list_deleted_ids", web::post().to(list_deleted_ids))
         .route("/search_range", web::post().to(search_range))
         .route("/compact", web::post().to(compact))
@@ -5206,7 +4942,7 @@ mod tests {
     #[test]
     fn audit_action_classifier_only_marks_mutations() {
         assert_eq!(audit_action_for_path("/build_index"), Some("build_index"));
-        assert_eq!(audit_action_for_path("/add_item"), Some("add_item"));
+        assert_eq!(audit_action_for_path("/add"), Some("add"));
         assert_eq!(audit_action_for_path("/search"), None);
         assert_eq!(audit_action_for_path("/metrics"), None);
     }

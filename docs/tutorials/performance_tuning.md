@@ -28,8 +28,7 @@ db = client.create_database("perf", drop_if_exists=True)
 collection = db.require_collection("vectors", dim=dim, drop_if_exists=True)
 
 vectors = np.random.rand(n, dim).astype(np.float32)
-collection.bulk_add_binary(vectors, batch_size=10_000, enable_progress_bar=False)
-collection.commit()
+collection.add(ids=list(range(n)), vectors=vectors, batch_size=10_000)
 
 query = np.random.rand(dim).astype(np.float32)
 
@@ -51,19 +50,28 @@ Use the flat result as a quality reference when evaluating approximate indexes.
 
 ## 2. Tune ingestion
 
-Use `bulk_add_items()` when you need metadata:
+Use `add()` for both vector-only and metadata-rich batches:
+
+```python
+collection.add(
+    ids=ids,
+    vectors=vectors,
+    fields=fields,
+    batch_size=1000,
+)
+```
+
+Use `insert_session()` when a pipeline produces many batches:
 
 ```python
 with collection.insert_session() as session:
-    session.bulk_add_items(items, batch_size=1000, enable_progress_bar=False)
-```
-
-Use `bulk_add_binary()` when you have a dense NumPy array and no metadata in the
-same call:
-
-```python
-collection.bulk_add_binary(vectors, batch_size=50_000, enable_progress_bar=False)
-collection.commit()
+    for ids, vectors, fields in embedding_batches:
+        session.add(
+            ids=ids,
+            vectors=vectors,
+            fields=fields,
+            batch_size=1000,
+        )
 ```
 
 Ingestion tips:
@@ -256,7 +264,7 @@ Deletes are soft deletes. Many tombstones can waste space and affect
 inspection:
 
 ```python
-collection.delete_items(ids_to_remove)
+collection.delete(ids_to_remove)
 collection.commit()
 
 print(collection.stats())

@@ -1,7 +1,7 @@
 # Tutorial: Search and Filter
 
-This tutorial covers vector search, metadata filters, batch search, range search,
-text search, hybrid search, and reranking.
+This tutorial covers vector search, document search, metadata filters, batch
+search, range search, BM25 search, hybrid search, and reranking.
 
 ## Setup
 
@@ -13,15 +13,21 @@ client = lynse.VectorDBClient(uri="./search-demo")
 db = client.create_database("search_demo", drop_if_exists=True)
 collection = db.require_collection("docs", dim=4, drop_if_exists=True)
 
-items = [
-    ([0.10, 0.20, 0.30, 0.40], 1, {"title": "vector database intro", "lang": "en", "rank": 1, "tags": ["vector", "database"]}),
-    ([0.11, 0.19, 0.29, 0.39], 2, {"title": "python client guide", "lang": "en", "rank": 2, "tags": ["python"]}),
-    ([0.80, 0.10, 0.20, 0.10], 3, {"title": "rust backend notes", "lang": "en", "rank": 3, "tags": ["rust"]}),
-    ([0.70, 0.12, 0.19, 0.13], 4, {"title": "archive", "lang": "fr", "rank": 4, "tags": ["archive"]}),
-]
-
-with collection.insert_session() as session:
-    session.bulk_add_items(items, enable_progress_bar=False)
+collection.add(
+    ids=["intro", "python-guide", "rust-notes", "archive-fr"],
+    vectors=[
+        [0.10, 0.20, 0.30, 0.40],
+        [0.11, 0.19, 0.29, 0.39],
+        [0.80, 0.10, 0.20, 0.10],
+        [0.70, 0.12, 0.19, 0.13],
+    ],
+    fields=[
+        {"title": "vector database intro", "lang": "en", "rank": 1, "tags": ["vector", "database"]},
+        {"title": "python client guide", "lang": "en", "rank": 2, "tags": ["python"]},
+        {"title": "rust backend notes", "lang": "en", "rank": 3, "tags": ["rust"]},
+        {"title": "archive", "lang": "fr", "rank": 4, "tags": ["archive"]},
+    ],
+)
 
 collection.build_index("FLAT-L2")
 ```
@@ -62,6 +68,23 @@ The meaning of `distances` depends on the index metric:
 | Cosine | higher score is better | `score >= threshold` |
 | L2 | lower squared distance is better | `distance <= threshold` |
 | Hamming/Jaccard | lower distance is better | `distance <= threshold` |
+
+## Document search
+
+If you inserted documents with `collection.add(ids=..., documents=...)`, search
+with text directly:
+
+```python
+result = collection.search(
+    document="vector database guide",
+    k=3,
+    return_fields=True,
+)
+print(result.to_list())
+```
+
+LynseDB embeds the query text with the same default embedding path used for
+document insertion.
 
 ## Metadata filters
 
@@ -192,12 +215,12 @@ print(profile["profile"])
 Use profiles during tuning, not as the primary application response. They are
 intended to explain candidate counts and timing details.
 
-## Text search
+## BM25 search
 
-Text search runs BM25 over stored metadata fields.
+BM25 search runs over stored metadata fields.
 
 ```python
-result = collection.text_search(
+result = collection.bm25_search(
     "vector database",
     k=3,
     text_fields=["title"],
@@ -208,7 +231,7 @@ print(result.to_list())
 
 `text_fields=None` searches all text-like metadata fields.
 
-Text search works best when text fields contain normal words, titles, tags, or
+BM25 search works best when text fields contain normal words, titles, tags, or
 short chunks. Keep binary payloads and very large documents out of metadata
 unless you actually want them searched.
 

@@ -12,7 +12,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::engine::{Collection, DatabaseEngine, DatabaseManager, SearchResult, VectorFieldConfig};
+use crate::engine::{
+    Collection, DatabaseEngine, DatabaseManager, ExternalId, SearchResult, VectorFieldConfig,
+};
 use crate::storage::dtype::VectorDtype;
 
 /// Register all Python classes and functions into the module.
@@ -154,6 +156,29 @@ pub struct PyCollection {
 
 #[pymethods]
 impl PyCollection {
+    /// Add records with public string/integer external IDs.
+    #[pyo3(signature = (vectors, ids, fields=None))]
+    fn add_records<'py>(
+        &self,
+        py: Python<'py>,
+        vectors: PyReadonlyArray2<f32>,
+        ids: &Bound<'_, PyList>,
+        fields: Option<&Bound<'_, PyList>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let array = vectors.as_array();
+        let n_vectors = array.nrows();
+        let flat_data: &[f32] = array
+            .as_slice()
+            .expect("numpy array must be contiguous (C-order)");
+        let external_ids = pylist_to_external_ids(ids)?;
+        let rust_fields = py_fields_to_json(fields, n_vectors)?;
+
+        let mut coll = self.inner.write();
+        coll.add_records(flat_data, n_vectors, &external_ids, rust_fields.as_deref())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        external_ids_to_pylist(py, &external_ids)
+    }
+
     /// Add vectors with user-specified IDs and optional field metadata.
     ///
     /// Args:
@@ -176,23 +201,7 @@ impl PyCollection {
             .as_slice()
             .expect("numpy array must be contiguous (C-order)");
 
-        // Convert Python dicts to Rust HashMaps
-        let rust_fields = if let Some(field_list) = fields {
-            let mut result: Vec<HashMap<String, serde_json::Value>> = Vec::with_capacity(n_vectors);
-            for item in field_list.iter() {
-                let dict = item.downcast::<PyDict>()?;
-                let mut map = HashMap::new();
-                for (key, value) in dict.iter() {
-                    let k: String = key.extract()?;
-                    let v = py_to_json_value(&value)?;
-                    map.insert(k, v);
-                }
-                result.push(map);
-            }
-            Some(result)
-        } else {
-            None
-        };
+        let rust_fields = py_fields_to_json(fields, n_vectors)?;
 
         let mut coll = self.inner.write();
         coll.add_items(&flat_data, n_vectors, &ids, rust_fields.as_deref())
@@ -769,6 +778,27 @@ impl PyCollection {
             .retrieve_fields(&ids)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         fields_to_pylist(py, &fields)
+    }
+
+    /// Convert internal numeric IDs to public external IDs.
+    fn external_ids<'py>(&self, py: Python<'py>, ids: Vec<u64>) -> PyResult<Bound<'py, PyList>> {
+        let coll = self.inner.read();
+        external_ids_to_pylist(py, &coll.external_ids_for_internal_ids(&ids))
+    }
+
+    /// Convert public external IDs to internal numeric IDs.
+    fn internal_ids(&self, ids: &Bound<'_, PyList>) -> PyResult<Vec<u64>> {
+        let external_ids = pylist_to_external_ids(ids)?;
+        let coll = self.inner.read();
+        coll.internal_ids_for_external_ids(&external_ids)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    /// Check whether a public external ID exists in the collection.
+    fn is_external_id_exists(&self, id: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let external_id = py_to_external_id(id)?;
+        let coll = self.inner.read();
+        Ok(coll.is_external_id_exists(&external_id))
     }
 
     /// List all field names.
@@ -1504,6 +1534,55 @@ fn vector_fields_to_pylist<'py>(
         dict.set_item("index_mode", &field.index_mode)?;
         dict.set_item("dtypes", &field.dtypes)?;
         list.append(dict)?;
+    }
+    Ok(list)
+}
+
+fn py_to_external_id(obj: &Bound<'_, PyAny>) -> PyResult<ExternalId> {
+    if obj.extract::<bool>().is_ok() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "bool is not a valid LynseDB ID",
+        ));
+    }
+    if let Ok(value) = obj.extract::<u64>() {
+        return Ok(ExternalId::Int(value));
+    }
+    if let Ok(value) = obj.extract::<String>() {
+        if value.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "string IDs cannot be empty",
+            ));
+        }
+        return Ok(ExternalId::String(value));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "IDs must be strings or non-negative integers",
+    ))
+}
+
+fn pylist_to_external_ids(ids: &Bound<'_, PyList>) -> PyResult<Vec<ExternalId>> {
+    let mut out = Vec::with_capacity(ids.len());
+    for item in ids.iter() {
+        out.push(py_to_external_id(&item)?);
+    }
+    if out.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ids cannot be empty",
+        ));
+    }
+    Ok(out)
+}
+
+fn external_ids_to_pylist<'py>(
+    py: Python<'py>,
+    ids: &[ExternalId],
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for id in ids {
+        match id {
+            ExternalId::Int(value) => list.append(*value)?,
+            ExternalId::String(value) => list.append(value)?,
+        }
     }
     Ok(list)
 }

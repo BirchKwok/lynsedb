@@ -34,14 +34,14 @@ def apply_external_rerank(
     target_k = _resolve_target_k(len(ids), rerank_k)
     if target_k == 0:
         return (
-            np.array([], dtype=np.int64),
+            ids[:0],
             np.array([], dtype=np.float32),
             [],
         )
 
     if reranker is None:
         return (
-            ids[:target_k].astype(np.int64, copy=False),
+            ids[:target_k],
             scores[:target_k].astype(np.float32, copy=False),
             fields[:target_k] if fields else [],
         )
@@ -50,11 +50,11 @@ def apply_external_rerank(
         raise TypeError("reranker must be callable.")
 
     payload_items: List[Dict[str, Any]] = []
-    ids_list = ids.astype(np.int64, copy=False).tolist()
+    ids_list = ids.tolist()
     for idx, item_id in enumerate(ids_list):
         payload_items.append(
             {
-                "id": int(item_id),
+                "id": item_id,
                 "score": float(scores[idx]),
                 "field": fields[idx] if idx < len(fields) else None,
             }
@@ -67,7 +67,7 @@ def apply_external_rerank(
 
     id_to_pos = {item_id: pos for pos, item_id in enumerate(ids_list)}
     used_ids = set()
-    final_ids: List[int] = []
+    final_ids: List[Any] = []
     final_scores: List[float] = []
     final_fields: List[Dict[str, Any]] = []
 
@@ -103,7 +103,7 @@ def apply_external_rerank(
                 break
 
     return (
-        np.array(final_ids, dtype=np.int64),
+        np.array(final_ids, dtype=ids.dtype),
         np.array(final_scores, dtype=np.float32),
         final_fields if fields else [],
     )
@@ -120,9 +120,9 @@ def _resolve_target_k(total: int, rerank_k: Optional[int]) -> int:
 def _normalize_rerank_output(
     output: Any,
     *,
-    ids: List[int],
+    ids: List[Any],
     scores: np.ndarray,
-) -> Tuple[List[int], Optional[np.ndarray]]:
+) -> Tuple[List[Any], Optional[np.ndarray]]:
     if output is None:
         return list(ids), None
 
@@ -135,7 +135,7 @@ def _normalize_rerank_output(
     if isinstance(output, tuple) and len(output) == 2:
         left, right = output
         if _is_sequence(left) and _is_sequence(right):
-            ids_out = [int(v) for v in list(left)]
+            ids_out = list(left)
             scores_out = np.asarray(list(right), dtype=np.float32)
             if len(ids_out) != len(scores_out):
                 raise ValueError("reranker tuple output ids and scores length mismatch.")
@@ -155,11 +155,11 @@ def _normalize_rerank_output(
 def _normalize_dict_output(
     output: Dict[Any, Any],
     *,
-    ids: List[int],
+    ids: List[Any],
     scores: np.ndarray,
-) -> Tuple[List[int], Optional[np.ndarray]]:
+) -> Tuple[List[Any], Optional[np.ndarray]]:
     if "ids" in output:
-        ids_out = [int(v) for v in list(output["ids"])]
+        ids_out = list(output["ids"])
         if "scores" not in output:
             return ids_out, None
         scores_out = np.asarray(list(output["scores"]), dtype=np.float32)
@@ -167,13 +167,9 @@ def _normalize_dict_output(
             raise ValueError("reranker output dict ids and scores length mismatch.")
         return _order_by_scores(ids_out, scores_out)
 
-    pairs: List[Tuple[int, float]] = []
+    pairs: List[Tuple[Any, float]] = []
     for raw_id, raw_score in output.items():
-        try:
-            item_id = int(raw_id)
-        except Exception as exc:
-            raise ValueError("reranker output dict keys must be IDs.") from exc
-        pairs.append((item_id, float(raw_score)))
+        pairs.append((raw_id, float(raw_score)))
 
     pairs.sort(key=lambda x: x[1], reverse=True)
     return [item_id for item_id, _ in pairs], np.array(
@@ -184,38 +180,38 @@ def _normalize_dict_output(
 def _normalize_array_output(
     arr: np.ndarray,
     *,
-    ids: List[int],
-) -> Tuple[List[int], Optional[np.ndarray]]:
+    ids: List[Any],
+) -> Tuple[List[Any], Optional[np.ndarray]]:
     if arr.ndim != 1:
         raise ValueError("reranker numpy output must be 1D.")
     if arr.dtype.kind in ("i", "u"):
-        return [int(v) for v in arr.tolist()], None
+        return arr.tolist(), None
 
     if len(arr) != len(ids):
         raise ValueError("reranker scores length must match candidate count.")
     scores_out = np.asarray(arr, dtype=np.float32)
     order = np.argsort(-scores_out, kind="stable")
-    return [int(ids[i]) for i in order.tolist()], scores_out[order]
+    return [ids[i] for i in order.tolist()], scores_out[order]
 
 
 def _normalize_sequence_output(
     seq: List[Any],
     *,
-    ids: List[int],
-) -> Tuple[List[int], Optional[np.ndarray]]:
+    ids: List[Any],
+) -> Tuple[List[Any], Optional[np.ndarray]]:
     if not seq:
         return [], np.array([], dtype=np.float32)
 
     first = seq[0]
 
     if isinstance(first, dict):
-        ids_out: List[int] = []
+        ids_out: List[Any] = []
         scores_out: List[float] = []
         has_score = False
         for item in seq:
             if "id" not in item:
                 raise ValueError("reranker dict items must include 'id'.")
-            ids_out.append(int(item["id"]))
+            ids_out.append(item["id"])
             if "score" in item:
                 has_score = True
                 scores_out.append(float(item["score"]))
@@ -226,14 +222,14 @@ def _normalize_sequence_output(
         return ids_out, None
 
     if isinstance(first, (list, tuple, np.ndarray)):
-        ids_out: List[int] = []
+        ids_out: List[Any] = []
         scores_out: List[float] = []
         has_score = False
         for item in seq:
             values = list(item)
             if not values:
                 continue
-            ids_out.append(int(values[0]))
+            ids_out.append(values[0])
             if len(values) > 1:
                 has_score = True
                 scores_out.append(float(values[1]))
@@ -244,14 +240,18 @@ def _normalize_sequence_output(
         return ids_out, None
 
     if all(_is_int_like(v) for v in seq):
-        return [int(v) for v in seq], None
+        return list(seq), None
 
     if all(_is_number(v) for v in seq):
         if len(seq) != len(ids):
             raise ValueError("reranker scores length must match candidate count.")
         scores_out = np.asarray(seq, dtype=np.float32)
         order = np.argsort(-scores_out, kind="stable")
-        return [int(ids[i]) for i in order.tolist()], scores_out[order]
+        return [ids[i] for i in order.tolist()], scores_out[order]
+
+    candidate_ids = set(ids)
+    if all(value in candidate_ids for value in seq):
+        return list(seq), None
 
     raise ValueError("Unsupported sequence-style reranker output.")
 
@@ -268,6 +268,6 @@ def _is_sequence(value: Any) -> bool:
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
 
 
-def _order_by_scores(ids: List[int], scores: np.ndarray) -> Tuple[List[int], np.ndarray]:
+def _order_by_scores(ids: List[Any], scores: np.ndarray) -> Tuple[List[Any], np.ndarray]:
     order = np.argsort(-scores, kind="stable")
-    return [int(ids[i]) for i in order.tolist()], scores[order]
+    return [ids[i] for i in order.tolist()], scores[order]

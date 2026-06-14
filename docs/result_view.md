@@ -38,7 +38,7 @@ The main result types are:
 
 | Result type | Produced by | Main attributes |
 | --- | --- | --- |
-| `search` | `search`, `batch_search`, `search_range`, `text_search`, `search_sparse`, `hybrid_search` | `ids`, `distances`, optional `fields` |
+| `search` | `search`, `batch_search`, `search_range`, `bm25_search`, `search_sparse`, `hybrid_search` | `ids`, `distances`, optional `fields` |
 | `query` | `query` | `ids`, optional `fields` |
 | `data` | `query_vectors`, `head`, `tail`, remote `read_by_only_id` | `vectors`, `ids`, `fields` |
 

@@ -14,9 +14,20 @@ import numpy as np
 from tqdm import trange
 
 from ..utils.utils import collection_repr
+from ..utils.utils import thread_local
 from .._backend import DatabaseManager, Collection, SearchResult, _normalize_sparse_vector
 from ..result_view import ResultView, _parse_index_mode
 from .rerank import apply_external_rerank, should_fetch_fields
+from ._embedding import embed_documents
+from ._records import (
+    attach_documents,
+    id_array,
+    normalize_documents,
+    normalize_external_ids,
+    normalize_fields,
+    normalize_vectors,
+    validate_unique_external_ids,
+)
 
 
 DEFAULT_INSERT_BUFFER_SIZE = 10_000
@@ -304,46 +315,58 @@ class LocalCollection:
         """Check if the collection exists."""
         return self._manager.collection_exists(self._database_name, self._collection_name)
 
-    def add_item(self, vector: Union[list, np.ndarray], id: int, *,
-                 field: Union[dict, None] = None,
-                 buffer_size: int = True):
+    def add(
+            self,
+            ids,
+            *,
+            vectors=None,
+            documents=None,
+            fields=None,
+            batch_size: int = 1000,
+            wire_dtype: str = "float32",
+    ):
         """
-        Add an item to the collection.
+        Add one or more records.
 
-        Parameters:
-            vector (list or np.ndarray): The vector of the item.
-            id (int): The ID of the item.
-            field (dict, optional): The fields of the item.
-            buffer_size (int or bool): The buffer size.
-                If True, the default buffered batch size (10000) is used.
+        ``ids`` are public string/int IDs. LynseDB assigns internal integer row
+        IDs automatically and stores the public ID mapping in metadata.
+        Provide ``vectors`` for direct vector insert, or provide ``documents``
+        without vectors to trigger lazy local embedding.
         """
-        if buffer_size is True:
-            buffer_size = DEFAULT_INSERT_BUFFER_SIZE
+        del wire_dtype  # Local calls pass numpy arrays directly.
+        external_ids, single_id = normalize_external_ids(ids)
+        n_records = len(external_ids)
+        validate_unique_external_ids(external_ids)
+        docs, _ = normalize_documents(documents, n_records) if documents is not None else (None, False)
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+
+        if vectors is None:
+            if docs is None:
+                raise ValueError("add() requires vectors or documents")
+            vec_array = embed_documents(docs)
+            if vec_array.shape[0] != n_records:
+                raise ValueError("embedding output count must match ids length")
         else:
-            if buffer_size is False:
-                buffer_size = 0
-            elif not isinstance(buffer_size, int) or buffer_size < 0:
-                raise ValueError('If buffer_size is not bool, it must be a positive integer.')
+            vec_array = normalize_vectors(vectors, n_records)
 
-        if buffer_size == 0:
-            vec = np.ascontiguousarray(vector, dtype=np.float32).reshape(1, -1)
-            fields = [field] if field else None
-            self._rust_coll.add_items(vec, [int(id)], fields)
-            self.COMMIT_FLAG = False
-            return id
-        else:
-            vec = np.ascontiguousarray(vector, dtype=np.float32).reshape(-1)
-            with self._lock:
-                self._mesosphere_list.put({
-                    "vector": vec,
-                    "id": id,
-                    "field": field if field is not None else {},
-                })
+        field_list = normalize_fields(fields, n_records)
+        stored_fields = attach_documents(field_list, docs)
 
-            if self._mesosphere_list.qsize() >= buffer_size:
-                self._flush_buffer()
+        with self._lock:
+            added_ids = []
+            for start in range(0, n_records, batch_size):
+                end = min(start + batch_size, n_records)
+                added_ids.extend(self._rust_coll.add_records(
+                    vec_array[start:end],
+                    external_ids[start:end],
+                    stored_fields[start:end],
+                ))
 
-            return id
+        if getattr(thread_local, "caller_name", None) != "DataInsertionSession":
+            self._rust_coll.flush()
+        self.COMMIT_FLAG = False
+        return added_ids[0] if single_id else added_ids
 
     def _flush_buffer(self):
         """Flush the internal buffer to the Rust collection."""
@@ -359,67 +382,25 @@ class LocalCollection:
             self.COMMIT_FLAG = False
             self._mesosphere_list = queue.Queue()
 
-    def bulk_add_items(
-            self,
-            vectors: List[Union[
-                Tuple[Union[List, Tuple, np.ndarray], int, dict],
-                Tuple[Union[List, Tuple, np.ndarray], int]
-            ]],
-            batch_size: int = 1000,
-            enable_progress_bar: bool = True,
-            wire_dtype: str = "float32",
-    ):
-        """
-        Add multiple items to the collection.
+    def _result_ids_and_fields(self, internal_ids, fetch_fields: bool = True):
+        internal_list = [int(i) for i in internal_ids.tolist()] if isinstance(internal_ids, np.ndarray) else [int(i) for i in internal_ids]
+        external_ids = id_array(self._rust_coll.external_ids(internal_list)) if internal_list else id_array([])
+        fields = [dict(f) for f in self._rust_coll.retrieve_fields(internal_list)] if fetch_fields and internal_list else []
+        return external_ids, fields
 
-        Parameters:
-            vectors: List of tuples (vector, id, fields) or (vector, id).
-            batch_size (int): The batch size. Default is 1000.
-            enable_progress_bar (bool): Whether to enable the progress bar.
-            wire_dtype (str): Accepted for HTTP API parity; ignored for local calls.
-
-        Returns:
-            list: The IDs of the items added.
-        """
-        total_batches = (len(vectors) + batch_size - 1) // batch_size
-        ids = []
-
-        if enable_progress_bar:
-            iter_obj = trange(total_batches, desc='Adding items', unit='batch')
-        else:
-            iter_obj = range(total_batches)
-
-        for i in iter_obj:
-            start = i * batch_size
-            end = (i + 1) * batch_size
-            items = vectors[start:end]
-
-            batch_vecs = []
-            batch_fields = []
-            batch_ids = []
-            has_fields = False
-            for item in items:
-                if not isinstance(item, tuple):
-                    raise TypeError('Each item must be a tuple of vector, ID, and fields(optional).')
-                if len(item) == 3:
-                    v, vid, vf = item
-                    batch_fields.append(vf)
-                    has_fields = True
-                elif len(item) == 2:
-                    v, vid = item
-                    batch_fields.append({})
-                else:
-                    raise TypeError('Each item must be a tuple of vector, ID, and fields(optional).')
-                batch_vecs.append(v if isinstance(v, np.ndarray) else np.array(v, dtype=np.float32))
-                batch_ids.append(vid)
-
-            vec_array = np.array(batch_vecs, dtype=np.float32)
-            int_ids = [int(vid) for vid in batch_ids]
-            self._rust_coll.add_items(vec_array, int_ids, batch_fields if has_fields else None)
-            self.COMMIT_FLAG = False
-            ids.extend(batch_ids)
-
-        return ids
+    def _internal_ids(self, ids, *, missing: str = "error") -> list[int]:
+        if isinstance(ids, (list, tuple, set, np.ndarray)) and len(ids) == 0:
+            return []
+        external_ids, _ = normalize_external_ids(ids)
+        if missing == "ignore":
+            external_ids = [
+                external_id
+                for external_id in external_ids
+                if self._rust_coll.is_external_id_exists(external_id)
+            ]
+            if not external_ids:
+                return []
+        return self._rust_coll.internal_ids(external_ids)
 
     def bulk_add_binary(
             self,
@@ -471,111 +452,65 @@ class LocalCollection:
 
         return added
 
-    def upsert_item(self, vector: Union[list, np.ndarray], id: int, *,
-                    field: Union[dict, None] = None):
-        """
-        Insert or update a single item by ID.
-
-        Existing IDs are updated in place. Missing IDs are inserted. If
-        ``field`` is provided, it replaces the current fields for that row; if
-        omitted, existing fields are preserved.
-        """
-        vec = np.ascontiguousarray(vector, dtype=np.float32).reshape(1, -1)
-        fields = [field] if field is not None else None
-        self._rust_coll.upsert_items([int(id)], vec, fields)
-        self.COMMIT_FLAG = False
-        return id
-
-    def upsert_items(
+    def upsert(
             self,
-            vectors: List[Union[
-                Tuple[Union[List, Tuple, np.ndarray], int, dict],
-                Tuple[Union[List, Tuple, np.ndarray], int]
-            ]],
+            ids,
+            *,
+            vectors,
+            fields=None,
             batch_size: int = 1000,
-            enable_progress_bar: bool = True,
             wire_dtype: str = "float32",
     ):
         """
-        Insert or update multiple items by ID.
+        Insert or update one or more records by public ID.
 
-        Two-tuples ``(vector, id)`` update only the vector and preserve existing
-        fields. Three-tuples ``(vector, id, field)`` replace fields for that ID.
-        ``wire_dtype`` is accepted for HTTP API parity and ignored locally.
+        Existing IDs are updated in place. Missing IDs are inserted with newly
+        allocated internal IDs. If ``fields`` is omitted, existing fields are
+        preserved for updated rows and empty fields are used for new rows.
         """
-        total_batches = (len(vectors) + batch_size - 1) // batch_size
-        ids = []
+        del wire_dtype  # Local calls pass numpy arrays directly.
+        external_ids, single_id = normalize_external_ids(ids)
+        n_records = len(external_ids)
+        validate_unique_external_ids(external_ids)
+        vec_array = normalize_vectors(vectors, n_records)
+        field_list = normalize_fields(fields, n_records) if fields is not None else None
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
 
-        if enable_progress_bar:
-            iter_obj = trange(total_batches, desc='Upserting items', unit='batch')
-        else:
-            iter_obj = range(total_batches)
+        with self._lock:
+            for start in range(0, n_records, batch_size):
+                end = min(start + batch_size, n_records)
+                batch_ids = external_ids[start:end]
+                batch_vectors = vec_array[start:end]
+                batch_fields = field_list[start:end] if field_list is not None else None
 
-        for i in iter_obj:
-            start = i * batch_size
-            end = (i + 1) * batch_size
-            items = vectors[start:end]
-
-            existing_vecs_with_fields = []
-            existing_ids_with_fields = []
-            existing_fields_with_fields = []
-            new_vecs_with_fields = []
-            new_ids_with_fields = []
-            new_fields_with_fields = []
-            vecs_without_fields = []
-            ids_without_fields = []
-            seen_ids = set()
-
-            for item in items:
-                if not isinstance(item, tuple):
-                    raise TypeError('Each item must be a tuple of vector, ID, and fields(optional).')
-                if len(item) == 3:
-                    v, vid, vf = item
-                    if int(vid) in seen_ids:
-                        raise ValueError(f'duplicate id {vid} within the same upsert batch')
-                    int_vid = int(vid)
-                    seen_ids.add(int_vid)
-                    vec = v if isinstance(v, np.ndarray) else np.array(v, dtype=np.float32)
-                    if self._rust_coll.is_id_exists(int_vid):
-                        existing_vecs_with_fields.append(vec)
-                        existing_ids_with_fields.append(int_vid)
-                        existing_fields_with_fields.append(vf)
+                existing_ids = []
+                existing_positions = []
+                new_ids = []
+                new_positions = []
+                for offset, public_id in enumerate(batch_ids):
+                    if self._rust_coll.is_external_id_exists(public_id):
+                        existing_ids.append(self._rust_coll.internal_ids([public_id])[0])
+                        existing_positions.append(offset)
                     else:
-                        new_vecs_with_fields.append(vec)
-                        new_ids_with_fields.append(int_vid)
-                        new_fields_with_fields.append(vf)
-                    ids.append(vid)
-                elif len(item) == 2:
-                    v, vid = item
-                    if int(vid) in seen_ids:
-                        raise ValueError(f'duplicate id {vid} within the same upsert batch')
-                    seen_ids.add(int(vid))
-                    vecs_without_fields.append(v if isinstance(v, np.ndarray) else np.array(v, dtype=np.float32))
-                    ids_without_fields.append(int(vid))
-                    ids.append(vid)
-                else:
-                    raise TypeError('Each item must be a tuple of vector, ID, and fields(optional).')
+                        new_ids.append(public_id)
+                        new_positions.append(offset)
 
-            if vecs_without_fields:
-                vec_array = np.array(vecs_without_fields, dtype=np.float32)
-                self._rust_coll.upsert_items(ids_without_fields, vec_array, None)
-            if existing_vecs_with_fields:
-                vec_array = np.array(existing_vecs_with_fields, dtype=np.float32)
-                self._rust_coll.upsert_items(
-                    existing_ids_with_fields,
-                    vec_array,
-                    existing_fields_with_fields,
-                )
-            if new_vecs_with_fields:
-                vec_array = np.array(new_vecs_with_fields, dtype=np.float32)
-                self._rust_coll.add_items(
-                    vec_array,
-                    new_ids_with_fields,
-                    new_fields_with_fields,
-                )
-            self.COMMIT_FLAG = False
+                if existing_ids:
+                    self._rust_coll.upsert_items(
+                        existing_ids,
+                        batch_vectors[existing_positions],
+                        [batch_fields[i] for i in existing_positions] if batch_fields is not None else None,
+                    )
+                if new_ids:
+                    self._rust_coll.add_records(
+                        batch_vectors[new_positions],
+                        new_ids,
+                        [batch_fields[i] for i in new_positions] if batch_fields is not None else None,
+                    )
 
-        return ids
+        self.COMMIT_FLAG = False
+        return external_ids[0] if single_id else external_ids
 
     def commit(self):
         """Commit the changes in the collection."""
@@ -622,9 +557,9 @@ class LocalCollection:
         self._rust_coll.export_to(str(export_path))
         return {'status': 'success'}
 
-    def is_id_exists(self, id: int) -> bool:
-        """Check if a user ID exists in the collection."""
-        return self._rust_coll.is_id_exists(int(id))
+    def is_id_exists(self, id: Union[str, int]) -> bool:
+        """Check if a public ID exists in the collection."""
+        return self._rust_coll.is_external_id_exists(id)
 
     @property
     def max_id(self) -> int:
@@ -779,7 +714,7 @@ class LocalCollection:
             self,
             field_name: str,
             vectors: Union[list, np.ndarray],
-            ids: List[int],
+            ids: List[Union[str, int]],
     ):
         """Attach vectors to a named vector field for existing IDs."""
         if not self._mesosphere_list.empty():
@@ -787,20 +722,20 @@ class LocalCollection:
         vecs = np.ascontiguousarray(vectors, dtype=np.float32)
         if vecs.ndim == 1:
             vecs = vecs.reshape(1, -1)
-        self._rust_coll.add_named_vectors(field_name, vecs, [int(i) for i in ids])
+        self._rust_coll.add_named_vectors(field_name, vecs, self._internal_ids(ids))
         self.COMMIT_FLAG = False
         return {'status': 'success'}
 
     def add_sparse_vectors(
             self,
             vectors: List[Union[Dict[int, float], List[Tuple[int, float]]]],
-            ids: List[int],
+            ids: List[Union[str, int]],
     ):
         """Attach sparse feature vectors to existing IDs."""
         if not self._mesosphere_list.empty():
             self._flush_buffer()
         normalized = [_normalize_sparse_vector(vector) for vector in vectors]
-        self._rust_coll.add_sparse_vectors(normalized, [int(i) for i in ids])
+        self._rust_coll.add_sparse_vectors(normalized, self._internal_ids(ids))
         self.COMMIT_FLAG = False
         return {'status': 'success'}
 
@@ -810,7 +745,8 @@ class LocalCollection:
         return DataInsertionSession(self)
 
     def search(
-            self, vector: Union[list, np.ndarray], k: int = 10, *,
+            self, vector: Union[list, np.ndarray, None] = None, k: int = 10, *,
+            document: Union[str, None] = None,
             where: Union[str, None] = None,
             return_fields: bool = False,
             vector_field: str = "default",
@@ -827,6 +763,8 @@ class LocalCollection:
 
         Parameters:
             vector (np.ndarray or list): The search vector.
+            document (str): Text to embed and search semantically. Exactly one
+                of ``vector`` or ``document`` must be provided.
             k (int): The number of nearest vectors to return.
             where (str, optional): SQL/WHERE expression string to filter results.
             return_fields (bool): Whether to return the fields of the search results.
@@ -854,7 +792,12 @@ class LocalCollection:
             ResultView: Search results with ids, distances, and optional fields.
         """
         eps = float(eps)
-        vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
+        if (vector is None) == (document is None):
+            raise ValueError("search() requires exactly one of vector or document")
+        if document is not None:
+            vec = embed_documents([document])[0]
+        else:
+            vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
         result = self._rust_coll.search(
             vec,
             k=k,
@@ -869,16 +812,16 @@ class LocalCollection:
             reranker=reranker,
             rerank_with_fields=rerank_with_fields,
         )
-        fields: List[Dict[str, Any]] = []
-        if need_fields and len(result) > 0:
-            fields = self._rust_coll.retrieve_fields(result.ids.tolist())
+        external_ids, raw_fields = self._result_ids_and_fields(result.ids, fetch_fields=need_fields)
+        rerank_fields = raw_fields if need_fields else []
         ids, distances, reranked_fields = apply_external_rerank(
-            ids=result.ids,
+            ids=external_ids,
             scores=result.distances,
-            fields=fields,
+            fields=rerank_fields,
             reranker=reranker,
             query={
-                "type": "vector_search",
+                "type": "document_search" if document is not None else "vector_search",
+                "document": document,
                 "vector_field": vector_field,
                 "vector": vec.tolist(),
                 "where": where,
@@ -914,13 +857,12 @@ class LocalCollection:
             reranker=reranker,
             rerank_with_fields=rerank_with_fields,
         )
-        fields: List[Dict[str, Any]] = []
-        if need_fields and len(result) > 0:
-            fields = self._rust_coll.retrieve_fields(result.ids.tolist())
+        external_ids, raw_fields = self._result_ids_and_fields(result.ids, fetch_fields=need_fields)
+        rerank_fields = raw_fields if need_fields else []
         ids, distances, reranked_fields = apply_external_rerank(
-            ids=result.ids,
+            ids=external_ids,
             scores=result.distances,
-            fields=fields,
+            fields=rerank_fields,
             reranker=reranker,
             query={
                 "type": "sparse_search",
@@ -951,7 +893,7 @@ class LocalCollection:
             nprobe=nprobe,
         )
 
-    def text_search(
+    def bm25_search(
             self, text: str, k: int = 10, *,
             text_fields: Union[list[str], None] = None,
             where: Union[str, None] = None,
@@ -960,23 +902,22 @@ class LocalCollection:
             rerank_k: Optional[int] = None,
             rerank_with_fields: bool = True,
     ):
-        """BM25 text search over metadata fields."""
+        """BM25 keyword search over metadata fields."""
         result = self._rust_coll.text_search(text, text_fields=text_fields, k=k, where=where)
         need_fields = should_fetch_fields(
             return_fields=return_fields,
             reranker=reranker,
             rerank_with_fields=rerank_with_fields,
         )
-        fields: List[Dict[str, Any]] = []
-        if need_fields and len(result) > 0:
-            fields = self._rust_coll.retrieve_fields(result.ids.tolist())
+        external_ids, raw_fields = self._result_ids_and_fields(result.ids, fetch_fields=need_fields)
+        rerank_fields = raw_fields if need_fields else []
         ids, distances, reranked_fields = apply_external_rerank(
-            ids=result.ids,
+            ids=external_ids,
             scores=result.distances,
-            fields=fields,
+            fields=rerank_fields,
             reranker=reranker,
             query={
-                "type": "text_search",
+                "type": "bm25_search",
                 "text": text,
                 "text_fields": text_fields,
                 "where": where,
@@ -1016,13 +957,12 @@ class LocalCollection:
             reranker=reranker,
             rerank_with_fields=rerank_with_fields,
         )
-        fields: List[Dict[str, Any]] = []
-        if need_fields and len(result) > 0:
-            fields = self._rust_coll.retrieve_fields(result.ids.tolist())
+        external_ids, raw_fields = self._result_ids_and_fields(result.ids, fetch_fields=need_fields)
+        rerank_fields = raw_fields if need_fields else []
         ids, distances, reranked_fields = apply_external_rerank(
-            ids=result.ids,
+            ids=external_ids,
             scores=result.distances,
-            fields=fields,
+            fields=rerank_fields,
             reranker=reranker,
             query={
                 "type": "hybrid_search",
@@ -1090,13 +1030,12 @@ class LocalCollection:
             rerank_with_fields=rerank_with_fields,
         )
         for idx, r in enumerate(results):
-            fields: List[Dict[str, Any]] = []
-            if need_fields and len(r) > 0:
-                fields = self._rust_coll.retrieve_fields(r.ids.tolist())
+            external_ids, raw_fields = self._result_ids_and_fields(r.ids, fetch_fields=need_fields)
+            rerank_fields = raw_fields if need_fields else []
             ids, distances, reranked_fields = apply_external_rerank(
-                ids=r.ids,
+                ids=external_ids,
                 scores=r.distances,
-                fields=fields,
+                fields=rerank_fields,
                 reranker=reranker,
                 query={
                     "type": "batch_vector_search",
@@ -1129,7 +1068,14 @@ class LocalCollection:
         Returns:
             ResultView: Data result with vectors, ids, and fields.
         """
-        return self._rust_coll.head(n)
+        result = self._rust_coll.head(n)
+        external_ids, _ = self._result_ids_and_fields(result.ids, fetch_fields=False)
+        return ResultView(
+            vectors=result.vectors,
+            ids=external_ids,
+            fields=result.fields,
+            result_type="data",
+        )
 
     def tail(self, n: int = 5):
         """Get the last n items in the collection.
@@ -1137,7 +1083,14 @@ class LocalCollection:
         Returns:
             ResultView: Data result with vectors, ids, and fields.
         """
-        return self._rust_coll.tail(n)
+        result = self._rust_coll.tail(n)
+        external_ids, _ = self._result_ids_and_fields(result.ids, fetch_fields=False)
+        return ResultView(
+            vectors=result.vectors,
+            ids=external_ids,
+            fields=result.fields,
+            result_type="data",
+        )
 
     def query(self, where=None, filter_ids=None, return_ids_only=False):
         """
@@ -1152,21 +1105,21 @@ class LocalCollection:
             ResultView: Query result with ids and optional fields.
         """
         if where is not None:
-            ids = self._rust_coll.query_fields(where)
-            ids_arr = np.array(ids, dtype=np.int64) if ids else np.array([], dtype=np.int64)
+            internal_ids = self._rust_coll.query_fields(where)
+            ids_arr = id_array(self._rust_coll.external_ids(internal_ids)) if internal_ids else id_array([])
             if return_ids_only:
                 return ResultView(ids=ids_arr, result_type="query")
-            if ids:
-                fields = [dict(f) for f in self._rust_coll.retrieve_fields([int(i) for i in ids])]
+            if internal_ids:
+                fields = [dict(f) for f in self._rust_coll.retrieve_fields([int(i) for i in internal_ids])]
             else:
                 fields = []
             return ResultView(ids=ids_arr, fields=fields, result_type="query")
         elif filter_ids is not None:
-            ids = filter_ids
+            ids = self._internal_ids(filter_ids)
         else:
             ids = []
 
-        ids_arr = np.array(ids, dtype=np.int64) if ids else np.array([], dtype=np.int64)
+        ids_arr = id_array(self._rust_coll.external_ids(ids)) if ids else id_array([])
 
         if return_ids_only:
             return ResultView(ids=ids_arr, result_type="query")
@@ -1191,13 +1144,14 @@ class LocalCollection:
         """
         if where is not None:
             ids, fields = self._rust_coll.query_with_fields(where)
-            ids_arr = np.array(ids, dtype=np.int64) if ids else np.array([], dtype=np.int64)
+            ids_arr = id_array(self._rust_coll.external_ids(ids)) if ids else id_array([])
+            internal_ids = ids
         elif filter_ids is not None:
-            ids = [int(i) for i in filter_ids]
-            ids_arr = np.array(ids, dtype=np.int64)
-            fields = [dict(f) for f in self._rust_coll.retrieve_fields(ids)] if ids else []
+            internal_ids = self._internal_ids(filter_ids)
+            ids_arr = id_array(self._rust_coll.external_ids(internal_ids)) if internal_ids else id_array([])
+            fields = [dict(f) for f in self._rust_coll.retrieve_fields(internal_ids)] if internal_ids else []
         else:
-            ids = []
+            internal_ids = []
             ids_arr = np.array([], dtype=np.int64)
             fields = []
 
@@ -1207,10 +1161,10 @@ class LocalCollection:
                 ids=ids_arr, fields=[], result_type="data",
             )
 
-        vecs = self._rust_coll.get_vectors(ids_arr.tolist())
+        vecs = self._rust_coll.get_vectors(internal_ids)
         return ResultView(vectors=vecs, ids=ids_arr, fields=list(fields), result_type="data")
 
-    def delete_items(self, ids):
+    def delete(self, ids):
         """
         Soft-delete vectors by ID.
 
@@ -1221,16 +1175,16 @@ class LocalCollection:
         Parameters:
             ids (list[int]): External IDs to soft-delete.
         """
-        self._rust_coll.delete_items([int(i) for i in ids])
+        self._rust_coll.delete_items(self._internal_ids(ids, missing="ignore"))
 
-    def restore_items(self, ids):
+    def restore(self, ids):
         """
         Restore previously soft-deleted vectors.
 
         Parameters:
             ids (list[int]): External IDs to restore.
         """
-        self._rust_coll.restore_items([int(i) for i in ids])
+        self._rust_coll.restore_items(self._internal_ids(ids, missing="ignore"))
 
     def list_deleted_ids(self):
         """
@@ -1239,7 +1193,8 @@ class LocalCollection:
         Returns:
             list[int]: Sorted list of soft-deleted external IDs.
         """
-        return list(self._rust_coll.list_deleted_ids())
+        internal_ids = self._rust_coll.list_deleted_ids()
+        return self._rust_coll.external_ids(internal_ids) if internal_ids else []
 
     def search_range(self, vector, threshold, max_results=1000):
         """
@@ -1258,7 +1213,16 @@ class LocalCollection:
         """
         import numpy as np
         vec = np.asarray(vector, dtype=np.float32)
-        return self._rust_coll.search_range(vec, float(threshold), int(max_results))
+        result = self._rust_coll.search_range(vec, float(threshold), int(max_results))
+        external_ids, _ = self._result_ids_and_fields(result.ids, fetch_fields=False)
+        return ResultView(
+            ids=external_ids,
+            distances=result.distances,
+            k=len(external_ids),
+            distance=result.distance_metric,
+            index=result.index_type,
+            result_type="search",
+        )
 
     def list_fields(self):
         """List all fields of a collection."""

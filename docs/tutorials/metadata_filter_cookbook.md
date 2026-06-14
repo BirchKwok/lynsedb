@@ -15,35 +15,40 @@ client = lynse.VectorDBClient(uri="./filter-cookbook")
 db = client.create_database("filters", drop_if_exists=True)
 collection = db.require_collection("docs", dim=4, drop_if_exists=True)
 
-items = [
-    ([0.10, 0.20, 0.30, 0.40], 1, {
-        "tenant": "acme",
-        "lang": "en",
-        "rank": 1,
-        "published": True,
-        "tags": ["vector", "docs"],
-        "created_at": "2026-06-01",
-    }),
-    ([0.11, 0.19, 0.29, 0.39], 2, {
-        "tenant": "acme",
-        "lang": "en",
-        "rank": 2,
-        "published": False,
-        "tags": ["draft"],
-        "created_at": "2026-06-03",
-    }),
-    ([0.80, 0.10, 0.20, 0.10], 3, {
-        "tenant": "globex",
-        "lang": "fr",
-        "rank": 3,
-        "published": True,
-        "tags": ["archive", "docs"],
-        "created_at": "2026-06-05",
-    }),
-]
-
-with collection.insert_session() as session:
-    session.bulk_add_items(items, enable_progress_bar=False)
+collection.add(
+    ids=["acme-doc-1", "acme-draft-2", "globex-doc-3"],
+    vectors=[
+        [0.10, 0.20, 0.30, 0.40],
+        [0.11, 0.19, 0.29, 0.39],
+        [0.80, 0.10, 0.20, 0.10],
+    ],
+    fields=[
+        {
+            "tenant": "acme",
+            "lang": "en",
+            "rank": 1,
+            "published": True,
+            "tags": ["vector", "docs"],
+            "created_at": "2026-06-01",
+        },
+        {
+            "tenant": "acme",
+            "lang": "en",
+            "rank": 2,
+            "published": False,
+            "tags": ["draft"],
+            "created_at": "2026-06-03",
+        },
+        {
+            "tenant": "globex",
+            "lang": "fr",
+            "rank": 3,
+            "published": True,
+            "tags": ["archive", "docs"],
+            "created_at": "2026-06-05",
+        },
+    ],
+)
 
 collection.build_index("FLAT-L2")
 query = np.array([0.10, 0.20, 0.30, 0.40], dtype=np.float32)
@@ -169,7 +174,7 @@ print(result.to_list())
 ## Filter with text and hybrid search
 
 ```python
-text = collection.text_search(
+text = collection.bm25_search(
     "docs",
     k=5,
     text_fields=["tags"],

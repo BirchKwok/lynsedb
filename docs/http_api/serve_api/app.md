@@ -61,7 +61,6 @@ Basic auth is also accepted; the password is treated as the API key.
 
 Some high-throughput operations use compact binary payloads internally:
 
-- `/bulk_add_binary`
 - `/search_binary`
 - `/batch_search_binary`
 - `/head_binary`

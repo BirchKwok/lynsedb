@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "LynseDB"
-version = "0.3.0"
+version = "0.4.0"
 description = "A lightweight, server-optional, multi-end compatible, Rust-powered vector database deployable locally or remotely."
 readme = "README.md"
 keywords = ["vector", "database"]

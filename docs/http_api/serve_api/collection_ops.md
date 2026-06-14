@@ -29,10 +29,8 @@ Most request bodies include:
 
 | Method | Path | Extra body fields | Description |
 | --- | --- | --- | --- |
-| `POST` | `/add_item` | `vector`, `id`, `field` | Add one vector. |
-| `POST` | `/bulk_add_items` | `items` | Add many vectors with optional fields. |
-| `POST` | `/bulk_add_binary` | binary payload | Add dense vectors through compact binary protocol. |
-| `POST` | `/upsert_items` | `ids`, `vectors`, `fields` | Insert or update many rows. |
+| `POST` | `/add` | `ids`, `vectors`, `fields` | Add one or more records with string or integer public IDs. |
+| `POST` | `/upsert` | `ids`, `vectors`, `fields` | Insert or update one or more records by public ID. |
 | `POST` | `/commit` | none | Commit pending writes. |
 | `POST` | `/flush` | none | Flush buffers. |
 | `POST` | `/checkpoint` | none | Force a durable checkpoint. |
@@ -61,13 +59,13 @@ Most request bodies include:
 
 | Method | Path | Extra body fields | Description |
 | --- | --- | --- | --- |
-| `POST` | `/search` | `vector`, `k`, `where`, `return_fields`, `nprobe`, `field_name`, `approx`, `eps` | Vector search. |
+| `POST` | `/search` | `vector` or `document`, `k`, `where`, `return_fields`, `nprobe`, `field_name`, `approx`, `eps` | Vector search, or document search with automatic embedding. |
 | `POST` | `/search_binary` | binary payload | Compact vector search protocol. |
 | `POST` | `/batch_search` | `vectors`, `k`, `where`, `return_fields`, `nprobe` | Batch vector search. |
 | `POST` | `/batch_search_binary` | binary payload | Compact batch search protocol. |
 | `POST` | `/search_range` | `vector`, `threshold`, `max_results` | Range search. |
 | `POST` | `/search_profile` | `vector`, `k`, `where`, `nprobe` | Search with profile metadata. |
-| `POST` | `/text_search` | `text`, `text_fields`, `k`, `where` | BM25 search over metadata fields. |
+| `POST` | `/bm25_search` | `text`, `text_fields`, `k`, `where` | BM25 search over metadata fields. |
 | `POST` | `/sparse_search` | `vector`, `k`, `where` | Sparse vector search. |
 | `POST` | `/hybrid_search` | `vector`, `text`, `text_fields`, `fusion`, `k`, `where` | Vector and text hybrid search. |
 | `POST` | `/query` | `where`, `filter_ids`, `return_ids_only` | Query IDs and fields. |
@@ -80,14 +78,14 @@ Most request bodies include:
 | `POST` | `/list_fields` | none | List metadata field names. |
 | `POST` | `/index_mode` | none | Return current index mode. |
 | `POST` | `/is_id_exists` | `id` | Check whether an ID exists. |
-| `POST` | `/max_id` | none | Return max external ID. |
+| `POST` | `/max_id` | none | Return max internal numeric ID. |
 
 ## Delete, restore, compact
 
 | Method | Path | Extra body fields | Description |
 | --- | --- | --- | --- |
-| `POST` | `/delete_items` | `ids` | Soft-delete IDs. |
-| `POST` | `/restore_items` | `ids` | Restore soft-deleted IDs. |
+| `POST` | `/delete` | `ids` | Soft-delete IDs. |
+| `POST` | `/restore` | `ids` | Restore soft-deleted IDs. |
 | `POST` | `/list_deleted_ids` | none | List tombstoned IDs. |
 | `POST` | `/compact` | none | Physically remove tombstoned vectors. |
 

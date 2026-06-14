@@ -101,4 +101,4 @@ nav:
       - Collection endpoints: http_api/serve_api/collection_ops.md
       - Python HTTP client: http_api/client_api.md
   - Deployment:
-    - Cluster example: deployment/cluster-example.md
+    - Cluster deployment: deployment/cluster-deployment.md

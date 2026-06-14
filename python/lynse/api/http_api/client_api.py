@@ -17,6 +17,16 @@ from ...utils.asserts import raise_if
 from ...utils.poster import Poster
 from ...utils.utils import collection_repr
 from ...result_view import ResultView, _parse_index_mode
+from .._embedding import embed_documents
+from .._records import (
+    attach_documents,
+    id_array,
+    normalize_documents,
+    normalize_external_ids,
+    normalize_fields,
+    normalize_vectors,
+    validate_unique_external_ids,
+)
 from ..rerank import apply_external_rerank, should_fetch_fields
 
 
@@ -647,143 +657,56 @@ class Collection:
         else:
             raise_error_response(response)
 
-    def add_item(self, vector: Union[list[float], np.ndarray], id: int, *,
-                 field: Union[dict, None] = None,
-                 buffer_size: int = True):
-        """
-        Add an item to the collection.
-        It is recommended to use incremental ids for best performance.
+    def add(
+            self,
+            ids,
+            *,
+            vectors=None,
+            documents=None,
+            fields=None,
+            batch_size: int = 1000,
+            wire_dtype: str = "float32",
+    ):
+        """Add one or more records through the unified insert API."""
+        del wire_dtype  # JSON HTTP add sends float32-compatible lists.
+        external_ids, single_id = normalize_external_ids(ids)
+        n_records = len(external_ids)
+        validate_unique_external_ids(external_ids)
+        docs, _ = normalize_documents(documents, n_records) if documents is not None else (None, False)
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
 
-        Parameters:
-            vector (list[float], np.ndarray): The vector of the item.
-            id (int): The ID of the item.
-            field (dict, optional): The fields of the item.
-            buffer_size (int or bool): The buffer size.
-                Default is True, which means the default buffer size (1000) will be used.
-                If buffer_size is 0, the function will add the item directly.
-                If buffer_size is greater than 0, the function will add the item to the buffer.
-                If buffer_size is False, the function will add the item directly and not use the buffer.
-                If buffer_size is True, the function will add the item to the buffer and use the default buffer size.
-
-        Returns:
-            int: The ID of the item.
-                If delay_num is greater than 0, and the number of items added is less than delay_num,
-                the function will return None. Otherwise, the function will return the IDs of the items added.
-
-        Raises:
-            ValueError: If the collection has been deleted or does not exist.
-            ExecutionError: If the server returns an error.
-        """
-        if buffer_size is True:
-            buffer_size = 0 if self._cluster_mode else 1000
+        if vectors is None:
+            if docs is None:
+                raise ValueError("add() requires vectors or documents")
+            vec_array = embed_documents(docs)
+            if vec_array.shape[0] != n_records:
+                raise ValueError("embedding output count must match ids length")
         else:
-            if buffer_size is False:
-                buffer_size = 0
-            else:
-                raise_if(ValueError, (not isinstance(buffer_size, int)) or buffer_size < 0,
-                         'If buffer_size is not bool, it must be a positive integer.')
+            vec_array = normalize_vectors(vectors, n_records)
 
-        if buffer_size == 0:
-            uri = f'{self._uri}/add_item'
+        field_list = attach_documents(normalize_fields(fields, n_records), docs)
+        uri = f'{self._uri}/add'
+        added_ids = []
 
-            data = {
-                "database_name": self._database_name,
-                "collection_name": self._collection_name,
-                "item": {
-                    "vector": vector if isinstance(vector, list) else vector.tolist(),
-                    "id": id,
-                    "field": field if field is not None else {},
-                },
-            }
-
-            response = self._session.post(uri, json=data)
-
-            if response.status_code == 200:
-                self.COMMIT_FLAG = False
-                return response.json()['params']['item']['id']
-            else:
-                raise_error_response(response)
-        else:
-            with self._lock:
-                self._mesosphere_list.put({
-                    "vector": vector if isinstance(vector, list) else vector.tolist(),
-                    "id": id,
-                    "field": field if field is not None else {},
-                })
-
-            if self._mesosphere_list.qsize() >= buffer_size:
-                mesosphere_list = list(self._mesosphere_list.queue)
-
-                uri = f'{self._uri}/bulk_add_items'
-
+        with self._lock:
+            for start in range(0, n_records, batch_size):
+                end = min(start + batch_size, n_records)
                 data = {
                     "database_name": self._database_name,
                     "collection_name": self._collection_name,
-                    "items": mesosphere_list,
+                    "ids": external_ids[start:end],
+                    "vectors": vec_array[start:end].tolist(),
+                    "fields": field_list[start:end],
                 }
-
                 response = self._session.post(uri, json=data)
-
                 if response.status_code == 200:
                     self.COMMIT_FLAG = False
-                    self._mesosphere_list = queue.Queue()
+                    added_ids.extend(response.json()['params']['ids'])
                 else:
                     raise_error_response(response)
 
-            return id
-
-    @staticmethod
-    def _check_bulk_add_items(vectors):
-        items = []
-        for vector in vectors:
-            raise_if(TypeError, not isinstance(vector, tuple), 'Each item must be a tuple of vector, '
-                                                               'ID, and fields(optional).')
-            vec_len = len(vector)
-
-            if vec_len == 3:
-                v1, v2, v3 = vector
-                items.append({
-                    "vector": v1.tolist() if isinstance(v1, np.ndarray) else v1,
-                    "id": v2,
-                    "field": v3,
-                })
-            elif vec_len == 2:
-                v1, v2 = vector
-                items.append({
-                    "vector": v1.tolist() if isinstance(v1, np.ndarray) else v1,
-                    "id": v2,
-                    "field": {},
-                })
-            else:
-                raise TypeError('Each item must be a tuple of vector, ID, and fields(optional).')
-
-        return items
-
-    @staticmethod
-    def _check_upsert_items(vectors):
-        items = []
-        for vector in vectors:
-            raise_if(TypeError, not isinstance(vector, tuple), 'Each item must be a tuple of vector, '
-                                                               'ID, and fields(optional).')
-            vec_len = len(vector)
-
-            if vec_len == 3:
-                v1, v2, v3 = vector
-                items.append({
-                    "vector": v1.tolist() if isinstance(v1, np.ndarray) else v1,
-                    "id": v2,
-                    "field": v3,
-                })
-            elif vec_len == 2:
-                v1, v2 = vector
-                items.append({
-                    "vector": v1.tolist() if isinstance(v1, np.ndarray) else v1,
-                    "id": v2,
-                })
-            else:
-                raise TypeError('Each item must be a tuple of vector, ID, and fields(optional).')
-
-        return items
+        return added_ids[0] if single_id else added_ids
 
     @staticmethod
     def _prepare_binary_items(vectors, *, upsert: bool, wire_dtype: str = "float32"):
@@ -862,175 +785,45 @@ class Collection:
             headers={'Content-Type': 'application/octet-stream'},
         )
 
-    def bulk_add_items(
+    def upsert(
             self,
-            vectors: List[Union[
-                Tuple[Union[List, Tuple, np.ndarray], int, dict],
-                Tuple[Union[List, Tuple, np.ndarray], int]
-            ]],
+            ids,
+            *,
+            vectors,
+            fields=None,
             batch_size: int = 1000,
-            enable_progress_bar: bool = True,
             wire_dtype: str = "float32",
     ):
-        """
-        Add multiple items to the collection.
-        It is recommended to use incremental ids for best performance.
+        """Insert or update one or more records by public ID."""
+        del wire_dtype  # JSON HTTP upsert sends float32-compatible lists.
+        external_ids, single_id = normalize_external_ids(ids)
+        n_records = len(external_ids)
+        validate_unique_external_ids(external_ids)
+        vec_array = normalize_vectors(vectors, n_records)
+        field_list = normalize_fields(fields, n_records) if fields is not None else None
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
 
-        Parameters:
-            vectors (List[Tuple[Union[List, Tuple, np.ndarray], int, dict]],
-            List[Tuple[Union[List, Tuple, np.ndarray], int]]):
-                The list of items to add. Each item is a tuple containing the vector, ID, and fields.
-            batch_size (int): The batch size. Default is 1000.
-            enable_progress_bar (bool): Whether to enable the progress bar. Default is True.
-
-        Returns:
-            dict: The response from the server.
-
-        Raises:
-            ValueError: If the collection has been deleted or does not exist.
-            TypeError: If the vectors are not in the correct format.
-            ExecutionError: If the server returns an error.
-        """
-
-        uri = f'{self._uri}/bulk_add_items'
-        total_batches = (len(vectors) + batch_size - 1) // batch_size
-
-        ids = []
-
-        if enable_progress_bar:
-            iter_obj = trange(total_batches, desc='Adding items', unit='batch')
-        else:
-            iter_obj = range(total_batches)
-
-        for i in iter_obj:
-            start = i * batch_size
-            end = (i + 1) * batch_size
-            items = vectors[start:end]
-
-            payload, n_vecs, dim, local_ids, id_params = self._prepare_binary_items(
-                items,
-                upsert=False,
-                wire_dtype=wire_dtype,
-            )
-            response = self._post_binary_items(
-                "bulk_add_items_binary",
-                payload,
-                n_vecs,
-                dim,
-                id_params,
-            )
-
-            if response.status_code == 200:
-                self.COMMIT_FLAG = False
-                ids.extend(local_ids)
-            elif response.status_code in (404, 405):
-                items_after_checking = self._check_bulk_add_items(items)
+        uri = f'{self._uri}/upsert'
+        returned_ids = []
+        with self._lock:
+            for start in range(0, n_records, batch_size):
+                end = min(start + batch_size, n_records)
                 data = {
                     "database_name": self._database_name,
                     "collection_name": self._collection_name,
-                    "items": items_after_checking,
+                    "ids": external_ids[start:end],
+                    "vectors": vec_array[start:end].tolist(),
+                    "fields": field_list[start:end] if field_list is not None else None,
                 }
                 response = self._session.post(uri, json=data)
                 if response.status_code == 200:
                     self.COMMIT_FLAG = False
-                    ids.extend(response.json()['params']['ids'])
+                    returned_ids.extend(response.json()['params']['ids'])
                 else:
                     raise_error_response(response)
-            else:
-                raise_error_response(response)
 
-        return ids
-
-    def upsert_item(self, vector: Union[list[float], np.ndarray], id: int, *,
-                    field: Union[dict, None] = None):
-        """
-        Insert or update a single item by ID.
-
-        Existing IDs are updated in place. Missing IDs are inserted. If
-        ``field`` is provided, it replaces the current fields for that ID.
-        """
-        item = {
-            "vector": vector if isinstance(vector, list) else vector.tolist(),
-            "id": id,
-        }
-        if field is not None:
-            item["field"] = field
-
-        uri = f'{self._uri}/upsert_items'
-        data = {
-            "database_name": self._database_name,
-            "collection_name": self._collection_name,
-            "items": [item],
-        }
-        response = self._session.post(uri, json=data)
-        if response.status_code == 200:
-            self.COMMIT_FLAG = False
-            return response.json()['params']['ids'][0]
-        else:
-            raise_error_response(response)
-
-    def upsert_items(
-            self,
-            vectors: List[Union[
-                Tuple[Union[List, Tuple, np.ndarray], int, dict],
-                Tuple[Union[List, Tuple, np.ndarray], int]
-            ]],
-            batch_size: int = 1000,
-            enable_progress_bar: bool = True,
-            wire_dtype: str = "float32",
-    ):
-        """
-        Insert or update multiple items by ID.
-
-        Two-tuples ``(vector, id)`` preserve existing fields. Three-tuples
-        ``(vector, id, field)`` replace fields for that ID.
-        """
-        uri = f'{self._uri}/upsert_items'
-        total_batches = (len(vectors) + batch_size - 1) // batch_size
-        ids = []
-
-        if enable_progress_bar:
-            iter_obj = trange(total_batches, desc='Upserting items', unit='batch')
-        else:
-            iter_obj = range(total_batches)
-
-        for i in iter_obj:
-            start = i * batch_size
-            end = (i + 1) * batch_size
-            items = vectors[start:end]
-            payload, n_vecs, dim, local_ids, id_params = self._prepare_binary_items(
-                items,
-                upsert=True,
-                wire_dtype=wire_dtype,
-            )
-            response = self._post_binary_items(
-                "upsert_items_binary",
-                payload,
-                n_vecs,
-                dim,
-                id_params,
-            )
-
-            if response.status_code == 200:
-                self.COMMIT_FLAG = False
-                ids.extend(local_ids)
-            elif response.status_code in (404, 405):
-                items_after_checking = self._check_upsert_items(items)
-                data = {
-                    "database_name": self._database_name,
-                    "collection_name": self._collection_name,
-                    "items": items_after_checking,
-                }
-                response = self._session.post(uri, json=data)
-                if response.status_code == 200:
-                    self.COMMIT_FLAG = False
-                    ids.extend(response.json()['params']['ids'])
-                else:
-                    raise_error_response(response)
-            else:
-                raise_error_response(response)
-
-        return ids
+        return returned_ids[0] if single_id else returned_ids
 
     def bulk_add_binary(
             self,
@@ -1098,15 +891,18 @@ class Collection:
 
         return added
 
-    def _flush_pending_items(self):
+    def _flush_pending(self):
         if self._mesosphere_list.empty():
             return
 
-        uri = f'{self._uri}/bulk_add_items'
+        queued = list(self._mesosphere_list.queue)
+        uri = f'{self._uri}/add'
         data = {
             "database_name": self._database_name,
             "collection_name": self._collection_name,
-            "items": list(self._mesosphere_list.queue),
+            "ids": [item["id"] for item in queued],
+            "vectors": [item["vector"] for item in queued],
+            "fields": [item.get("field", {}) for item in queued],
         }
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
@@ -1164,7 +960,7 @@ class Collection:
         data = {"database_name": self._database_name, "collection_name": self._collection_name}
 
         if not self._mesosphere_list.empty():
-            self._flush_pending_items()
+            self._flush_pending()
 
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
@@ -1178,7 +974,7 @@ class Collection:
         data = {"database_name": self._database_name, "collection_name": self._collection_name}
 
         if not self._mesosphere_list.empty():
-            self._flush_pending_items()
+            self._flush_pending()
 
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
@@ -1193,7 +989,7 @@ class Collection:
         data = {"database_name": self._database_name, "collection_name": self._collection_name}
 
         if not self._mesosphere_list.empty():
-            self._flush_pending_items()
+            self._flush_pending()
 
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
@@ -1212,7 +1008,7 @@ class Collection:
         }
 
         if not self._mesosphere_list.empty():
-            self._flush_pending_items()
+            self._flush_pending()
 
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
@@ -1230,7 +1026,7 @@ class Collection:
         }
 
         if not self._mesosphere_list.empty():
-            self._flush_pending_items()
+            self._flush_pending()
 
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
@@ -1238,12 +1034,12 @@ class Collection:
         else:
             raise_error_response(response)
 
-    def is_id_exists(self, id: int):
+    def is_id_exists(self, id: Union[str, int]):
         """
         Check if an ID exists in the collection.
 
         Parameters:
-            id (int): The ID to check.
+            id (str | int): The public ID to check.
 
         Returns:
             is_id_exists(Bool): Whether the ID exists in the collection.
@@ -1469,7 +1265,7 @@ class Collection:
             "collection_name": self._collection_name,
             "field_name": field_name,
             "vectors": vecs.tolist(),
-            "ids": [int(i) for i in ids],
+            "ids": normalize_external_ids(ids)[0],
         }
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
@@ -1489,7 +1285,7 @@ class Collection:
             "database_name": self._database_name,
             "collection_name": self._collection_name,
             "vectors": payloads,
-            "ids": [int(i) for i in ids],
+            "ids": normalize_external_ids(ids)[0],
         }
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
@@ -1564,7 +1360,8 @@ class Collection:
             raise_error_response(response)
 
     def search(
-            self, vector: Union[list[float], np.ndarray], k: int = 10, *,
+            self, vector: Union[list[float], np.ndarray, None] = None, k: int = 10, *,
+            document: Union[str, None] = None,
             where: Union[str, None] = None,
             return_fields: bool = False,
             vector_field: str = "default",
@@ -1612,31 +1409,46 @@ class Collection:
             ValueError: If the collection has been deleted or does not exist.
             ExecutionError: If the server returns an error.
         """
+        del wire_dtype  # JSON search is used so public string IDs can round-trip.
+        if (vector is None) == (document is None):
+            raise ValueError("search() requires exactly one of vector or document")
         send_return_fields = should_fetch_fields(
             return_fields=return_fields,
             reranker=reranker,
             rerank_with_fields=rerank_with_fields,
         )
-        vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
-        buf = self._search(
-            vector=vec,
-            k=k,
-            where=where,
-            return_fields=send_return_fields,
-            vector_field=vector_field,
-            nprobe=nprobe,
-            approx=approx,
-            eps=eps,
-            wire_dtype=wire_dtype,
-        )
-        ids, dists, fields, _ = _decode_search_binary(buf)
+        if document is not None:
+            vec = embed_documents([document])[0]
+        else:
+            vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
+        uri = f'{self._uri}/search'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "vector": vec.tolist(),
+            "vector_field": vector_field,
+            "k": k,
+            "where": where,
+            "return_fields": send_return_fields,
+            "nprobe": nprobe,
+            "approx": approx,
+            "eps": float(eps),
+        }
+        response = self._session.post(uri, json=data)
+        if response.status_code != 200:
+            raise_error_response(response)
+        items = response.json()['params']['items']
+        ids = id_array(items.get('ids', []))
+        dists = np.array(items.get('scores', []), dtype=np.float32)
+        fields = items.get('fields', [])
         ids, dists, reranked_fields = apply_external_rerank(
             ids=ids,
             scores=dists,
             fields=fields,
             reranker=reranker,
             query={
-                "type": "vector_search",
+                "type": "document_search" if document is not None else "vector_search",
+                "document": document,
                 "vector_field": vector_field,
                 "vector": vec.tolist(),
                 "where": where,
@@ -1696,7 +1508,7 @@ class Collection:
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
             items = response.json()['params']['items']
-            ids = np.array(items.get('ids', []), dtype=np.int64)
+            ids = id_array(items.get('ids', []))
             scores = np.array(items.get('scores', []), dtype=np.float32)
             fields = items.get('fields', [])
             ids, scores, reranked_fields = apply_external_rerank(
@@ -1742,7 +1554,7 @@ class Collection:
             return response.json()['params']
         raise_error_response(response)
 
-    def text_search(
+    def bm25_search(
             self, text: str, k: int = 10, *,
             text_fields: Union[list[str], None] = None,
             where: Union[str, None] = None,
@@ -1750,9 +1562,9 @@ class Collection:
             reranker: Optional[Callable[[Dict[str, Any]], Any]] = None,
             rerank_k: Optional[int] = None,
             rerank_with_fields: bool = True,
-    ):
+        ):
         """BM25 text search over metadata fields."""
-        uri = f'{self._uri}/text_search'
+        uri = f'{self._uri}/bm25_search'
         send_return_fields = should_fetch_fields(
             return_fields=return_fields,
             reranker=reranker,
@@ -1770,7 +1582,7 @@ class Collection:
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
             items = response.json()['params']['items']
-            ids = np.array(items.get('ids', []), dtype=np.int64)
+            ids = id_array(items.get('ids', []))
             scores = np.array(items.get('scores', []), dtype=np.float32)
             fields = items.get('fields', [])
             ids, scores, reranked_fields = apply_external_rerank(
@@ -1779,7 +1591,7 @@ class Collection:
                 fields=fields,
                 reranker=reranker,
                 query={
-                    "type": "text_search",
+                    "type": "bm25_search",
                     "text": text,
                     "text_fields": text_fields,
                     "where": where,
@@ -1840,7 +1652,7 @@ class Collection:
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
             items = response.json()['params']['items']
-            ids = np.array(items.get('ids', []), dtype=np.int64)
+            ids = id_array(items.get('ids', []))
             scores = np.array(items.get('scores', []), dtype=np.float32)
             fields = items.get('fields', [])
             ids, scores, reranked_fields = apply_external_rerank(
@@ -1907,45 +1719,31 @@ class Collection:
         vecs = np.ascontiguousarray(vectors, dtype=np.float32)
         if vecs.ndim == 1:
             vecs = vecs.reshape(1, -1)
-        n_queries, dim = vecs.shape
-        vector_encoding = _normalize_vector_encoding(wire_dtype)
-        if vector_encoding == "float16":
-            body = np.ascontiguousarray(vecs, dtype="<f2").tobytes()
-        else:
-            body = vecs.tobytes()
+        del wire_dtype
         send_return_fields = should_fetch_fields(
             return_fields=return_fields,
             reranker=reranker,
             rerank_with_fields=rerank_with_fields,
         )
-
-        params = {
-            'database_name': self._database_name,
-            'collection_name': self._collection_name,
-            'dim': dim,
-            'n_queries': n_queries,
-            'k': k,
-            'return_fields': str(send_return_fields).lower(),
-            'nprobe': nprobe,
-            'vector_encoding': vector_encoding,
+        uri = f'{self._uri}/batch_search'
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "vectors": vecs.tolist(),
+            "k": k,
+            "where": where,
+            "return_fields": send_return_fields,
+            "nprobe": nprobe,
         }
-        if where is not None:
-            params['where'] = where
-
-        uri = f'{self._uri}/batch_search_binary'
-        response = self._session.post(
-            uri, params=params, content=body,
-            headers={'Content-Type': 'application/octet-stream'},
-        )
+        response = self._session.post(uri, json=data)
 
         if response.status_code == 200:
-            buf = response.content
-            nq = struct.unpack_from('<I', buf, 0)[0]
-            off = 4
             idx_type, metric = _parse_index_mode(self.index_mode)
             output = []
-            for query_index in range(nq):
-                ids, dists, fields, off = _decode_search_binary(buf, off)
+            for query_index, item in enumerate(response.json()['params']['results']):
+                ids = id_array(item.get('ids', []))
+                dists = np.array(item.get('scores', []), dtype=np.float32)
+                fields = item.get('fields', [])
                 ids, dists, reranked_fields = apply_external_rerank(
                     ids=ids,
                     scores=dists,
@@ -1999,7 +1797,7 @@ class Collection:
 
     def head(self, n: int = 5):
         """
-        Get the first n items in the collection (compact binary protocol).
+        Get the first n items in the collection.
 
         Parameters:
             n (int): The number of items to return. Default is 5.
@@ -2010,15 +1808,18 @@ class Collection:
         Raises:
             ExecutionError: If the server returns an error.
         """
-        params = {
-            'database_name': self._database_name,
-            'collection_name': self._collection_name,
-            'n': n,
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "n": n,
         }
-        response = self._session.get(f'{self._uri}/head_binary', params=params)
+        response = self._session.post(f'{self._uri}/head', json=data)
 
         if response.status_code == 200:
-            vecs, ids, fields = _decode_vectors_binary(response.content)
+            head = response.json()['params']['head']
+            vecs = np.asarray(head[0], dtype=np.float32)
+            ids = id_array(head[1])
+            fields = head[2] if len(head) > 2 else []
             return ResultView(
                 vectors=vecs, ids=ids, fields=fields,
                 result_type="data",
@@ -2028,7 +1829,7 @@ class Collection:
 
     def tail(self, n: int = 5):
         """
-        Get the last n items in the collection (compact binary protocol).
+        Get the last n items in the collection.
 
         Parameters:
             n (int): The number of items to return. Default is 5.
@@ -2039,15 +1840,18 @@ class Collection:
         Raises:
             ExecutionError: If the server returns an error.
         """
-        params = {
-            'database_name': self._database_name,
-            'collection_name': self._collection_name,
-            'n': n,
+        data = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "n": n,
         }
-        response = self._session.get(f'{self._uri}/tail_binary', params=params)
+        response = self._session.post(f'{self._uri}/tail', json=data)
 
         if response.status_code == 200:
-            vecs, ids, fields = _decode_vectors_binary(response.content)
+            tail = response.json()['params']['tail']
+            vecs = np.asarray(tail[0], dtype=np.float32)
+            ids = id_array(tail[1])
+            fields = tail[2] if len(tail) > 2 else []
             return ResultView(
                 vectors=vecs, ids=ids, fields=fields,
                 result_type="data",
@@ -2075,7 +1879,7 @@ class Collection:
         if response.status_code == 200:
             item = response.json()['params']['item']
             vecs = np.asarray(item[0], dtype=np.float32)
-            ids = np.array(item[1], dtype=np.int64)
+            ids = id_array(item[1])
             fields = item[2] if len(item) > 2 else []
             return ResultView(
                 vectors=vecs, ids=ids, fields=fields,
@@ -2106,7 +1910,7 @@ class Collection:
                  'where must be a SQL/WHERE expression string or None.')
 
         if where is None and filter_ids is None:
-            return ResultView(ids=np.array([], dtype=np.int64), result_type="query")
+                return ResultView(ids=id_array([]), result_type="query")
 
         data = {
             "database_name": self._database_name,
@@ -2121,13 +1925,13 @@ class Collection:
         if response.status_code == 200:
             result = response.json()['params']['result']
             if return_ids_only:
-                ids_arr = np.array(result, dtype=np.int64) if result else np.array([], dtype=np.int64)
+                ids_arr = id_array(result) if result else id_array([])
                 return ResultView(ids=ids_arr, result_type="query")
             else:
                 # result is a list of dicts
                 records = result if isinstance(result, list) else []
                 ids_list = [r.get('id', i) for i, r in enumerate(records)] if records else []
-                ids_arr = np.array(ids_list, dtype=np.int64) if ids_list else np.array([], dtype=np.int64)
+                ids_arr = id_array(ids_list) if ids_list else id_array([])
                 return ResultView(ids=ids_arr, fields=records, result_type="query")
         else:
             raise_error_response(response)
@@ -2154,7 +1958,7 @@ class Collection:
             dim = int(self._init_params.get('dim') or 0)
             return ResultView(
                 vectors=np.empty((0, dim), dtype=np.float32),
-                ids=np.array([], dtype=np.int64),
+                ids=id_array([]),
                 fields=[],
                 result_type="data",
             )
@@ -2171,7 +1975,7 @@ class Collection:
         if response.status_code == 200:
             result = response.json()['params']['result']
             vecs = np.asarray(result[0], dtype=np.float32)
-            ids = np.array(result[1], dtype=np.int64)
+            ids = id_array(result[1])
             fields = result[2] if len(result) > 2 else []
             return ResultView(
                 vectors=vecs, ids=ids, fields=fields,
@@ -2240,7 +2044,7 @@ class Collection:
         else:
             raise_error_response(response)
 
-    def delete_items(self, ids):
+    def delete(self, ids):
         """
         Soft-delete vectors by ID.
 
@@ -2249,28 +2053,28 @@ class Collection:
         Parameters:
             ids (list[int]): External IDs to soft-delete.
         """
-        uri = f'{self._uri}/delete_items'
+        uri = f'{self._uri}/delete'
         data = {
             "database_name": self._database_name,
             "collection_name": self._collection_name,
-            "ids": [int(i) for i in ids],
+            "ids": normalize_external_ids(ids)[0],
         }
         response = self._session.post(uri, json=data)
         if response.status_code != 200:
             raise_error_response(response)
 
-    def restore_items(self, ids):
+    def restore(self, ids):
         """
         Restore previously soft-deleted vectors.
 
         Parameters:
             ids (list[int]): External IDs to restore.
         """
-        uri = f'{self._uri}/restore_items'
+        uri = f'{self._uri}/restore'
         data = {
             "database_name": self._database_name,
             "collection_name": self._collection_name,
-            "ids": [int(i) for i in ids],
+            "ids": normalize_external_ids(ids)[0],
         }
         response = self._session.post(uri, json=data)
         if response.status_code != 200:
@@ -2318,7 +2122,7 @@ class Collection:
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
             result = response.json()['params']['result']
-            ids = np.array(result['ids'], dtype=np.int64)
+            ids = id_array(result['ids'])
             dists = np.array(result['distances'], dtype=np.float32)
             from ...result_view import ResultView
             return ResultView(

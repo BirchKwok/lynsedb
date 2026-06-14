@@ -52,16 +52,16 @@ The methods mirror the database client described in [Python Client API](../clien
 
 The remote `Collection` class mirrors the local collection API:
 
-- writes: `add_item`, `bulk_add_items`, `bulk_add_binary`, `upsert_item`,
-  `upsert_items`, `commit`, `flush`, `checkpoint`, `close`;
+- writes: `add`, `upsert`, `commit`, `flush`,
+  `checkpoint`, `close`;
 - indexes: `build_index`, `remove_index`;
 - named/sparse vectors: `create_vector_field`, `list_vector_fields`,
   `add_named_vectors`, `add_sparse_vectors`;
 - search: `search`, `batch_search`, `search_range`, `search_profile`,
-  `search_sparse`, `text_search`, `hybrid_search`;
+  `search_sparse`, `bm25_search`, `hybrid_search`;
 - query/data access: `query`, `query_vectors`, `head`, `tail`, `read_by_only_id`,
   `list_fields`, `is_id_exists`, `max_id`, `shape`, `stats`, `index_mode`;
-- maintenance: `delete_items`, `restore_items`, `list_deleted_ids`, `compact`,
+- maintenance: `delete`, `restore`, `list_deleted_ids`, `compact`,
   `snapshot_to`, `export_to`, `update_description`.
 
 The HTTP Python client uses the same explicit method signatures and parameter

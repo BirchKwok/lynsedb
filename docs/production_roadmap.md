@@ -144,7 +144,7 @@ Distributed work should wait until single-node semantics are stable.
 - [x] Add insert duplicate-ID validation.
 - [x] Add tests for reopen after uncommitted vector-only and custom-ID batches.
 - [x] Add tests documenting duplicate insert behavior.
-- [x] Add explicit `upsert_items` after insert behavior is stable.
+- [x] Add explicit `upsert` after insert behavior is stable.
 - [x] Add reopen tests for upserted vectors, IDs, fields, and tombstones.
 - [x] Extend crash/reopen coverage to persisted index files.
 - [x] Ensure index metadata and index files are atomically swapped.
@@ -187,9 +187,9 @@ Distributed work should wait until single-node semantics are stable.
 ## Milestone 5 Immediate Coding Queue
 
 - [x] Add `/search_profile` with filter matches, estimated scanned vectors, index path, and timing data.
-- [x] Add baseline BM25 metadata text search over current field rows.
-- [x] Add hybrid vector/text search with RRF and weighted fusion.
-- [x] Expose query profile, text search, and hybrid search through local and HTTP clients.
+- [x] Add baseline BM25 metadata search over current field rows.
+- [x] Add hybrid vector/BM25 search with RRF and weighted fusion.
+- [x] Expose query profile, BM25 search, and hybrid search through local and HTTP clients.
 - [x] Add named vector fields per record.
 - [x] Allow each vector field to define its own dimension, metric, and index.
 - [x] Add sparse vector storage and sparse inner-product search.

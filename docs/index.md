@@ -52,14 +52,19 @@ client = lynse.VectorDBClient(uri="./lynsedb-data")
 db = client.create_database("demo", drop_if_exists=True)
 collection = db.require_collection("documents", dim=4, drop_if_exists=True)
 
-items = [
-    ([0.10, 0.20, 0.30, 0.40], 1, {"title": "intro", "lang": "en"}),
-    ([0.11, 0.19, 0.29, 0.39], 2, {"title": "guide", "lang": "en"}),
-    ([0.80, 0.10, 0.20, 0.10], 3, {"title": "notes", "lang": "fr"}),
-]
-
-with collection.insert_session() as session:
-    session.bulk_add_items(items, enable_progress_bar=False)
+collection.add(
+    ids=["intro", "guide", "notes-fr"],
+    vectors=[
+        [0.10, 0.20, 0.30, 0.40],
+        [0.11, 0.19, 0.29, 0.39],
+        [0.80, 0.10, 0.20, 0.10],
+    ],
+    fields=[
+        {"title": "intro", "lang": "en"},
+        {"title": "guide", "lang": "en"},
+        {"title": "notes", "lang": "fr"},
+    ],
+)
 
 collection.build_index("FLAT-L2")
 
@@ -85,7 +90,7 @@ print(result.to_list())
   remote mode and configure the server.
 - Use [Search and filter](tutorials/search_and_filter.md) and the
   [Metadata filter cookbook](tutorials/metadata_filter_cookbook.md) for vector
-  search, standard SQL-style filters, text search, hybrid search, and reranking.
+  search, standard SQL-style filters, BM25 search, hybrid search, and reranking.
 - Use [Indexing guide](tutorials/indexing.md) and
   [Performance tuning](tutorials/performance_tuning.md) to choose between flat,
   HNSW, IVF, DiskANN, and quantized indexes.

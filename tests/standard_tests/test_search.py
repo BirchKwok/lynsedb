@@ -59,9 +59,10 @@ class TestSearch:
         ]:
             coll = db.require_collection(name, dim=4, drop_if_exists=True)
             with coll.insert_session() as session:
-                session.bulk_add_items(
-                    [(vectors[i], i, {"metric": name}) for i in range(len(vectors))],
-                    enable_progress_bar=False,
+                session.add(
+                    ids=list(range(len(vectors))),
+                    vectors=vectors,
+                    fields=[{"metric": name} for _ in range(len(vectors))],
                 )
             coll.build_index(index_mode)
 
@@ -89,7 +90,7 @@ class TestSearch:
     ):
         baseline = populated_collection.search(query_vec, k=6, approx=True)
         deleted = int(baseline.ids[0])
-        populated_collection.delete_items([deleted])
+        populated_collection.delete([deleted])
 
         result = populated_collection.search(query_vec, k=5, approx=True)
         assert len(result.ids) == 5
@@ -152,15 +153,15 @@ class TestSearch:
         result_before = populated_collection.search(query_vec, k=N)
         ids_before = set(result_before.ids.tolist())
         del_id = int(result_before.ids[0])
-        populated_collection.delete_items([del_id])
+        populated_collection.delete([del_id])
         result_after = populated_collection.search(query_vec, k=N)
         assert del_id not in result_after.ids.tolist()
 
     def test_search_restored_id_appears(self, populated_collection, query_vec):
         result = populated_collection.search(query_vec, k=N)
         del_id = int(result.ids[0])
-        populated_collection.delete_items([del_id])
-        populated_collection.restore_items([del_id])
+        populated_collection.delete([del_id])
+        populated_collection.restore([del_id])
         result2 = populated_collection.search(query_vec, k=N)
         assert del_id in result2.ids.tolist()
 
@@ -180,8 +181,8 @@ class TestSearch:
         assert result["profile"]["filter_matches"] > 0
         assert result["profile"]["index_path"]
 
-    def test_text_search_returns_result_view(self, populated_collection):
-        result = populated_collection.text_search(
+    def test_bm25_search_returns_result_view(self, populated_collection):
+        result = populated_collection.bm25_search(
             "item_3", k=3, text_fields=["tag"], return_fields=True
         )
         assert isinstance(result, ResultView)
@@ -236,13 +237,13 @@ class TestSearch:
         assert observed["has_field"] is True
         assert result.fields == [] or result.fields is None or len(result.fields) == 0
 
-    def test_text_search_reranker_accepts_scores(self, populated_collection):
-        baseline = populated_collection.text_search("item", k=6, text_fields=["tag"])
+    def test_bm25_search_reranker_accepts_scores(self, populated_collection):
+        baseline = populated_collection.bm25_search("item", k=6, text_fields=["tag"])
 
         def reranker(payload):
             return np.array([item["id"] for item in payload["items"]], dtype=np.float32)
 
-        reranked = populated_collection.text_search(
+        reranked = populated_collection.bm25_search(
             "item",
             k=6,
             text_fields=["tag"],
@@ -448,7 +449,7 @@ class TestSearchRange:
         result_all = populated_collection.search_range(query_vec, threshold=-1e6)
         assert len(result_all.ids) > 0, "search_range with threshold=-1e6 should return all vectors"
         del_id = int(result_all.ids[0])
-        populated_collection.delete_items([del_id])
+        populated_collection.delete([del_id])
         result_after = populated_collection.search_range(query_vec, threshold=-1e6)
         assert del_id not in result_after.ids.tolist()
 
@@ -533,20 +534,20 @@ class TestEdgeCasesSearch:
         assert len(result.distances) == 1
 
     def test_search_all_deleted_returns_empty(self, populated_collection, query_vec):
-        populated_collection.delete_items(list(range(N)))
+        populated_collection.delete(list(range(N)))
         result = populated_collection.search(query_vec, k=5)
         assert len(result.ids) == 0
 
     def test_search_after_restore_includes_id(self, populated_collection, query_vec):
-        populated_collection.delete_items(list(range(N)))
-        populated_collection.restore_items([0, 1, 2])
+        populated_collection.delete(list(range(N)))
+        populated_collection.restore([0, 1, 2])
         result = populated_collection.search(query_vec, k=5)
         for rid in result.ids.tolist():
             assert rid in [0, 1, 2]
 
     def test_search_after_compact_still_correct(self, populated_collection, query_vec):
         del_ids = [0, 1, 2]
-        populated_collection.delete_items(del_ids)
+        populated_collection.delete(del_ids)
         populated_collection.compact()
         result = populated_collection.search(query_vec, k=N)
         for del_id in del_ids:
@@ -569,7 +570,7 @@ class TestEdgeCasesSearch:
         assert len(result.ids) == 0
 
     def test_search_range_after_compact(self, populated_collection, query_vec):
-        populated_collection.delete_items([3, 4])
+        populated_collection.delete([3, 4])
         populated_collection.compact()
         result = populated_collection.search_range(query_vec, threshold=-1e6)
         assert 3 not in result.ids.tolist()
@@ -615,12 +616,11 @@ class TestLifecycle:
 
         np.random.seed(99)
         n = 30
-        items = [
-            (np.random.rand(DIM).astype(np.float32), i, {"group": i % 3, "score": float(i)})
-            for i in range(n)
-        ]
+        vectors = [np.random.rand(DIM).astype(np.float32) for _ in range(n)]
+        ids = list(range(n))
+        fields = [{"group": i % 3, "score": float(i)} for i in range(n)]
         with coll.insert_session() as session:
-            session.bulk_add_items(items)
+            session.add(ids=ids, vectors=vectors, fields=fields)
 
         assert coll.shape[0] == n
         assert coll.max_id == n - 1
@@ -630,7 +630,7 @@ class TestLifecycle:
         assert len(result.ids) == 10
 
         del_ids = [0, 3, 6, 9, 12]
-        coll.delete_items(del_ids)
+        coll.delete(del_ids)
         assert coll.list_deleted_ids() == sorted(del_ids)
         s = coll.stats()
         assert s["n_tombstoned"] == len(del_ids)

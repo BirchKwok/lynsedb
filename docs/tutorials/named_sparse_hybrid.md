@@ -15,15 +15,19 @@ client = lynse.VectorDBClient(uri="./multi-vector-demo")
 db = client.create_database("multi_vector", drop_if_exists=True)
 collection = db.require_collection("products", dim=4, drop_if_exists=True)
 
-with collection.insert_session() as session:
-    session.bulk_add_items(
-        [
-            ([0.10, 0.20, 0.30, 0.40], 1, {"sku": "A", "name": "red shirt"}),
-            ([0.11, 0.21, 0.29, 0.39], 2, {"sku": "B", "name": "blue shirt"}),
-            ([0.80, 0.10, 0.20, 0.10], 3, {"sku": "C", "name": "green hat"}),
-        ],
-        enable_progress_bar=False,
-    )
+collection.add(
+    ids=["sku-A", "sku-B", "sku-C"],
+    vectors=[
+        [0.10, 0.20, 0.30, 0.40],
+        [0.11, 0.21, 0.29, 0.39],
+        [0.80, 0.10, 0.20, 0.10],
+    ],
+    fields=[
+        {"sku": "A", "name": "red shirt"},
+        {"sku": "B", "name": "blue shirt"},
+        {"sku": "C", "name": "green hat"},
+    ],
+)
 ```
 
 Create a field for image embeddings:
@@ -40,7 +44,7 @@ image_vectors = np.array(
     dtype=np.float32,
 )
 
-collection.add_named_vectors("image", image_vectors, ids=[1, 2, 3])
+collection.add_named_vectors("image", image_vectors, ids=["sku-A", "sku-B", "sku-C"])
 collection.build_index("HNSW-L2", field_name="image")
 collection.commit()
 ```
@@ -123,7 +127,7 @@ collection.add_sparse_vectors(
         {101: 0.8, 333: 0.7},
         {999: 1.0},
     ],
-    ids=[1, 2, 3],
+    ids=["sku-A", "sku-B", "sku-C"],
 )
 collection.commit()
 ```
@@ -166,13 +170,13 @@ result = collection.search_sparse(
 )
 ```
 
-## Text search
+## BM25 search
 
-Text search uses BM25 over metadata fields. Text is indexed from stored fields
+BM25 search uses metadata fields. Text is indexed from stored fields
 when you insert or update rows.
 
 ```python
-result = collection.text_search(
+result = collection.bm25_search(
     "shirt",
     k=3,
     text_fields=["name"],
@@ -184,7 +188,7 @@ print(result.to_list())
 Search one or more fields:
 
 ```python
-result = collection.text_search(
+result = collection.bm25_search(
     "red shirt",
     k=10,
     text_fields=["name", "sku"],
@@ -314,14 +318,19 @@ client = lynse.VectorDBClient(uri="./multimodal-products")
 db = client.create_database("store", drop_if_exists=True)
 collection = db.require_collection("products", dim=4, drop_if_exists=True)
 
-products = [
-    ([0.10, 0.20, 0.30, 0.40], 1, {"sku": "A", "name": "red shirt", "category": "apparel"}),
-    ([0.11, 0.21, 0.29, 0.39], 2, {"sku": "B", "name": "blue shirt", "category": "apparel"}),
-    ([0.80, 0.10, 0.20, 0.10], 3, {"sku": "C", "name": "green hat", "category": "accessory"}),
-]
-
-with collection.insert_session() as session:
-    session.bulk_add_items(products, enable_progress_bar=False)
+collection.add(
+    ids=["sku-A", "sku-B", "sku-C"],
+    vectors=[
+        [0.10, 0.20, 0.30, 0.40],
+        [0.11, 0.21, 0.29, 0.39],
+        [0.80, 0.10, 0.20, 0.10],
+    ],
+    fields=[
+        {"sku": "A", "name": "red shirt", "category": "apparel"},
+        {"sku": "B", "name": "blue shirt", "category": "apparel"},
+        {"sku": "C", "name": "green hat", "category": "accessory"},
+    ],
+)
 
 collection.create_vector_field("image", dim=3, metric="l2")
 collection.add_named_vectors(
@@ -334,7 +343,7 @@ collection.add_named_vectors(
         ],
         dtype=np.float32,
     ),
-    ids=[1, 2, 3],
+    ids=["sku-A", "sku-B", "sku-C"],
 )
 
 collection.add_sparse_vectors(
@@ -343,7 +352,7 @@ collection.add_sparse_vectors(
         {10: 0.9, 30: 0.8},
         {40: 1.0},
     ],
-    ids=[1, 2, 3],
+    ids=["sku-A", "sku-B", "sku-C"],
 )
 
 collection.build_index("FLAT-L2")
@@ -384,6 +393,6 @@ print(keyword_like.to_list())
 | Semantic similarity from one embedding model | Primary vector search. |
 | Multiple embeddings per record | Named vector fields. |
 | Feature-ID weights or learned sparse representations | Sparse vector search. |
-| Exact or keyword-like text matching | `text_search()`. |
+| Exact or keyword-like text matching | `bm25_search()`. |
 | Semantic plus lexical recall | `hybrid_search()`. |
 | Final ordering with richer logic | `reranker`. |

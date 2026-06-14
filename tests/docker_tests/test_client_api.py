@@ -16,12 +16,16 @@ def test_remote_round_trip_search(remote_server, unique_name):
     collection = db.require_collection("remote_smoke", dim=4, drop_if_exists=True)
 
     with collection.insert_session() as session:
-        session.bulk_add_items(
-            [
-                (np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), 1, {"tag": "alpha"}),
-                (np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32), 2, {"tag": "beta"}),
-            ],
-            enable_progress_bar=False,
+        session.add(
+            ids=[1, 2],
+            vectors=np.array(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                ],
+                dtype=np.float32,
+            ),
+            fields=[{"tag": "alpha"}, {"tag": "beta"}],
         )
 
     result = collection.search([1.0, 0.0, 0.0, 0.0], k=1, return_fields=True)
@@ -38,19 +42,23 @@ def test_remote_delete_restore_and_stats(remote_server, unique_name):
     collection = db.require_collection("restore_smoke", dim=4, drop_if_exists=True)
 
     with collection.insert_session() as session:
-        session.bulk_add_items(
-            [
-                (np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32), 10, {"tag": "keep"}),
-                (np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), 11, {"tag": "drop"}),
-            ],
-            enable_progress_bar=False,
+        session.add(
+            ids=[10, 11],
+            vectors=np.array(
+                [
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            ),
+            fields=[{"tag": "keep"}, {"tag": "drop"}],
         )
 
-    collection.delete_items([11])
+    collection.delete([11])
     assert collection.list_deleted_ids() == [11]
     assert collection.stats()["n_tombstoned"] == 1
 
-    collection.restore_items([11])
+    collection.restore([11])
     assert collection.list_deleted_ids() == []
     assert collection.stats()["n_live"] == 2
 
@@ -61,7 +69,7 @@ def test_remote_query_without_filter_returns_empty(remote_server, unique_name):
     collection = db.require_collection("query_contract", dim=4, drop_if_exists=True)
 
     with collection.insert_session() as session:
-        session.add_item([1.0, 0.0, 0.0, 0.0], id=1, field={"tag": "alpha"})
+        session.add(ids=1, vectors=[1.0, 0.0, 0.0, 0.0], fields={"tag": "alpha"})
 
     assert len(collection.query().ids) == 0
     assert collection.query_vectors().vectors.shape == (0, 4)
@@ -73,12 +81,16 @@ def test_remote_named_vector_index_uses_field_endpoint(remote_server, unique_nam
     collection = db.require_collection("named_vector_remote", dim=4, drop_if_exists=True)
 
     with collection.insert_session() as session:
-        session.bulk_add_items(
-            [
-                (np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), 1, {"tag": "one"}),
-                (np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32), 2, {"tag": "two"}),
-            ],
-            enable_progress_bar=False,
+        session.add(
+            ids=[1, 2],
+            vectors=np.array(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                ],
+                dtype=np.float32,
+            ),
+            fields=[{"tag": "one"}, {"tag": "two"}],
         )
 
     collection.create_vector_field("image", dim=3, metric="l2")
@@ -109,9 +121,10 @@ def test_remote_search_forwards_approx_options(remote_server, unique_name):
     vectors = np.zeros((3, 128), dtype=np.float32)
     vectors[1, 96:] = 0.7
     with collection.insert_session() as session:
-        session.bulk_add_items(
-            [(vectors[i], i, {"tag": str(i)}) for i in range(len(vectors))],
-            enable_progress_bar=False,
+        session.add(
+            ids=list(range(len(vectors))),
+            vectors=vectors,
+            fields=[{"tag": str(i)} for i in range(len(vectors))],
         )
     collection.build_index("FLAT-L2")
 

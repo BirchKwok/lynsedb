@@ -62,11 +62,8 @@ Remote-only database helpers:
 | Method | Description |
 | --- | --- |
 | `insert_session()` | Context manager that commits on success and discards pending buffered writes on exception. |
-| `add_item(vector, id, *, field=None, buffer_size=True)` | Add one dense vector with optional metadata. |
-| `bulk_add_items(vectors, batch_size=1000, enable_progress_bar=True)` | Add `(vector, id)` or `(vector, id, field)` tuples. |
-| `bulk_add_binary(vectors, batch_size=50000, enable_progress_bar=True)` | Add a dense `float32` array without metadata in the same call; IDs are assigned sequentially after `max_id`. |
-| `upsert_item(vector, id, *, field=None)` | Insert or update one row. |
-| `upsert_items(vectors, batch_size=1000, enable_progress_bar=True)` | Insert or update many rows. |
+| `add(ids, *, vectors=None, documents=None, fields=None, batch_size=1000, wire_dtype="float32")` | Add one or more records. Provide vectors directly, or provide documents without vectors to trigger lazy default embedding. IDs may be strings or non-negative integers. |
+| `upsert(ids, *, vectors, fields=None, batch_size=1000, wire_dtype="float32")` | Insert or update one or more records by public ID. |
 | `commit()` | Commit pending writes. |
 | `flush()` | Flush client/storage buffers. |
 | `checkpoint()` | Force a durable checkpoint. |
@@ -87,12 +84,12 @@ Remote-only database helpers:
 
 | Method | Description |
 | --- | --- |
-| `search(vector, k=10, *, where=None, return_fields=False, vector_field="default", reranker=None, rerank_k=None, rerank_with_fields=False, nprobe=10, approx=False, eps=1e-4)` | Dense vector search. |
+| `search(vector=None, k=10, *, document=None, where=None, return_fields=False, vector_field="default", reranker=None, rerank_k=None, rerank_with_fields=False, nprobe=10, approx=False, eps=1e-4, wire_dtype="float32")` | Dense vector search, or semantic document search when `document` is provided instead of `vector`. |
 | `batch_search(vectors, k=10, *, where=None, return_fields=False, nprobe=10, reranker=None, rerank_k=None, rerank_with_fields=False)` | Search multiple query vectors. |
 | `search_range(vector, threshold, max_results=1000)` | Return all matches within a metric-specific threshold. |
 | `search_profile(vector, k=10, *, where=None, nprobe=10)` | Search with explain/profile metadata. |
 | `search_sparse(vector, k=10, *, where=None, return_fields=False, reranker=None, rerank_k=None, rerank_with_fields=True)` | Sparse inner-product search. |
-| `text_search(text, k=10, *, text_fields=None, where=None, return_fields=False, reranker=None, rerank_k=None, rerank_with_fields=True)` | BM25 search over metadata fields. |
+| `bm25_search(text, k=10, *, text_fields=None, where=None, return_fields=False, reranker=None, rerank_k=None, rerank_with_fields=True)` | BM25 search over metadata fields. |
 | `hybrid_search(vector=None, text=None, k=10, *, where=None, text_fields=None, fusion="rrf", vector_weight=1.0, text_weight=1.0, rrf_k=60.0, candidate_limit=None, nprobe=10, return_fields=False, reranker=None, rerank_k=None, rerank_with_fields=True)` | Dense plus text hybrid search. |
 
 Parameter behavior is the same for local and HTTP Python clients:
@@ -120,7 +117,7 @@ Parameter behavior is the same for local and HTTP Python clients:
 | `exists()` | Check whether the collection exists. |
 | `is_read_only` | Local collection property indicating whether storage is read-only. |
 | `is_id_exists(id)` | Check whether an ID exists. |
-| `max_id` | Highest stored external ID. |
+| `max_id` | Highest internal numeric ID, mainly for diagnostics. |
 | `shape` | `(n_vectors, dim)`. |
 | `stats()` | Collection statistics. |
 | `index_mode` | Current primary index mode. |
@@ -136,8 +133,8 @@ Remote-only collection helpers:
 
 | Method | Description |
 | --- | --- |
-| `delete_items(ids)` | Soft-delete IDs. |
-| `restore_items(ids)` | Restore soft-deleted IDs. |
+| `delete(ids)` | Soft-delete IDs. |
+| `restore(ids)` | Restore soft-deleted IDs. |
 | `list_deleted_ids()` | List tombstoned IDs. |
 | `compact()` | Physically remove tombstoned rows. |
 | `snapshot_to(snapshot_path)` | Snapshot this collection. |

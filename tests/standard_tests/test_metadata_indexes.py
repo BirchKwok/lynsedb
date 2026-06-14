@@ -3,23 +3,21 @@ import numpy as np
 
 
 def test_metadata_indexes_cover_range_bool_array_and_datetime(collection):
-    items = []
+    vectors = []
+    ids = []
+    fields = []
     for i in range(5):
-        items.append(
-            (
-                np.array([float(i)] + [0.0] * 7, dtype=np.float32),
-                100 + i,
-                {
-                    "order": i,
-                    "active": i % 2 == 0,
-                    "tags": ["rust", "vector"] if i % 2 == 0 else ["python"],
-                    "created_at": f"2026-04-{i + 1:02d}",
-                },
-            )
-        )
+        vectors.append(np.array([float(i)] + [0.0] * 7, dtype=np.float32))
+        ids.append(100 + i)
+        fields.append({
+            "order": i,
+            "active": i % 2 == 0,
+            "tags": ["rust", "vector"] if i % 2 == 0 else ["python"],
+            "created_at": f"2026-04-{i + 1:02d}",
+        })
 
     with collection.insert_session() as session:
-        session.bulk_add_items(items, enable_progress_bar=False)
+        session.add(ids=ids, vectors=vectors, fields=fields)
 
     assert collection.query(
         where='"order" >= 2 AND "order" < 4',

@@ -119,18 +119,19 @@ primary vector dimension.
 ## 6. Insert chunks
 
 ```python
-items = []
-next_id = 1
+ids = []
+vectors = []
+fields = []
 
 for doc in documents:
     for chunk in chunk_document(doc):
         text_for_embedding = f"{chunk['title']} {chunk['text']}"
-        vector = embed_text(text_for_embedding)
-        items.append((vector, next_id, chunk))
-        next_id += 1
+        ids.append(chunk["source"])
+        vectors.append(embed_text(text_for_embedding))
+        fields.append(chunk)
 
 with collection.insert_session() as session:
-    session.bulk_add_items(items, batch_size=1000, enable_progress_bar=False)
+    session.add(ids=ids, vectors=vectors, fields=fields, batch_size=1000)
 
 collection.build_index("FLAT-COS")
 collection.checkpoint()
@@ -185,7 +186,7 @@ for row in hybrid.to_list():
     print(row["id"], row["distance"], row["title"])
 ```
 
-Use vector search for semantic recall and BM25 text search for exact terms.
+Use vector search for semantic recall and BM25 search for exact terms.
 `fusion="rrf"` is a good default because vector and text scores use different
 scales.
 
@@ -270,10 +271,10 @@ updated_field = {
     "source": "local-remote#0",
 }
 
-collection.upsert_item(
-    embed_text(f"{updated_field['title']} {updated_text}"),
-    id=2,
-    field=updated_field,
+collection.upsert(
+    ids="local-remote#0",
+    vectors=embed_text(f"{updated_field['title']} {updated_text}"),
+    fields=updated_field,
 )
 collection.commit()
 ```
@@ -281,7 +282,7 @@ collection.commit()
 If the number of chunks changes, delete old chunk IDs that no longer exist:
 
 ```python
-collection.delete_items([old_chunk_id])
+collection.delete([old_chunk_id])
 collection.commit()
 ```
 
@@ -291,7 +292,7 @@ Run `compact()` later during maintenance if many rows have been tombstoned.
 
 - Pick an embedding model and record its dimension and metric.
 - Normalize vectors if your metric strategy requires it.
-- Use one stable integer ID per chunk.
+- Use one stable public string or integer ID per chunk.
 - Store source metadata needed for filtering and citations.
 - Use `where` for tenant, permission, language, source, and freshness filters.
 - Start with `FLAT-COS` or `FLAT-L2` as a baseline.

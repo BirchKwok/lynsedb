@@ -370,6 +370,33 @@ class Collection:
             vectors = vectors.reshape(1, -1)
         self._inner.add_items(vectors, [int(i) for i in ids], fields)
 
+    def add_records(
+        self,
+        vectors: np.ndarray,
+        ids: List[Union[str, int]],
+        fields: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Union[str, int]]:
+        """Add records with public string/integer IDs.
+
+        Rust assigns internal integer IDs and stores the external-ID map.
+        """
+        vectors = np.ascontiguousarray(vectors, dtype=np.float32)
+        if vectors.ndim == 1:
+            vectors = vectors.reshape(1, -1)
+        return list(self._inner.add_records(vectors, list(ids), fields))
+
+    def external_ids(self, ids: List[int]) -> List[Union[str, int]]:
+        """Convert internal numeric IDs to public external IDs."""
+        return list(self._inner.external_ids([int(i) for i in ids]))
+
+    def internal_ids(self, ids: List[Union[str, int]]) -> List[int]:
+        """Convert public external IDs to internal numeric IDs."""
+        return [int(i) for i in self._inner.internal_ids(list(ids))]
+
+    def is_external_id_exists(self, id: Union[str, int]) -> bool:
+        """Check whether a public external ID exists."""
+        return bool(self._inner.is_external_id_exists(id))
+
     def build_index(
         self,
         index_mode: str,

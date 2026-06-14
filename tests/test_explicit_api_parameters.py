@@ -160,8 +160,15 @@ class _FakeRustCollection:
     def add_items(self, vectors, ids, fields):
         self.calls.append(("add_items", vectors.copy(), list(ids), fields))
 
-    def upsert_items(self, ids, vectors, fields):
-        self.calls.append(("upsert_items", list(ids), vectors.copy(), fields))
+    def add_records(self, vectors, ids, fields):
+        self.calls.append(("add_records", vectors.copy(), list(ids), fields))
+        return list(ids)
+
+    def upsert(self, ids, vectors, fields):
+        self.calls.append(("upsert", list(ids), vectors.copy(), fields))
+
+    def is_external_id_exists(self, id):
+        return False
 
     def search(self, vector, **kwargs):
         self.calls.append(("search", vector.copy(), kwargs))
@@ -174,6 +181,9 @@ class _FakeRustCollection:
     def retrieve_fields(self, ids):
         self.calls.append(("retrieve_fields", list(ids)))
         return []
+
+    def external_ids(self, ids):
+        return list(ids)
 
 
 def test_local_build_index_ignores_non_ivf_n_clusters():
@@ -206,13 +216,9 @@ def test_local_wire_dtype_is_accepted_without_changing_local_float32_path():
     assert ids == [0]
     assert fields is None
 
-    coll.upsert_items(
-        [([3.0, 4.0], 42)],
-        enable_progress_bar=False,
-        wire_dtype="float16",
-    )
-    op, ids, vectors, fields = rust.calls[-1]
-    assert op == "upsert_items"
+    coll.upsert(ids=42, vectors=[3.0, 4.0], wire_dtype="float16")
+    op, vectors, ids, fields = rust.calls[-1]
+    assert op == "add_records"
     assert ids == [42]
     assert vectors.dtype == np.float32
     assert fields is None

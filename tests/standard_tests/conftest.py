@@ -40,16 +40,11 @@ def collection(db):
 def populated_collection(collection):
     """Collection pre-loaded with N vectors and fields."""
     np.random.seed(42)
-    items = [
-        (
-            np.random.rand(DIM).astype(np.float32),
-            i,
-            {"tag": f"item_{i}", "group": i % 3},
-        )
-        for i in range(N)
-    ]
+    vectors = [np.random.rand(DIM).astype(np.float32) for _ in range(N)]
+    ids = list(range(N))
+    fields = [{"tag": f"item_{i}", "group": i % 3} for i in range(N)]
     with collection.insert_session() as session:
-        session.bulk_add_items(items, enable_progress_bar=False)
+        session.add(ids=ids, vectors=vectors, fields=fields)
     yield collection
 
 

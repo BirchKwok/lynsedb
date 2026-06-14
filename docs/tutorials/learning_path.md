@@ -15,7 +15,7 @@ After this stage, you should know:
 
 - a `VectorDBClient` chooses local or remote mode;
 - a database groups collections;
-- a collection stores primary dense vectors, integer IDs, and metadata fields;
+- a collection stores primary dense vectors, public IDs, and metadata fields;
 - named vector fields attach extra dense embeddings to existing IDs;
 - sparse vectors attach feature-weight maps to existing IDs;
 - indexes change recall, latency, memory, disk usage, and build time;
@@ -51,11 +51,11 @@ Read [Add vectors](add_vectors.md).
 
 After this stage, you should be able to:
 
-- choose stable integer IDs;
+- choose stable public IDs as strings or non-negative integers;
 - insert one row or many rows;
+- insert documents and let LynseDB embed them when you do not pass vectors;
 - attach JSON-like metadata fields;
 - use `insert_session()` so writes commit on success;
-- use `bulk_add_binary()` for large dense arrays;
 - upsert existing IDs;
 - decide when to call `commit()`, `flush()`, `checkpoint()`, and `close()`.
 
@@ -100,7 +100,7 @@ After this stage, you should be able to:
 - store text and image embeddings on the same ID;
 - build indexes for named vector fields;
 - add sparse feature vectors;
-- run BM25 text search over metadata fields;
+- run BM25 search over metadata fields;
 - combine vector and text candidates with RRF or weighted fusion;
 - plug in a custom reranker.
 
@@ -144,14 +144,19 @@ client = lynse.VectorDBClient(uri="./learn-lynsedb")
 db = client.create_database("learn", drop_if_exists=True)
 collection = db.require_collection("docs", dim=4, drop_if_exists=True)
 
-docs = [
-    ([0.10, 0.20, 0.30, 0.40], 1, {"title": "intro", "lang": "en", "rank": 1}),
-    ([0.11, 0.19, 0.31, 0.41], 2, {"title": "guide", "lang": "en", "rank": 2}),
-    ([0.80, 0.10, 0.20, 0.10], 3, {"title": "notes", "lang": "fr", "rank": 3}),
-]
-
-with collection.insert_session() as session:
-    session.bulk_add_items(docs, enable_progress_bar=False)
+collection.add(
+    ids=["intro", "guide", "notes-fr"],
+    vectors=[
+        [0.10, 0.20, 0.30, 0.40],
+        [0.11, 0.19, 0.31, 0.41],
+        [0.80, 0.10, 0.20, 0.10],
+    ],
+    fields=[
+        {"title": "intro", "lang": "en", "rank": 1},
+        {"title": "guide", "lang": "en", "rank": 2},
+        {"title": "notes", "lang": "fr", "rank": 3},
+    ],
+)
 
 collection.build_index("FLAT-L2")
 
@@ -164,7 +169,7 @@ result = collection.search(
 )
 print(result.to_list())
 
-collection.delete_items([3])
+collection.delete(["notes-fr"])
 collection.checkpoint()
 client.close()
 ```

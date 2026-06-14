@@ -68,6 +68,20 @@ def _hash_u64(value: str) -> int:
     return int.from_bytes(digest, "little", signed=False)
 
 
+def _external_id_key(value: Any) -> str:
+    if isinstance(value, bool):
+        raise ValueError("bool is not a valid LynseDB ID")
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError("integer IDs must be non-negative")
+        return f"int:{value}"
+    if isinstance(value, str):
+        if not value:
+            raise ValueError("string IDs cannot be empty")
+        return f"str:{value}"
+    raise TypeError("IDs must be strings or non-negative integers")
+
+
 def _is_ascending_index(index_mode: str | None) -> bool:
     upper = (index_mode or "FLAT").upper()
     return any(token in upper for token in ("L2", "COS", "HAMMING", "JACCARD"))
@@ -383,16 +397,16 @@ def _split_binary_items_payload(
 
 
 def _merge_pairs(
-    results: list[tuple[list[int], list[float], list[dict[str, Any]]]],
+    results: list[tuple[list[Any], list[float], list[dict[str, Any]]]],
     k: int,
     ascending: bool,
     return_fields: bool,
-) -> tuple[list[int], list[float], list[dict[str, Any]]]:
-    merged: list[tuple[int, float, dict[str, Any] | None]] = []
+) -> tuple[list[Any], list[float], list[dict[str, Any]]]:
+    merged: list[tuple[Any, float, dict[str, Any] | None]] = []
     for ids, scores, fields in results:
         for idx, (item_id, score) in enumerate(zip(ids, scores)):
             field = fields[idx] if return_fields and idx < len(fields) else None
-            merged.append((int(item_id), float(score), field))
+            merged.append((item_id, float(score), field))
     merged.sort(key=lambda item: item[1], reverse=not ascending)
     top = merged[:k]
     ids = [item[0] for item in top]
@@ -587,6 +601,14 @@ class ClusterState:
             coll = self.data["collections"][self.collection_key(db_name, coll_name)]
             bucket_count = int(coll.get("bucket_count", self.data.get("bucket_count", DEFAULT_BUCKET_COUNT)))
             bucket = _hash_u64(f"{db_name}/{coll_name}/{int(item_id)}") % bucket_count
+            group_name = coll["bucket_to_group"][bucket]
+            return self.group_by_name(group_name)
+
+    def group_for_external_id(self, db_name: str, coll_name: str, item_id: Any) -> dict[str, Any]:
+        with self._lock:
+            coll = self.data["collections"][self.collection_key(db_name, coll_name)]
+            bucket_count = int(coll.get("bucket_count", self.data.get("bucket_count", DEFAULT_BUCKET_COUNT)))
+            bucket = _hash_u64(f"{db_name}/{coll_name}/{_external_id_key(item_id)}") % bucket_count
             group_name = coll["bucket_to_group"][bucket]
             return self.group_by_name(group_name)
 
@@ -913,7 +935,7 @@ class ClusterCoordinator:
         body: dict[str, Any],
         items: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        op = RPC_OP_UPSERT_BINARY_IDS if path == "/upsert_items" else RPC_OP_BULK_ADD_BINARY_IDS
+        op = RPC_OP_UPSERT_BINARY_IDS if path == "/upsert" else RPC_OP_BULK_ADD_BINARY_IDS
         vectors = [item["vector"] for item in items]
         raw, n_vectors, dim = _vectors_to_f32_bytes(vectors)
         ids = [int(item["id"]) for item in items]
@@ -981,7 +1003,7 @@ class ClusterCoordinator:
         ids: list[int],
         fields: list[Any] | None,
     ) -> dict[str, Any]:
-        op = RPC_OP_UPSERT_BINARY_IDS if path == "/upsert_items_binary" else RPC_OP_BULK_ADD_BINARY_IDS
+        op = RPC_OP_UPSERT_BINARY_IDS if path == "/upsert_binary" else RPC_OP_BULK_ADD_BINARY_IDS
         id_raw, id_meta = _encode_ids_for_wire(ids)
         raw = bytes(vector_raw) + id_raw
         if fields is not None:
@@ -1033,7 +1055,7 @@ class ClusterCoordinator:
 
     @staticmethod
     def _fields_for_binary_items(path: str, items: list[dict[str, Any]]) -> list[Any] | None:
-        if path == "/upsert_items":
+        if path == "/upsert":
             if not any("field" in item for item in items):
                 return None
             return [item["field"] if "field" in item else None for item in items]
@@ -1043,25 +1065,11 @@ class ClusterCoordinator:
         return [item.get("field") or {} for item in items]
 
     def write_group_ids(self, group: dict[str, Any], path: str, body: dict[str, Any]) -> dict[str, Any]:
-        op = RPC_OP_RESTORE_ITEMS if path == "/restore_items" else RPC_OP_DELETE_ITEMS
-        meta = {
-            "database_name": body["database_name"],
-            "collection_name": body["collection_name"],
-            "ids": [int(item_id) for item_id in body.get("ids", [])],
-        }
         primary_errors = []
         first_payload: dict[str, Any] | None = None
         for uri, is_primary in self.state.writable_uris_for_group(group):
             try:
-                if self._can_rpc(uri):
-                    self._rpc_request(uri, op, meta)
-                    payload = _json_success({
-                        "database_name": body["database_name"],
-                        "collection_name": body["collection_name"],
-                        "status": "ok",
-                    })
-                else:
-                    payload = self._json_post(uri, path, body)
+                payload = self._json_post(uri, path, body)
                 if is_primary:
                     first_payload = payload
             except Exception:
@@ -1141,25 +1149,6 @@ class ClusterCoordinator:
             "exists": exists,
         })
 
-    def add_item(self, body: dict[str, Any]) -> dict[str, Any]:
-        db_name = body["database_name"]
-        coll_name = body["collection_name"]
-        item = dict(body["item"])
-        if item.get("id") is None:
-            item["id"] = self.state.allocate_ids(db_name, coll_name, 1)[0]
-        group = self.state.group_for_id(db_name, coll_name, int(item["id"]))
-        payload = {
-            "database_name": db_name,
-            "collection_name": coll_name,
-            "items": [item],
-        }
-        self.write_group_binary_items(group, "/bulk_add_items", payload, [item])
-        return _json_success({
-            "database_name": db_name,
-            "collection_name": coll_name,
-            "item": {"id": item["id"]},
-        })
-
     def _route_items(self, body: dict[str, Any], endpoint: str) -> list[int]:
         db_name = body["database_name"]
         coll_name = body["collection_name"]
@@ -1193,19 +1182,93 @@ class ClusterCoordinator:
                 future.result()
         return [int(item["id"]) for item in items]
 
-    def bulk_add_items(self, body: dict[str, Any]) -> dict[str, Any]:
-        ids = self._route_items(body, "/bulk_add_items")
+    def add_records(self, body: dict[str, Any]) -> dict[str, Any]:
+        db_name = body["database_name"]
+        coll_name = body["collection_name"]
+        ids = list(body.get("ids") or [])
+        vectors = list(body.get("vectors") or [])
+        fields = body.get("fields")
+        if not ids:
+            raise ValueError("ids cannot be empty")
+        if len(ids) != len(vectors):
+            raise ValueError("ids length must match vectors length")
+        if fields is not None and len(fields) != len(ids):
+            raise ValueError("fields length must match ids length")
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for idx, item_id in enumerate(ids):
+            group = self.state.group_for_external_id(db_name, coll_name, item_id)
+            bucket = grouped.setdefault(
+                group["name"],
+                {"group": group, "ids": [], "vectors": [], "fields": [] if fields is not None else None},
+            )
+            bucket["ids"].append(item_id)
+            bucket["vectors"].append(vectors[idx])
+            if fields is not None:
+                bucket["fields"].append(fields[idx])
+
+        with ThreadPoolExecutor(max_workers=min(len(grouped), 32) or 1) as pool:
+            futures = []
+            for bucket in grouped.values():
+                payload = {
+                    "database_name": db_name,
+                    "collection_name": coll_name,
+                    "ids": bucket["ids"],
+                    "vectors": bucket["vectors"],
+                    "fields": bucket["fields"],
+                }
+                futures.append(pool.submit(self.write_group_json, bucket["group"], "/add", payload))
+            for future in as_completed(futures):
+                future.result()
+
         return _json_success({
-            "database_name": body["database_name"],
-            "collection_name": body["collection_name"],
+            "database_name": db_name,
+            "collection_name": coll_name,
             "ids": ids,
         })
 
-    def upsert_items(self, body: dict[str, Any]) -> dict[str, Any]:
-        ids = self._route_items(body, "/upsert_items")
+    def upsert_records(self, body: dict[str, Any]) -> dict[str, Any]:
+        db_name = body["database_name"]
+        coll_name = body["collection_name"]
+        ids = list(body.get("ids") or [])
+        vectors = list(body.get("vectors") or [])
+        fields = body.get("fields")
+        if not ids:
+            raise ValueError("ids cannot be empty")
+        if len(ids) != len(vectors):
+            raise ValueError("ids length must match vectors length")
+        if fields is not None and len(fields) != len(ids):
+            raise ValueError("fields length must match ids length")
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for idx, item_id in enumerate(ids):
+            group = self.state.group_for_external_id(db_name, coll_name, item_id)
+            bucket = grouped.setdefault(
+                group["name"],
+                {"group": group, "ids": [], "vectors": [], "fields": [] if fields is not None else None},
+            )
+            bucket["ids"].append(item_id)
+            bucket["vectors"].append(vectors[idx])
+            if fields is not None:
+                bucket["fields"].append(fields[idx])
+
+        with ThreadPoolExecutor(max_workers=min(len(grouped), 32) or 1) as pool:
+            futures = []
+            for bucket in grouped.values():
+                payload = {
+                    "database_name": db_name,
+                    "collection_name": coll_name,
+                    "ids": bucket["ids"],
+                    "vectors": bucket["vectors"],
+                    "fields": bucket["fields"],
+                }
+                futures.append(pool.submit(self.write_group_json, bucket["group"], "/upsert", payload))
+            for future in as_completed(futures):
+                future.result()
+
         return _json_success({
-            "database_name": body["database_name"],
-            "collection_name": body["collection_name"],
+            "database_name": db_name,
+            "collection_name": coll_name,
             "ids": ids,
         })
 
@@ -1264,10 +1327,10 @@ class ClusterCoordinator:
     def route_ids_write(self, body: dict[str, Any], endpoint: str) -> dict[str, Any]:
         db_name = body["database_name"]
         coll_name = body["collection_name"]
-        ids = [int(item_id) for item_id in body.get("ids", [])]
-        grouped: dict[str, tuple[dict[str, Any], list[int]]] = {}
+        ids = list(body.get("ids", []))
+        grouped: dict[str, tuple[dict[str, Any], list[Any]]] = {}
         for item_id in ids:
-            group = self.state.group_for_id(db_name, coll_name, item_id)
+            group = self.state.group_for_external_id(db_name, coll_name, item_id)
             grouped.setdefault(group["name"], (group, []))[1].append(item_id)
         with ThreadPoolExecutor(max_workers=min(len(grouped), 32) or 1) as pool:
             futures = []
@@ -1304,7 +1367,7 @@ class ClusterCoordinator:
                 payload = future.result()
                 items = payload.get("params", {}).get("items", {})
                 results.append((
-                    [int(x) for x in items.get("ids", [])],
+                    list(items.get("ids", [])),
                     [float(x) for x in items.get("scores", [])],
                     items.get("fields", []) or [],
                 ))
@@ -1318,6 +1381,38 @@ class ClusterCoordinator:
                 "scores": scores,
                 "fields": fields,
                 "vector_field": body.get("vector_field", "default"),
+            },
+        })
+
+    def bm25_search_json(self, body: dict[str, Any]) -> dict[str, Any]:
+        db_name = body["database_name"]
+        coll_name = body["collection_name"]
+        k = int(body.get("k") or 10)
+        return_fields = bool(body.get("return_fields", False))
+        results = []
+        with ThreadPoolExecutor(max_workers=min(len(self.state.groups()), 32)) as pool:
+            futures = []
+            for group in self.state.groups():
+                uri = self.read_uri_for_group(group)
+                futures.append(pool.submit(self._json_post, uri, "/bm25_search", body))
+            for future in as_completed(futures):
+                payload = future.result()
+                items = payload.get("params", {}).get("items", {})
+                results.append((
+                    list(items.get("ids", [])),
+                    [float(x) for x in items.get("scores", [])],
+                    items.get("fields", []) or [],
+                ))
+        ids, scores, fields = _merge_pairs(results, k, False, return_fields)
+        return _json_success({
+            "database_name": db_name,
+            "collection_name": coll_name,
+            "items": {
+                "k": k,
+                "ids": ids,
+                "scores": scores,
+                "fields": fields,
+                "index": "BM25-SCAN",
             },
         })
 
@@ -1455,20 +1550,50 @@ class ClusterCoordinator:
         fields = [row[2] for row in rows]
         return _encode_vectors_binary(vectors, ids, fields)
 
+    def head_tail_json(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
+        n = int(body.get("n") or 5)
+        result_key = "tail" if endpoint == "/tail" else "head"
+        rows: list[tuple[list[float], Any, dict[str, Any]]] = []
+        with ThreadPoolExecutor(max_workers=min(len(self.state.groups()), 32)) as pool:
+            futures = []
+            for group in self.state.groups():
+                uri = self.read_uri_for_group(group)
+                futures.append(pool.submit(self._json_post, uri, endpoint, body))
+            for future in as_completed(futures):
+                payload = future.result()
+                result = payload.get("params", {}).get(result_key, [[], [], []])
+                vectors, ids, fields = result[0] or [], result[1] or [], result[2] or []
+                for idx, (vector, item_id) in enumerate(zip(vectors, ids)):
+                    field = fields[idx] if idx < len(fields) else {}
+                    rows.append((vector, item_id, field))
+
+        rows.sort(key=lambda item: (type(item[1]).__name__, str(item[1])), reverse=endpoint == "/tail")
+        rows = rows[:n]
+        if endpoint == "/tail":
+            rows.reverse()
+        vectors = [row[0] for row in rows]
+        ids = [row[1] for row in rows]
+        fields = [row[2] for row in rows]
+        return _json_success({
+            "database_name": body["database_name"],
+            "collection_name": body["collection_name"],
+            result_key: [vectors, ids, fields],
+        })
+
     def query_all_json(self, body: dict[str, Any], endpoint: str) -> dict[str, Any]:
         results = []
         with ThreadPoolExecutor(max_workers=min(len(self.state.groups()), 32)) as pool:
             futures = []
             filter_ids = body.get("filter_ids") or []
             if filter_ids and body.get("where") is None:
-                grouped: dict[str, tuple[dict[str, Any], list[int]]] = {}
+                grouped: dict[str, tuple[dict[str, Any], list[Any]]] = {}
                 for item_id in filter_ids:
-                    group = self.state.group_for_id(
+                    group = self.state.group_for_external_id(
                         body["database_name"],
                         body["collection_name"],
-                        int(item_id),
+                        item_id,
                     )
-                    grouped.setdefault(group["name"], (group, []))[1].append(int(item_id))
+                    grouped.setdefault(group["name"], (group, []))[1].append(item_id)
                 for group, group_ids in grouped.values():
                     uri = self.read_uri_for_group(group)
                     payload = {**body, "filter_ids": group_ids}
@@ -1536,10 +1661,10 @@ class ClusterCoordinator:
         return _json_success({"database_name": db_name, "collections": details})
 
     def is_id_exists(self, body: dict[str, Any]) -> dict[str, Any]:
-        group = self.state.group_for_id(
+        group = self.state.group_for_external_id(
             body["database_name"],
             body["collection_name"],
-            int(body["id"]),
+            body["id"],
         )
         uri = self.read_uri_for_group(group)
         payload = self._json_post(uri, "/is_id_exists", body)
@@ -1564,7 +1689,7 @@ class ClusterCoordinator:
                 payload = future.result()
                 result = payload.get("params", {}).get("result", {})
                 results.append((
-                    [int(x) for x in result.get("ids", [])],
+                    list(result.get("ids", [])),
                     [float(x) for x in result.get("distances", [])],
                     [],
                 ))
@@ -1584,11 +1709,11 @@ class ClusterCoordinator:
                 futures.append(pool.submit(self._json_post, uri, "/list_deleted_ids", body))
             for future in as_completed(futures):
                 payload = future.result()
-                ids.update(int(x) for x in payload.get("params", {}).get("ids", []))
+                ids.update(payload.get("params", {}).get("ids", []))
         return _json_success({
             "database_name": body["database_name"],
             "collection_name": body["collection_name"],
-            "ids": sorted(ids),
+            "ids": sorted(ids, key=lambda value: (type(value).__name__, str(value))),
         })
 
 
@@ -1659,7 +1784,7 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                 buf = self.coordinator.batch_search_binary(params, self._read_body())
                 self._send_binary(buf)
                 return
-            if path in {"/bulk_add_items_binary", "/upsert_items_binary"}:
+            if path in {"/add_binary_ids", "/upsert_binary"}:
                 params = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
                 payload = self.coordinator.route_binary_items(params, self._read_body(), path)
                 self._send_json(payload)
@@ -1689,22 +1814,24 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                 payload = self.coordinator.collection_config_response(body)
             elif path == "/is_id_exists":
                 payload = self.coordinator.is_id_exists(body)
-            elif path == "/add_item":
-                payload = self.coordinator.add_item(body)
-            elif path == "/bulk_add_items":
-                payload = self.coordinator.bulk_add_items(body)
-            elif path == "/upsert_items":
-                payload = self.coordinator.upsert_items(body)
-            elif path == "/delete_items":
-                payload = self.coordinator.route_ids_write(body, "/delete_items")
-            elif path == "/restore_items":
-                payload = self.coordinator.route_ids_write(body, "/restore_items")
+            elif path == "/add":
+                payload = self.coordinator.add_records(body)
+            elif path == "/upsert":
+                payload = self.coordinator.upsert_records(body)
+            elif path == "/delete":
+                payload = self.coordinator.route_ids_write(body, "/delete")
+            elif path == "/restore":
+                payload = self.coordinator.route_ids_write(body, "/restore")
             elif path == "/search":
                 payload = self.coordinator.search_json(body)
+            elif path == "/bm25_search":
+                payload = self.coordinator.bm25_search_json(body)
             elif path == "/search_range":
                 payload = self.coordinator.search_range(body)
             elif path == "/list_deleted_ids":
                 payload = self.coordinator.list_deleted_ids(body)
+            elif path in {"/head", "/tail"}:
+                payload = self.coordinator.head_tail_json(path, body)
             elif path in {"/query", "/query_vectors"}:
                 payload = self.coordinator.query_all_json(body, path)
             elif path in {"/commit", "/flush", "/checkpoint", "/close_collection"}:
@@ -1791,10 +1918,10 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
         if path == "/read_by_only_id":
             raw_id = body.get("id")
             ids = raw_id if isinstance(raw_id, list) else [raw_id]
-            by_group: dict[str, tuple[dict[str, Any], list[int]]] = {}
+            by_group: dict[str, tuple[dict[str, Any], list[Any]]] = {}
             for item_id in ids:
-                group = coord.state.group_for_id(body["database_name"], body["collection_name"], int(item_id))
-                by_group.setdefault(group["name"], (group, []))[1].append(int(item_id))
+                group = coord.state.group_for_external_id(body["database_name"], body["collection_name"], item_id)
+                by_group.setdefault(group["name"], (group, []))[1].append(item_id)
             vectors = []
             returned_ids = []
             fields = []

@@ -13,7 +13,7 @@ def test_lynse_run_with_api_key_authenticates(remote_server_with_auth, unique_na
     collection = db.require_collection("auth_smoke", dim=2, drop_if_exists=True)
 
     with collection.insert_session() as session:
-        session.add_item([1.0, 0.0], id=1, field={"tag": "secured"}, buffer_size=False)
+        session.add(ids=1, vectors=[1.0, 0.0], fields={"tag": "secured"})
 
     result = collection.search([1.0, 0.0], k=1, return_fields=True)
     assert result.ids.tolist() == [1]

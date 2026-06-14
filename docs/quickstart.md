@@ -82,31 +82,34 @@ collection = db.get_collection("documents")
 
 ## 4. Insert vectors
 
-Each vector has a user-provided integer ID. Metadata fields are optional JSON-like
-dicts and can be used later for filtering, text search, or result display.
+Each row has a public string or non-negative integer ID. Metadata fields are
+optional JSON-like dicts and can be used later for filtering, BM25 search, or
+result display.
 
 ```python
-items = [
-    ([0.10, 0.20, 0.30, 0.40], 1, {"title": "LynseDB intro", "lang": "en", "rank": 1, "tags": ["vector", "rust"]}),
-    ([0.11, 0.19, 0.29, 0.39], 2, {"title": "Vector guide", "lang": "en", "rank": 2, "tags": ["vector"]}),
-    ([0.80, 0.10, 0.20, 0.10], 3, {"title": "French note", "lang": "fr", "rank": 3, "tags": ["note"]}),
-    ([0.75, 0.12, 0.18, 0.12], 4, {"title": "Another note", "lang": "fr", "rank": 4, "tags": ["note", "archive"]}),
-]
-
-with collection.insert_session() as session:
-    session.bulk_add_items(items, enable_progress_bar=False)
+collection.add(
+    ids=["intro", "guide", "note-fr", "note-archive"],
+    vectors=[
+        [0.10, 0.20, 0.30, 0.40],
+        [0.11, 0.19, 0.29, 0.39],
+        [0.80, 0.10, 0.20, 0.10],
+        [0.75, 0.12, 0.18, 0.12],
+    ],
+    fields=[
+        {"title": "LynseDB intro", "lang": "en", "rank": 1, "tags": ["vector", "rust"]},
+        {"title": "Vector guide", "lang": "en", "rank": 2, "tags": ["vector"]},
+        {"title": "French note", "lang": "fr", "rank": 3, "tags": ["note"]},
+        {"title": "Another note", "lang": "fr", "rank": 4, "tags": ["note", "archive"]},
+    ],
+)
 ```
 
-`insert_session()` commits automatically if the block exits successfully. If an
-exception is raised, pending buffered writes are discarded and the original
-exception is preserved.
-
-For large dense arrays without per-row metadata:
+For large dense arrays, keep the same `add()` API and choose a larger batch
+size:
 
 ```python
 vectors = np.random.rand(10_000, 4).astype(np.float32)
-added = collection.bulk_add_binary(vectors, batch_size=5000, enable_progress_bar=False)
-collection.commit()
+added = collection.add(ids=[f"vec-{i}" for i in range(10_000)], vectors=vectors, batch_size=5000)
 print(added)
 ```
 
@@ -187,10 +190,10 @@ empty `ResultView`; it does not perform a full scan.
 
 ## 8. Text and hybrid search
 
-Text search uses BM25 over stored metadata fields:
+BM25 search uses stored metadata fields:
 
 ```python
-text_result = collection.text_search(
+text_result = collection.bm25_search(
     "vector guide",
     k=3,
     text_fields=["title"],
@@ -251,7 +254,7 @@ collection.add_sparse_vectors(
         {10: 1.0, 42: 0.5},
         {11: 1.0, 42: 0.8},
     ],
-    ids=[1, 2],
+    ids=["intro", "guide"],
 )
 collection.commit()
 
@@ -264,10 +267,10 @@ print(sparse_result.to_list())
 Use upsert when the same external ID should be replaced or inserted:
 
 ```python
-collection.upsert_item(
-    [0.12, 0.20, 0.31, 0.41],
-    id=1,
-    field={"title": "updated intro", "lang": "en", "rank": 1},
+collection.upsert(
+    ids="intro",
+    vectors=[0.12, 0.20, 0.31, 0.41],
+    fields={"title": "updated intro", "lang": "en", "rank": 1},
 )
 collection.commit()
 ```
@@ -276,13 +279,13 @@ Deletes are soft deletes. Deleted IDs disappear from search and query results,
 but their raw storage is kept until compaction:
 
 ```python
-collection.delete_items([4])
+collection.delete(["note-archive"])
 print(collection.list_deleted_ids())
 
-collection.restore_items([4])
+collection.restore(["note-archive"])
 print(collection.list_deleted_ids())
 
-collection.delete_items([4])
+collection.delete(["note-archive"])
 removed = collection.compact()
 print(removed)
 ```
@@ -293,11 +296,11 @@ This quickstart touched the whole everyday workflow:
 
 - choose local or remote mode with `VectorDBClient`;
 - create a database and collection;
-- insert vectors with stable integer IDs and metadata fields;
+- insert vectors with stable public IDs and metadata fields;
 - commit writes through `insert_session()`;
 - build and tune an index;
 - search by vector, filter by metadata, query fields, and retrieve vectors;
-- use text, hybrid, named vector, and sparse vector retrieval;
+- use document, BM25, hybrid, named vector, and sparse vector retrieval;
 - update, soft-delete, restore, and compact rows.
 
 For a complete curriculum, continue with the
@@ -341,13 +344,13 @@ Deletes are soft deletes. Deleted IDs are excluded from search and can be
 restored until compaction.
 
 ```python
-collection.delete_items([3])
+collection.delete(["note-fr"])
 print(collection.list_deleted_ids())
 
-collection.restore_items([3])
+collection.restore(["note-fr"])
 print(collection.list_deleted_ids())
 
-collection.delete_items([4])
+collection.delete(["note-archive"])
 removed = collection.compact()
 print(removed)
 ```

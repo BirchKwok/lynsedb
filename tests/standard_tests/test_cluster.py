@@ -133,7 +133,7 @@ def test_vectors_to_f32_bytes_reports_shape():
 
 def test_binary_item_fields_preserve_add_and_upsert_semantics():
     add_fields = ClusterCoordinator._fields_for_binary_items(
-        "/bulk_add_items",
+        "/add",
         [
             {"id": 1, "vector": [1.0], "field": {}},
             {"id": 2, "vector": [2.0], "field": {"tag": "x"}},
@@ -142,7 +142,7 @@ def test_binary_item_fields_preserve_add_and_upsert_semantics():
     assert add_fields == [{}, {"tag": "x"}]
 
     no_add_fields = ClusterCoordinator._fields_for_binary_items(
-        "/bulk_add_items",
+        "/add",
         [
             {"id": 1, "vector": [1.0], "field": {}},
             {"id": 2, "vector": [2.0]},
@@ -151,7 +151,7 @@ def test_binary_item_fields_preserve_add_and_upsert_semantics():
     assert no_add_fields is None
 
     upsert_fields = ClusterCoordinator._fields_for_binary_items(
-        "/upsert_items",
+        "/upsert",
         [
             {"id": 1, "vector": [1.0]},
             {"id": 2, "vector": [2.0], "field": {}},

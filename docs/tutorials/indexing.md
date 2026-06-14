@@ -64,7 +64,8 @@ After a large initial load:
 
 ```python
 with collection.insert_session() as session:
-    session.bulk_add_items(items, enable_progress_bar=False)
+    for ids, vectors, fields in embedding_batches:
+        session.add(ids=ids, vectors=vectors, fields=fields, batch_size=1000)
 
 collection.build_index("HNSW-L2")
 collection.checkpoint()
