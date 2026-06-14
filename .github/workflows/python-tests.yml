@@ -4,25 +4,71 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to test and publish, for example v0.4.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   verify-main-tag:
     runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.resolve-tag.outputs.tag_name }}
+      tag_commit: ${{ steps.resolve-tag.outputs.tag_commit }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Resolve release tag
+        id: resolve-tag
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+)*([-.][0-9A-Za-z]+)*$ ]]; then
+            echo "Release tag must look like v0.4.0; got '$RELEASE_TAG'."
+            exit 1
+          fi
+          git fetch origin +refs/tags/*:refs/tags/* +refs/heads/main:refs/remotes/origin/main
+          tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          echo "tag_name=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "tag_commit=$tag_commit" >> "$GITHUB_OUTPUT"
       - name: Check tag commit is on main
         run: |
-          git fetch origin +refs/heads/main:refs/remotes/origin/main
-          tag_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          tag_commit="${{ steps.resolve-tag.outputs.tag_commit }}"
           main_commit="$(git rev-parse origin/main)"
           echo "Tag commit: $tag_commit"
           echo "origin/main: $main_commit"
           if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
-            echo "Tag $GITHUB_REF_NAME does not point to a commit on main."
+            echo "Tag ${{ steps.resolve-tag.outputs.tag_name }} does not point to a commit on main."
             exit 1
           fi
+      - name: Check package version matches tag
+        run: |
+          git checkout --detach "${{ steps.resolve-tag.outputs.tag_commit }}"
+          python - <<'PY'
+          import re
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          tag = "${{ steps.resolve-tag.outputs.tag_name }}"
+          pyproject = Path("pyproject.toml")
+          if not pyproject.exists():
+              sys.exit("pyproject.toml is required for PyPI publishing.")
+
+          version = tomllib.loads(pyproject.read_text())["project"]["version"]
+          expected = tag.removeprefix("v")
+          if version != expected:
+              sys.exit(f"pyproject.toml version {version!r} does not match tag {tag!r}.")
+
+          if not re.match(r"^[0-9]+(\.[0-9]+)*([-.][0-9A-Za-z]+)*$", version):
+              sys.exit(f"Invalid package version: {version!r}")
+          PY
 
   build:
     needs: verify-main-tag
@@ -35,9 +81,11 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.verify-main-tag.outputs.tag_name }}
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
     - name: Set up Rust
@@ -57,3 +105,91 @@ jobs:
     - name: Test with pytest
       run: |
         pytest tests/standard_tests/
+
+  build-wheels:
+    needs: [verify-main-tag, build]
+    name: Build wheels (${{ matrix.platform.os }}, ${{ matrix.platform.target }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        platform:
+          - os: ubuntu-latest
+            target: x86_64
+          - os: ubuntu-latest
+            target: aarch64
+          - os: macos-13
+            target: x86_64
+          - os: macos-14
+            target: aarch64
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.verify-main-tag.outputs.tag_name }}
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Build wheel
+      uses: PyO3/maturin-action@v1
+      with:
+        command: build
+        target: ${{ matrix.platform.target }}
+        args: --release --out dist --interpreter python
+        manylinux: auto
+    - name: Upload wheel
+      uses: actions/upload-artifact@v4
+      with:
+        name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}-py${{ matrix.python-version }}
+        path: dist/*.whl
+        if-no-files-found: error
+
+  build-sdist:
+    needs: [verify-main-tag, build]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.verify-main-tag.outputs.tag_name }}
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Build source distribution
+      uses: PyO3/maturin-action@v1
+      with:
+        command: sdist
+        args: --out dist
+    - name: Upload source distribution
+      uses: actions/upload-artifact@v4
+      with:
+        name: sdist
+        path: dist/*.tar.gz
+        if-no-files-found: error
+
+  publish-pypi:
+    needs: [verify-main-tag, build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+    - name: Download distributions
+      uses: actions/download-artifact@v4
+      with:
+        path: dist
+        merge-multiple: true
+    - name: List distributions
+      run: ls -lh dist
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        packages-dir: dist
+        skip-existing: true
