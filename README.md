@@ -7,131 +7,188 @@
 </div>
 <br>
 
+# LynseDB
 
-**LynseDB** is a high-performance, low-cost vector database that can run either
-embedded inside your Python process or as a standalone HTTP service. It keeps a
-Python-first developer experience while moving storage and search execution into
-a Rust backend.
+**LynseDB is a Python-first vector database with a Rust storage and search
+engine, built for AI applications that need to move from a local prototype to a
+service, and then to a lightweight sharded cluster, without changing the client
+API.**
 
-Use LynseDB when you want vector search that starts as a local library, can be
-deployed as a service when your app grows, and does not require a heavy database
-cluster for common semantic search, RAG, agent memory, and multimodal retrieval
-workloads.
+It is a good fit for RAG, semantic search, agent memory, multimodal retrieval,
+document QA, recommendation features, and internal AI tools where you want
+strong retrieval primitives without operating a heavyweight database stack on
+day one.
+
+```python
+import lynse
+
+client = lynse.VectorDBClient("./ai-memory")              # embedded
+client = lynse.VectorDBClient("http://127.0.0.1:7637")    # server or cluster
+```
 
 ## Why LynseDB
 
-- **Embedded and service-ready**: the same `lynse.VectorDBClient` works with a
-  local data path or a remote HTTP endpoint.
-- **High-performance core**: dense vector search, metadata filtering, index
-  building, and storage paths are backed by Rust.
-- **Low operating cost**: run in-process for single-service apps and jobs, then
-  switch to the HTTP server only when multiple workers or services need shared
-  access.
-- **Retrieval beyond dense vectors**: supports metadata filters, named vector
-  fields, sparse vectors, BM25 search, and hybrid search.
-- **Deployment basics included**: API key auth, health checks, readiness checks,
-  Prometheus metrics, OpenAPI schema, snapshots, restore, export/import, Docker,
-  systemd, and Kubernetes examples.
-
-## Best Fit
-
-LynseDB is designed for teams that need a practical vector database with a small
-footprint:
-
-- local semantic search inside Python apps, scripts, notebooks, and tests;
-- RAG and agent-memory storage where one process can own the data directory;
-- web APIs and background workers that need a shared vector service;
-- multimodal records with multiple embeddings per item;
-- deployments where predictable cost and simple operations matter more than
-  running a distributed vector database cluster.
-
-For concurrent production access from independent processes, use the HTTP server
-rather than sharing one embedded data directory.
+- **Start local, grow in place**: use the same Python client for embedded
+  storage, a single HTTP server, or a coordinator-backed cluster.
+- **Rust where it matters**: vector storage, search, indexes, filters, WAL,
+  snapshots, and server execution are backed by the Rust core.
+- **AI-native retrieval**: dense vectors, metadata filters, BM25, hybrid search,
+  sparse vectors, named vector fields, external reranking, and result views are
+  exposed from one collection API.
+- **Small operational footprint**: a single Python process can own the data
+  directory during development; production can run as an HTTP service with API
+  keys, health checks, readiness checks, metrics, OpenAPI, Docker, systemd, and
+  Kubernetes examples.
+- **Cluster mode when one node is not enough**: shard groups, stable hash
+  bucket routing, coordinator fan-out search, replica write mirroring, health
+  checks, primary promotion, and `/cluster_info` diagnostics are included.
+- **Cost-conscious by design**: use local mode for notebooks, scripts, tests,
+  jobs, and single-service apps; add network and cluster overhead only when
+  multiple workers, larger datasets, or failover require it.
 
 ## Install
 
 Python 3.9 or newer is required.
 
-Native Linux and macOS environments are supported. Native Windows environments
-are not supported; on Windows, run LynseDB inside WSL 2 (Windows Subsystem for
-Linux) or use Docker.
-
 ```shell
 pip install LynseDB
 ```
 
-## Quickstart
+Native Linux and macOS environments are supported. Native Windows environments
+are not supported; on Windows, run LynseDB inside WSL 2 or use Docker.
+
+## Quickstart: Build a Tiny AI Knowledge Base
+
+This example stores small knowledge snippets with vectors and metadata, then
+retrieves context for a user question. The embedding function is deliberately
+tiny and local so the example runs without an API key. In a real AI app, replace
+`embed()` with OpenAI embeddings, sentence-transformers, FastEmbed, CLIP, or your
+own model.
 
 ```python
+import hashlib
+import re
+
 import numpy as np
 import lynse
 
-client = lynse.VectorDBClient(uri="./lynsedb-data")
-db = client.create_database("demo", drop_if_exists=True)
-collection = db.require_collection("documents", dim=4, drop_if_exists=True)
+
+DIM = 64
+
+
+def embed(text: str) -> np.ndarray:
+    vector = np.zeros(DIM, dtype=np.float32)
+    for token in re.findall(r"[a-z0-9]+", text.lower()):
+        bucket = int(hashlib.md5(token.encode()).hexdigest(), 16) % DIM
+        vector[bucket] += 1.0
+    norm = np.linalg.norm(vector)
+    return vector / norm if norm else vector
+
+
+docs = [
+    {
+        "id": "local-mode",
+        "title": "Local mode",
+        "text": "Use embedded mode for notebooks, tests, jobs, and single-process AI apps.",
+        "tags": ["local", "python"],
+    },
+    {
+        "id": "server-mode",
+        "title": "Server mode",
+        "text": "Run lynse serve when several services or workers need shared vector search.",
+        "tags": ["server", "production"],
+    },
+    {
+        "id": "cluster-mode",
+        "title": "Cluster mode",
+        "text": "Use a coordinator with shard groups when one node is not enough for data or throughput.",
+        "tags": ["cluster", "scale"],
+    },
+]
+
+client = lynse.VectorDBClient("./lynsedb-ai-demo")
+db = client.create_database("assistant", drop_if_exists=True)
+collection = db.require_collection("knowledge", dim=DIM, drop_if_exists=True)
 
 collection.add(
-    ids=["intro", "guide", "note-fr"],
-    vectors=[
-        [0.10, 0.20, 0.30, 0.40],
-        [0.11, 0.19, 0.29, 0.39],
-        [0.80, 0.10, 0.20, 0.10],
-    ],
-    fields=[
-        {"title": "LynseDB intro", "lang": "en"},
-        {"title": "Vector guide", "lang": "en"},
-        {"title": "French note", "lang": "fr"},
-    ],
+    ids=[doc["id"] for doc in docs],
+    vectors=[embed(f"{doc['title']} {doc['text']}") for doc in docs],
+    fields=docs,
 )
-
 collection.build_index("FLAT-L2")
+collection.commit()
 
+question = "How should I deploy vector search for multiple workers?"
 result = collection.search(
-    np.array([0.10, 0.20, 0.30, 0.40], dtype=np.float32),
-    k=2,
-    where="lang = 'en'",
+    embed(question),
+    k=1,
+    where="tags CONTAINS 'server'",
     return_fields=True,
 )
 
-print(result.to_list())
+for item in result.to_list():
+    print(item["id"], item["title"], item["text"])
 ```
 
-## One API, Two Deployment Modes
+You now have the core loop behind most AI retrieval systems:
 
-### Embedded mode
+1. Chunk or collect content.
+2. Embed it.
+3. Store vectors with stable IDs and metadata.
+4. Search by semantic similarity plus filters.
+5. Send the returned fields to your LLM as grounded context.
+
+LynseDB also supports document-first calls through `documents=` and
+`search(document=...)`, which use a lazy local default text embedding model. For
+production systems, explicitly choose and version your embedding model.
+
+## One API, Three Deployment Shapes
+
+### 1. Embedded Mode
 
 Use embedded mode when one Python process owns the data directory. It avoids a
-network hop and is the lowest-cost way to add vector search to a local app,
-notebook, test suite, job, or small service.
+network hop and is the fastest way to add vector search to a notebook, local
+agent, ingestion job, test suite, or single-process app.
 
 ```python
-client = lynse.VectorDBClient(uri="./data")
+import lynse
+
+client = lynse.VectorDBClient("./data")
 ```
 
-### Service mode
+Do not share the same embedded data path between independent processes. When
+multiple processes need the same database, run the HTTP server.
 
-Use service mode when multiple processes, web workers, or applications need to
-share the same database.
+### 2. HTTP Service Mode
+
+Use service mode when web workers, background jobs, or multiple applications
+need shared access to one LynseDB instance.
 
 ```shell
 lynse serve --host 0.0.0.0 --port 7637 --data-dir ./server-data
 ```
 
 ```python
+import lynse
+
 client = lynse.VectorDBClient("http://127.0.0.1:7637")
 ```
 
 With API key authentication:
 
 ```shell
-lynse serve --host 0.0.0.0 --port 7637 --data-dir ./server-data --api-key your_key
+lynse serve \
+  --host 0.0.0.0 \
+  --port 7637 \
+  --data-dir ./server-data \
+  --api-key your_key
 ```
 
 ```python
 client = lynse.VectorDBClient("http://127.0.0.1:7637", api_key="your_key")
 ```
 
-Health, readiness, metrics, and OpenAPI endpoints are available in service mode:
+Useful service endpoints:
 
 ```shell
 curl http://127.0.0.1:7637/healthz
@@ -140,17 +197,88 @@ curl http://127.0.0.1:7637/metrics
 curl http://127.0.0.1:7637/openapi.json
 ```
 
+### 3. Cluster Mode
+
+Use cluster mode when a single server is no longer enough for data size, query
+throughput, or shard-level failover. Applications still connect to one endpoint:
+
+```python
+client = lynse.VectorDBClient("http://coordinator:7637")
+```
+
+The coordinator owns metadata and request routing. Shard nodes are ordinary
+LynseDB HTTP servers, each with its own data directory.
+
+```text
+Python / API clients
+        |
+        v
+Coordinator :7637
+        |
+        +-- shard group sg0
+        |     +-- primary http://10.0.0.11:7638
+        |     +-- replica http://10.0.0.12:7638
+        |
+        +-- shard group sg1
+              +-- primary http://10.0.0.21:7638
+              +-- replica http://10.0.0.22:7638
+```
+
+Cluster workflow:
+
+1. Start normal LynseDB servers as shard primaries and replicas.
+2. Create a `cluster.json` that lists shard groups and replica layout.
+3. Start a coordinator with `--role coordinator`.
+4. Point application clients at the coordinator.
+5. Monitor `/cluster_info` for shard health, replica state, and promotions.
+
+```shell
+lynse serve --host 127.0.0.1 --port 7638 --data-dir ./data/sg0-primary
+lynse serve --host 127.0.0.1 --port 7639 --data-dir ./data/sg0-replica
+lynse serve --host 127.0.0.1 --port 7640 --data-dir ./data/sg1-primary
+lynse serve --host 127.0.0.1 --port 7641 --data-dir ./data/sg1-replica
+```
+
+```shell
+lynse serve \
+  --role coordinator \
+  --host 127.0.0.1 \
+  --port 7637 \
+  --cluster-config ./cluster.json \
+  --cluster-state ./cluster_state.json
+```
+
+Cluster advantages:
+
+- **Horizontal data growth**: stable hash buckets distribute collection records
+  across shard groups.
+- **Parallel retrieval**: searches fan out to shard groups and are merged by the
+  coordinator into one top-k result set.
+- **Replica-aware writes**: active replicas can receive mirrored writes when
+  `write_mirror_replicas` is enabled.
+- **Failover foundation**: the coordinator health-checks primaries and replicas;
+  a healthy active replica can be promoted if a primary fails.
+- **No client rewrite**: application code keeps using `VectorDBClient` and the
+  normal database, collection, add, upsert, delete, search, and query APIs.
+- **Clear operations model**: the mutable coordinator state lives in
+  `cluster_state.json`; shard data directories and coordinator state can be
+  backed up and restored as explicit operational artifacts.
+
+Read the full [cluster deployment guide](docs/deployment/cluster-deployment.md)
+before using cluster mode in production.
+
 ## Retrieval Features
 
 - Dense vector search with flat, HNSW, IVF, DiskANN, and quantized index
   families.
-- Standard SQL-style metadata filtering through `where` expressions.
+- SQL-style metadata filtering through `where` expressions.
+- BM25 search over metadata fields for exact and lexical recall.
+- Hybrid search with reciprocal-rank fusion or weighted dense/text candidates.
 - Named vector fields for multimodal records, such as text and image embeddings
   on the same item.
 - Sparse vector search for feature-weight retrieval.
-- BM25 search over metadata fields.
-- Hybrid search with vector and text candidates.
-- `ResultView` return objects with NumPy arrays plus list, JSON, and dataframe
+- External rerank hooks for cross-encoders, LLM rerankers, or business rules.
+- `ResultView` objects with NumPy arrays plus list, JSON, and dataframe
   conversion helpers.
 
 ## Indexing
@@ -185,11 +313,12 @@ docker run -p 7637:7637 -e LYNSE_API_KEY=your_key -v lynsedb-data:/data birchkwo
 On Windows, use this Docker image or install/run LynseDB from a Linux
 environment in WSL 2.
 
-Deployment examples are included in:
+Deployment examples:
 
 - [Docker Compose](docs/deployment/docker-compose.yml)
 - [systemd](docs/deployment/lynsedb.service)
 - [Kubernetes](docs/deployment/kubernetes.yaml)
+- [Cluster deployment](docs/deployment/cluster-deployment.md)
 
 ## Documentation
 
@@ -212,7 +341,8 @@ Deployment examples are included in:
 
 ## Stability Notes
 
-LynseDB is still evolving. Pin package and server image versions for
-deployments, and test migrations before upgrading. For concurrent production
-access, prefer the HTTP server over sharing one local data directory across
-independent Python processes.
+LynseDB is evolving quickly. Pin package and server image versions for
+deployments, test migrations before upgrading, and back up data directories plus
+cluster state before operational changes. For concurrent production access,
+prefer the HTTP server or coordinator cluster over sharing one local data
+directory across independent Python processes.
