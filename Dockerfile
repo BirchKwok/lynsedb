@@ -18,7 +18,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 ENV LYNSE_ROOT="/data"
 
 # 构建并安装 LynseDB（含 Rust 扩展）
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --config-settings=maturin.build-args=--locked .
 
 EXPOSE 7637
 VOLUME ["/data"]

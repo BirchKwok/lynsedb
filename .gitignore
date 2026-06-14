@@ -173,6 +173,7 @@ fingerprint
 *.db-shm
 *.db-wal
 *.lock
+!/Cargo.lock
 *.bin
 
 *.apex
