@@ -117,12 +117,17 @@ jobs:
         platform:
           - os: ubuntu-latest
             target: x86_64
+            manylinux: auto
           - os: ubuntu-latest
             target: aarch64
+            # manylinux2014's aarch64 cross-GCC is too old for libmimalloc-sys.
+            manylinux: "2_28"
           - os: macos-13
             target: x86_64
+            manylinux: auto
           - os: macos-14
             target: aarch64
+            manylinux: auto
 
     steps:
     - uses: actions/checkout@v4
@@ -145,7 +150,7 @@ jobs:
         command: build
         target: ${{ matrix.platform.target }}
         args: --release --locked --out dist --interpreter python${{ matrix.python-version }}
-        manylinux: auto
+        manylinux: ${{ matrix.platform.manylinux }}
     - name: Upload wheel
       uses: actions/upload-artifact@v4
       with:
