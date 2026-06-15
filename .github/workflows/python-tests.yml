@@ -20,6 +20,7 @@ jobs:
     outputs:
       tag_name: ${{ steps.resolve-tag.outputs.tag_name }}
       tag_commit: ${{ steps.resolve-tag.outputs.tag_commit }}
+      package_kind: ${{ steps.check-version.outputs.package_kind }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,26 +49,47 @@ jobs:
             exit 1
           fi
       - name: Check package version matches tag
+        id: check-version
         run: |
           git checkout --detach "${{ steps.resolve-tag.outputs.tag_commit }}"
           python - <<'PY'
+          import ast
+          import os
           import re
           import sys
           import tomllib
           from pathlib import Path
 
           tag = "${{ steps.resolve-tag.outputs.tag_name }}"
-          pyproject = Path("pyproject.toml")
-          if not pyproject.exists():
-              sys.exit("pyproject.toml is required for PyPI publishing.")
+          if Path("pyproject.toml").exists():
+              package_kind = "maturin"
+              version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          elif Path("setup.py").exists():
+              package_kind = "legacy"
+              version = None
+              tree = ast.parse(Path("setup.py").read_text())
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "setup":
+                      for keyword in node.keywords:
+                          if keyword.arg == "version" and isinstance(keyword.value, ast.Constant):
+                              version = keyword.value.value
+                              break
+                  if version:
+                      break
+              if not version:
+                  sys.exit("Could not resolve package version from setup.py.")
+          else:
+              sys.exit("Neither pyproject.toml nor setup.py exists at this tag.")
 
-          version = tomllib.loads(pyproject.read_text())["project"]["version"]
           expected = tag.removeprefix("v")
           if version != expected:
-              sys.exit(f"pyproject.toml version {version!r} does not match tag {tag!r}.")
+              sys.exit(f"Package version {version!r} does not match tag {tag!r}.")
 
           if not re.match(r"^[0-9]+(\.[0-9]+)*([-.][0-9A-Za-z]+)*$", version):
               sys.exit(f"Invalid package version: {version!r}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"package_kind={package_kind}", file=output)
           PY
 
   build:
@@ -89,27 +111,36 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
     - name: Set up Rust
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin'
       uses: dtolnay/rust-toolchain@stable
     - name: Ensure Cargo.lock exists
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin'
       run: |
         if [ ! -f Cargo.lock ]; then
           cargo generate-lockfile
         fi
     - name: Install dependencies
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin'
       run: |
         python -m pip install --upgrade pip
         python -m pip install flake8 pytest numba
         if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
         python -m pip install --config-settings=maturin.build-args=--locked .
     - name: Lint with flake8
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin'
       run: |
         # stop the build if there are Python syntax errors or undefined names
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
         # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
     - name: Test with pytest
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin'
       run: |
         pytest tests/standard_tests/
+    - name: Legacy release tag
+      if: needs.verify-main-tag.outputs.package_kind == 'legacy'
+      run: |
+        echo "Legacy setup.py tag detected; skipping current Rust-backed test matrix."
 
   build-wheels:
     needs: [verify-main-tag, build]
@@ -143,25 +174,37 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
     - name: Set up Rust
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin'
       uses: dtolnay/rust-toolchain@stable
     - name: Ensure Cargo.lock exists
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin'
       run: |
         if [ ! -f Cargo.lock ]; then
           cargo generate-lockfile
         fi
     - name: Set up QEMU for Linux aarch64 wheels
-      if: runner.os == 'Linux' && matrix.platform.target == 'aarch64'
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin' && runner.os == 'Linux' && matrix.platform.target == 'aarch64'
       uses: docker/setup-qemu-action@v4
       with:
         platforms: arm64
     - name: Build wheel
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin'
       uses: PyO3/maturin-action@v1
       with:
         command: build
         target: ${{ matrix.platform.target }}
         args: --release --locked --out dist --interpreter python${{ matrix.python-version }}
         manylinux: ${{ matrix.platform.manylinux }}
+    - name: Build legacy wheel
+      if: needs.verify-main-tag.outputs.package_kind == 'legacy' && matrix.platform.os == 'ubuntu-latest' && matrix.platform.target == 'x86_64' && matrix.python-version == '3.11'
+      run: |
+        python -m pip install --upgrade pip build wheel
+        if [ -f requirements.txt ] && [ ! -f ../requirements.txt ]; then
+          cp requirements.txt ../requirements.txt
+        fi
+        python -m build --wheel --outdir dist
     - name: Upload wheel
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin' || (needs.verify-main-tag.outputs.package_kind == 'legacy' && matrix.platform.os == 'ubuntu-latest' && matrix.platform.target == 'x86_64' && matrix.python-version == '3.11')
       uses: actions/upload-artifact@v4
       with:
         name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}-py${{ matrix.python-version }}
@@ -180,17 +223,28 @@ jobs:
       with:
         python-version: "3.11"
     - name: Set up Rust
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin'
       uses: dtolnay/rust-toolchain@stable
     - name: Ensure Cargo.lock exists
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin'
       run: |
         if [ ! -f Cargo.lock ]; then
           cargo generate-lockfile
         fi
     - name: Build source distribution
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin'
       uses: PyO3/maturin-action@v1
       with:
         command: sdist
         args: --out dist
+    - name: Build legacy source distribution
+      if: needs.verify-main-tag.outputs.package_kind == 'legacy'
+      run: |
+        python -m pip install --upgrade pip build wheel
+        if [ -f requirements.txt ] && [ ! -f ../requirements.txt ]; then
+          cp requirements.txt ../requirements.txt
+        fi
+        python -m build --sdist --outdir dist
     - name: Upload source distribution
       uses: actions/upload-artifact@v4
       with:
