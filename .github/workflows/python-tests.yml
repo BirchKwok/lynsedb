@@ -258,6 +258,10 @@ jobs:
     permissions:
       contents: write
     steps:
+    - name: Checkout release notes source
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.repository.default_branch }}
     - name: Download distributions
       uses: actions/download-artifact@v4
       with:
@@ -265,15 +269,50 @@ jobs:
         merge-multiple: true
     - name: List distributions
       run: ls -lh dist
+    - name: Prepare release notes
+      env:
+        TAG_NAME: ${{ needs.verify-main-tag.outputs.tag_name }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        python - <<'PY'
+        import os
+        import re
+        from pathlib import Path
+
+        tag = os.environ["TAG_NAME"]
+        changelog = Path("docs/releases.md")
+        output = Path("release-notes.md")
+
+        if changelog.exists():
+            text = changelog.read_text()
+            match = re.search(
+                rf"^##\s+{re.escape(tag)}\s*\n(?P<body>.*?)(?=^##\s+v|\Z)",
+                text,
+                re.MULTILINE | re.DOTALL,
+            )
+            if match:
+                body = match.group("body").strip()
+                body = re.sub(r"\n---\s*$", "", body)
+                output.write_text(
+                    f"{body}\n\n---\n\n"
+                    f"Full release history: [docs/releases.md](https://github.com/{os.environ['GITHUB_REPOSITORY']}/blob/{os.environ['DEFAULT_BRANCH']}/docs/releases.md)\n"
+                )
+                raise SystemExit
+
+        output.write_text(
+            f"Release artifacts for {tag}.\n\n"
+            "Detailed notes were not found in `docs/releases.md` for this tag.\n"
+        )
+        PY
     - name: Create GitHub Release and upload distributions
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ needs.verify-main-tag.outputs.tag_name }}
         name: LynseDB ${{ needs.verify-main-tag.outputs.tag_name }}
+        body_path: release-notes.md
         files: |
           dist/*.whl
           dist/*.tar.gz
-        generate_release_notes: true
         fail_on_unmatched_files: true
         make_latest: true
 

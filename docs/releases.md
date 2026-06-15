@@ -187,14 +187,14 @@ This page documents the major features and improvements in each version of Lynse
 
 ## v0.1.0
 
-**Major Release - Python Implementation with HNSW**
+**Major Release - Pure Python Vector Database Foundation**
 
 **Key Features:**
 - 🐍 **Pure Python Core**: Established LynseDB as a lightweight vector database implemented in Python with local embedded usage and optional HTTP deployment.
-- 🌐 **HNSW Indexing**: Added the main HNSW-based vector index for approximate nearest-neighbor search.
+- 🧭 **Unified Client Entry Point**: Added `VectorDBClient`, which routes to the local native API for filesystem paths and to the HTTP client for remote URLs.
 - 🗄️ **Storage Layer**: Added file-backed vector storage, memory-mapped access, ID tracking, and persistence primitives.
 - 🔍 **Metadata Filtering**: Added FieldExpression-style metadata filtering and field indexing for filtered vector search.
-- 📐 **Distance Metrics**: Supported common vector distance metrics including L2 and cosine-oriented workflows.
+- 📐 **Index and Distance Options**: Included flat, scalar-quantized, binary, and IVF-oriented index code paths with L2, inner-product, cosine, Hamming, and Jaccard-style search support.
 - 🧵 **Single-Process Native API**: Documented the native Python API as best suited for single-process use, with HTTP mode recommended for process-safe deployments.
 
 **Improvements:**
@@ -206,30 +206,23 @@ This page documents the major features and improvements in each version of Lynse
 
 ## v0.0.2
 
-**Early Release - Bug Fixes**
+**Historical Tag - Same Code as v0.1.0**
 
-**Key Features:**
-- 🐛 **FileNotFoundError Fix**: Fixed a `FileNotFoundError` issue reported in #9.
-- 📦 **Early Package Stabilization**: Continued preparing the Python package for basic installation and use.
+The `v0.0.2` tag points to the same commit as `v0.1.0`. The package metadata in that commit reports version `0.1.0`, so no separate `0.0.2` wheel should be generated from this tag.
 
-**Improvements:**
-- Small stability fixes on top of the initial public package.
+Use the `v0.1.0` release assets for this historical code state.
 
 ---
 
 ## v0.0.1
 
-**Initial Release - Foundation**
+**Historical Tag - Same Code as v0.1.0**
 
-**Features:**
-- 🐍 **Initial Python Package**: First public LynseDB package and repository foundation.
-- 🔎 **Basic Vector Database Workflows**: Provided early APIs for adding vectors, storing records, and running vector similarity search.
-- 📐 **Core Distance Support**: Included common distance workflows such as L2 and cosine-oriented search.
-- 🧾 **Metadata Filtering Foundations**: Introduced the first metadata filtering capabilities.
-- 📚 **Initial Documentation**: Added README, installation instructions, Docker notes, and early examples.
+The `v0.0.1` tag points to the same commit as `v0.1.0`. The package metadata in that commit reports version `0.1.0`, so no separate `0.0.1` wheel should be generated from this tag.
 
 **Compatibility Notes:**
-- Early v0.0.x releases were experimental and not guaranteed to be backward compatible.
+- Treat `v0.0.1` and `v0.0.2` as historical aliases for the first `0.1.0` code state.
+- Use the `v0.1.0` release assets if you need installable artifacts for this commit.
 
 ---
 
@@ -264,9 +257,8 @@ This page documents the major features and improvements in each version of Lynse
 - No intentional major API migration is documented within the v0.1.x line, but early releases did not guarantee strict backward compatibility.
 
 ### From v0.0.x to v0.1.0
-- The v0.1 series standardizes the pure Python client and storage API.
-- HNSW becomes the main vector index.
-- Expect API cleanup and resource-management improvements compared with early v0.0 releases.
+- `v0.0.1`, `v0.0.2`, and `v0.1.0` currently point to the same commit.
+- The installable package version in that commit is `0.1.0`; prefer the `v0.1.0` release when installing artifacts from this code state.
 
 ---
 
