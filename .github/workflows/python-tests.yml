@@ -286,7 +286,7 @@ jobs:
         if changelog.exists():
             text = changelog.read_text()
             match = re.search(
-                rf"^##\s+{re.escape(tag)}\s*\n(?P<body>.*?)(?=^##\s+v|\Z)",
+                rf"^##\s+{re.escape(tag)}\s*\n(?P<body>.*?)(?=^##\s+|\Z)",
                 text,
                 re.MULTILINE | re.DOTALL,
             )
