@@ -198,8 +198,34 @@ jobs:
         path: dist/*.tar.gz
         if-no-files-found: error
 
+  github-release:
+    needs: [verify-main-tag, build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Download distributions
+      uses: actions/download-artifact@v4
+      with:
+        path: dist
+        merge-multiple: true
+    - name: List distributions
+      run: ls -lh dist
+    - name: Create GitHub Release and upload distributions
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ needs.verify-main-tag.outputs.tag_name }}
+        name: LynseDB ${{ needs.verify-main-tag.outputs.tag_name }}
+        files: |
+          dist/*.whl
+          dist/*.tar.gz
+        generate_release_notes: true
+        fail_on_unmatched_files: true
+        make_latest: true
+
   publish-pypi:
     needs: [verify-main-tag, build-wheels, build-sdist]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
