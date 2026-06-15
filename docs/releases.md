@@ -204,28 +204,6 @@ This page documents the major features and improvements in each version of Lynse
 
 ---
 
-## v0.0.2
-
-**Historical Tag - Same Code as v0.1.0**
-
-The `v0.0.2` tag points to the same commit as `v0.1.0`. The package metadata in that commit reports version `0.1.0`, so no separate `0.0.2` wheel should be generated from this tag.
-
-Use the `v0.1.0` release assets for this historical code state.
-
----
-
-## v0.0.1
-
-**Historical Tag - Same Code as v0.1.0**
-
-The `v0.0.1` tag points to the same commit as `v0.1.0`. The package metadata in that commit reports version `0.1.0`, so no separate `0.0.1` wheel should be generated from this tag.
-
-**Compatibility Notes:**
-- Treat `v0.0.1` and `v0.0.2` as historical aliases for the first `0.1.0` code state.
-- Use the `v0.1.0` release assets if you need installable artifacts for this commit.
-
----
-
 ## Migration Guide
 
 ### From v0.3.0 to v0.4.0
@@ -255,12 +233,6 @@ The `v0.0.1` tag points to the same commit as `v0.1.0`. The package metadata in 
 - v0.1.1 through v0.1.6 are pure Python maintenance releases.
 - Upgrade within the v0.1 line for safer mmap handling, Windows file-handle fixes, chunk-size guardrails, workflow updates, and the Trie query fix.
 - No intentional major API migration is documented within the v0.1.x line, but early releases did not guarantee strict backward compatibility.
-
-### From v0.0.x to v0.1.0
-- `v0.0.1`, `v0.0.2`, and `v0.1.0` currently point to the same commit.
-- The installable package version in that commit is `0.1.0`; prefer the `v0.1.0` release when installing artifacts from this code state.
-
----
 
 ## Support
 
