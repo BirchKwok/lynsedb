@@ -39,6 +39,7 @@ jobs:
           echo "tag_name=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "tag_commit=$tag_commit" >> "$GITHUB_OUTPUT"
       - name: Check tag commit is on main
+        if: github.event_name == 'push'
         run: |
           tag_commit="${{ steps.resolve-tag.outputs.tag_commit }}"
           main_commit="$(git rev-parse origin/main)"
@@ -48,6 +49,10 @@ jobs:
             echo "Tag ${{ steps.resolve-tag.outputs.tag_name }} does not point to a commit on main."
             exit 1
           fi
+      - name: Allow historical tag for manual release backfill
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "Manual release backfill for ${{ steps.resolve-tag.outputs.tag_name }}; skipping current-main ancestry check."
       - name: Check package version matches tag
         id: check-version
         run: |
