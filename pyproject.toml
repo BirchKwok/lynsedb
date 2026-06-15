@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "LynseDB"
 version = "0.4.0"
-description = "A lightweight, server-optional, multi-end compatible, Rust-powered vector database deployable locally or remotely."
+description = "A Python-first, Rust-powered vector database for AI apps, from embedded local storage to HTTP service and lightweight sharded clusters."
 readme = "README.md"
 keywords = ["vector", "database"]
 license = {text = "Apache-2.0"}
