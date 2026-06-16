@@ -398,7 +398,6 @@ print(removed)
 ## 12. Back up and close
 
 ```python
-collection.flush()
 collection.checkpoint()
 
 db.snapshot_collection("documents", "./documents.snapshot")
@@ -407,3 +406,7 @@ db.export_collection("documents", "./documents-export")
 collection.close()
 client.close()
 ```
+
+`commit()` is used for normal fast write boundaries. `checkpoint()` is the call
+to make before backup or controlled shutdown because it forces a durable
+on-disk checkpoint and clears WAL state.

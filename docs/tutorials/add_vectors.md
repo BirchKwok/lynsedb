@@ -241,10 +241,24 @@ early. `upsert()` is the explicit replacement path.
 Use these calls explicitly in services:
 
 ```python
-collection.flush()       # flush client and storage buffers
-collection.checkpoint()  # force a durable checkpoint
-collection.close()       # flush and close this handle
+collection.commit()      # fast logical commit
+collection.checkpoint()  # durable checkpoint for critical boundaries
+collection.close()       # close this handle
 ```
+
+`commit()` is the normal ingestion boundary. It makes writes visible and clears
+WAL state without forcing a recursive `fsync`, so it is fast enough to use after
+regular batches. It does not promise that bytes have reached stable storage at
+the exact moment the call returns.
+
+`checkpoint()` is the explicit durability boundary. It syncs committed
+collection state and clears WAL, and can be called before backups, snapshots,
+controlled shutdowns, or any point where the application must know the batch is
+durably on disk.
+
+`flush()` is an advanced storage call: it flushes pending buffers and bytes but
+does not clear WAL. Most applications should prefer `commit()` for normal
+ingestion and `checkpoint()` for durable checkpoints.
 
 The practical rule:
 
@@ -253,9 +267,9 @@ The practical rule:
 | `add()` | You want a simple write-through batch. |
 | `insert_session()` | You want grouped ingestion with automatic commit on success. |
 | `with collection:` | You want normal collection calls committed automatically on success. |
-| `commit()` | A write batch is complete and should be visible durably. |
+| `commit()` | A write batch is complete and should be visible quickly. |
+| `checkpoint()` | You need a deterministic on-disk durability point. |
 | `flush()` | You want pending buffers and bytes flushed without clearing the WAL. |
-| `checkpoint()` | You are about to back up, snapshot, or shut down cleanly. |
 | `close()` | The process is done with the collection handle. |
 
 ## Common Ingestion Checks

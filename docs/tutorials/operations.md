@@ -3,16 +3,18 @@
 This tutorial covers operational calls for durability, backups, restores, soft
 deletes, compaction, and monitoring.
 
-## Flush, checkpoint, and close
+## Commit, checkpoint, flush, and close
 
 ```python
-collection.flush()
+collection.commit()
 collection.checkpoint()
 collection.close()
 client.close()
 ```
 
-Use `commit()` after normal write batches:
+Use `commit()` after normal write batches. It is a fast logical commit: writes
+become visible and WAL state is cleared, but the call does not force a recursive
+`fsync`.
 
 ```python
 with collection.insert_session() as session:
@@ -21,15 +23,18 @@ with collection.insert_session() as session:
 # committed automatically by the session
 ```
 
-Use `checkpoint()` before backups or controlled shutdowns.
+Use `checkpoint()` before backups, snapshots, controlled shutdowns, or any
+critical acknowledgement that requires deterministic on-disk durability.
+`flush()` is a lower-level operation that pushes pending buffers and bytes but
+does not clear WAL.
 
 Operational meaning:
 
 | Call | Purpose |
 | --- | --- |
-| `commit()` | Commit normal writes. |
-| `flush()` | Flush pending buffers and bytes without clearing the WAL. |
-| `checkpoint()` | Force a durable checkpoint and clear committed WAL state. |
+| `commit()` | Fast logical commit for normal writes; no forced recursive fsync. |
+| `checkpoint()` | Force a durable checkpoint, sync committed state, and clear WAL. |
+| `flush()` | Flush pending buffers and bytes without clearing WAL. |
 | `close()` | Flush and close the handle from the API perspective. |
 
 For scripts, `insert_session()` is usually enough. For services and backup jobs,

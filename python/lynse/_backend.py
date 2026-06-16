@@ -733,7 +733,7 @@ class Collection:
         self._inner.upsert_items([int(i) for i in ids], vectors, fields)
 
     def commit(self) -> None:
-        """Commit: clear WAL after successful writes."""
+        """Commit: clear WAL after successful writes without recursive fsync."""
         self._inner.commit()
 
     def checkpoint_fast(self) -> None:

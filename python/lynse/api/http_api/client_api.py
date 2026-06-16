@@ -945,7 +945,7 @@ class Collection:
 
     def commit(self):
         """
-        Commit the changes in the collection.
+        Commit changes and clear WAL without forcing recursive fsync.
 
         Returns:
             dict: The response from the server.

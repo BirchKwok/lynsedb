@@ -79,6 +79,7 @@ Ingestion tips:
 - convert embeddings to contiguous `float32` arrays before insertion;
 - choose batch sizes that fit memory comfortably;
 - commit after meaningful batches, not after every row;
+- checkpoint at backup, shutdown, or critical durability boundaries;
 - build or rebuild indexes after bulk loading;
 - use local mode for single-process offline ingestion when possible;
 - use remote mode when several processes must share one database.
@@ -268,17 +269,22 @@ collection.delete(ids_to_remove)
 collection.commit()
 
 print(collection.stats())
+collection.checkpoint()
 removed = collection.compact()
 print(removed)
 ```
 
 Run compaction during a maintenance window for large collections. Take a
-snapshot or export before risky maintenance.
+snapshot or export before risky maintenance. Use `checkpoint()` when you need a
+deterministic durability boundary; normal `commit()` is the faster logical write
+boundary.
 
 ## 12. Performance checklist
 
 - Use contiguous `float32` vectors.
 - Batch writes and avoid per-row commits.
+- Use `checkpoint()` at operational boundaries instead of after every small
+  batch.
 - Build indexes after large ingestion jobs.
 - Keep metadata fields useful but not bloated.
 - Use filters to reduce candidate work.

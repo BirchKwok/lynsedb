@@ -201,12 +201,19 @@ exception is preserved.
 Use explicit lifecycle calls for services and operations:
 
 ```python
-collection.commit()
-collection.flush()
-collection.checkpoint()
+collection.commit()      # fast logical commit
+collection.checkpoint()  # durable checkpoint
+collection.flush()       # advanced: flush bytes without clearing WAL
 collection.close()
 client.close()
 ```
+
+`commit()` is optimized for write latency. It makes the batch visible and clears
+WAL state, but it does not promise that data has reached stable storage at the
+instant the call returns. `checkpoint()` is the deterministic durability
+boundary; call it before backups, snapshots, controlled shutdowns, or critical
+write acknowledgements. `flush()` is mostly useful for storage-level workflows
+that need bytes pushed out while keeping WAL state.
 
 ## Local and remote parity
 

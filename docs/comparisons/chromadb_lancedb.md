@@ -119,7 +119,8 @@ application needs both speed and a complete retrieval/database layer.
 | Query by text | `collection.search(document="...", k=...)` |
 | Query by vector | `collection.search(vector, k=...)` |
 | Filter metadata | `collection.search(..., where="field = 'value'")` |
-| Commit writes | `collection.commit()` or `with collection:` |
+| Commit writes | `collection.commit()` or `with collection:` for fast logical commits |
+| Durable checkpoint | `collection.checkpoint()` before backups, snapshots, or controlled shutdowns |
 | Tune index | `collection.build_index("HNSW-L2")`, `collection.build_index("IVF-L2", n_clusters=...)` |
 
 ## Migration Sketch

@@ -724,6 +724,10 @@ impl WALStorage {
         let mut inner = self.inner.lock();
         inner.buffer.clear();
         self.close_current_file(&mut inner);
+        inner.initialized = false;
+        inner.write_buf_pos = 0;
+        inner.pending_row_count = 0;
+        inner.last_flush = Instant::now();
 
         let pattern_prefix = format!("{}.", self.collection_name);
         if let Ok(entries) = fs::read_dir(&self.storage_path) {

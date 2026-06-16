@@ -46,6 +46,7 @@ const EXTERNAL_ID_MAP_VERSION: u32 = 1;
 const SPARSE_VECTORS_FILE: &str = "sparse_vectors.jsonl";
 const TEXT_INDEX_FILE: &str = "text_index.bin";
 const LEGACY_TEXT_INDEX_FILE: &str = "text_index.json";
+const TOMBSTONE_FILE: &str = "tombstone.bin";
 const TEXT_INDEX_MAGIC: &[u8; 4] = b"LTX2";
 const TEXT_INDEX_FORMAT_VERSION: u32 = 1;
 const STORAGE_FORMAT_NAME: &str = "lynsedb-collection";
@@ -2089,8 +2090,50 @@ impl Collection {
         Ok(())
     }
 
+    fn sync_file_if_exists(path: &Path) -> Result<()> {
+        if path.exists() && std::fs::metadata(path)?.is_file() {
+            let file = std::fs::OpenOptions::new().read(true).open(path)?;
+            file.sync_all()?;
+        }
+        Ok(())
+    }
+
+    fn sync_dir_if_exists(path: &Path) {
+        if path.exists() {
+            if let Ok(dir) = std::fs::File::open(path) {
+                let _ = dir.sync_all();
+            }
+        }
+    }
+
     fn sync_collection_files(&self) -> Result<()> {
         Self::sync_path_recursively(&self.path)
+    }
+
+    fn sync_checkpoint_files(&self) -> Result<()> {
+        for name in [
+            "vectors.bin",
+            "id_map.bin",
+            "info.json",
+            "fingerprint",
+            "storage_manifest.json",
+            EXTERNAL_ID_MAP_BIN_FILE,
+            TOMBSTONE_FILE,
+            SPARSE_VECTORS_FILE,
+            TEXT_INDEX_FILE,
+            LEGACY_TEXT_INDEX_FILE,
+            "sync_fingerprint",
+        ] {
+            Self::sync_file_if_exists(&self.path.join(name))?;
+        }
+
+        Self::sync_path_recursively(&self.path.join("fields_db"))?;
+        Self::sync_path_recursively(&self.path.join("index_meta"))?;
+        Self::sync_path_recursively(&self.path.join("index"))?;
+        Self::sync_path_recursively(&Self::vector_fields_root(&self.path))?;
+
+        Self::sync_dir_if_exists(&self.path);
+        Ok(())
     }
 
     fn persist_vector_store_metadata(&self) -> Result<()> {
@@ -3982,10 +4025,15 @@ impl Collection {
     pub fn checkpoint(&self) -> Result<()> {
         self.ensure_writable()?;
         self.text_index.write_to_disk_if_present()?;
-        self.flush()?;
+        self.flush_pending_ingest()?;
+        self.field_store.flush()?;
+        self.persist_vector_store_metadata()?;
         self.write_external_id_map()?;
+        self.sync_checkpoint_files()?;
         self.wal.cleanup()?;
-        self.sync_collection_files()
+        Self::sync_dir_if_exists(self.wal.log_dir());
+        Self::sync_dir_if_exists(&self.path);
+        Ok(())
     }
 
     /// Lightweight checkpoint for local benchmarks: persist derived metadata and
@@ -4021,9 +4069,11 @@ impl Collection {
         Ok(())
     }
 
-    /// Commit: checkpoint main storage and clear WAL after successful writes.
+    /// Commit: move pending data into main storage and clear WAL without a
+    /// recursive fsync. Use `checkpoint()` when an explicit durable fsync
+    /// barrier is required.
     pub fn commit(&self) -> Result<()> {
-        self.checkpoint()
+        self.checkpoint_fast()
     }
 
     /// Check if there is uncommitted WAL data.

@@ -31,9 +31,13 @@ Most request bodies include:
 | --- | --- | --- | --- |
 | `POST` | `/add` | `ids`, `vectors`, `fields` | Add one or more records with string or integer public IDs. |
 | `POST` | `/upsert` | `ids`, `vectors`, `fields` | Insert or update one or more records by public ID. |
-| `POST` | `/commit` | none | Commit pending writes. |
-| `POST` | `/flush` | none | Flush buffers. |
-| `POST` | `/checkpoint` | none | Force a durable checkpoint. |
+| `POST` | `/commit` | none | Fast logical commit; clears WAL without forcing recursive fsync. |
+| `POST` | `/flush` | none | Flush pending buffers and bytes without clearing WAL. |
+| `POST` | `/checkpoint` | none | Force a durable checkpoint, sync committed state, and clear WAL. |
+
+Use `/commit` for normal ingestion latency and `/checkpoint` before backups,
+snapshots, controlled shutdowns, or critical acknowledgements that require
+deterministic on-disk durability.
 
 ## Indexes
 

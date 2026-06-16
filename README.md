@@ -70,6 +70,8 @@ This example stores small knowledge snippets with documents and metadata, then
 retrieves context for a user question. LynseDB can embed the documents lazily
 through the default local FastEmbed adapter, build a `FLAT-IP` index on first
 write, and commit automatically when the collection context exits successfully.
+`commit()` is a fast logical write boundary; call `checkpoint()` before backups,
+snapshots, controlled shutdowns, or critical durability acknowledgements.
 
 ```python
 import lynse

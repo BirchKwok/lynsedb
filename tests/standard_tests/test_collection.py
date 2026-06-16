@@ -1,4 +1,7 @@
 """Tests for LocalCollection CRUD, metadata, index, soft-delete, compact, stats."""
+import gc
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -79,6 +82,59 @@ class TestAddItem:
         collection.add(ids=1, vectors=np.random.rand(DIM).astype(np.float32))
 
         assert collection.index_mode is None or collection.index_mode == ""
+
+
+class TestCheckpoint:
+    def test_checkpoint_allows_subsequent_writes(self, collection):
+        first = np.ones(DIM, dtype=np.float32)
+        second = np.zeros(DIM, dtype=np.float32)
+
+        collection.add(ids=1, vectors=first, fields={"stage": "before"})
+        response = collection.checkpoint()
+
+        assert response["status"] == "success"
+        assert collection._rust_coll.has_uncommitted_data() is False
+
+        collection.add(ids=2, vectors=second, fields={"stage": "after"})
+        collection.commit()
+
+        result = collection.query(where='"stage" in ("before", "after")')
+        assert result.ids.tolist() == [1, 2]
+
+    def test_checkpoint_clears_wal_and_reopen_preserves_rows(self, tmp_root):
+        import lynse
+
+        client = lynse.VectorDBClient(uri=tmp_root)
+        db = client.create_database("checkpoint_db", drop_if_exists=True)
+        collection = db.require_collection("checkpoint_col", dim=DIM, drop_if_exists=True)
+        collection.add(
+            ids=["doc-a", "doc-b"],
+            vectors=np.eye(2, DIM, dtype=np.float32),
+            fields=[{"group": "a"}, {"group": "b"}],
+        )
+
+        assert collection._rust_coll.has_uncommitted_data() is True
+        collection.checkpoint()
+        assert collection._rust_coll.has_uncommitted_data() is False
+
+        wal_dir = Path(tmp_root) / "checkpoint_db" / "checkpoint_col" / "wal"
+        assert not list(wal_dir.glob("*.wal"))
+
+        del collection, db
+        client.close()
+        del client
+        gc.collect()
+
+        reopened = lynse.VectorDBClient(uri=tmp_root)
+        reopened_collection = (
+            reopened.get_database("checkpoint_db").get_collection("checkpoint_col")
+        )
+        assert reopened_collection.shape[0] == 2
+        assert reopened_collection.head(2).ids.tolist() == ["doc-a", "doc-b"]
+        assert reopened_collection.is_id_exists("doc-a") is True
+        assert reopened_collection.query(where='"group" = \'b\'').ids.tolist() == ["doc-b"]
+        assert reopened_collection._rust_coll.has_uncommitted_data() is False
+        reopened.close()
 
 
 class TestBulkAdd:

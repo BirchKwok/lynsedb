@@ -634,7 +634,8 @@ impl PyCollection {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Commit: clear WAL after successful writes.
+    /// Commit: clear WAL after successful writes without forcing recursive fsync.
+    /// Use checkpoint() for an explicit durable fsync barrier.
     fn commit(&self) -> PyResult<()> {
         let coll = self.inner.read();
         coll.commit()

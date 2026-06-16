@@ -25,7 +25,7 @@ sensitive to allocator state, import order, and OS cache behavior.
 The suite uses normalized synthetic vectors and exact NumPy inner-product
 ground truth for recall checks. LynseDB uses `FLAT-IP`, `float16` dense-vector
 storage, compact persisted text indexes, and the embedded benchmark adapter's
-fast checkpoint path. LanceDB stores normalized vectors. Both embedded engines
+fast commit path. LanceDB stores normalized vectors. Both embedded engines
 are ingested through their batch insert APIs.
 
 ## Summary
@@ -108,9 +108,9 @@ metadata-filtered search stays around 2.1 ms mean latency.
 
 ## Persisted Vector + Metadata/Text-Index Ingest
 
-This ingest metric includes durable vector writes, metadata persistence, and the
-text index needed by the hybrid-search benchmark. It is not a pure vector-only
-append microbenchmark.
+This ingest metric includes committed vector writes, metadata persistence, and
+the text index needed by the hybrid-search benchmark. It is not a pure
+vector-only append microbenchmark.
 
 | Engine | Vectors/s | Disk MB | RSS delta MB |
 | --- | ---: | ---: | ---: |

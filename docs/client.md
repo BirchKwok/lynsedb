@@ -65,10 +65,17 @@ Remote-only database helpers:
 | `with collection:` | Collection context manager that calls `commit()` on successful exit. |
 | `add(ids, *, vectors=None, documents=None, fields=None, batch_size=1000, wire_dtype="float32")` | Add one or more records. Provide vectors directly, or provide documents without vectors to trigger lazy default embedding. IDs may be strings or non-negative integers. |
 | `upsert(ids, *, vectors, fields=None, batch_size=1000, wire_dtype="float32")` | Insert or update one or more records by public ID. |
-| `commit()` | Commit pending writes. |
-| `flush()` | Flush client/storage buffers. |
-| `checkpoint()` | Force a durable checkpoint. |
+| `commit()` | Fast logical commit: make writes visible and clear WAL without forcing recursive fsync. |
+| `flush()` | Flush pending buffers and bytes without clearing WAL. Advanced storage operation. |
+| `checkpoint()` | Force a durable checkpoint, sync committed state, and clear WAL. |
 | `close()` | Flush and close the collection handle. |
+
+`commit()` is optimized for normal ingestion latency. It does not guarantee that
+data has reached stable storage at the instant the call returns; operating
+system writeback controls that timing. Call `checkpoint()` when a batch must be
+durably on disk before backup, snapshot, shutdown, or acknowledging a critical
+write. `flush()` is lower-level: it pushes pending bytes but intentionally keeps
+WAL state.
 
 ## Collection Indexes and Vector Fields
 

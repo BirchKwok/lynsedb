@@ -563,7 +563,7 @@ class LocalCollection:
         return external_ids[0] if single_id else external_ids
 
     def commit(self):
-        """Commit the changes in the collection."""
+        """Commit changes and clear WAL without forcing recursive fsync."""
         if not self._mesosphere_list.empty():
             self._flush_buffer()
         self._rust_coll.commit()
