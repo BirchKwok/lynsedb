@@ -74,7 +74,7 @@ field = {
     "tenant": "acme",
     "lang": "en",
     "title": "Install LynseDB",
-    "text": "pip install LynseDB",
+    "text": "pip install lynsedb",
     "tags": ["install", "python"],
     "created_at": "2026-06-05T10:00:00Z",
 }
@@ -154,10 +154,17 @@ collection.add(
 )
 ```
 
-The lightweight embedding dependency is installed lazily only when this path is
-used, or when you call vector search with a document query. The raw text is also
-stored in the row field as `document` so it can be returned, filtered, or used
-for BM25 search.
+Install the optional local embedding adapter explicitly for repeatable
+environments:
+
+```shell
+pip install "lynsedb[embeddings]"
+```
+
+If `fastembed` is missing, LynseDB can still try to install it lazily on first
+document use. Set `LYNSE_AUTO_INSTALL_EMBEDDINGS=0` to disable that behavior.
+The raw text is also stored in the row field as `document` so it can be
+returned, filtered, or used for BM25 search.
 
 Search with text directly:
 
@@ -245,6 +252,7 @@ The practical rule:
 | --- | --- |
 | `add()` | You want a simple write-through batch. |
 | `insert_session()` | You want grouped ingestion with automatic commit on success. |
+| `with collection:` | You want normal collection calls committed automatically on success. |
 | `commit()` | A write batch is complete and should be visible durably. |
 | `flush()` | You want pending buffers and bytes flushed without clearing the WAL. |
 | `checkpoint()` | You are about to back up, snapshot, or shut down cleanly. |

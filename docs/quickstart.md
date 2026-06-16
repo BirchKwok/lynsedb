@@ -1,13 +1,20 @@
 # Quickstart
 
 This guide walks through the main LynseDB workflow: connect, create a
-collection, insert vectors, build an index, search, filter metadata, inspect
+collection, insert vectors or documents, search, filter metadata, inspect
 results, and clean up.
 
 ## 1. Install and import
 
 ```shell
-pip install LynseDB
+pip install lynsedb
+```
+
+For `documents=` and `search(document=...)`, install the optional local
+embedding adapter:
+
+```shell
+pip install "lynsedb[embeddings]"
 ```
 
 Native Linux and macOS environments are supported. Native Windows environments
@@ -74,6 +81,10 @@ collection = db.require_collection(
 )
 ```
 
+New collections build a `FLAT-IP` index automatically after the first primary
+vector write. Use `default_index=None` to disable this, or pass an index mode
+such as `default_index="FLAT-COS"` when creating the collection.
+
 Open an existing collection safely:
 
 ```python
@@ -87,22 +98,25 @@ optional JSON-like dicts and can be used later for filtering, BM25 search, or
 result display.
 
 ```python
-collection.add(
-    ids=["intro", "guide", "note-fr", "note-archive"],
-    vectors=[
-        [0.10, 0.20, 0.30, 0.40],
-        [0.11, 0.19, 0.29, 0.39],
-        [0.80, 0.10, 0.20, 0.10],
-        [0.75, 0.12, 0.18, 0.12],
-    ],
-    fields=[
-        {"title": "LynseDB intro", "lang": "en", "rank": 1, "tags": ["vector", "rust"]},
-        {"title": "Vector guide", "lang": "en", "rank": 2, "tags": ["vector"]},
-        {"title": "French note", "lang": "fr", "rank": 3, "tags": ["note"]},
-        {"title": "Another note", "lang": "fr", "rank": 4, "tags": ["note", "archive"]},
-    ],
-)
+with collection:
+    collection.add(
+        ids=["intro", "guide", "note-fr", "note-archive"],
+        vectors=[
+            [0.10, 0.20, 0.30, 0.40],
+            [0.11, 0.19, 0.29, 0.39],
+            [0.80, 0.10, 0.20, 0.10],
+            [0.75, 0.12, 0.18, 0.12],
+        ],
+        fields=[
+            {"title": "LynseDB intro", "lang": "en", "rank": 1, "tags": ["vector", "rust"]},
+            {"title": "Vector guide", "lang": "en", "rank": 2, "tags": ["vector"]},
+            {"title": "French note", "lang": "fr", "rank": 3, "tags": ["note"]},
+            {"title": "Another note", "lang": "fr", "rank": 4, "tags": ["note", "archive"]},
+        ],
+    )
 ```
+
+The collection context manager calls `commit()` on successful exit.
 
 For large dense arrays, keep the same `add()` API and choose a larger batch
 size:
@@ -113,10 +127,36 @@ added = collection.add(ids=[f"vec-{i}" for i in range(10_000)], vectors=vectors,
 print(added)
 ```
 
-## 5. Build an index
+You can also pass text documents and let LynseDB use the default local embedding
+adapter:
 
-Flat search is the simplest and most recall-friendly default. Use HNSW or IVF as
-data grows and latency matters.
+```python
+docs = db.require_collection("text_docs", drop_if_exists=True)
+
+with docs:
+    docs.add(
+        ids=["local", "server"],
+        documents=[
+            "Use embedded mode for notebooks, tests, and jobs.",
+            "Run lynse serve when several workers need shared search.",
+        ],
+        fields=[
+            {"mode": "local"},
+            {"mode": "server"},
+        ],
+    )
+
+result = docs.search(document="How do I share search across workers?", k=1)
+print(result.ids)
+```
+
+## 5. Build or tune an index
+
+Flat search is the simplest and most recall-friendly default. LynseDB builds a
+`FLAT-IP` index automatically for new collections after the first write so the
+default metric is explicit. Use HNSW or IVF as data grows and latency matters,
+or rebuild with a metric-specific flat index when that matches your embedding
+model.
 
 ```python
 collection.build_index("FLAT-L2")

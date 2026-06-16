@@ -9,8 +9,6 @@ from threading import Lock
 import numpy as np
 import httpx
 
-from tqdm import trange
-
 from ...cluster import _encode_fields_binary, _encode_ids_for_wire, _normalize_vector_encoding
 from ...api import logger
 from ...utils.asserts import raise_if
@@ -28,6 +26,9 @@ from .._records import (
     validate_unique_external_ids,
 )
 from ..rerank import apply_external_rerank, should_fetch_fields
+
+
+DEFAULT_COLLECTION_INDEX = "FLAT-IP"
 
 
 def _decode_search_binary(buf: bytes, offset: int = 0):
@@ -168,6 +169,7 @@ class HTTPClient:
             drop_if_exists: bool = False,
             description: str = None,
             dtypes: str = "float32",
+            default_index: Union[str, None] = DEFAULT_COLLECTION_INDEX,
     ):
         """
         Create a collection.
@@ -182,6 +184,9 @@ class HTTPClient:
             description (str): A description of the collection. Default is None.
                 The description is limited to 500 characters.
             dtypes (str): Dense vector storage dtype, "float32" or "float16".
+            default_index (str or None): Index mode to build automatically after
+                the first write to a newly created collection. Use None to
+                disable automatic index creation.
 
         Returns:
             Collection: The collection object.
@@ -190,7 +195,6 @@ class HTTPClient:
             ConnectionError: If the server cannot be connected to.
         """
         uri = f'{self.uri}/required_collection'
-
         data = {
             "database_name": self.database_name,
             "collection_name": collection,
@@ -203,6 +207,17 @@ class HTTPClient:
         }
 
         try:
+            existed_before = False
+            if not drop_if_exists:
+                exists_response = self._session.post(
+                    f'{self.uri}/is_collection_exists',
+                    json={"database_name": self.database_name, "collection_name": collection},
+                )
+                if exists_response.status_code == 200:
+                    existed_before = exists_response.json()['params']['exists']
+                else:
+                    raise_error_response(exists_response)
+
             response = self._session.post(uri, json=data)
             if response.status_code == 200:
                 collection = Collection(
@@ -216,6 +231,7 @@ class HTTPClient:
                     description=description,
                     dtypes=dtypes,
                     api_key=self._api_key,
+                    default_index=default_index if not existed_before else None,
                 )
                 return collection
             else:
@@ -581,6 +597,7 @@ class Collection:
             cache_chunks: Union[int, None] = None,
             api_key: Union[str, None] = None,
             dtypes: str = "float32",
+            default_index: Union[str, None] = None,
     ):
         """
         Initialize the collection.
@@ -601,6 +618,8 @@ class Collection:
                 ignored by the Rust HTTP client.
             api_key (str): Optional Bearer token.
             dtypes (str): Dense vector storage dtype.
+            default_index (str or None): Deferred default index mode for newly
+                created collections.
 
         """
         self.IS_DELETED = False
@@ -619,6 +638,8 @@ class Collection:
             'cache_chunks': cache_chunks,
             'dtypes': dtypes,
         }
+        self._default_index = default_index
+        self._default_index_built = False
 
         self.COMMIT_FLAG = False
 
@@ -631,9 +652,30 @@ class Collection:
         except Exception:
             self._cluster_mode = False
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None and not self.COMMIT_FLAG:
+            self.commit()
+        return False
+
     def _set_dim_if_known(self, dim):
         if dim:
             self._init_params['dim'] = int(dim)
+
+    def _maybe_build_default_index(self):
+        if not self._default_index or self._default_index_built:
+            return
+        current_index = self.index_mode
+        if current_index and str(current_index).lower() != "none":
+            self._default_index_built = True
+            return
+        n_vectors, dim = self.shape
+        if n_vectors <= 0 or dim <= 0:
+            return
+        self.build_index(self._default_index)
+        self._default_index_built = True
 
     @property
     def vector_dtype(self) -> str:
@@ -662,7 +704,7 @@ class Collection:
 
     def add(
             self,
-            ids,
+            ids=None,
             *,
             vectors=None,
             documents=None,
@@ -671,6 +713,52 @@ class Collection:
             wire_dtype: str = "float32",
     ):
         """Add one or more records through the unified insert API."""
+        if ids is None:
+            if vectors is None or documents is not None or fields is not None:
+                raise ValueError("add(ids=None) requires vectors and does not accept documents or fields")
+            if not isinstance(batch_size, int) or batch_size <= 0:
+                raise ValueError("batch_size must be a positive integer")
+            if not isinstance(vectors, np.ndarray):
+                vectors = np.array(vectors, dtype=np.float32)
+            if vectors.ndim == 1:
+                vectors = vectors.reshape(1, -1)
+            elif vectors.ndim != 2:
+                raise ValueError("vectors must be a 1D vector or a 2D matrix")
+            vectors = np.ascontiguousarray(vectors, dtype=np.float32)
+            n_total, dim = vectors.shape
+            start_id = int(self.max_id) + 1
+            generated_ids = list(range(start_id, start_id + n_total))
+            vector_encoding = _normalize_vector_encoding(wire_dtype)
+            total_batches = (n_total + batch_size - 1) // batch_size
+
+            for i in range(total_batches):
+                start = i * batch_size
+                end = min((i + 1) * batch_size, n_total)
+                batch = vectors[start:end]
+                n_vecs = batch.shape[0]
+                if vector_encoding == "float16":
+                    body = np.ascontiguousarray(batch, dtype="<f2").tobytes()
+                else:
+                    body = batch.tobytes()
+
+                uri = (f'{self._uri}/bulk_add_binary'
+                       f'?database_name={self._database_name}'
+                       f'&collection_name={self._collection_name}'
+                       f'&dim={dim}&n_vectors={n_vecs}'
+                       f'&vector_encoding={vector_encoding}')
+
+                response = self._session.post(
+                    uri, content=body, headers={'Content-Type': 'application/octet-stream'}
+                )
+                if response.status_code == 200:
+                    self.COMMIT_FLAG = False
+                    self._set_dim_if_known(dim)
+                else:
+                    raise_error_response(response)
+
+            self._maybe_build_default_index()
+            return generated_ids[0] if n_total == 1 else generated_ids
+
         del wire_dtype  # JSON HTTP add sends float32-compatible lists.
         external_ids, single_id = normalize_external_ids(ids)
         n_records = len(external_ids)
@@ -710,6 +798,7 @@ class Collection:
                 else:
                     raise_error_response(response)
 
+        self._maybe_build_default_index()
         return added_ids[0] if single_id else added_ids
 
     @staticmethod
@@ -828,74 +917,8 @@ class Collection:
                 else:
                     raise_error_response(response)
 
+        self._maybe_build_default_index()
         return returned_ids[0] if single_id else returned_ids
-
-    def bulk_add_binary(
-            self,
-            vectors: np.ndarray,
-            batch_size: int = 50000,
-            enable_progress_bar: bool = True,
-            wire_dtype: str = "float32",
-    ):
-        """
-        High-performance binary bulk add. Sends raw vector bytes instead of JSON.
-        Use this when adding vectors without fields for maximum throughput.
-
-        Parameters:
-            vectors (np.ndarray): 2D array of shape (n, dim), dtype float32.
-            batch_size (int): Number of vectors per batch. Default is 50000.
-            enable_progress_bar (bool): Whether to enable the progress bar.
-            wire_dtype (str): "float32" for lossless transfer or "float16" for
-                half-size lossy transfer.
-
-        Returns:
-            int: Total number of vectors added.
-        """
-        if not isinstance(vectors, np.ndarray):
-            vectors = np.array(vectors, dtype=np.float32)
-        if vectors.ndim == 1:
-            vectors = vectors.reshape(1, -1)
-        vectors = np.ascontiguousarray(vectors, dtype=np.float32)
-        vector_encoding = _normalize_vector_encoding(wire_dtype)
-
-        n_total, dim = vectors.shape
-        total_batches = (n_total + batch_size - 1) // batch_size
-        added = 0
-
-        if enable_progress_bar:
-            iter_obj = trange(total_batches, desc='Adding vectors (binary)', unit='batch')
-        else:
-            iter_obj = range(total_batches)
-
-        for i in iter_obj:
-            start = i * batch_size
-            end = min((i + 1) * batch_size, n_total)
-            batch = vectors[start:end]
-            n_vecs = batch.shape[0]
-            if vector_encoding == "float16":
-                body = np.ascontiguousarray(batch, dtype="<f2").tobytes()
-            else:
-                body = batch.tobytes()
-
-            uri = (f'{self._uri}/bulk_add_binary'
-                   f'?database_name={self._database_name}'
-                   f'&collection_name={self._collection_name}'
-                   f'&dim={dim}&n_vectors={n_vecs}'
-                   f'&vector_encoding={vector_encoding}')
-
-            response = self._session.post(
-                uri, content=body,
-                headers={'Content-Type': 'application/octet-stream'}
-            )
-
-            if response.status_code == 200:
-                self.COMMIT_FLAG = False
-                self._set_dim_if_known(dim)
-                added += n_vecs
-            else:
-                raise_error_response(response)
-
-        return added
 
     def _flush_pending(self):
         if self._mesosphere_list.empty():
@@ -1187,6 +1210,8 @@ class Collection:
         response = self._session.post(uri, json=data)
 
         if response.status_code == 200:
+            if field_name == "default":
+                self._default_index_built = True
             return response.json()
         else:
             raise_error_response(response)
@@ -1221,6 +1246,9 @@ class Collection:
         response = self._session.post(uri, json=data)
 
         if response.status_code == 200:
+            if field_name == "default":
+                self._default_index = None
+                self._default_index_built = False
             return response.json()
         else:
             raise_error_response(response)
@@ -2071,6 +2099,7 @@ class Collection:
         response = self._session.post(uri, json=data)
         if response.status_code != 200:
             raise_error_response(response)
+        self.COMMIT_FLAG = False
 
     def restore(self, ids):
         """
@@ -2088,6 +2117,7 @@ class Collection:
         response = self._session.post(uri, json=data)
         if response.status_code != 200:
             raise_error_response(response)
+        self.COMMIT_FLAG = False
 
     def list_deleted_ids(self):
         """

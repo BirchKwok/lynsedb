@@ -39,6 +39,11 @@ dependencies = [
     "tqdm>=4.50.0",
 ]
 
+[project.optional-dependencies]
+embeddings = [
+    "fastembed>=0.3.0",
+]
+
 [project.urls]
 homepage = "https://github.com/BirchKwok/LynseDB"
 

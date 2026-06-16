@@ -208,6 +208,45 @@ impl PyCollection {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
+    /// Add float16-encoded vectors with user-specified IDs and optional metadata.
+    ///
+    /// Args:
+    ///     vectors: numpy array of shape (n, dim) with dtype uint16 containing
+    ///         little-endian IEEE float16 bits.
+    ///     ids: list of integer user IDs, one per vector
+    ///     fields: optional list of dicts, one per vector
+    #[pyo3(signature = (vectors, ids, fields=None))]
+    fn add_items_encoded_f16(
+        &self,
+        vectors: PyReadonlyArray2<u16>,
+        ids: Vec<u64>,
+        fields: Option<&Bound<'_, PyList>>,
+    ) -> PyResult<()> {
+        let array = vectors.as_array();
+        let n_vectors = array.nrows();
+        let flat_data: &[u16] = array
+            .as_slice()
+            .expect("numpy array must be contiguous (C-order)");
+        let encoded = unsafe {
+            std::slice::from_raw_parts(
+                flat_data.as_ptr().cast::<u8>(),
+                flat_data.len() * std::mem::size_of::<u16>(),
+            )
+        };
+
+        let rust_fields = py_fields_to_json(fields, n_vectors)?;
+
+        let mut coll = self.inner.write();
+        coll.add_items_encoded_vectors(
+            encoded,
+            VectorDtype::F16,
+            n_vectors,
+            &ids,
+            rust_fields.as_deref(),
+        )
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Create an additional named vector field for existing records.
     #[pyo3(signature = (name, dimension, metric=None, index_mode=None, dtypes=None))]
     fn create_vector_field(
@@ -613,6 +652,13 @@ impl PyCollection {
     fn checkpoint(&self) -> PyResult<()> {
         let coll = self.inner.read();
         coll.checkpoint()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Lightweight checkpoint: clear WAL without forcing recursive fsync.
+    fn checkpoint_fast(&self) -> PyResult<()> {
+        let coll = self.inner.read();
+        coll.checkpoint_fast()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 

@@ -51,7 +51,14 @@ client = lynse.VectorDBClient("http://127.0.0.1:7637")    # server or cluster
 Python 3.9 or newer is required.
 
 ```shell
-pip install LynseDB
+pip install lynsedb
+```
+
+For document-first inserts and `search(document=...)`, install the optional
+local embedding adapter explicitly:
+
+```shell
+pip install "lynsedb[embeddings]"
 ```
 
 Native Linux and macOS environments are supported. Native Windows environments
@@ -59,30 +66,13 @@ are not supported; on Windows, run LynseDB inside WSL 2 or use Docker.
 
 ## Quickstart: Build a Tiny AI Knowledge Base
 
-This example stores small knowledge snippets with vectors and metadata, then
-retrieves context for a user question. The embedding function is deliberately
-tiny and local so the example runs without an API key. In a real AI app, replace
-`embed()` with OpenAI embeddings, sentence-transformers, FastEmbed, CLIP, or your
-own model.
+This example stores small knowledge snippets with documents and metadata, then
+retrieves context for a user question. LynseDB can embed the documents lazily
+through the default local FastEmbed adapter, build a `FLAT-IP` index on first
+write, and commit automatically when the collection context exits successfully.
 
 ```python
-import hashlib
-import re
-
-import numpy as np
 import lynse
-
-
-DIM = 64
-
-
-def embed(text: str) -> np.ndarray:
-    vector = np.zeros(DIM, dtype=np.float32)
-    for token in re.findall(r"[a-z0-9]+", text.lower()):
-        bucket = int(hashlib.md5(token.encode()).hexdigest(), 16) % DIM
-        vector[bucket] += 1.0
-    norm = np.linalg.norm(vector)
-    return vector / norm if norm else vector
 
 
 docs = [
@@ -108,19 +98,18 @@ docs = [
 
 client = lynse.VectorDBClient("./lynsedb-ai-demo")
 db = client.create_database("assistant", drop_if_exists=True)
-collection = db.require_collection("knowledge", dim=DIM, drop_if_exists=True)
+collection = db.require_collection("knowledge", drop_if_exists=True)
 
-collection.add(
-    ids=[doc["id"] for doc in docs],
-    vectors=[embed(f"{doc['title']} {doc['text']}") for doc in docs],
-    fields=docs,
-)
-collection.build_index("FLAT-L2")
-collection.commit()
+with collection:
+    collection.add(
+        ids=[doc["id"] for doc in docs],
+        documents=[f"{doc['title']} {doc['text']}" for doc in docs],
+        fields=docs,
+    )
 
 question = "How should I deploy vector search for multiple workers?"
 result = collection.search(
-    embed(question),
+    document=question,
     k=1,
     where="tags CONTAINS 'server'",
     return_fields=True,
@@ -138,9 +127,9 @@ You now have the core loop behind most AI retrieval systems:
 4. Search by semantic similarity plus filters.
 5. Send the returned fields to your LLM as grounded context.
 
-LynseDB also supports document-first calls through `documents=` and
-`search(document=...)`, which use a lazy local default text embedding model. For
-production systems, explicitly choose and version your embedding model.
+For production systems, explicitly choose and version your embedding model. Pass
+vectors directly through `vectors=` when you already use OpenAI embeddings,
+sentence-transformers, FastEmbed, CLIP, or your own model.
 
 ## One API, Three Deployment Shapes
 
@@ -283,14 +272,17 @@ before using cluster mode in production.
 
 ## Indexing
 
-Start with a flat index as a correctness baseline:
+New collections build a `FLAT-IP` index automatically after the first primary
+vector write. Disable this with `default_index=None`, or choose another default
+when creating the collection:
 
 ```python
-collection.build_index("FLAT-L2")
+collection = db.require_collection("docs", dim=384, default_index="FLAT-COS")
 ```
 
-Move to HNSW or IVF when latency matters, DiskANN when memory pressure matters,
-and quantized variants when you want a smaller memory or disk footprint:
+Call `build_index()` when you want to rebuild or switch index modes. Move to
+HNSW or IVF when latency matters, DiskANN when memory pressure matters, and
+quantized variants when you want a smaller memory or disk footprint:
 
 ```python
 collection.build_index("HNSW-L2")

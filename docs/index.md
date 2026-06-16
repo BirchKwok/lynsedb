@@ -35,7 +35,7 @@ retrieval workloads.
 ## Install
 
 ```shell
-pip install LynseDB
+pip install lynsedb
 ```
 
 Python 3.9 or newer is required. Wheels are published for common macOS, Linux,

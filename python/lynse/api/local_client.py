@@ -11,7 +11,6 @@ from typing import Union, List, Tuple, Dict, Any, Optional, Callable
 from threading import Lock
 
 import numpy as np
-from tqdm import trange
 
 from ..utils.utils import collection_repr
 from .._backend import DatabaseManager, Collection, SearchResult, _normalize_sparse_vector
@@ -30,6 +29,7 @@ from ._records import (
 
 
 DEFAULT_INSERT_BUFFER_SIZE = 10_000
+DEFAULT_COLLECTION_INDEX = "FLAT-IP"
 
 
 class LocalClient:
@@ -56,6 +56,7 @@ class LocalClient:
             drop_if_exists: bool = False,
             description: str = None,
             dtypes: str = "float32",
+            default_index: Union[str, None] = DEFAULT_COLLECTION_INDEX,
     ):
         """
         Create or open a collection.
@@ -69,10 +70,18 @@ class LocalClient:
             drop_if_exists (bool): Whether to drop the collection if it exists. Default is False.
             description (str): A description of the collection. Default is None.
             dtypes (str): Dense vector storage dtype, "float32" or "float16".
+            default_index (str or None): Index mode to build automatically after
+                the first write to a newly created collection. Use None to
+                disable automatic index creation.
 
         Returns:
             LocalCollection: The collection object.
         """
+        existed_before = (
+            self._manager.collection_exists(self.database_name, collection)
+            if not drop_if_exists
+            else False
+        )
         self._manager.require_collection(
             self.database_name, collection, dim, drop_if_exists, description, dtypes
         )
@@ -90,6 +99,7 @@ class LocalClient:
             drop_if_exists=drop_if_exists,
             description=description,
             dtypes=dtypes,
+            default_index=default_index if not existed_before else None,
         )
 
     def get_collection(self, collection: str, warm_up=True):
@@ -284,6 +294,7 @@ class LocalCollection:
             drop_if_exists: bool = False,
             description: Union[str, None] = None,
             dtypes: str = "float32",
+            default_index: Union[str, None] = None,
     ):
         self.IS_DELETED = False
         self._manager = manager
@@ -298,10 +309,20 @@ class LocalCollection:
             'description': description,
             'dtypes': dtypes,
         }
+        self._default_index = default_index
+        self._default_index_built = False
 
         self.COMMIT_FLAG = False
         self._mesosphere_list = queue.Queue()
         self._lock = Lock()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None and not self.COMMIT_FLAG:
+            self.commit()
+        return False
 
     @property
     def is_read_only(self) -> bool:
@@ -317,6 +338,19 @@ class LocalCollection:
             self._init_params['dim'] = dim
         return dim
 
+    def _maybe_build_default_index(self):
+        if not self._default_index or self._default_index_built:
+            return
+        current_index = getattr(self._rust_coll, "index_mode", None)
+        if current_index and str(current_index).lower() != "none":
+            self._default_index_built = True
+            return
+        n_vectors, dim = self.shape
+        if n_vectors <= 0 or dim <= 0:
+            return
+        self.build_index(self._default_index)
+        self._default_index_built = True
+
     @property
     def vector_dtype(self) -> str:
         return self._rust_coll.vector_dtype
@@ -327,7 +361,7 @@ class LocalCollection:
 
     def add(
             self,
-            ids,
+            ids=None,
             *,
             vectors=None,
             documents=None,
@@ -338,18 +372,62 @@ class LocalCollection:
         """
         Add one or more records.
 
-        ``ids`` are public string/int IDs. LynseDB assigns internal integer row
-        IDs automatically and stores the public ID mapping in metadata.
+        ``ids`` are public string/int IDs. When omitted, LynseDB assigns
+        sequential integer IDs starting after the current max ID.
         Provide ``vectors`` for direct vector insert, or provide ``documents``
         without vectors to trigger lazy local embedding.
         """
         del wire_dtype  # Local calls pass numpy arrays directly.
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+
+        if ids is None:
+            docs, _ = normalize_documents(documents) if documents is not None else (None, False)
+            if vectors is None:
+                if docs is None:
+                    raise ValueError("add() requires vectors or documents")
+                vec_array = embed_documents(docs)
+                n_records = vec_array.shape[0]
+                if n_records != len(docs):
+                    raise ValueError("embedding output count must match documents length")
+            else:
+                vec_array = np.asarray(vectors, dtype=np.float32)
+                if vec_array.ndim == 1:
+                    vec_array = vec_array.reshape(1, -1)
+                elif vec_array.ndim != 2:
+                    raise ValueError("vectors must be a 1D vector or a 2D matrix")
+                vec_array = np.ascontiguousarray(vec_array, dtype=np.float32)
+                n_records = vec_array.shape[0]
+                if docs is not None and len(docs) != n_records:
+                    raise ValueError(f"documents length ({len(docs)}) must match vectors row count ({n_records})")
+
+            stored_fields = (
+                None
+                if fields is None and docs is None
+                else attach_documents(normalize_fields(fields, n_records), docs)
+            )
+
+            with self._lock:
+                offset = self._rust_coll.max_id()
+                start_id = int(offset) + 1 if offset >= 0 else 0
+                generated_ids = list(range(start_id, start_id + n_records))
+                for start in range(0, n_records, batch_size):
+                    end = min(start + batch_size, n_records)
+                    self._rust_coll.add_items(
+                        vec_array[start:end],
+                        generated_ids[start:end],
+                        None if stored_fields is None else stored_fields[start:end],
+                    )
+                self._refresh_dim_from_backend()
+
+            self._maybe_build_default_index()
+            self.COMMIT_FLAG = False
+            return generated_ids[0] if n_records == 1 else generated_ids
+
         external_ids, single_id = normalize_external_ids(ids)
         n_records = len(external_ids)
         validate_unique_external_ids(external_ids)
         docs, _ = normalize_documents(documents, n_records) if documents is not None else (None, False)
-        if not isinstance(batch_size, int) or batch_size <= 0:
-            raise ValueError("batch_size must be a positive integer")
 
         if vectors is None:
             if docs is None:
@@ -374,6 +452,7 @@ class LocalCollection:
                 ))
             self._refresh_dim_from_backend()
 
+        self._maybe_build_default_index()
         self.COMMIT_FLAG = False
         return added_ids[0] if single_id else added_ids
 
@@ -391,12 +470,21 @@ class LocalCollection:
             self._refresh_dim_from_backend()
             self.COMMIT_FLAG = False
             self._mesosphere_list = queue.Queue()
+        self._maybe_build_default_index()
 
     def _result_ids_and_fields(self, internal_ids, fetch_fields: bool = True):
         internal_list = [int(i) for i in internal_ids.tolist()] if isinstance(internal_ids, np.ndarray) else [int(i) for i in internal_ids]
         external_ids = id_array(self._rust_coll.external_ids(internal_list)) if internal_list else id_array([])
         fields = [dict(f) for f in self._rust_coll.retrieve_fields(internal_list)] if fetch_fields and internal_list else []
         return external_ids, fields
+
+    def _add_items_encoded_f16(self, vectors, ids, fields=None):
+        add_encoded = getattr(self._rust_coll, "add_items_encoded_f16", None)
+        if add_encoded is None:
+            raise AttributeError("Rust backend does not expose add_items_encoded_f16")
+        add_encoded(vectors, ids, fields)
+        self._refresh_dim_from_backend()
+        self.COMMIT_FLAG = False
 
     def _internal_ids(self, ids, *, missing: str = "error") -> list[int]:
         if isinstance(ids, (list, tuple, set, np.ndarray)) and len(ids) == 0:
@@ -411,57 +499,6 @@ class LocalCollection:
             if not external_ids:
                 return []
         return self._rust_coll.internal_ids(external_ids)
-
-    def bulk_add_binary(
-            self,
-            vectors: np.ndarray,
-            batch_size: int = 50000,
-            enable_progress_bar: bool = True,
-            wire_dtype: str = "float32",
-    ):
-        """
-        High-performance binary bulk add. Directly passes numpy arrays to Rust.
-
-        Parameters:
-            vectors (np.ndarray): 2D array of shape (n, dim), dtype float32.
-            batch_size (int): Number of vectors per batch. Default is 50000.
-            enable_progress_bar (bool): Whether to enable the progress bar.
-            wire_dtype (str): Accepted for HTTP API parity; ignored for local calls.
-
-        Returns:
-            int: Total number of vectors added.
-        """
-        if not isinstance(vectors, np.ndarray):
-            vectors = np.array(vectors, dtype=np.float32)
-        if vectors.ndim == 1:
-            vectors = vectors.reshape(1, -1)
-        vectors = np.ascontiguousarray(vectors, dtype=np.float32)
-
-        n_total = vectors.shape[0]
-        total_batches = (n_total + batch_size - 1) // batch_size
-        added = 0
-
-        if enable_progress_bar:
-            iter_obj = trange(total_batches, desc='Adding vectors (binary)', unit='batch')
-        else:
-            iter_obj = range(total_batches)
-
-        offset = self._rust_coll.max_id()
-        start_id = int(offset) + 1 if offset >= 0 else 0
-
-        for i in iter_obj:
-            start = i * batch_size
-            end = min((i + 1) * batch_size, n_total)
-            batch = vectors[start:end]
-            n_batch = batch.shape[0]
-            seq_ids = list(range(start_id, start_id + n_batch))
-            self._rust_coll.add_items(batch, seq_ids, None)
-            self._refresh_dim_from_backend()
-            start_id += n_batch
-            self.COMMIT_FLAG = False
-            added += n_batch
-
-        return added
 
     def upsert(
             self,
@@ -521,6 +558,7 @@ class LocalCollection:
                     )
             self._refresh_dim_from_backend()
 
+        self._maybe_build_default_index()
         self.COMMIT_FLAG = False
         return external_ids[0] if single_id else external_ids
 
@@ -694,6 +732,8 @@ class LocalCollection:
             field_name=field_name,
             n_clusters=effective_n_clusters,
         )
+        if field_name == "default":
+            self._default_index_built = True
         return {'status': 'success'}
 
     def remove_index(self, field_name: str = 'default'):
@@ -704,6 +744,9 @@ class LocalCollection:
                 Defaults to "default" (the primary collection index).
         """
         self._rust_coll.remove_index(field_name=field_name)
+        if field_name == "default":
+            self._default_index = None
+            self._default_index_built = False
         return {'status': 'success'}
 
     def create_vector_field(
@@ -1188,6 +1231,7 @@ class LocalCollection:
             ids (list[int]): External IDs to soft-delete.
         """
         self._rust_coll.delete_items(self._internal_ids(ids, missing="ignore"))
+        self.COMMIT_FLAG = False
 
     def restore(self, ids):
         """
@@ -1197,6 +1241,7 @@ class LocalCollection:
             ids (list[int]): External IDs to restore.
         """
         self._rust_coll.restore_items(self._internal_ids(ids, missing="ignore"))
+        self.COMMIT_FLAG = False
 
     def list_deleted_ids(self):
         """

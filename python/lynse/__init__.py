@@ -160,6 +160,60 @@ class VectorDBClient:
             self._manager.create_database(database_name)
             return LocalClient(manager=self._manager, database_name=database_name)
 
+    def create_collection(
+            self,
+            database_name: str,
+            collection: str,
+            dim: int = None,
+            n_threads: Union[int, None] = 10,
+            warm_up: bool = False,
+            drop_if_exists: bool = False,
+            description: str = None,
+            dtypes: str = "float32",
+            default_index: Union[str, None] = "FLAT-IP",
+            drop_database_if_exists: bool = False,
+    ):
+        """
+        Create or open a database and collection in one call.
+
+        Parameters:
+            database_name (str): The name of the database to create or open.
+            collection (str): The name of the collection to create or open.
+            dim (int): Optional vector dimension. If omitted for a new
+                collection, LynseDB infers it from the first inserted vectors.
+            n_threads (int): The number of threads. Default is 10.
+            warm_up (bool): Whether to warm up. Default is False.
+            drop_if_exists (bool): Whether to drop the collection if it exists.
+                Default is False.
+            description (str): A description of the collection. Default is None.
+            dtypes (str): Dense vector storage dtype, "float32" or "float16".
+            default_index (str or None): Index mode to build automatically after
+                the first write to a newly created collection. Use None to
+                disable automatic index creation.
+            drop_database_if_exists (bool): Whether to drop and recreate the
+                database before creating the collection. Default is False.
+
+        Returns:
+            LocalCollection or Collection: The collection object.
+        """
+        if drop_database_if_exists or database_name not in self.list_databases():
+            db = self.create_database(
+                database_name, drop_if_exists=drop_database_if_exists
+            )
+        else:
+            db = self.get_database(database_name)
+
+        return db.require_collection(
+            collection=collection,
+            dim=dim,
+            n_threads=n_threads,
+            warm_up=warm_up,
+            drop_if_exists=drop_if_exists,
+            description=description,
+            dtypes=dtypes,
+            default_index=default_index,
+        )
+
     def get_database(self, database_name: str):
         """
         Get an existing database.

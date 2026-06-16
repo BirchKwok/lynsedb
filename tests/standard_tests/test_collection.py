@@ -56,6 +56,30 @@ class TestAddItem:
             session.add(ids=99, vectors=np.random.rand(DIM).astype(np.float32))
         assert collection.is_id_exists(99)
 
+    def test_collection_context_manager_commits_automatically(self, collection):
+        with collection as coll:
+            coll.add(ids=100, vectors=np.random.rand(DIM).astype(np.float32))
+        assert collection.COMMIT_FLAG is True
+        assert collection.is_id_exists(100)
+
+    def test_default_index_builds_after_first_write(self, db):
+        collection = db.require_collection("auto_index_col", dim=DIM, drop_if_exists=True)
+        collection.add(ids=1, vectors=np.random.rand(DIM).astype(np.float32))
+
+        assert collection.index_mode is not None
+        assert collection.index_mode.upper() == "FLAT-IP"
+
+    def test_default_index_can_be_disabled(self, db):
+        collection = db.require_collection(
+            "manual_index_col",
+            dim=DIM,
+            drop_if_exists=True,
+            default_index=None,
+        )
+        collection.add(ids=1, vectors=np.random.rand(DIM).astype(np.float32))
+
+        assert collection.index_mode is None or collection.index_mode == ""
+
 
 class TestBulkAdd:
     def test_add_batch(self, collection):
@@ -74,18 +98,58 @@ class TestBulkAdd:
             inserted = session.add(ids=ids, vectors=vectors)
         assert len(inserted) == 5
 
-    def test_bulk_add_binary(self, collection):
+    def test_add_without_ids_batch(self, collection):
         vecs = np.random.rand(50, DIM).astype(np.float32)
-        n = collection.bulk_add_binary(vecs, enable_progress_bar=False)
+        inserted = collection.add(vectors=vecs, batch_size=17)
         collection.commit()
-        assert n == 50
+        assert inserted == list(range(50))
         assert collection.shape[0] == 50
 
-    def test_bulk_add_binary_1d_input(self, collection):
+    def test_add_without_ids_1d_input(self, collection):
         vec = np.random.rand(DIM).astype(np.float32)
-        n = collection.bulk_add_binary(vec, enable_progress_bar=False)
+        inserted = collection.add(vectors=vec)
         collection.commit()
-        assert n == 1
+        assert inserted == 0
+
+    def test_add_with_fields_and_filter(self, collection):
+        vectors = np.zeros((3, DIM), dtype=np.float32)
+        vectors[0, 0] = 1.0
+        vectors[1, 1] = 1.0
+        vectors[2, 0] = 0.5
+        vectors[2, 1] = 0.5
+        ids = [10, 11, 12]
+        fields = [{"category": 1}, {"category": 2}, {"category": 1}]
+
+        inserted = collection.add(
+            ids=ids,
+            vectors=vectors,
+            fields=fields,
+            batch_size=2,
+        )
+
+        assert inserted == ids
+        assert collection.shape[0] == 3
+        assert collection.query(where='"category" = 2', return_ids_only=True).ids.tolist() == [11]
+        result = collection.search(
+            vectors[0],
+            k=2,
+            where='"category" = 1',
+            return_fields=True,
+        )
+        assert result.ids.tolist() == [10, 12]
+        assert [field["category"] for field in result.fields] == [1, 1]
+
+    def test_add_without_ids_assigns_sequential_ids(self, collection):
+        vectors = np.zeros((3, DIM), dtype=np.float32)
+        vectors[0, 0] = 1.0
+        vectors[1, 1] = 1.0
+        vectors[2, 2] = 1.0
+
+        inserted = collection.add(vectors=vectors, batch_size=2)
+
+        assert inserted == [0, 1, 2]
+        assert collection.shape[0] == 3
+        assert collection.search(vectors[0], k=1).ids.tolist() == [0]
 
 
 class TestCollectionProperties:

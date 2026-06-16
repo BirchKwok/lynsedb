@@ -34,7 +34,7 @@ Returned by `create_database()` or `get_database()`.
 
 | Method | Description |
 | --- | --- |
-| `require_collection(collection, dim=None, n_threads=10, warm_up=False, drop_if_exists=False, description=None, dtypes="float32")` | Create or open a collection. Use `dtypes="float16"` for half-precision vector storage. |
+| `require_collection(collection, dim=None, n_threads=10, warm_up=False, drop_if_exists=False, description=None, dtypes="float32", default_index="FLAT-IP")` | Create or open a collection. Use `dtypes="float16"` for half-precision vector storage. New collections build `default_index` after the first primary vector write; pass `default_index=None` to disable this. |
 | `get_collection(collection, warm_up=True)` | Open an existing collection. |
 | `drop_collection(collection)` | Drop a collection. |
 | `show_collections()` | List collection names. |
@@ -62,6 +62,7 @@ Remote-only database helpers:
 | Method | Description |
 | --- | --- |
 | `insert_session()` | Context manager that commits on success and discards pending buffered writes on exception. |
+| `with collection:` | Collection context manager that calls `commit()` on successful exit. |
 | `add(ids, *, vectors=None, documents=None, fields=None, batch_size=1000, wire_dtype="float32")` | Add one or more records. Provide vectors directly, or provide documents without vectors to trigger lazy default embedding. IDs may be strings or non-negative integers. |
 | `upsert(ids, *, vectors, fields=None, batch_size=1000, wire_dtype="float32")` | Insert or update one or more records by public ID. |
 | `commit()` | Commit pending writes. |
@@ -94,6 +95,10 @@ Remote-only database helpers:
 
 Parameter behavior is the same for local and HTTP Python clients:
 
+- New collections default to `default_index="FLAT-IP"`. The index is built lazily
+  after the first primary vector write so collections with inferred dimensions
+  can still be created without specifying `dim`, and the default inner-product
+  metric is explicit.
 - `n_clusters` is used only by IVF index modes. Passing it to Flat, PQ, RaBitQ,
   PolarVec, HNSW, or DiskANN modes is allowed and ignored.
 - `nprobe` controls IVF partitions and HNSW search breadth. Flat, PQ, RaBitQ,
@@ -104,6 +109,28 @@ Parameter behavior is the same for local and HTTP Python clients:
 `where` accepts standard SQL-style metadata filters, for example
 `"lang = 'en' AND rank <= 10"`, `"tags CONTAINS 'vector'"`, and
 `"created_at >= '2026-06-01'"`.
+
+## Default Document Embedding
+
+`add(documents=...)` and `search(document=...)` use the default local text
+embedding adapter when vectors are not provided. Install it explicitly for
+repeatable environments:
+
+```shell
+pip install "lynsedb[embeddings]"
+```
+
+Configuration environment variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `LYNSE_TEXT_EMBEDDING_ADAPTER` | `fastembed` | Default text embedding adapter. |
+| `LYNSE_TEXT_EMBEDDING_MODEL` | `Qdrant/clip-ViT-B-32-text` | Model used by the default adapter. |
+| `LYNSE_MODEL_CACHE` | `~/.cache/lynse/models` | Local model cache directory. |
+| `LYNSE_AUTO_INSTALL_EMBEDDINGS` | `1` | Set to `0` to disable lazy `fastembed` installation and require explicit dependencies. |
+
+For production retrieval, choose and version your embedding model deliberately,
+or pass precomputed vectors through `vectors=`.
 
 ## Collection Query and Data Access
 

@@ -2,6 +2,26 @@
 
 This page documents the major features and improvements in each version of LynseDB. Only versions with the `v` prefix are official releases.
 
+## Unreleased
+
+**Developer Experience and Document-First Retrieval**
+
+**Key Features:**
+- Added collection context-manager support so `with collection:` commits writes
+  automatically on successful exit.
+- Added lazy default index creation for new collections. `require_collection()`
+  now defaults to `default_index="FLAT-IP"` and builds that index after the
+  first primary vector write; pass `default_index=None` to keep manual index
+  control.
+- Made the default document embedding adapter configurable through environment
+  variables and added the `lynsedb[embeddings]` optional dependency for explicit
+  FastEmbed installation.
+
+**Documentation:**
+- Updated README, quickstart, and Python client reference around document-first
+  `add(documents=...)` and `search(document=...)` usage.
+- Added a `LynseDB vs ChromaDB` comparison and migration guide.
+
 ## v0.4.0
 
 **Major Release - Cluster Coordination, Transport, and API Consistency**

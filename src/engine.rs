@@ -44,7 +44,9 @@ const EXTERNAL_ID_MAP_BIN_FILE: &str = "external_id_map.bin";
 const EXTERNAL_ID_MAP_DELTA_BIN_FILE: &str = "external_id_map.delta.bin";
 const EXTERNAL_ID_MAP_VERSION: u32 = 1;
 const SPARSE_VECTORS_FILE: &str = "sparse_vectors.jsonl";
-const TEXT_INDEX_FILE: &str = "text_index.json";
+const TEXT_INDEX_FILE: &str = "text_index.bin";
+const LEGACY_TEXT_INDEX_FILE: &str = "text_index.json";
+const TEXT_INDEX_MAGIC: &[u8; 4] = b"LTX2";
 const TEXT_INDEX_FORMAT_VERSION: u32 = 1;
 const STORAGE_FORMAT_NAME: &str = "lynsedb-collection";
 const DATABASE_SNAPSHOT_FORMAT_NAME: &str = "lynsedb-database";
@@ -683,6 +685,7 @@ struct InvertedTextIndexDataRef<'a> {
     version: u32,
     postings: &'a HashMap<String, HashMap<u64, HashMap<String, u32>>>,
     doc_lengths: &'a HashMap<u64, HashMap<String, usize>>,
+    field_names: &'a HashMap<String, usize>,
 }
 
 fn default_text_index_version() -> u32 {
@@ -694,23 +697,48 @@ struct InvertedTextIndex {
     path: PathBuf,
     postings: HashMap<String, HashMap<u64, HashMap<String, u32>>>,
     doc_lengths: HashMap<u64, HashMap<String, usize>>,
+    doc_count_by_field: HashMap<String, usize>,
+    total_doc_len_by_field: HashMap<String, usize>,
+    all_doc_count: usize,
+    all_total_doc_len: usize,
+    df_cache: Arc<RwLock<HashMap<String, usize>>>,
     loaded_from_disk: bool,
 }
 
 impl InvertedTextIndex {
     fn load(path: PathBuf) -> Result<Self> {
-        if !path.exists() {
+        let (index_path, bytes, legacy_json) = if path.exists() {
+            (path.clone(), Some(std::fs::read(&path)?), false)
+        } else {
+            let legacy_path = path.with_file_name(LEGACY_TEXT_INDEX_FILE);
+            if legacy_path.exists() {
+                (path.clone(), Some(std::fs::read(&legacy_path)?), true)
+            } else {
+                (path.clone(), None, false)
+            }
+        };
+
+        let Some(bytes) = bytes else {
             return Ok(Self {
-                path,
+                path: index_path,
                 postings: HashMap::new(),
                 doc_lengths: HashMap::new(),
+                doc_count_by_field: HashMap::new(),
+                total_doc_len_by_field: HashMap::new(),
+                all_doc_count: 0,
+                all_total_doc_len: 0,
+                df_cache: Arc::new(RwLock::new(HashMap::new())),
                 loaded_from_disk: false,
             });
-        }
+        };
 
-        let bytes = std::fs::read(&path)?;
-        let data: InvertedTextIndexData =
-            serde_json::from_slice(&bytes).map_err(|e| LynseError::Serialization(e.to_string()))?;
+        let data: InvertedTextIndexData = if legacy_json {
+            serde_json::from_slice(&bytes).map_err(|e| LynseError::Serialization(e.to_string()))?
+        } else if bytes.starts_with(TEXT_INDEX_MAGIC) {
+            decode_compact_text_index(&bytes)?
+        } else {
+            bincode::deserialize(&bytes).map_err(|e| LynseError::Serialization(e.to_string()))?
+        };
         if data.version > TEXT_INDEX_FORMAT_VERSION {
             return Err(LynseError::Storage(format!(
                 "text index format version {} is newer than supported version {}",
@@ -718,12 +746,19 @@ impl InvertedTextIndex {
             )));
         }
 
-        Ok(Self {
-            path,
+        let mut index = Self {
+            path: index_path,
             postings: data.postings,
             doc_lengths: data.doc_lengths,
+            doc_count_by_field: HashMap::new(),
+            total_doc_len_by_field: HashMap::new(),
+            all_doc_count: 0,
+            all_total_doc_len: 0,
+            df_cache: Arc::new(RwLock::new(HashMap::new())),
             loaded_from_disk: true,
-        })
+        };
+        index.rebuild_length_stats();
+        Ok(index)
     }
 
     fn needs_bootstrap(&self) -> bool {
@@ -750,6 +785,8 @@ impl InvertedTextIndex {
 
         self.postings.clear();
         self.doc_lengths.clear();
+        self.clear_length_stats();
+        self.clear_df_cache();
         for (&id, field_map) in ids.iter().zip(fields.iter()) {
             self.index_document(id, field_map);
         }
@@ -774,10 +811,41 @@ impl InvertedTextIndex {
             )));
         }
 
+        if !ids.is_empty() {
+            self.clear_df_cache();
+        }
         for (&id, field_map) in ids.iter().zip(fields.iter()) {
             if self.doc_lengths.contains_key(&id) {
                 self.remove_document(id);
             }
+            self.index_document(id, field_map);
+        }
+
+        if persist {
+            self.write_to_disk()?;
+            self.loaded_from_disk = true;
+        }
+        Ok(())
+    }
+
+    fn insert_documents(
+        &mut self,
+        ids: &[u64],
+        fields: &[HashMap<String, serde_json::Value>],
+        persist: bool,
+    ) -> Result<()> {
+        if ids.len() != fields.len() {
+            return Err(LynseError::InvalidArgument(format!(
+                "ids length ({}) must match field count ({})",
+                ids.len(),
+                fields.len()
+            )));
+        }
+
+        if !ids.is_empty() {
+            self.clear_df_cache();
+        }
+        for (&id, field_map) in ids.iter().zip(fields.iter()) {
             self.index_document(id, field_map);
         }
 
@@ -793,6 +861,7 @@ impl InvertedTextIndex {
             return Ok(());
         }
 
+        self.clear_df_cache();
         for &id in ids {
             self.remove_document(id);
         }
@@ -817,18 +886,65 @@ impl InvertedTextIndex {
             return Vec::new();
         }
 
-        let field_filter = text_fields
-            .filter(|fields| !fields.is_empty())
-            .map(|fields| fields.iter().cloned().collect::<HashSet<String>>());
-        let field_filter_ref = field_filter.as_ref();
+        let field_filter = TextFieldSelection::from_fields(text_fields);
 
         let mut query_counts: HashMap<String, usize> = HashMap::new();
         for term in query_terms {
             *query_counts.entry(term).or_insert(0) += 1;
         }
 
-        let mut candidate_ids = HashSet::new();
+        let Some((corpus_docs, total_doc_len)) =
+            self.corpus_stats(&field_filter, allowed_ids, tombstones)
+        else {
+            return Vec::new();
+        };
+        let avg_doc_len = (total_doc_len as f32 / corpus_docs as f32).max(1.0);
+        let n_docs = corpus_docs as f32;
+
+        let mut document_frequencies = HashMap::new();
         for term in query_counts.keys() {
+            let df = self
+                .postings
+                .get(term)
+                .map(|posting| {
+                    self.document_frequency(term, posting, &field_filter, allowed_ids, tombstones)
+                })
+                .unwrap_or(0);
+            if df > 0 {
+                document_frequencies.insert(term.as_str(), df);
+            }
+        }
+
+        if document_frequencies.is_empty() {
+            return Vec::new();
+        }
+
+        let min_df = document_frequencies
+            .values()
+            .copied()
+            .min()
+            .unwrap_or(corpus_docs);
+        // High-frequency query terms often match nearly the whole corpus. Seed
+        // candidates from selective terms when available, then score candidates
+        // with the full query below.
+        let selective_cutoff = (min_df.saturating_mul(4)).max(limit.saturating_mul(8));
+        let candidate_terms: Vec<&String> = query_counts
+            .keys()
+            .filter(|term| {
+                document_frequencies
+                    .get(term.as_str())
+                    .map(|df| *df < corpus_docs && *df <= selective_cutoff)
+                    .unwrap_or(false)
+            })
+            .collect();
+        let candidate_terms = if candidate_terms.is_empty() {
+            query_counts.keys().collect()
+        } else {
+            candidate_terms
+        };
+
+        let mut candidate_ids = HashSet::new();
+        for term in candidate_terms {
             let Some(posting) = self.postings.get(term) else {
                 continue;
             };
@@ -836,7 +952,7 @@ impl InvertedTextIndex {
                 if !text_doc_allowed(id, allowed_ids, tombstones) {
                     continue;
                 }
-                if selected_term_frequency(tf_by_field, field_filter_ref) > 0 {
+                if selected_term_frequency(tf_by_field, &field_filter) > 0 {
                     candidate_ids.insert(id);
                 }
             }
@@ -846,52 +962,15 @@ impl InvertedTextIndex {
             return Vec::new();
         }
 
-        let mut corpus_docs = 0usize;
-        let mut total_doc_len = 0usize;
-        for (&id, lengths) in &self.doc_lengths {
-            if !text_doc_allowed(id, allowed_ids, tombstones) {
-                continue;
-            }
-            let len = selected_doc_length(lengths, field_filter_ref);
-            if len > 0 {
-                corpus_docs += 1;
-                total_doc_len += len;
-            }
-        }
-
-        if corpus_docs == 0 {
-            return Vec::new();
-        }
-
-        let avg_doc_len = (total_doc_len as f32 / corpus_docs as f32).max(1.0);
-        let n_docs = corpus_docs as f32;
         let k1 = 1.2f32;
         let b = 0.75f32;
-
-        let mut document_frequencies = HashMap::new();
-        for term in query_counts.keys() {
-            let df = self
-                .postings
-                .get(term)
-                .map(|posting| {
-                    posting
-                        .iter()
-                        .filter(|(id, tf_by_field)| {
-                            text_doc_allowed(**id, allowed_ids, tombstones)
-                                && selected_term_frequency(tf_by_field, field_filter_ref) > 0
-                        })
-                        .count()
-                })
-                .unwrap_or(0);
-            document_frequencies.insert(term.as_str(), df);
-        }
 
         let mut scored = Vec::new();
         for id in candidate_ids {
             let Some(lengths) = self.doc_lengths.get(&id) else {
                 continue;
             };
-            let doc_len = selected_doc_length(lengths, field_filter_ref);
+            let doc_len = selected_doc_length(lengths, &field_filter);
             if doc_len == 0 {
                 continue;
             }
@@ -902,7 +981,7 @@ impl InvertedTextIndex {
                     .postings
                     .get(term)
                     .and_then(|posting| posting.get(&id))
-                    .map(|tf_by_field| selected_term_frequency(tf_by_field, field_filter_ref))
+                    .map(|tf_by_field| selected_term_frequency(tf_by_field, &field_filter))
                     .unwrap_or(0) as f32;
                 if tf == 0.0 {
                     continue;
@@ -919,50 +998,169 @@ impl InvertedTextIndex {
             }
         }
 
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        scored.truncate(limit);
+        sort_truncate_scores_desc(&mut scored, limit);
         scored
     }
 
-    fn index_document(&mut self, id: u64, fields: &HashMap<String, serde_json::Value>) {
-        let field_terms = tokenize_text_fields(fields);
-        if field_terms.is_empty() {
-            return;
+    fn document_frequency(
+        &self,
+        term: &str,
+        posting: &HashMap<u64, HashMap<String, u32>>,
+        field_filter: &TextFieldSelection<'_>,
+        allowed_ids: Option<&HashSet<u64>>,
+        tombstones: &HashSet<u64>,
+    ) -> usize {
+        if allowed_ids.is_none() && tombstones.is_empty() {
+            let cache_key = field_filter.cache_key(term);
+            if let Some(cached) = self.df_cache.read().get(&cache_key).copied() {
+                return cached;
+            }
+            let df = posting_document_frequency(posting, field_filter, None, tombstones);
+            self.df_cache.write().insert(cache_key, df);
+            return df;
         }
 
-        let mut lengths = HashMap::new();
-        for (field, term_counts) in field_terms {
+        posting_document_frequency(posting, field_filter, allowed_ids, tombstones)
+    }
+
+    fn index_document(&mut self, id: u64, fields: &HashMap<String, serde_json::Value>) {
+        let mut lengths = HashMap::with_capacity(fields.len());
+        for (field, value) in fields {
+            let mut term_counts = HashMap::with_capacity(8);
+            append_searchable_json_terms(value, &mut term_counts);
             let field_len: usize = term_counts.values().map(|count| *count as usize).sum();
             if field_len == 0 {
                 continue;
             }
 
-            lengths.insert(field.clone(), field_len);
+            let field_name = field.clone();
+            lengths.insert(field_name.clone(), field_len);
             for (term, tf) in term_counts {
                 self.postings
                     .entry(term)
                     .or_default()
                     .entry(id)
                     .or_default()
-                    .insert(field.clone(), tf);
+                    .insert(field_name.clone(), tf);
             }
         }
 
         if !lengths.is_empty() {
+            self.add_length_stats(&lengths);
             self.doc_lengths.insert(id, lengths);
         }
     }
 
     fn remove_document(&mut self, id: u64) {
-        self.doc_lengths.remove(&id);
+        if let Some(lengths) = self.doc_lengths.remove(&id) {
+            self.remove_length_stats(&lengths);
+        }
         self.postings.retain(|_, posting| {
             posting.remove(&id);
             !posting.is_empty()
         });
+    }
+
+    fn clear_length_stats(&mut self) {
+        self.doc_count_by_field.clear();
+        self.total_doc_len_by_field.clear();
+        self.all_doc_count = 0;
+        self.all_total_doc_len = 0;
+    }
+
+    fn clear_df_cache(&self) {
+        self.df_cache.write().clear();
+    }
+
+    fn rebuild_length_stats(&mut self) {
+        self.clear_length_stats();
+        let lengths: Vec<HashMap<String, usize>> = self.doc_lengths.values().cloned().collect();
+        for item in lengths {
+            self.add_length_stats(&item);
+        }
+    }
+
+    fn add_length_stats(&mut self, lengths: &HashMap<String, usize>) {
+        let total: usize = lengths.values().copied().sum();
+        if total > 0 {
+            self.all_doc_count += 1;
+            self.all_total_doc_len += total;
+        }
+        for (field, len) in lengths {
+            if *len == 0 {
+                continue;
+            }
+            *self.doc_count_by_field.entry(field.clone()).or_insert(0) += 1;
+            *self
+                .total_doc_len_by_field
+                .entry(field.clone())
+                .or_insert(0) += *len;
+        }
+    }
+
+    fn remove_length_stats(&mut self, lengths: &HashMap<String, usize>) {
+        let total: usize = lengths.values().copied().sum();
+        if total > 0 {
+            self.all_doc_count = self.all_doc_count.saturating_sub(1);
+            self.all_total_doc_len = self.all_total_doc_len.saturating_sub(total);
+        }
+        for (field, len) in lengths {
+            if *len == 0 {
+                continue;
+            }
+            if let Some(count) = self.doc_count_by_field.get_mut(field) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.doc_count_by_field.remove(field);
+                }
+            }
+            if let Some(total_len) = self.total_doc_len_by_field.get_mut(field) {
+                *total_len = total_len.saturating_sub(*len);
+                if *total_len == 0 {
+                    self.total_doc_len_by_field.remove(field);
+                }
+            }
+        }
+    }
+
+    fn corpus_stats(
+        &self,
+        field_filter: &TextFieldSelection<'_>,
+        allowed_ids: Option<&HashSet<u64>>,
+        tombstones: &HashSet<u64>,
+    ) -> Option<(usize, usize)> {
+        if allowed_ids.is_none() && tombstones.is_empty() {
+            match field_filter {
+                TextFieldSelection::All => {
+                    return (self.all_doc_count > 0)
+                        .then_some((self.all_doc_count, self.all_total_doc_len));
+                }
+                TextFieldSelection::One(field) => {
+                    let count = self.doc_count_by_field.get(*field).copied().unwrap_or(0);
+                    let total = self
+                        .total_doc_len_by_field
+                        .get(*field)
+                        .copied()
+                        .unwrap_or(0);
+                    return (count > 0).then_some((count, total));
+                }
+                TextFieldSelection::Many(_) => {}
+            }
+        }
+
+        let mut corpus_docs = 0usize;
+        let mut total_doc_len = 0usize;
+        for (&id, lengths) in &self.doc_lengths {
+            if !text_doc_allowed(id, allowed_ids, tombstones) {
+                continue;
+            }
+            let len = selected_doc_length(lengths, field_filter);
+            if len > 0 {
+                corpus_docs += 1;
+                total_doc_len += len;
+            }
+        }
+        (corpus_docs > 0).then_some((corpus_docs, total_doc_len))
     }
 
     fn write_to_disk(&self) -> Result<()> {
@@ -974,10 +1172,15 @@ impl InvertedTextIndex {
             version: TEXT_INDEX_FORMAT_VERSION,
             postings: &self.postings,
             doc_lengths: &self.doc_lengths,
+            field_names: &self.doc_count_by_field,
         };
-        let bytes =
-            serde_json::to_vec(&data).map_err(|e| LynseError::Serialization(e.to_string()))?;
-        Collection::atomic_write_file(&self.path, &bytes)
+        let bytes = encode_compact_text_index(&data)?;
+        Collection::atomic_write_file(&self.path, &bytes)?;
+        let legacy_path = self.path.with_file_name(LEGACY_TEXT_INDEX_FILE);
+        if legacy_path != self.path {
+            let _ = std::fs::remove_file(legacy_path);
+        }
+        Ok(())
     }
 
     fn write_to_disk_if_present(&self) -> Result<()> {
@@ -985,6 +1188,259 @@ impl InvertedTextIndex {
             return Ok(());
         }
         self.write_to_disk()
+    }
+}
+
+fn encode_compact_text_index(data: &InvertedTextIndexDataRef<'_>) -> Result<Vec<u8>> {
+    let mut fields: Vec<&str> = data.field_names.keys().map(String::as_str).collect();
+    fields.sort_unstable();
+
+    let mut out = Vec::new();
+    out.extend_from_slice(TEXT_INDEX_MAGIC);
+    write_var_u64(&mut out, data.version as u64);
+    write_var_u64(&mut out, fields.len() as u64);
+    for field in &fields {
+        write_compact_string(&mut out, field);
+    }
+
+    write_var_u64(&mut out, data.postings.len() as u64);
+    for (term, posting) in data.postings {
+        write_compact_string(&mut out, term);
+        write_var_u64(&mut out, posting.len() as u64);
+
+        if posting.len() == 1 {
+            if let Some((&id, tf_by_field)) = posting.iter().next() {
+                write_var_u64(&mut out, id);
+                write_compact_u32_field_entries(&mut out, &fields, tf_by_field);
+            }
+            continue;
+        }
+
+        let mut docs: Vec<(u64, &HashMap<String, u32>)> =
+            posting.iter().map(|(id, fields)| (*id, fields)).collect();
+        docs.sort_by_key(|(id, _)| *id);
+
+        let mut previous_id = 0u64;
+        for (id, tf_by_field) in docs {
+            write_var_u64(&mut out, id.saturating_sub(previous_id));
+            previous_id = id;
+            write_compact_u32_field_entries(&mut out, &fields, tf_by_field);
+        }
+    }
+
+    let mut docs: Vec<(u64, &HashMap<String, usize>)> = data
+        .doc_lengths
+        .iter()
+        .map(|(id, lengths)| (*id, lengths))
+        .collect();
+    docs.sort_by_key(|(id, _)| *id);
+    write_var_u64(&mut out, docs.len() as u64);
+    let mut previous_id = 0u64;
+    for (id, lengths) in docs {
+        write_var_u64(&mut out, id.saturating_sub(previous_id));
+        previous_id = id;
+
+        write_compact_usize_field_entries(&mut out, &fields, lengths);
+    }
+
+    Ok(out)
+}
+
+fn write_compact_u32_field_entries(
+    out: &mut Vec<u8>,
+    fields: &[&str],
+    values: &HashMap<String, u32>,
+) {
+    let count = fields
+        .iter()
+        .filter(|field| values.get(**field).copied().unwrap_or(0) > 0)
+        .count();
+    write_var_u64(out, count as u64);
+    for (field_id, field) in fields.iter().enumerate() {
+        let Some(value) = values.get(*field).copied().filter(|value| *value > 0) else {
+            continue;
+        };
+        write_var_u64(out, field_id as u64);
+        write_var_u64(out, value as u64);
+    }
+}
+
+fn write_compact_usize_field_entries(
+    out: &mut Vec<u8>,
+    fields: &[&str],
+    values: &HashMap<String, usize>,
+) {
+    let count = fields
+        .iter()
+        .filter(|field| values.get(**field).copied().unwrap_or(0) > 0)
+        .count();
+    write_var_u64(out, count as u64);
+    for (field_id, field) in fields.iter().enumerate() {
+        let Some(value) = values.get(*field).copied().filter(|value| *value > 0) else {
+            continue;
+        };
+        write_var_u64(out, field_id as u64);
+        write_var_u64(out, value as u64);
+    }
+}
+
+fn decode_compact_text_index(bytes: &[u8]) -> Result<InvertedTextIndexData> {
+    if !bytes.starts_with(TEXT_INDEX_MAGIC) {
+        return Err(LynseError::Serialization(
+            "invalid compact text index magic".to_string(),
+        ));
+    }
+
+    let mut cursor = TEXT_INDEX_MAGIC.len();
+    let version = read_var_u64(bytes, &mut cursor)?;
+    if version > u32::MAX as u64 {
+        return Err(LynseError::Serialization(
+            "compact text index version is too large".to_string(),
+        ));
+    }
+
+    let field_count = read_compact_len(bytes, &mut cursor)?;
+    let mut fields = Vec::with_capacity(field_count);
+    for _ in 0..field_count {
+        fields.push(read_compact_string(bytes, &mut cursor)?);
+    }
+
+    let term_count = read_compact_len(bytes, &mut cursor)?;
+    let mut postings = HashMap::with_capacity(term_count);
+    for _ in 0..term_count {
+        let term = read_compact_string(bytes, &mut cursor)?;
+        let posting_count = read_compact_len(bytes, &mut cursor)?;
+        let mut posting = HashMap::with_capacity(posting_count);
+        let mut previous_id = 0u64;
+        for _ in 0..posting_count {
+            let delta = read_var_u64(bytes, &mut cursor)?;
+            let id = previous_id.checked_add(delta).ok_or_else(|| {
+                LynseError::Serialization("compact text index id delta overflow".to_string())
+            })?;
+            previous_id = id;
+
+            let field_entry_count = read_compact_len(bytes, &mut cursor)?;
+            let mut tf_by_field = HashMap::with_capacity(field_entry_count);
+            for _ in 0..field_entry_count {
+                let field_id = read_compact_len(bytes, &mut cursor)?;
+                let field = fields.get(field_id).ok_or_else(|| {
+                    LynseError::Serialization(format!(
+                        "compact text index field id {} is out of range",
+                        field_id
+                    ))
+                })?;
+                let tf = read_var_u64(bytes, &mut cursor)?;
+                if tf > u32::MAX as u64 {
+                    return Err(LynseError::Serialization(
+                        "compact text index term frequency is too large".to_string(),
+                    ));
+                }
+                tf_by_field.insert(field.clone(), tf as u32);
+            }
+            posting.insert(id, tf_by_field);
+        }
+        postings.insert(term, posting);
+    }
+
+    let doc_count = read_compact_len(bytes, &mut cursor)?;
+    let mut doc_lengths = HashMap::with_capacity(doc_count);
+    let mut previous_id = 0u64;
+    for _ in 0..doc_count {
+        let delta = read_var_u64(bytes, &mut cursor)?;
+        let id = previous_id.checked_add(delta).ok_or_else(|| {
+            LynseError::Serialization("compact text index doc id delta overflow".to_string())
+        })?;
+        previous_id = id;
+
+        let field_entry_count = read_compact_len(bytes, &mut cursor)?;
+        let mut lengths = HashMap::with_capacity(field_entry_count);
+        for _ in 0..field_entry_count {
+            let field_id = read_compact_len(bytes, &mut cursor)?;
+            let field = fields.get(field_id).ok_or_else(|| {
+                LynseError::Serialization(format!(
+                    "compact text index field id {} is out of range",
+                    field_id
+                ))
+            })?;
+            let len = read_var_u64(bytes, &mut cursor)?;
+            if len > usize::MAX as u64 {
+                return Err(LynseError::Serialization(
+                    "compact text index document length is too large".to_string(),
+                ));
+            }
+            lengths.insert(field.clone(), len as usize);
+        }
+        doc_lengths.insert(id, lengths);
+    }
+
+    Ok(InvertedTextIndexData {
+        version: version as u32,
+        postings,
+        doc_lengths,
+    })
+}
+
+fn write_compact_string(out: &mut Vec<u8>, value: &str) {
+    write_var_u64(out, value.len() as u64);
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn read_compact_string(bytes: &[u8], cursor: &mut usize) -> Result<String> {
+    let len = read_compact_len(bytes, cursor)?;
+    let end = cursor.checked_add(len).ok_or_else(|| {
+        LynseError::Serialization("compact text index string length overflow".to_string())
+    })?;
+    if end > bytes.len() {
+        return Err(LynseError::Serialization(
+            "compact text index string extends past end of file".to_string(),
+        ));
+    }
+    let value = std::str::from_utf8(&bytes[*cursor..end])
+        .map_err(|e| LynseError::Serialization(e.to_string()))?
+        .to_string();
+    *cursor = end;
+    Ok(value)
+}
+
+fn read_compact_len(bytes: &[u8], cursor: &mut usize) -> Result<usize> {
+    let value = read_var_u64(bytes, cursor)?;
+    if value > usize::MAX as u64 {
+        return Err(LynseError::Serialization(
+            "compact text index length is too large".to_string(),
+        ));
+    }
+    Ok(value as usize)
+}
+
+fn write_var_u64(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push(((value as u8) & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn read_var_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        if *cursor >= bytes.len() {
+            return Err(LynseError::Serialization(
+                "compact text index varint extends past end of file".to_string(),
+            ));
+        }
+        let byte = bytes[*cursor];
+        *cursor += 1;
+        value |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(LynseError::Serialization(
+                "compact text index varint is too large".to_string(),
+            ));
+        }
     }
 }
 
@@ -1635,6 +2091,14 @@ impl Collection {
 
     fn sync_collection_files(&self) -> Result<()> {
         Self::sync_path_recursively(&self.path)
+    }
+
+    fn persist_vector_store_metadata(&self) -> Result<()> {
+        self.vector_store.persist_metadata()?;
+        for field in self.named_vector_fields.values() {
+            field.vector_store.persist_metadata()?;
+        }
+        Ok(())
     }
 
     fn rebuild_text_index(&mut self, persist: bool) -> Result<()> {
@@ -2738,6 +3202,18 @@ impl Collection {
             )
         };
         let (encoded_vectors, vector_dtype, dim, ids) = snapshot;
+        self.write_ingested_vectors(&encoded_vectors, vector_dtype, dim, &ids)?;
+        let _ = self.pending_ingest.lock().take();
+        Ok(())
+    }
+
+    fn write_ingested_vectors(
+        &self,
+        encoded_vectors: &[u8],
+        vector_dtype: VectorDtype,
+        dim: usize,
+        ids: &[u64],
+    ) -> Result<()> {
         if dim != self.meta.dimension {
             return Err(LynseError::DimensionMismatch {
                 expected: self.meta.dimension,
@@ -2745,10 +3221,8 @@ impl Collection {
             });
         }
         self.vector_store
-            .write_encoded_le_bytes(&encoded_vectors, ids.len(), vector_dtype)?;
-        Self::append_id_map(&self.path, &ids)?;
-        let _ = self.pending_ingest.lock().take();
-        Ok(())
+            .write_encoded_le_bytes(encoded_vectors, ids.len(), vector_dtype)?;
+        Self::append_id_map(&self.path, ids)
     }
 
     fn append_recovered_items(
@@ -2783,7 +3257,7 @@ impl Collection {
 
         self.vector_store.write(vectors)?;
         self.field_store.batch_store_at_ids(&row_ids, fields)?;
-        self.text_index.upsert_documents(ids, fields, false)?;
+        self.text_index.insert_documents(ids, fields, false)?;
 
         if let Some(ref mut idx) = self.index {
             idx.insert(vectors, n_vectors, dim, &row_ids)?;
@@ -2848,7 +3322,7 @@ impl Collection {
         self.vector_store
             .write_encoded_le_bytes(encoded_vectors, n_vectors, vector_dtype)?;
         self.field_store.batch_store_at_ids(&row_ids, fields)?;
-        self.text_index.upsert_documents(ids, fields, false)?;
+        self.text_index.insert_documents(ids, fields, false)?;
 
         if let Some(ref mut idx) = self.index {
             idx.insert(decoded_vectors, n_vectors, dim, &row_ids)?;
@@ -2932,27 +3406,38 @@ impl Collection {
         self.wal
             .write_log_encoded_data(encoded_vectors, dim, vector_dtype, ids, &wal_fields)?;
 
+        let direct_write = n_vectors >= PENDING_INGEST_FLUSH_ROWS
+            || encoded_vectors.len() >= PENDING_INGEST_FLUSH_BYTES;
+        let needs_decoded_vectors = self.index.is_some() || !direct_write;
         let decoded;
-        let vectors = match decoded_vectors_for_index {
-            Some(vectors) => vectors,
-            None => {
-                decoded = decode_vector_bytes_to_f32(encoded_vectors, vector_dtype);
-                decoded.as_slice()
+        let vectors = if needs_decoded_vectors {
+            let vectors = match decoded_vectors_for_index {
+                Some(vectors) => vectors,
+                None => {
+                    decoded = decode_vector_bytes_to_f32(encoded_vectors, vector_dtype);
+                    decoded.as_slice()
+                }
+            };
+            if vectors.len() != n_vectors * dim {
+                return Err(LynseError::DimensionMismatch {
+                    expected: n_vectors * dim,
+                    got: vectors.len(),
+                });
             }
+            Some(vectors)
+        } else {
+            None
         };
-        if vectors.len() != n_vectors * dim {
-            return Err(LynseError::DimensionMismatch {
-                expected: n_vectors * dim,
-                got: vectors.len(),
-            });
-        }
 
         if let Some(field_list) = fields {
             self.field_store.batch_store_at_ids(&row_ids, field_list)?;
-            self.text_index.upsert_documents(ids, field_list, false)?;
+            self.text_index.insert_documents(ids, field_list, false)?;
         }
 
         if let Some(ref mut idx) = self.index {
+            let vectors = vectors.ok_or_else(|| {
+                LynseError::Storage("decoded vectors are required for index updates".to_string())
+            })?;
             idx.insert(vectors, n_vectors, dim, &row_ids)?;
         }
 
@@ -2968,13 +3453,23 @@ impl Collection {
             }
         }
 
-        let should_flush = {
-            let mut pending = self.pending_ingest.lock();
-            pending.append(encoded_vectors, vectors, vector_dtype, dim, ids, &row_ids)?;
-            pending.should_flush()
-        };
-        if should_flush {
+        if direct_write {
             self.flush_pending_ingest()?;
+            self.write_ingested_vectors(encoded_vectors, vector_dtype, dim, ids)?;
+        } else {
+            let should_flush = {
+                let mut pending = self.pending_ingest.lock();
+                let vectors = vectors.ok_or_else(|| {
+                    LynseError::Storage(
+                        "decoded vectors are required for pending ingest buffering".to_string(),
+                    )
+                })?;
+                pending.append(encoded_vectors, vectors, vector_dtype, dim, ids, &row_ids)?;
+                pending.should_flush()
+            };
+            if should_flush {
+                self.flush_pending_ingest()?;
+            }
         }
 
         Ok(())
@@ -3478,6 +3973,7 @@ impl Collection {
     pub fn flush(&self) -> Result<()> {
         self.ensure_writable()?;
         self.flush_pending_ingest()?;
+        self.persist_vector_store_metadata()?;
         self.wal.flush()?;
         self.sync_collection_files()
     }
@@ -3490,6 +3986,17 @@ impl Collection {
         self.write_external_id_map()?;
         self.wal.cleanup()?;
         self.sync_collection_files()
+    }
+
+    /// Lightweight checkpoint for local benchmarks: persist derived metadata and
+    /// clear WAL without forcing a recursive fsync.
+    pub fn checkpoint_fast(&self) -> Result<()> {
+        self.ensure_writable()?;
+        self.text_index.write_to_disk_if_present()?;
+        self.flush_pending_ingest()?;
+        self.persist_vector_store_metadata()?;
+        self.write_external_id_map()?;
+        self.wal.cleanup()
     }
 
     /// Close the collection handle from an API perspective.
@@ -4239,9 +4746,7 @@ impl Collection {
             (0..n).collect()
         };
 
-        let field_filter = text_fields
-            .filter(|fields| !fields.is_empty())
-            .map(|fields| fields.iter().cloned().collect::<HashSet<String>>());
+        let field_filter = TextFieldSelection::from_fields(text_fields);
 
         let mut docs: Vec<(u64, Vec<String>)> = Vec::new();
         let fields_list = self.field_store.retrieve_many(&row_ids)?;
@@ -4251,7 +4756,7 @@ impl Collection {
                 continue;
             }
 
-            let text = fields_to_searchable_text(&fields, field_filter.as_ref());
+            let text = fields_to_searchable_text(&fields, &field_filter);
             let tokens = tokenize_text(&text);
             if !tokens.is_empty() {
                 docs.push((user_id, tokens));
@@ -4314,8 +4819,7 @@ impl Collection {
             }
         }
 
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
+        sort_truncate_scores_desc(&mut scored, limit);
         Ok(scored)
     }
 
@@ -5846,40 +6350,95 @@ fn sparse_inner_product(query: &[(u32, f32)], vector: &[(u32, f32)]) -> f32 {
     score
 }
 
+enum TextFieldSelection<'a> {
+    All,
+    One(&'a str),
+    Many(HashSet<String>),
+}
+
+impl<'a> TextFieldSelection<'a> {
+    fn from_fields(text_fields: Option<&'a [String]>) -> Self {
+        match text_fields {
+            None => Self::All,
+            Some([]) => Self::All,
+            Some([field]) => Self::One(field.as_str()),
+            Some(fields) => Self::Many(fields.iter().cloned().collect()),
+        }
+    }
+
+    fn contains(&self, field: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::One(selected) => *selected == field,
+            Self::Many(selected) => selected.contains(field),
+        }
+    }
+
+    fn cache_key(&self, term: &str) -> String {
+        let mut key = String::with_capacity(term.len() + 24);
+        key.push_str(term);
+        key.push('\u{1f}');
+        match self {
+            Self::All => key.push('*'),
+            Self::One(field) => key.push_str(field),
+            Self::Many(fields) => {
+                let mut fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+                fields.sort_unstable();
+                for (idx, field) in fields.iter().enumerate() {
+                    if idx > 0 {
+                        key.push(',');
+                    }
+                    key.push_str(field);
+                }
+            }
+        }
+        key
+    }
+}
+
+fn compare_score_desc_then_id(a: &(u64, f32), b: &(u64, f32)) -> std::cmp::Ordering {
+    b.1.partial_cmp(&a.1)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.0.cmp(&b.0))
+}
+
+fn sort_truncate_scores_desc(scored: &mut Vec<(u64, f32)>, limit: usize) {
+    if limit == 0 {
+        scored.clear();
+        return;
+    }
+    if scored.len() > limit {
+        scored.select_nth_unstable_by(limit, compare_score_desc_then_id);
+        scored.truncate(limit);
+    }
+    scored.sort_by(compare_score_desc_then_id);
+}
+
 fn tokenize_text(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter_map(|token| {
-            let token = token.trim().to_lowercase();
             if token.is_empty() {
                 None
             } else {
-                Some(token)
+                Some(normalize_text_token(token))
             }
         })
         .collect()
 }
 
-fn tokenize_text_fields(
-    fields: &HashMap<String, serde_json::Value>,
-) -> HashMap<String, HashMap<String, u32>> {
-    let mut field_terms = HashMap::new();
-    for (field, value) in fields {
-        let mut counts = HashMap::new();
-        append_searchable_json_terms(value, &mut counts);
-        if !counts.is_empty() {
-            field_terms.insert(field.clone(), counts);
-        }
+fn normalize_text_token(token: &str) -> String {
+    if token.is_ascii() && !token.as_bytes().iter().any(u8::is_ascii_uppercase) {
+        token.to_owned()
+    } else {
+        token.to_lowercase()
     }
-    field_terms
 }
 
 fn append_searchable_json_terms(value: &serde_json::Value, counts: &mut HashMap<String, u32>) {
     match value {
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
         serde_json::Value::String(v) => {
-            for token in tokenize_text(v) {
-                *counts.entry(token).or_insert(0) += 1;
-            }
+            append_text_terms(v, counts);
         }
         serde_json::Value::Array(values) => {
             for value in values {
@@ -5894,6 +6453,15 @@ fn append_searchable_json_terms(value: &serde_json::Value, counts: &mut HashMap<
     }
 }
 
+fn append_text_terms(text: &str, counts: &mut HashMap<String, u32>) {
+    for token in text.split(|c: char| !c.is_alphanumeric()) {
+        if token.is_empty() {
+            continue;
+        }
+        *counts.entry(normalize_text_token(token)).or_insert(0) += 1;
+    }
+}
+
 fn text_doc_allowed(
     id: u64,
     allowed_ids: Option<&HashSet<u64>>,
@@ -5905,44 +6473,72 @@ fn text_doc_allowed(
             .unwrap_or(true)
 }
 
+fn posting_document_frequency(
+    posting: &HashMap<u64, HashMap<String, u32>>,
+    field_filter: &TextFieldSelection<'_>,
+    allowed_ids: Option<&HashSet<u64>>,
+    tombstones: &HashSet<u64>,
+) -> usize {
+    if allowed_ids.is_none() && tombstones.is_empty() {
+        match field_filter {
+            TextFieldSelection::All => return posting.len(),
+            TextFieldSelection::One(field) => {
+                return posting
+                    .values()
+                    .filter(|tf_by_field| tf_by_field.get(*field).copied().unwrap_or(0) > 0)
+                    .count();
+            }
+            TextFieldSelection::Many(_) => {}
+        }
+    }
+
+    posting
+        .iter()
+        .filter(|(id, tf_by_field)| {
+            text_doc_allowed(**id, allowed_ids, tombstones)
+                && selected_term_frequency(tf_by_field, field_filter) > 0
+        })
+        .count()
+}
+
 fn selected_doc_length(
     lengths_by_field: &HashMap<String, usize>,
-    field_filter: Option<&HashSet<String>>,
+    field_filter: &TextFieldSelection<'_>,
 ) -> usize {
     match field_filter {
-        Some(filter) => lengths_by_field
+        TextFieldSelection::All => lengths_by_field.values().copied().sum(),
+        TextFieldSelection::One(field) => lengths_by_field.get(*field).copied().unwrap_or(0),
+        TextFieldSelection::Many(filter) => lengths_by_field
             .iter()
             .filter(|(field, _)| filter.contains(*field))
             .map(|(_, len)| *len)
             .sum(),
-        None => lengths_by_field.values().copied().sum(),
     }
 }
 
 fn selected_term_frequency(
     tf_by_field: &HashMap<String, u32>,
-    field_filter: Option<&HashSet<String>>,
+    field_filter: &TextFieldSelection<'_>,
 ) -> u32 {
     match field_filter {
-        Some(filter) => tf_by_field
+        TextFieldSelection::All => tf_by_field.values().copied().sum(),
+        TextFieldSelection::One(field) => tf_by_field.get(*field).copied().unwrap_or(0),
+        TextFieldSelection::Many(filter) => tf_by_field
             .iter()
             .filter(|(field, _)| filter.contains(*field))
             .map(|(_, tf)| *tf)
             .sum(),
-        None => tf_by_field.values().copied().sum(),
     }
 }
 
 fn fields_to_searchable_text(
     fields: &HashMap<String, serde_json::Value>,
-    field_filter: Option<&HashSet<String>>,
+    field_filter: &TextFieldSelection<'_>,
 ) -> String {
     let mut text = String::new();
     for (field, value) in fields {
-        if let Some(filter) = field_filter {
-            if !filter.contains(field) {
-                continue;
-            }
+        if !field_filter.contains(field) {
+            continue;
         }
         append_searchable_json_text(value, &mut text);
         text.push(' ');

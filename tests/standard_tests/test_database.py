@@ -41,6 +41,19 @@ class TestVectorDBClient:
         dbs_after = client.list_databases()
         assert "db_drop_test" not in dbs_after
 
+    def test_create_collection_creates_database_and_collection(self, client):
+        coll = client.create_collection(
+            database_name="db_with_collection",
+            collection="col_created_together",
+            dim=DIM,
+            drop_database_if_exists=True,
+        )
+
+        assert coll is not None
+        assert "db_with_collection" in client.list_databases()
+        db = client.get_database("db_with_collection")
+        assert "col_created_together" in db.show_collections()
+
 
 class TestLocalClient:
     def test_require_collection_creates(self, db):

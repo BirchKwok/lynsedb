@@ -25,6 +25,9 @@ setup(
     packages=find_packages(include=["lynse", "lynse.*"]),
     python_requires=">=3.9",
     install_requires=reqs,
+    extras_require={
+        "embeddings": ["fastembed>=0.3.0"],
+    },
     classifiers=[
         "Intended Audience :: Science/Research",
         "Intended Audience :: Developers",

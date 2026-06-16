@@ -110,6 +110,14 @@ fn denormalize_f64_bits(bits: u64) -> f64 {
     f64::from_bits(raw)
 }
 
+fn is_unstructured_text_value(value: &serde_json::Value) -> bool {
+    matches!(
+        value,
+        serde_json::Value::String(text)
+            if text.len() > 64 || text.chars().any(char::is_whitespace)
+    )
+}
+
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone)]
 enum RangeKey {
     Number(u64),
@@ -334,9 +342,18 @@ impl FieldIndex {
             return;
         }
 
+        if is_unstructured_text_value(value) {
+            self.blacklist_field(field);
+            return;
+        }
+
         match value {
             serde_json::Value::Array(values) => {
                 for value in values {
+                    if is_unstructured_text_value(value) {
+                        self.blacklist_field(field);
+                        return;
+                    }
                     if matches!(
                         value,
                         serde_json::Value::Array(_) | serde_json::Value::Object(_)
@@ -499,6 +516,10 @@ impl FieldIndex {
             return;
         }
 
+        self.blacklist_field(field);
+    }
+
+    fn blacklist_field(&mut self, field: &str) {
         self.index.remove(field);
         self.range_index.remove(field);
         self.array_index.remove(field);

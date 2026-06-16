@@ -53,7 +53,7 @@ documents = [
         "title": "Install LynseDB",
         "tenant": "acme",
         "lang": "en",
-        "text": "Install LynseDB with pip install LynseDB. Use Python 3.9 or newer.",
+        "text": "Install LynseDB with pip install lynsedb. Use Python 3.9 or newer.",
     },
     {
         "doc_id": "local-remote",

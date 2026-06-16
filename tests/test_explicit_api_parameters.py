@@ -205,9 +205,10 @@ def test_local_wire_dtype_is_accepted_without_changing_local_float32_path():
     rust = _FakeRustCollection()
     coll = LocalCollection(object(), "db", "items", rust, dim=2)
 
-    coll.bulk_add_binary(
-        np.array([[1.0, 2.0]], dtype=np.float64),
-        enable_progress_bar=False,
+    coll.add(
+        ids=None,
+        vectors=np.array([[1.0, 2.0]], dtype=np.float64),
+        batch_size=1,
         wire_dtype="float16",
     )
     op, vectors, ids, fields = rust.calls[-1]

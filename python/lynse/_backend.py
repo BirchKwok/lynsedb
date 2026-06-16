@@ -375,6 +375,18 @@ class Collection:
             vectors = vectors.reshape(1, -1)
         self._inner.add_items(vectors, [int(i) for i in ids], fields)
 
+    def add_items_encoded_f16(
+        self,
+        vectors: np.ndarray,
+        ids: List[int],
+        fields: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Add vectors that are already encoded as IEEE float16 bits."""
+        encoded = np.ascontiguousarray(vectors, dtype=np.uint16)
+        if encoded.ndim == 1:
+            encoded = encoded.reshape(1, -1)
+        self._inner.add_items_encoded_f16(encoded, [int(i) for i in ids], fields)
+
     def add_records(
         self,
         vectors: np.ndarray,
@@ -723,6 +735,10 @@ class Collection:
     def commit(self) -> None:
         """Commit: clear WAL after successful writes."""
         self._inner.commit()
+
+    def checkpoint_fast(self) -> None:
+        """Lightweight checkpoint: clear WAL without forcing recursive fsync."""
+        self._inner.checkpoint_fast()
 
     def flush(self) -> None:
         """Flush pending bytes and fsync collection files without clearing WAL."""

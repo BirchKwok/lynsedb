@@ -476,13 +476,13 @@ impl WALStorage {
             self.flush_buffer_to_disk(&mut inner)?;
         }
 
-        // Keep WAL durable before callers append to the main vector store.
+        // Make WAL bytes visible to the OS before callers append to the main
+        // vector store. Expensive fsync is handled by flush()/checkpoint().
         self.flush_buffer_to_disk(&mut inner)?;
         self.flush_write_buffer(&mut inner)?;
         self.flush_row_count(&mut inner)?;
         if let Some(ref mut f) = inner.current_file {
             f.flush()?;
-            f.sync_all()?;
         }
 
         Ok(())

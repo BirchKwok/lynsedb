@@ -121,6 +121,40 @@ impl VectorStore {
         self.fingerprint.read().clone()
     }
 
+    fn mark_changed(&self, total_vectors: u64) {
+        let fingerprint = format!(
+            "{}:{}:{}",
+            total_vectors,
+            self.dimension,
+            self.dtype.storage_name()
+        );
+        *self.fingerprint.write() = Some(fingerprint);
+    }
+
+    /// Persist lightweight compatibility metadata for collection discovery.
+    ///
+    /// The vector count is tracked in memory and recovered from `vectors.bin` on
+    /// open, so append-heavy workloads do not need to rewrite these sidecar files
+    /// on every batch.
+    pub fn persist_metadata(&self) -> Result<()> {
+        let total = self.total_vectors.load(Ordering::Relaxed);
+        let info_path = self.collection_path.join("info.json");
+        let info = serde_json::json!({
+            "total_shape": [total, self.dimension]
+        });
+        atomic_write(
+            &info_path,
+            serde_json::to_string(&info)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?
+                .as_bytes(),
+        )?;
+
+        if let Some(fp) = self.fingerprint() {
+            atomic_write(&self.collection_path.join("fingerprint"), fp.as_bytes())?;
+        }
+        Ok(())
+    }
+
     // ── Core write path (raw file append — NO mmap) ─────────────────────
 
     /// Append vectors to the flat file. Does NOT re-mmap.
@@ -195,21 +229,7 @@ impl VectorStore {
         // Invalidate mmap cache (will be re-created on next read)
         *self.mmap_cache.write() = None;
 
-        // Update info.json (atomic) — for backward compat with scan_collections
-        let info_path = self.collection_path.join("info.json");
-        let info = serde_json::json!({
-            "total_shape": [new_total, self.dimension]
-        });
-        atomic_write(
-            &info_path,
-            serde_json::to_string(&info)
-                .map_err(|e| LynseError::Serialization(e.to_string()))?
-                .as_bytes(),
-        )?;
-
-        // Update fingerprint in-memory
-        let new_fp = uuid::Uuid::new_v4().to_string().replace("-", "");
-        *self.fingerprint.write() = Some(new_fp);
+        self.mark_changed(new_total);
 
         Ok(())
     }
@@ -264,16 +284,8 @@ impl VectorStore {
         self.total_vectors
             .store(n_vectors as u64, Ordering::Relaxed);
         *self.mmap_cache.write() = None;
-
-        // Update info.json
-        let info_path = self.collection_path.join("info.json");
-        let info = serde_json::json!({ "total_shape": [n_vectors, self.dimension] });
-        atomic_write(
-            &info_path,
-            serde_json::to_string(&info)
-                .map_err(|e| LynseError::Serialization(e.to_string()))?
-                .as_bytes(),
-        )?;
+        self.mark_changed(n_vectors as u64);
+        self.persist_metadata()?;
 
         Ok(())
     }
@@ -304,18 +316,8 @@ impl VectorStore {
         self.total_vectors
             .store(n_vectors as u64, Ordering::Relaxed);
         *self.mmap_cache.write() = None;
-
-        let info_path = self.collection_path.join("info.json");
-        let info = serde_json::json!({ "total_shape": [n_vectors, self.dimension] });
-        atomic_write(
-            &info_path,
-            serde_json::to_string(&info)
-                .map_err(|e| LynseError::Serialization(e.to_string()))?
-                .as_bytes(),
-        )?;
-
-        let new_fp = uuid::Uuid::new_v4().to_string().replace("-", "");
-        *self.fingerprint.write() = Some(new_fp);
+        self.mark_changed(n_vectors as u64);
+        self.persist_metadata()?;
 
         Ok(())
     }

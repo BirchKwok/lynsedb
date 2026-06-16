@@ -92,6 +92,9 @@ nav:
   - Concepts:
     - Release Notes: releases.md
     - ResultView: result_view.md
+    - Comparisons:
+      - LynseDB vs ChromaDB and LanceDB: comparisons/chromadb_lancedb.md
+      - Vector database benchmarks: comparisons/vector_database_benchmarks.md
     - Production roadmap: production_roadmap.md
   - API Reference:
     - Python client: client.md
