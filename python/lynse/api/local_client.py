@@ -13,7 +13,7 @@ from threading import Lock
 import numpy as np
 
 from ..utils.utils import collection_repr
-from .._backend import DatabaseManager, Collection, SearchResult, _normalize_sparse_vector
+from .._backend import DatabaseManager, Collection, _normalize_sparse_vector
 from ..result_view import ResultView, _parse_index_mode
 from .rerank import apply_external_rerank, should_fetch_fields
 from ._embedding import embed_documents

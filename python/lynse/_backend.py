@@ -882,7 +882,3 @@ class Collection:
     def export_to(self, export_path: str) -> None:
         self._inner.export_to(export_path)
 
-
-# SearchResult is replaced by ResultView from result_view.py.
-# Keep a backward-compatible alias.
-SearchResult = ResultView
