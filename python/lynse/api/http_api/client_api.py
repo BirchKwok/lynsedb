@@ -44,9 +44,9 @@ def _decode_search_binary(buf: bytes, offset: int = 0):
     Returns (ids, distances, fields, new_offset).
     """
     n = struct.unpack_from('<I', buf, offset)[0]; offset += 4
-    ids = np.frombuffer(buf, dtype='<u8', count=n, offset=offset).astype(np.int64)
+    ids = np.frombuffer(buf, dtype='<i8', count=n, offset=offset)
     offset += n * 8
-    dists = np.frombuffer(buf, dtype='<f4', count=n, offset=offset).copy()
+    dists = np.frombuffer(buf, dtype='<f4', count=n, offset=offset)
     offset += n * 4
     flen = struct.unpack_from('<I', buf, offset)[0]; offset += 4
     fields = json.loads(buf[offset:offset + flen]) if flen > 0 else []
@@ -771,6 +771,44 @@ class Collection:
                 raise ValueError("vectors must be a 1D vector or a 2D matrix")
             vectors = np.ascontiguousarray(vectors, dtype=np.float32)
             n_total, dim = vectors.shape
+            vector_encoding = _normalize_vector_encoding(wire_dtype)
+            if self._cluster_mode and self._integer_id_routing != "external":
+                returned_ids = []
+                total_batches = (n_total + batch_size - 1) // batch_size
+                for i in range(total_batches):
+                    start = i * batch_size
+                    end = min((i + 1) * batch_size, n_total)
+                    batch = vectors[start:end]
+                    n_vecs = batch.shape[0]
+                    if vector_encoding == "float16":
+                        body = np.ascontiguousarray(batch, dtype="<f2").tobytes()
+                    else:
+                        body = batch.tobytes()
+                    response = self._session.post(
+                        f'{self._uri}/bulk_add_binary',
+                        params={
+                            "database_name": self._database_name,
+                            "collection_name": self._collection_name,
+                            "dim": dim,
+                            "n_vectors": n_vecs,
+                            "vector_encoding": vector_encoding,
+                            "return_ids": "true",
+                        },
+                        content=body,
+                        headers={'Content-Type': 'application/octet-stream'},
+                    )
+                    if response.status_code == 200:
+                        payload = response.json()
+                        self.COMMIT_FLAG = False
+                        self._set_dim_if_known(dim)
+                        returned_ids.extend(payload.get("params", {}).get("ids", []))
+                    else:
+                        raise_error_response(response)
+                self._integer_id_routing = "internal"
+                self._binary_integer_id_safe = True
+                self._maybe_build_default_index()
+                return returned_ids[0] if n_total == 1 else returned_ids
+
             start_id = int(self.max_id) + 1
             generated_ids = list(range(start_id, start_id + n_total))
             use_bulk_binary = (
@@ -785,7 +823,6 @@ class Collection:
                     batch_size=batch_size,
                     wire_dtype=wire_dtype,
                 )
-            vector_encoding = _normalize_vector_encoding(wire_dtype)
             total_batches = (n_total + batch_size - 1) // batch_size
 
             for i in range(total_batches):
@@ -835,18 +872,22 @@ class Collection:
         else:
             vec_array = normalize_vectors(vectors, n_records)
 
-        field_list = attach_documents(normalize_fields(fields, n_records), docs)
+        field_list = (
+            attach_documents(normalize_fields(fields, n_records), docs)
+            if fields is not None or docs is not None
+            else None
+        )
         if self._can_write_cluster_binary_integer_ids(external_ids):
             returned_ids = []
             with self._lock:
                 for start in range(0, n_records, batch_size):
                     end = min(start + batch_size, n_records)
-                    items = [
-                        (vec_array[idx], external_ids[idx], field_list[idx])
-                        for idx in range(start, end)
-                    ]
-                    payload, n_vectors, dim, batch_ids, id_params = self._prepare_binary_items(
-                        items,
+                    batch_ids = external_ids[start:end]
+                    batch_fields = None if field_list is None else field_list[start:end]
+                    payload, n_vectors, dim, batch_ids, id_params = self._prepare_binary_matrix(
+                        vec_array[start:end],
+                        batch_ids,
+                        batch_fields,
                         upsert=False,
                         wire_dtype=wire_dtype,
                     )
@@ -879,8 +920,9 @@ class Collection:
                     "collection_name": self._collection_name,
                     "ids": external_ids[start:end],
                     "vectors": vec_array[start:end].tolist(),
-                    "fields": field_list[start:end],
                 }
+                if field_list is not None:
+                    data["fields"] = field_list[start:end]
                 response = self._session.post(uri, json=data)
                 if response.status_code == 200:
                     self.COMMIT_FLAG = False
@@ -956,6 +998,50 @@ class Collection:
             payload += _encode_fields_binary(fields)
         return payload, matrix.shape[0], matrix.shape[1], ids, id_params
 
+    @staticmethod
+    def _prepare_binary_matrix(matrix, ids, fields=None, *, upsert: bool, wire_dtype: str = "float32"):
+        matrix = np.ascontiguousarray(matrix, dtype=np.float32)
+        if matrix.ndim == 1:
+            matrix = matrix.reshape(1, -1)
+        elif matrix.ndim != 2:
+            raise ValueError("vectors must be a 1D vector or a 2D matrix")
+
+        ids = [int(item_id) for item_id in ids]
+        if len(ids) != matrix.shape[0]:
+            raise ValueError("ids length must match vector row count")
+        if any(item_id < 0 for item_id in ids):
+            raise ValueError("item IDs must be non-negative")
+
+        vector_encoding = _normalize_vector_encoding(wire_dtype)
+        id_raw, id_params = _encode_ids_for_wire(ids)
+        id_params["vector_encoding"] = vector_encoding
+        if vector_encoding == "float16":
+            vector_payload = np.ascontiguousarray(matrix, dtype="<f2").tobytes()
+        else:
+            vector_payload = matrix.tobytes()
+
+        payload = vector_payload + id_raw
+        if fields is not None:
+            if len(fields) != len(ids):
+                raise ValueError("fields length must match ids length")
+            if upsert:
+                field_payload = [field if field is not None else None for field in fields]
+                payload += _encode_fields_binary(field_payload)
+            else:
+                field_payload = []
+                has_field_payload = False
+                for field in fields:
+                    field = field or {}
+                    if not isinstance(field, dict):
+                        raise TypeError("field payload entries must be dict or None")
+                    if field:
+                        has_field_payload = True
+                    field_payload.append(field)
+                if has_field_payload:
+                    payload += _encode_fields_binary(field_payload)
+
+        return payload, matrix.shape[0], matrix.shape[1], ids, id_params
+
     def _post_binary_items(self, endpoint: str, payload: bytes, n_vectors: int, dim: int, id_params: dict):
         params = {
             "database_name": self._database_name,
@@ -995,18 +1081,12 @@ class Collection:
             with self._lock:
                 for start in range(0, n_records, batch_size):
                     end = min(start + batch_size, n_records)
-                    if field_list is None:
-                        items = [
-                            (vec_array[idx], external_ids[idx])
-                            for idx in range(start, end)
-                        ]
-                    else:
-                        items = [
-                            (vec_array[idx], external_ids[idx], field_list[idx])
-                            for idx in range(start, end)
-                        ]
-                    payload, n_vectors, dim, batch_ids, id_params = self._prepare_binary_items(
-                        items,
+                    batch_ids = external_ids[start:end]
+                    batch_fields = None if field_list is None else field_list[start:end]
+                    payload, n_vectors, dim, batch_ids, id_params = self._prepare_binary_matrix(
+                        vec_array[start:end],
+                        batch_ids,
+                        batch_fields,
                         upsert=True,
                         wire_dtype=wire_dtype,
                     )
@@ -1087,6 +1167,18 @@ class Collection:
         Raises:
             ExecutionError: If the server returns an error.
         """
+        if self.COMMIT_FLAG and self._mesosphere_list.empty():
+            return {
+                "status": "success",
+                "params": {
+                    "status": "Success",
+                    "result": {
+                        "database_name": self._database_name,
+                        "collection_name": self._collection_name,
+                    },
+                },
+            }
+
         uri = f'{self._uri}/commit'
         data = {"database_name": self._database_name, "collection_name": self._collection_name}
 
@@ -1610,14 +1702,13 @@ class Collection:
                 wire_dtype=wire_dtype,
             )
             raw_ids, dists, fields, _ = _decode_search_binary(raw)
-            ids = id_array(raw_ids.tolist())
             index_mode = self._result_index_mode(vector_field)
             idx_type, metric = _parse_index_mode(index_mode)
             return ResultView(
-                ids=ids,
+                ids=raw_ids,
                 distances=np.asarray(dists, dtype=np.float32),
                 fields=fields if return_fields else [],
-                k=len(ids),
+                k=len(raw_ids),
                 distance=metric,
                 index=idx_type,
                 result_type="search",
@@ -1952,7 +2043,7 @@ class Collection:
             for _query_index in range(count):
                 ids, dists, fields, offset = _decode_search_binary(buf, offset)
                 output.append(ResultView(
-                    ids=id_array(ids.tolist()),
+                    ids=ids,
                     distances=np.asarray(dists, dtype=np.float32),
                     fields=fields if return_fields else [],
                     k=len(ids),

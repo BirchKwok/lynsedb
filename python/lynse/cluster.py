@@ -72,6 +72,13 @@ def _hash_u64(value: str) -> int:
     return int.from_bytes(digest, "little", signed=False)
 
 
+def _hash_u64_prefixed(prefix_hasher, value: int) -> int:
+    hasher = prefix_hasher.copy()
+    hasher.update(str(int(value)).encode("utf-8"))
+    digest = hasher.digest()
+    return int.from_bytes(digest, "little", signed=False)
+
+
 def _external_id_key(value: Any) -> str:
     if isinstance(value, bool):
         raise ValueError("bool is not a valid LynseDB ID")
@@ -199,7 +206,10 @@ def _encode_ids_for_wire(ids: list[int]) -> tuple[bytes, dict[str, Any]]:
         if all(item_id == start + idx for idx, item_id in enumerate(ids)):
             return b"", {"ids_encoding": "range", "ids_start": start}
 
-    raw = b"".join(struct.pack("<Q", item_id) for item_id in ids)
+    raw_ids = array.array("Q", ids)
+    if sys.byteorder != "little":
+        raw_ids.byteswap()
+    raw = raw_ids.tobytes()
     return raw, {"ids_encoding": "raw"}
 
 
@@ -673,6 +683,15 @@ class ClusterState:
             self.save()
             return ids
 
+    def allocate_id_range(self, db_name: str, coll_name: str, count: int) -> tuple[int, int]:
+        with self._lock:
+            coll = self.data["collections"][self.collection_key(db_name, coll_name)]
+            start = int(coll.get("next_id", 0))
+            coll["next_id"] = start + int(count)
+            self.bump_epoch()
+            self.save()
+            return start, int(count)
+
     def group_for_id(self, db_name: str, coll_name: str, item_id: int) -> dict[str, Any]:
         with self._lock:
             coll = self.data["collections"][self.collection_key(db_name, coll_name)]
@@ -694,6 +713,21 @@ class ClusterState:
             if self.integer_id_routing(db_name, coll_name) == "internal":
                 return self.group_for_id(db_name, coll_name, int(item_id))
         return self.group_for_external_id(db_name, coll_name, item_id)
+
+    def internal_id_routing_snapshot(self, db_name: str, coll_name: str):
+        with self._lock:
+            coll = self.data["collections"][self.collection_key(db_name, coll_name)]
+            bucket_count = int(coll.get("bucket_count", self.data.get("bucket_count", DEFAULT_BUCKET_COUNT)))
+            bucket_to_group = list(coll["bucket_to_group"])
+            groups_by_name = {
+                group["name"]: group
+                for group in self.data["shard_groups"]
+            }
+        prefix_hasher = hashlib.blake2b(
+            f"{db_name}/{coll_name}/".encode("utf-8"),
+            digest_size=8,
+        )
+        return bucket_count, bucket_to_group, groups_by_name, prefix_hasher
 
     def group_by_name(self, name: str) -> dict[str, Any]:
         for group in self.data["shard_groups"]:
@@ -1673,15 +1707,19 @@ class ClusterCoordinator:
             params.get("ids_start"),
         )
         stride = dim * _vector_wire_width(vector_encoding)
+        bucket_count, bucket_to_group, groups_by_name, prefix_hasher = (
+            self.state.internal_id_routing_snapshot(db_name, coll_name)
+        )
         grouped: dict[str, dict[str, Any]] = {}
         for idx, item_id in enumerate(ids):
-            group = self.state.group_for_id(db_name, coll_name, int(item_id))
+            bucket = _hash_u64_prefixed(prefix_hasher, int(item_id)) % bucket_count
+            group = groups_by_name[bucket_to_group[bucket]]
             bucket = grouped.setdefault(
                 group["name"],
-                {"group": group, "parts": [], "ids": [], "fields": [] if fields is not None else None},
+                {"group": group, "raw": bytearray(), "ids": [], "fields": [] if fields is not None else None},
             )
             start = idx * stride
-            bucket["parts"].append(vector_raw[start:start + stride])
+            bucket["raw"].extend(vector_raw[start:start + stride])
             bucket["ids"].append(int(item_id))
             if fields is not None:
                 bucket["fields"].append(fields[idx])
@@ -1696,7 +1734,7 @@ class ClusterCoordinator:
                 coll_name,
                 dim,
                 vector_encoding,
-                b"".join(bucket["parts"]),
+                bucket["raw"],
                 bucket["ids"],
                 bucket["fields"],
             ))
@@ -1723,19 +1761,27 @@ class ClusterCoordinator:
             )
         self.state.update_collection_dim_if_unset(db_name, coll_name, dim)
         self.state.mark_integer_id_routing(db_name, coll_name, "internal")
-        ids = self.state.allocate_ids(db_name, coll_name, n_vectors)
+        start_id, id_count = self.state.allocate_id_range(db_name, coll_name, n_vectors)
+        return_ids = str(params.get("return_ids", "false")).lower() == "true"
+        response_ids = [] if return_ids else None
 
         vector_raw = memoryview(body)
         stride = dim * _vector_wire_width(vector_encoding)
+        bucket_count, bucket_to_group, groups_by_name, prefix_hasher = (
+            self.state.internal_id_routing_snapshot(db_name, coll_name)
+        )
         grouped: dict[str, dict[str, Any]] = {}
-        for idx, item_id in enumerate(ids):
-            group = self.state.group_for_id(db_name, coll_name, int(item_id))
+        for idx, item_id in enumerate(range(start_id, start_id + id_count)):
+            if response_ids is not None:
+                response_ids.append(item_id)
+            routing_bucket = _hash_u64_prefixed(prefix_hasher, item_id) % bucket_count
+            group = groups_by_name[bucket_to_group[routing_bucket]]
             bucket = grouped.setdefault(
                 group["name"],
-                {"group": group, "parts": [], "ids": []},
+                {"group": group, "raw": bytearray(), "ids": []},
             )
             start = idx * stride
-            bucket["parts"].append(vector_raw[start:start + stride])
+            bucket["raw"].extend(vector_raw[start:start + stride])
             bucket["ids"].append(int(item_id))
 
         futures = []
@@ -1748,7 +1794,7 @@ class ClusterCoordinator:
                 coll_name,
                 dim,
                 vector_encoding,
-                b"".join(bucket["parts"]),
+                bucket["raw"],
                 bucket["ids"],
                 None,
             ))
@@ -1758,7 +1804,7 @@ class ClusterCoordinator:
         return _json_success({
             "database_name": db_name,
             "collection_name": coll_name,
-            **({"ids": ids} if str(params.get("return_ids", "false")).lower() == "true" else {"n_vectors": n_vectors}),
+            **({"ids": response_ids or []} if return_ids else {"n_vectors": n_vectors}),
         })
 
     def route_ids_write(self, body: dict[str, Any], endpoint: str) -> dict[str, Any]:
@@ -2520,7 +2566,7 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
             elif path in {"/add_named_vectors", "/add_sparse_vectors"}:
                 payload = self.coordinator.route_vector_payloads(body, path)
             elif path in {"/commit", "/flush", "/checkpoint", "/close_collection"}:
-                payload = self.coordinator.broadcast_json(path, body)
+                payload = self.coordinator.broadcast_control(path, body)
             elif path == "/build_index":
                 payload = self.coordinator.broadcast_json(path, body)
                 self.coordinator.state.update_collection_index(

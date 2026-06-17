@@ -1,4 +1,5 @@
 import json
+import queue
 import socket
 import struct
 import sys
@@ -846,6 +847,63 @@ def test_client_batch_search_uses_binary_when_integer_ids_are_safe():
     assert results[0].ids.tolist() == [7]
     assert coll._session.calls[0][0] == "http://127.0.0.1:7637/batch_search_binary"
     assert coll._session.calls[0][1]["params"]["n_queries"] == 1
+
+
+def test_client_cluster_auto_ids_uses_bulk_return_ids_without_max_id():
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"status": "success", "params": {"ids": [0, 1]}}
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, uri, **kwargs):
+            self.calls.append((uri, kwargs))
+            if uri.endswith("/max_id"):
+                raise AssertionError("cluster auto-id bulk add should not call max_id")
+            return Response()
+
+    coll = object.__new__(Collection)
+    coll._uri = "http://127.0.0.1:7637"
+    coll._database_name = "db"
+    coll._collection_name = "docs"
+    coll._session = Session()
+    coll._cluster_mode = True
+    coll._integer_id_routing = None
+    coll._binary_integer_id_safe = False
+    coll._default_index = None
+    coll._default_index_built = False
+    coll._init_params = {}
+    coll.COMMIT_FLAG = True
+
+    returned = Collection.add(coll, ids=None, vectors=[[1.0, 2.0], [3.0, 4.0]])
+
+    assert returned == [0, 1]
+    assert coll._integer_id_routing == "internal"
+    assert coll._binary_integer_id_safe is True
+    assert coll._session.calls[0][0] == "http://127.0.0.1:7637/bulk_add_binary"
+    assert coll._session.calls[0][1]["params"]["return_ids"] == "true"
+
+
+def test_client_commit_noops_when_already_clean():
+    class Session:
+        def post(self, *args, **kwargs):
+            raise AssertionError("clean commit should not perform an HTTP request")
+
+    coll = object.__new__(Collection)
+    coll._database_name = "db"
+    coll._collection_name = "docs"
+    coll._session = Session()
+    coll._mesosphere_list = queue.Queue()
+    coll.COMMIT_FLAG = True
+
+    payload = Collection.commit(coll)
+
+    assert payload["status"] == "success"
+    assert payload["params"]["result"]["database_name"] == "db"
 
 
 def test_client_binary_item_preparer_supports_float16_wire_dtype():

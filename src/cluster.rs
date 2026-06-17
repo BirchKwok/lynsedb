@@ -9,6 +9,7 @@ use crate::rpc::{self, OP_BATCH_SEARCH, OP_SEARCH};
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -22,8 +23,8 @@ const MAX_CLUSTER_RPC_FRAME_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct RustReadCoordinator {
-    groups: Vec<ShardGroup>,
-    collections: HashMap<String, CollectionConfig>,
+    groups: Arc<Vec<ShardGroup>>,
+    collections: Arc<HashMap<String, CollectionConfig>>,
     timeout: Duration,
     api_key: Option<String>,
     rpc_pool: Arc<Mutex<HashMap<String, Vec<TcpStream>>>>,
@@ -77,8 +78,8 @@ impl RustReadCoordinator {
             ));
         }
         Ok(Self {
-            groups,
-            collections: config.collections,
+            groups: Arc::new(groups),
+            collections: Arc::new(config.collections),
             timeout,
             api_key,
             rpc_pool: Arc::new(Mutex::new(HashMap::new())),
@@ -170,14 +171,38 @@ impl RustReadCoordinator {
     }
 
     async fn fanout_rpc(&self, op: u8, meta: Value, raw: Vec<u8>) -> Result<Vec<Vec<u8>>> {
+        let meta_bytes =
+            serde_json::to_vec(&meta).map_err(|e| LynseError::Serialization(e.to_string()))?;
+        let mut payload = Vec::with_capacity(1 + 4 + meta_bytes.len() + raw.len());
+        payload.push(op);
+        payload.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&meta_bytes);
+        payload.extend_from_slice(&raw);
+        let payload = Arc::new(payload);
+
+        if self.groups.len() == 1 {
+            let (_meta, raw) = self
+                .rpc_request_payload(&self.groups[0].primary, Arc::clone(&payload))
+                .await?;
+            return Ok(vec![raw]);
+        }
+        if self.groups.len() == 2 {
+            let left_uri = self.groups[0].primary.clone();
+            let right_uri = self.groups[1].primary.clone();
+            let ((_, left_raw), (_, right_raw)) = tokio::try_join!(
+                self.rpc_request_payload(&left_uri, Arc::clone(&payload)),
+                self.rpc_request_payload(&right_uri, Arc::clone(&payload)),
+            )?;
+            return Ok(vec![left_raw, right_raw]);
+        }
+
         let mut handles = Vec::with_capacity(self.groups.len());
-        for group in &self.groups {
+        for group in self.groups.iter() {
             let uri = group.primary.clone();
-            let meta = meta.clone();
-            let raw = raw.clone();
+            let payload = Arc::clone(&payload);
             let coordinator = self.clone();
             handles.push(tokio::spawn(async move {
-                coordinator.rpc_request(&uri, op, meta, raw).await
+                coordinator.rpc_request_payload(&uri, payload).await
             }));
         }
 
@@ -191,6 +216,7 @@ impl RustReadCoordinator {
         Ok(out)
     }
 
+    #[cfg(test)]
     async fn rpc_request(
         &self,
         http_uri: &str,
@@ -205,7 +231,14 @@ impl RustReadCoordinator {
         payload.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
         payload.extend_from_slice(&meta_bytes);
         payload.extend_from_slice(&raw);
+        self.rpc_request_payload(http_uri, Arc::new(payload)).await
+    }
 
+    async fn rpc_request_payload(
+        &self,
+        http_uri: &str,
+        payload: Arc<Vec<u8>>,
+    ) -> Result<(Value, Vec<u8>)> {
         let mut last_error = None;
         for _ in 0..2 {
             let mut stream = match self.take_rpc_stream(http_uri).await {
@@ -215,7 +248,7 @@ impl RustReadCoordinator {
                     continue;
                 }
             };
-            match rpc_roundtrip(&mut stream, &payload, self.timeout).await {
+            match rpc_roundtrip(&mut stream, payload.as_slice(), self.timeout).await {
                 Ok(response) => {
                     self.return_rpc_stream(http_uri, stream);
                     return Ok(response);
@@ -307,30 +340,45 @@ pub fn merge_search_blocks(
         };
     }
 
+    if !return_fields {
+        let total = blocks.len().saturating_mul(k);
+        let mut merged: Vec<(u64, f32)> = Vec::with_capacity(total);
+        for block in blocks {
+            for (&id, &distance) in block.ids.iter().zip(&block.distances) {
+                merged.push((id, distance));
+            }
+        }
+
+        if merged.len() > k {
+            merged.select_nth_unstable_by(k - 1, |left, right| {
+                compare_distance(left.1, right.1, ascending)
+            });
+            merged.truncate(k);
+        }
+        merged.sort_unstable_by(|left, right| compare_distance(left.1, right.1, ascending));
+
+        return SearchBlock {
+            ids: merged.iter().map(|(id, _)| *id).collect(),
+            distances: merged.iter().map(|(_, distance)| *distance).collect(),
+            fields: Vec::new(),
+        };
+    }
+
     let mut merged: Vec<(u64, f32, Option<HashMap<String, Value>>)> = Vec::new();
     for block in blocks {
         for (idx, (&id, &distance)) in block.ids.iter().zip(&block.distances).enumerate() {
-            let field = if return_fields {
-                block.fields.get(idx).cloned()
-            } else {
-                None
-            };
+            let field = block.fields.get(idx).cloned();
             merged.push((id, distance, field));
         }
     }
 
-    merged.sort_by(|left, right| {
-        let ord = left
-            .1
-            .partial_cmp(&right.1)
-            .unwrap_or(std::cmp::Ordering::Equal);
-        if ascending {
-            ord
-        } else {
-            ord.reverse()
-        }
-    });
-    merged.truncate(k);
+    if merged.len() > k {
+        merged.select_nth_unstable_by(k, |left, right| {
+            compare_distance(left.1, right.1, ascending)
+        });
+        merged.truncate(k);
+    }
+    merged.sort_unstable_by(|left, right| compare_distance(left.1, right.1, ascending));
 
     SearchBlock {
         ids: merged.iter().map(|(id, _, _)| *id).collect(),
@@ -343,6 +391,15 @@ pub fn merge_search_blocks(
         } else {
             Vec::new()
         },
+    }
+}
+
+fn compare_distance(left: f32, right: f32, ascending: bool) -> Ordering {
+    let ord = left.partial_cmp(&right).unwrap_or(Ordering::Equal);
+    if ascending {
+        ord
+    } else {
+        ord.reverse()
     }
 }
 
@@ -391,7 +448,7 @@ async fn rpc_roundtrip(
     .await
     .map_err(|_| LynseError::Storage("cluster RPC write timed out".to_string()))?
     .map_err(LynseError::Io)?;
-    time::timeout(timeout, stream.write_all(&payload))
+    time::timeout(timeout, stream.write_all(payload))
         .await
         .map_err(|_| LynseError::Storage("cluster RPC write timed out".to_string()))?
         .map_err(LynseError::Io)?;
