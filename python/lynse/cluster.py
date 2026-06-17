@@ -94,7 +94,7 @@ def _external_id_key(value: Any) -> str:
 
 
 def _is_ascending_index(index_mode: str | None) -> bool:
-    upper = (index_mode or "FLAT").upper()
+    upper = (index_mode or "FLAT-IP").upper()
     return any(token in upper for token in ("L2", "COS", "HAMMING", "JACCARD"))
 
 
@@ -607,7 +607,7 @@ class ClusterState:
                 "chunk_size": 100000,
                 "description": description,
                 "dtypes": dtypes or "float32",
-                "index_mode": "FLAT",
+                "index_mode": "FLAT-IP",
                 "next_id": 0,
                 "bucket_count": bucket_count,
                 "bucket_to_group": bucket_to_group,
@@ -2531,7 +2531,7 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                     "/search_profile",
                     body,
                     ascending=_is_ascending_index(coll.get("index_mode")),
-                    index=coll.get("index_mode") or "FLAT",
+                    index=coll.get("index_mode") or "FLAT-IP",
                     include_profile=True,
                 )
             elif path == "/bm25_search":
@@ -2572,7 +2572,7 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                 self.coordinator.state.update_collection_index(
                     body["database_name"],
                     body["collection_name"],
-                    body.get("index_mode") or "FLAT",
+                    body.get("index_mode") or "FLAT-IP",
                 )
             elif path == "/build_vector_field_index":
                 payload = self.coordinator.broadcast_json(path, body)

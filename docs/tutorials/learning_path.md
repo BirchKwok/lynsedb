@@ -82,11 +82,11 @@ Read [Indexing guide](indexing.md) and [Performance tuning](performance_tuning.m
 
 After this stage, you should be able to:
 
-- select `FLAT`, `HNSW`, `IVF`, `DiskANN`, SQ8, PQ, RaBitQ, PolarVec, or binary
-  indexes;
+- select explicit metric index modes such as `FLAT-IP`, `HNSW-L2`,
+  `IVF-COS`, `SPANN-L2`, `DiskANN-IP`, SQ8, PQ, RaBitQ, PolarVec, or binary indexes;
 - match the index metric to your embedding model;
-- use `n_clusters` for IVF;
-- tune `nprobe` for IVF and HNSW;
+- use `n_clusters` for IVF and SPANN;
+- tune `nprobe` for IVF, SPANN, and HNSW;
 - use a flat index as the recall baseline;
 - profile queries with `search_profile()`;
 - understand when quantization is worth the quality tradeoff.

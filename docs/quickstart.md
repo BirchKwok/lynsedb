@@ -154,19 +154,20 @@ print(result.ids)
 
 Flat search is the simplest and most recall-friendly default. LynseDB builds a
 `FLAT-IP` index automatically for new collections after the first write so the
-default metric is explicit. Use HNSW or IVF as data grows and latency matters,
-or rebuild with a metric-specific flat index when that matches your embedding
-model.
+default metric is explicit. Use HNSW, IVF, or SPANN as data grows and latency
+matters, or rebuild with a metric-specific flat index when that matches your
+embedding model.
 
 ```python
 collection.build_index("FLAT-L2")
 print(collection.index_mode)
 ```
 
-IVF uses `n_clusters`; other index families allow the argument and ignore it:
+IVF and SPANN use `n_clusters`; other index families allow the argument and ignore it:
 
 ```python
 collection.build_index("IVF-L2", n_clusters=256)
+collection.build_index("SPANN-L2", n_clusters=256)
 ```
 
 ## 6. Search
@@ -194,7 +195,7 @@ result = collection.search(
 print(result.to_list())
 ```
 
-For IVF and HNSW, `nprobe` controls search breadth. Higher values generally
+For IVF, SPANN, and HNSW, `nprobe` controls search breadth. Higher values generally
 improve recall and increase latency.
 
 ```python

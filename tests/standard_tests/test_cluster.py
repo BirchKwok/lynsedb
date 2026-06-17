@@ -18,6 +18,7 @@ from lynse.cluster import (
     _encode_fields_binary,
     _encode_ids_for_wire,
     _encode_search_binary,
+    _is_ascending_index,
     _merge_pairs,
     _shard_artifact_path,
     _split_binary_items_payload,
@@ -43,6 +44,12 @@ def _seed_config():
             },
         ],
     }
+
+
+def test_spann_cluster_merge_order_uses_metric_tokens():
+    assert _is_ascending_index("SPANN-L2")
+    assert _is_ascending_index("SPANN-COS")
+    assert not _is_ascending_index("SPANN")
 
 
 def _single_seed_config():
@@ -198,7 +205,7 @@ def test_search_binary_uses_rust_read_coordinator_when_available(tmp_path, monke
     assert payload == raw_response
     assert calls[0] == ("init", str(state.path), 3.0, "secret")
     assert calls[1][0] == "search_binary"
-    assert calls[1][1]["index_mode"] == "FLAT"
+    assert calls[1][1]["index_mode"] == "FLAT-IP"
     assert calls[1][2] == b"query"
 
 

@@ -296,7 +296,8 @@ Run `compact()` later during maintenance if many rows have been tombstoned.
 - Store source metadata needed for filtering and citations.
 - Use `where` for tenant, permission, language, source, and freshness filters.
 - Start with `FLAT-COS` or `FLAT-L2` as a baseline.
-- Evaluate HNSW, IVF, DiskANN, or quantized indexes against known questions.
+- Evaluate `HNSW-*`, `IVF-*`, `SPANN-*`, `DiskANN-*`, or quantized indexes
+  against known questions.
 - Use hybrid search when exact terms matter.
 - Add a reranker when final ordering quality matters.
 - Snapshot or export before migrations and large re-indexing jobs.

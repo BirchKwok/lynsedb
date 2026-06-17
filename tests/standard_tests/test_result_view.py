@@ -247,7 +247,7 @@ class TestResultViewConversions:
 
 class TestParseIndexMode:
     def test_flat_ip(self):
-        idx, metric = _parse_index_mode("FLAT")
+        idx, metric = _parse_index_mode("FLAT-IP")
         assert "FLAT" in idx.upper()
         assert metric is not None
 
@@ -260,12 +260,17 @@ class TestParseIndexMode:
         assert metric is not None
 
     def test_hnsw(self):
-        idx, metric = _parse_index_mode("HNSW")
+        idx, metric = _parse_index_mode("HNSW-IP")
         assert "HNSW" in idx.upper()
 
     def test_ivf(self):
         idx, metric = _parse_index_mode("IVF-L2")
         assert "IVF" in idx.upper()
+
+    def test_spann(self):
+        idx, metric = _parse_index_mode("SPANN-L2")
+        assert "SPANN" in idx.upper()
+        assert metric == "L2"
 
     def test_diskann(self):
         idx, metric = _parse_index_mode("DiskANN-Cos")

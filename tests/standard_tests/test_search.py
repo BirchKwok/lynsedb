@@ -134,17 +134,23 @@ class TestSearch:
         assert len(result.ids) == 5
 
     def test_search_hnsw_index(self, populated_collection, query_vec):
-        populated_collection.build_index("HNSW")
+        populated_collection.build_index("HNSW-IP")
         result = populated_collection.search(query_vec, k=5)
         assert len(result.ids) == 5
 
     def test_search_ivf_index_with_nprobe(self, populated_collection, query_vec):
-        populated_collection.build_index("IVF", n_clusters=4)
+        populated_collection.build_index("IVF-IP", n_clusters=4)
         result = populated_collection.search(query_vec, k=5, nprobe=2)
         assert len(result.ids) <= 5
 
+    def test_search_spann_index_with_nprobe(self, populated_collection, query_vec):
+        populated_collection.build_index("SPANN-L2", n_clusters=4)
+        result = populated_collection.search(query_vec, k=5, nprobe=2)
+        assert len(result.ids) <= 5
+        assert "SPANN" in result.index_type.upper()
+
     def test_search_after_remove_index(self, populated_collection, query_vec):
-        populated_collection.build_index("HNSW")
+        populated_collection.build_index("HNSW-IP")
         populated_collection.remove_index()
         result = populated_collection.search(query_vec, k=5)
         assert len(result.ids) == 5
@@ -397,7 +403,7 @@ class TestBatchSearch:
         assert len(results) == 1
 
     def test_batch_search_nprobe(self, populated_collection, query_vec):
-        populated_collection.build_index("IVF", n_clusters=4)
+        populated_collection.build_index("IVF-IP", n_clusters=4)
         queries = np.stack([query_vec] * 2)
         results = populated_collection.batch_search(queries, k=3, nprobe=2)
         assert len(results) == 2

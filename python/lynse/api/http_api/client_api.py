@@ -723,7 +723,7 @@ class Collection:
                 for field in vector_fields
                 if field.get("name") == vector_field
             ),
-            "FLAT",
+            "FLAT-IP",
         )
 
     def exists(self):
@@ -1331,7 +1331,7 @@ class Collection:
 
     def build_index(
             self,
-            index_mode: str = 'FLAT',
+            index_mode: str = 'FLAT-IP',
             field_name: str = 'default',
             n_clusters: Union[int, None] = None,
     ):
@@ -1343,7 +1343,7 @@ class Collection:
 
                 **Flat (brute-force):**
 
-                - 'FLAT': Flat index with inner product. (Default)
+                - 'FLAT-IP': Flat index with inner product. (Default)
                 - 'FLAT-L2': Flat index with squared L2 distance.
                 - 'FLAT-COS': Flat index with cosine similarity.
                 - 'FLAT-IP-SQ8': Flat index with inner product and SQ8 quantizer.
@@ -1378,7 +1378,7 @@ class Collection:
 
                 **HNSW (graph-based ANN):**
 
-                - 'HNSW': HNSW index with inner product.
+                - 'HNSW-IP': HNSW index with inner product.
                 - 'HNSW-L2': HNSW index with squared L2 distance.
                 - 'HNSW-Cos': HNSW index with cosine similarity.
                 - 'HNSW-IP-SQ8': HNSW index with inner product and SQ8 quantizer.
@@ -1387,16 +1387,25 @@ class Collection:
 
                 **DiskANN (disk-friendly graph ANN):**
 
-                - 'DiskANN': DiskANN index with inner product.
+                - 'DiskANN-IP': DiskANN index with inner product.
                 - 'DiskANN-L2': DiskANN index with squared L2 distance.
                 - 'DiskANN-Cos': DiskANN index with cosine similarity.
                 - 'DiskANN-IP-SQ8': DiskANN index with inner product and SQ8 quantizer.
                 - 'DiskANN-L2-SQ8': DiskANN index with squared L2 distance and SQ8 quantizer.
                 - 'DiskANN-Cos-SQ8': DiskANN index with cosine similarity and SQ8 quantizer.
 
+                **SPANN (space-partition ANN):**
+
+                - 'SPANN-IP': SPANN index with inner product.
+                - 'SPANN-L2': SPANN index with squared L2 distance.
+                - 'SPANN-COS': SPANN index with cosine similarity.
+                - 'SPANN-IP-SQ8': SPANN index with inner product and SQ8 quantizer.
+                - 'SPANN-L2-SQ8': SPANN index with squared L2 distance and SQ8 quantizer.
+                - 'SPANN-COS-SQ8': SPANN index with cosine similarity and SQ8 quantizer.
+
                 **IVF (inverted file ANN):**
 
-                - 'IVF': IVF index with inner product.
+                - 'IVF-IP': IVF index with inner product.
                 - 'IVF-L2': IVF index with squared L2 distance.
                 - 'IVF-COS': IVF index with cosine similarity.
                 - 'IVF-IP-SQ8': IVF index with inner product and SQ8 quantizer.
@@ -1406,8 +1415,8 @@ class Collection:
                 - 'IVF-HAMMING-BINARY': IVF index with Hamming distance (binary vectors).
             field_name (str): Named vector field to build index for.
                 Defaults to "default" (the primary collection vector).
-            n_clusters (int, optional): The number of clusters. Only IVF modes
-                use it; other index modes silently ignore it.
+            n_clusters (int, optional): The number of clusters. IVF and SPANN
+                modes use it; other index modes silently ignore it.
 
         Returns:
             dict: The response from the server.
@@ -1430,7 +1439,7 @@ class Collection:
                 "field_name": field_name,
                 "index_mode": index_mode,
             }
-        if n_clusters is not None and index_mode.upper().startswith("IVF"):
+        if n_clusters is not None and index_mode.upper().startswith(("IVF", "SPANN")):
             data['n_clusters'] = int(n_clusters)
 
         response = self._session.post(uri, json=data)
@@ -1657,7 +1666,7 @@ class Collection:
             rerank_with_fields (bool): Fetch candidate fields for reranker payload
                 even when ``return_fields=False``.
             nprobe (int): Controls search breadth by index type (default: 10).
-                - **IVF**: number of partitions to probe; higher improves recall and increases latency.
+                - **IVF / SPANN**: number of partitions to probe; higher improves recall and increases latency.
                 - **HNSW**: ef_search beam width; higher improves recall and increases latency.
                 - **Flat / PQ / RaBitQ / PolarVec**: ignored.
                 - Named vector fields: ignored.
@@ -1986,7 +1995,7 @@ class Collection:
             where (str, optional): SQL/WHERE expression string to filter results.
             return_fields (bool): Whether to return the fields of the search results.
             nprobe (int): Controls search breadth by index type (default: 10).
-                - **IVF**: number of partitions to probe — higher = better recall, slower.
+                - **IVF / SPANN**: number of partitions to probe — higher = better recall, slower.
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
                 - **Flat / PQ / RaBitQ / PolarVec**: ignored (exhaustive two-pass search).
             reranker (callable, optional): External rerank hook, applied per-query.

@@ -15,17 +15,24 @@ def _parse_index_mode(index_mode: Optional[str]) -> Tuple[str, str]:
     """Extract (index_type, distance_metric) from an index mode string.
 
     Examples:
-        'FLAT'            -> ('Flat', 'IP')
+        'FLAT-IP'         -> ('Flat', 'IP')
         'FLAT-L2'         -> ('Flat', 'L2')
         'FLAT-COS-SQ8'    -> ('Flat', 'Cosine')
         'IVF-L2'          -> ('IVF', 'L2')
+        'SPANN-L2'        -> ('SPANN', 'L2')
         'IVF-HAMMING-BINARY' -> ('IVF', 'Hamming')
     """
     if not index_mode:
         return ("Flat", "IP")
     parts = index_mode.upper().split("-")
-    idx_type = parts[0]  # FLAT / IVF / HNSW / DISKANN
-    idx_type_map = {"FLAT": "Flat", "IVF": "IVF", "HNSW": "HNSW", "DISKANN": "DiskANN"}
+    idx_type = parts[0]  # FLAT / IVF / SPANN / HNSW / DISKANN
+    idx_type_map = {
+        "FLAT": "Flat",
+        "IVF": "IVF",
+        "SPANN": "SPANN",
+        "HNSW": "HNSW",
+        "DISKANN": "DiskANN",
+    }
     idx_type = idx_type_map.get(idx_type, idx_type)
 
     # Match Rust's metric_from_mode_str: uses contains() on the full string

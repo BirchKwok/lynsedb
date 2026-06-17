@@ -156,7 +156,7 @@ print(profile)
 | --- | --- |
 | maximum recall and simple behavior | `FLAT-*` |
 | low-latency online search | `HNSW-*` |
-| explicit recall/latency tradeoff | `IVF-*` with `n_clusters` and `nprobe` |
+| explicit recall/latency tradeoff | `IVF-*` or `SPANN-*` with `n_clusters` and `nprobe` |
 | lower memory pressure from graph search | `DiskANN-*` |
 | smaller memory or disk footprint | SQ8, PQ, RaBitQ, or PolarVec variants |
 | binary vectors | Hamming or Jaccard binary indexes |
@@ -175,12 +175,13 @@ collection.build_index("HNSW-Cos")
 candidate = collection.search(query, k=20, nprobe=64)
 ```
 
-## 7. Tune IVF
+## 7. Tune IVF and SPANN
 
 Build:
 
 ```python
 collection.build_index("IVF-L2", n_clusters=256)
+collection.build_index("SPANN-L2", n_clusters=256)
 ```
 
 Search:
@@ -189,7 +190,7 @@ Search:
 result = collection.search(query, k=10, nprobe=20)
 ```
 
-IVF knobs:
+IVF/SPANN knobs:
 
 - more clusters can reduce scanned vectors per query;
 - too many clusters can hurt recall unless `nprobe` also increases;

@@ -3035,7 +3035,7 @@ async fn build_vector_field_index(
     state: web::Data<AppState>,
     body: web::Json<BuildVectorFieldIndexRequest>,
 ) -> HttpResponse {
-    let index_mode = body.index_mode.as_deref().unwrap_or("FLAT");
+    let index_mode = body.index_mode.as_deref().unwrap_or("FLAT-IP");
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
         return error_response(&e.to_string());
     }
@@ -3684,7 +3684,7 @@ async fn build_index(
     state: web::Data<AppState>,
     body: web::Json<BuildIndexRequest>,
 ) -> HttpResponse {
-    let index_mode = body.index_mode.as_deref().unwrap_or("FLAT");
+    let index_mode = body.index_mode.as_deref().unwrap_or("FLAT-IP");
     let metrics = Arc::clone(&state.metrics);
 
     let result = with_collection_mut(

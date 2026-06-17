@@ -137,6 +137,10 @@ def test_http_build_index_ignores_non_ivf_n_clusters():
     _, second_kwargs = coll._session.posts[-1]
     assert second_kwargs["json"]["n_clusters"] == 128
 
+    coll.build_index("SPANN-L2", n_clusters=64)
+    _, spann_kwargs = coll._session.posts[-1]
+    assert spann_kwargs["json"]["n_clusters"] == 64
+
     coll.build_index("HNSW-L2", field_name="image", n_clusters=128)
     uri, third_kwargs = coll._session.posts[-1]
     assert uri.endswith("/build_vector_field_index")
@@ -197,6 +201,9 @@ def test_local_build_index_ignores_non_ivf_n_clusters():
 
     coll.build_index("IVF-L2", field_name="image", n_clusters=128)
     assert rust.calls[-1] == ("IVF-L2", "image", 128)
+
+    coll.build_index("SPANN-L2", n_clusters=64)
+    assert rust.calls[-1] == ("SPANN-L2", "default", 64)
 
 
 def test_local_wire_dtype_is_accepted_without_changing_local_float32_path():

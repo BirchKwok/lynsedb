@@ -48,7 +48,7 @@ deterministic on-disk durability.
 | `POST` | `/build_vector_field_index` | `field_name`, `index_mode`, `n_clusters` | Build an index for a named vector field. |
 | `POST` | `/remove_vector_field_index` | `field_name` | Remove a named vector field index. |
 
-`n_clusters` is accepted only by IVF index modes.
+`n_clusters` is accepted only by IVF and SPANN index modes.
 
 ## Named and sparse vectors
 

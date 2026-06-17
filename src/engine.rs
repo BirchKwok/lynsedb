@@ -1918,7 +1918,7 @@ impl Collection {
             .unwrap_or_else(|| match metric {
                 DistanceMetric::L2Squared => "FLAT-L2".to_string(),
                 DistanceMetric::Cosine => "FLAT-COS".to_string(),
-                DistanceMetric::InnerProduct => "FLAT".to_string(),
+                DistanceMetric::InnerProduct => "FLAT-IP".to_string(),
                 DistanceMetric::Hamming => "FLAT-HAMMING".to_string(),
                 DistanceMetric::Jaccard => "FLAT-JACCARD".to_string(),
             });
@@ -3733,7 +3733,7 @@ impl Collection {
             index_mode: self
                 .index_mode
                 .clone()
-                .unwrap_or_else(|| "FLAT".to_string()),
+                .unwrap_or_else(|| "FLAT-IP".to_string()),
             dtypes: self.vector_dtype.storage_name().to_string(),
         }];
         let mut named: Vec<VectorFieldConfig> = self
@@ -3901,9 +3901,12 @@ impl Collection {
         let metric = Self::metric_from_mode_str(index_type);
         let index_type = Self::normalize_field_index_mode(Some(index_type), metric)?;
         let is_flat = Self::resolve_metric_from_type(&index_type).is_some();
-        if n_clusters.is_some() && !index_type.to_uppercase().starts_with("IVF") {
+        let index_upper = index_type.to_uppercase();
+        if n_clusters.is_some()
+            && !(index_upper.starts_with("IVF") || index_upper.starts_with("SPANN"))
+        {
             return Err(LynseError::InvalidArgument(
-                "n_clusters is only supported for IVF indexes".to_string(),
+                "n_clusters is only supported for IVF and SPANN indexes".to_string(),
             ));
         }
 
@@ -4004,7 +4007,7 @@ impl Collection {
                 DistanceMetric::Cosine => "FLAT-COS".to_string(),
                 DistanceMetric::Hamming => "FLAT-HAMMING".to_string(),
                 DistanceMetric::Jaccard => "FLAT-JACCARD".to_string(),
-                DistanceMetric::InnerProduct => "FLAT".to_string(),
+                DistanceMetric::InnerProduct => "FLAT-IP".to_string(),
             };
         }
 
@@ -4086,7 +4089,7 @@ impl Collection {
     /// For Flat types (Flat-IP/L2/Cos): just sets the metric. Data is already
     /// in VectorStore's mmap — search uses it directly with zero-copy.
     ///
-    /// For HNSW/IVF types: loads data from mmap and builds the index structure.
+    /// For HNSW/IVF/SPANN types: loads data from mmap and builds the index structure.
     pub fn build_index(&mut self, index_type: &str) -> Result<()> {
         self.build_index_with_options(index_type, None)
     }
@@ -4107,14 +4110,14 @@ impl Collection {
         self.polarvec_index = None;
 
         let is_flat = Self::resolve_metric_from_type(index_type).is_some();
-        if n_clusters.is_some() && !upper.starts_with("IVF") {
+        if n_clusters.is_some() && !(upper.starts_with("IVF") || upper.starts_with("SPANN")) {
             return Err(LynseError::InvalidArgument(
-                "n_clusters is only supported for IVF indexes".to_string(),
+                "n_clusters is only supported for IVF and SPANN indexes".to_string(),
             ));
         }
 
         let n_vectors = if is_flat {
-            // Flat family: clear any HNSW/IVF tree index, and remove stale graph index.bin
+            // Flat family: clear any graph/partition index, and remove stale graph index.bin
             self.index = None;
             let stale_index = self.path.join("index").join("index.bin");
             if stale_index.exists() {
@@ -4168,7 +4171,7 @@ impl Collection {
             }
             n
         } else {
-            // HNSW/IVF: need data to build
+            // Graph/partition ANN indexes need data to build.
             let guard = self.vector_store.read_mmap()?;
             let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
             let n = fm.len();
@@ -4218,11 +4221,13 @@ impl Collection {
     }
 
     /// Map an index type string to a distance metric (for Flat types).
-    /// Returns Some(metric) for Flat-family types, None for HNSW/IVF (which build a separate index).
+    /// Returns Some(metric) for Flat-family types, None for ANN structures
+    /// (HNSW/IVF/SPANN/DiskANN) which build a separate index.
     fn resolve_metric_from_type(index_type: &str) -> Option<DistanceMetric> {
         let upper = index_type.to_uppercase();
-        // Flat family: no separate index structure needed
-        if upper.starts_with("FLAT") || upper == "FLAT" {
+        // Flat family: no separate index structure needed. Bare "FLAT" is not
+        // accepted; callers must provide an explicit metric suffix.
+        if upper.starts_with("FLAT-") {
             Some(Self::metric_from_mode_str(&upper))
         } else {
             // Legacy compat
@@ -4236,7 +4241,7 @@ impl Collection {
     }
 
     /// Extract the distance metric from an index_mode string.
-    /// Supports: FLAT, FLAT-L2, FLAT-COS, FLAT-IP-SQ8, IVF-L2-SQ8, etc.
+    /// Supports: FLAT-IP, FLAT-L2, FLAT-COS, FLAT-IP-SQ8, IVF-L2-SQ8, etc.
     fn metric_from_mode_str(mode: &str) -> DistanceMetric {
         let upper = mode.to_uppercase();
         if upper.contains("JACCARD") {
@@ -4248,7 +4253,7 @@ impl Collection {
         } else if upper.contains("COS") {
             DistanceMetric::Cosine
         } else {
-            // Default: Inner Product ("FLAT", "FLAT-IP-SQ8", "IVF", etc.)
+            // Default: Inner Product ("FLAT-IP", "FLAT-IP-SQ8", "IVF-IP", etc.)
             DistanceMetric::InnerProduct
         }
     }
@@ -4264,7 +4269,7 @@ impl Collection {
     /// Search for nearest neighbors.
     ///
     /// Search path:
-    /// 1. If an HNSW/IVF index exists → use it
+    /// 1. If an HNSW/IVF/SPANN/DiskANN index exists → use it
     /// 2. Otherwise → zero-copy mmap brute-force via VectorStore's FlatMmap
     /// 3. Filtered search → brute-force with subset filtering on mmap data
     pub fn search(
@@ -4312,7 +4317,7 @@ impl Collection {
         };
 
         let (result_ids, result_dists) = if let Some(ref idx) = self.index {
-            // HNSW/IVF index path
+            // ANN structure index path
             idx.search(query, search_k, &search_params)?
         } else if let Some(ref pq) = self.pq_index {
             // PQ (Product Quantization) two-pass search
@@ -4399,7 +4404,7 @@ impl Collection {
             ids: result_ids,
             distances: result_dists,
             fields: Vec::new(),
-            index_mode: self.index_mode.clone().unwrap_or("FLAT".into()),
+            index_mode: self.index_mode.clone().unwrap_or("FLAT-IP".into()),
             dimension: dim,
             k,
         })
@@ -4950,7 +4955,7 @@ impl Collection {
                                 ids: result_ids,
                                 distances: result_dists,
                                 fields: Vec::new(),
-                                index_mode: self.index_mode.clone().unwrap_or("FLAT".into()),
+                                index_mode: self.index_mode.clone().unwrap_or("FLAT-IP".into()),
                                 dimension: dim,
                                 k,
                             }
@@ -5051,7 +5056,7 @@ impl Collection {
                     ids: result_ids,
                     distances: result_dists,
                     fields: Vec::new(),
-                    index_mode: self.index_mode.clone().unwrap_or("FLAT".into()),
+                    index_mode: self.index_mode.clone().unwrap_or("FLAT-IP".into()),
                     dimension: dim,
                     k,
                 })
@@ -5637,7 +5642,8 @@ impl Collection {
     /// Only rebuilds if the storage fingerprint has changed.
     ///
     /// Note: For Flat types, no sync is needed — VectorStore's mmap is always
-    /// up-to-date (re-mmap'd after every write). Sync only applies to HNSW/IVF.
+    /// up-to-date (re-mmap'd after every write). Sync only applies to
+    /// separate ANN structures such as HNSW/IVF/SPANN/DiskANN.
     pub fn sync_index(&mut self) -> Result<()> {
         self.ensure_writable()?;
         if !self.needs_index_sync() {
@@ -8547,7 +8553,7 @@ mod tests {
             )
             .unwrap();
             coll.commit().unwrap();
-            coll.build_index("HNSW").unwrap();
+            coll.build_index("HNSW-IP").unwrap();
 
             let meta_path = tmp
                 .path()
@@ -8567,7 +8573,7 @@ mod tests {
         }
 
         let coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
-        assert_eq!(coll.get_index_mode(), Some("HNSW"));
+        assert_eq!(coll.get_index_mode(), Some("HNSW-IP"));
         let result = coll
             .search(&[0.0, 1.0, 0.0, 0.0], 1, None, 10, false, 1e-4)
             .unwrap();

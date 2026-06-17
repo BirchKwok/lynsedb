@@ -141,7 +141,7 @@ The metric describes how similarity is measured:
 
 | Metric | Common index suffix | Meaning | Result ordering |
 | --- | --- | --- | --- |
-| Inner product | `FLAT`, `HNSW`, `IVF`, `DiskANN` | Larger score is better. | descending score |
+| Inner product | `-IP` | Larger score is better. | descending score |
 | Squared L2 | `-L2` | Smaller distance is better. | ascending distance |
 | Cosine | `-COS` or `-Cos` | Larger similarity is better. | descending score |
 | Hamming | `-HAMMING-BINARY` | Smaller binary distance is better. | ascending distance |

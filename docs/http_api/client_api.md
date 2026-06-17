@@ -66,7 +66,7 @@ The remote `Collection` class mirrors the local collection API:
 
 The HTTP Python client uses the same explicit method signatures and parameter
 ignore rules as the local client. For example, `build_index(...,
-n_clusters=...)` uses `n_clusters` only for IVF indexes, and `search(...,
+n_clusters=...)` uses `n_clusters` only for IVF and SPANN indexes, and `search(...,
 nprobe=..., approx=..., eps=...)` ignores parameters that do not apply to the
 active index or metric.
 

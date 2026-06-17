@@ -93,7 +93,7 @@ print(result.to_list())
   search, standard SQL-style filters, BM25 search, hybrid search, and reranking.
 - Use [Indexing guide](tutorials/indexing.md) and
   [Performance tuning](tutorials/performance_tuning.md) to choose between flat,
-  HNSW, IVF, DiskANN, and quantized indexes.
+  HNSW, IVF, SPANN, DiskANN, and quantized indexes with explicit metric suffixes.
 - Use [Build a RAG workflow](tutorials/rag_workflow.md) for an end-to-end
   retrieval example.
 

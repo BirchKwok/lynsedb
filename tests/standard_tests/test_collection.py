@@ -284,7 +284,7 @@ class TestUpdateDescription:
 
 class TestIndexBuildRemove:
     def test_build_index_flat(self, populated_collection):
-        populated_collection.build_index("FLAT")
+        populated_collection.build_index("FLAT-IP")
         assert "FLAT" in populated_collection.index_mode.upper()
 
     def test_build_index_flat_l2(self, populated_collection):
@@ -296,26 +296,39 @@ class TestIndexBuildRemove:
         assert populated_collection.index_mode is not None
 
     def test_remove_index(self, populated_collection):
-        populated_collection.build_index("FLAT")
+        populated_collection.build_index("FLAT-IP")
         populated_collection.remove_index()
 
     def test_build_hnsw(self, populated_collection):
-        populated_collection.build_index("HNSW")
+        populated_collection.build_index("HNSW-IP")
         assert "HNSW" in populated_collection.index_mode.upper()
 
     def test_build_hnsw_l2(self, populated_collection):
         populated_collection.build_index("HNSW-L2")
 
     def test_build_ivf(self, populated_collection):
-        populated_collection.build_index("IVF", n_clusters=4)
+        populated_collection.build_index("IVF-IP", n_clusters=4)
         assert "IVF" in populated_collection.index_mode.upper()
 
     def test_build_ivf_l2(self, populated_collection):
         populated_collection.build_index("IVF-L2", n_clusters=4)
 
+    def test_build_spann(self, populated_collection):
+        populated_collection.build_index("SPANN-IP", n_clusters=4)
+        assert "SPANN" in populated_collection.index_mode.upper()
+
+    def test_build_spann_l2(self, populated_collection):
+        populated_collection.build_index("SPANN-L2", n_clusters=4)
+        assert "SPANN" in populated_collection.index_mode.upper()
+
     def test_n_clusters_is_ignored_for_non_ivf_index(self, populated_collection):
-        populated_collection.build_index("HNSW", n_clusters=4)
+        populated_collection.build_index("HNSW-IP", n_clusters=4)
         assert "HNSW" in populated_collection.index_mode.upper()
+
+    def test_bare_index_family_names_are_rejected(self, populated_collection):
+        for index_mode in ["FLAT", "HNSW", "IVF", "SPANN", "DiskANN"]:
+            with pytest.raises(Exception):
+                populated_collection.build_index(index_mode)
 
 
 class TestSoftDelete:

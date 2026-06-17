@@ -427,7 +427,7 @@ class Collection:
 
                 **Flat (brute-force):**
 
-                - 'FLAT': Flat index with inner product. (Default)
+                - 'FLAT-IP': Flat index with inner product. (Default)
                 - 'Flat-L2': Flat index with squared L2 distance.
                 - 'Flat-Cos': Flat index with cosine similarity.
                 - 'Flat-IP-SQ8': Flat index with inner product and SQ8 quantizer.
@@ -453,7 +453,7 @@ class Collection:
 
                 **HNSW (graph-based ANN):**
 
-                - 'HNSW': HNSW index with inner product.
+                - 'HNSW-IP': HNSW index with inner product.
                 - 'HNSW-L2': HNSW index with squared L2 distance.
                 - 'HNSW-Cos': HNSW index with cosine similarity.
                 - 'HNSW-IP-SQ8': HNSW index with inner product and SQ8 quantizer.
@@ -462,16 +462,25 @@ class Collection:
 
                 **DiskANN (disk-friendly graph ANN):**
 
-                - 'DiskANN': DiskANN index with inner product.
+                - 'DiskANN-IP': DiskANN index with inner product.
                 - 'DiskANN-L2': DiskANN index with squared L2 distance.
                 - 'DiskANN-Cos': DiskANN index with cosine similarity.
                 - 'DiskANN-IP-SQ8': DiskANN index with inner product and SQ8 quantizer.
                 - 'DiskANN-L2-SQ8': DiskANN index with squared L2 distance and SQ8 quantizer.
                 - 'DiskANN-Cos-SQ8': DiskANN index with cosine similarity and SQ8 quantizer.
 
+                **SPANN (space-partition ANN):**
+
+                - 'SPANN-IP': SPANN index with inner product.
+                - 'SPANN-L2': SPANN index with squared L2 distance.
+                - 'SPANN-Cos': SPANN index with cosine similarity.
+                - 'SPANN-IP-SQ8': SPANN index with inner product and SQ8 quantizer.
+                - 'SPANN-L2-SQ8': SPANN index with squared L2 distance and SQ8 quantizer.
+                - 'SPANN-Cos-SQ8': SPANN index with cosine similarity and SQ8 quantizer.
+
                 **IVF (inverted file ANN):**
 
-                - 'IVF': IVF index with inner product.
+                - 'IVF-IP': IVF index with inner product.
                 - 'IVF-L2': IVF index with squared L2 distance.
                 - 'IVF-Cos': IVF index with cosine similarity.
                 - 'IVF-IP-SQ8': IVF index with inner product and SQ8 quantizer.
@@ -482,10 +491,14 @@ class Collection:
 
             field_name (str): Named vector field to build index for.
                 Defaults to "default" (the primary collection vector).
-            n_clusters (int, optional): Number of clusters. Only IVF modes use
-                it; other index modes silently ignore it.
+            n_clusters (int, optional): Number of clusters. IVF and SPANN modes
+                use it; other index modes silently ignore it.
         """
-        effective_n_clusters = n_clusters if index_mode.upper().startswith("IVF") else None
+        effective_n_clusters = (
+            n_clusters
+            if index_mode.upper().startswith(("IVF", "SPANN"))
+            else None
+        )
 
         if field_name == "default":
             self._inner.build_index(index_mode, effective_n_clusters)
@@ -559,7 +572,7 @@ class Collection:
             field_name: named vector field to search. Defaults to "default"
                 (the primary collection vector).
             nprobe: controls search breadth by index type (default: 10).
-                - **IVF**: number of partitions to probe — higher = better recall, slower.
+                - **IVF / SPANN**: number of partitions to probe — higher = better recall, slower.
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
                 - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).
             approx: if True, use metric-specific flat approximation for IP, L2,
@@ -677,7 +690,7 @@ class Collection:
             k: number of results per query.
             where: optional SQL-like filter.
             nprobe: controls search breadth by index type (default: 10).
-                - **IVF**: number of partitions to probe — higher = better recall, slower.
+                - **IVF / SPANN**: number of partitions to probe — higher = better recall, slower.
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
                 - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).
 
@@ -881,4 +894,3 @@ class Collection:
 
     def export_to(self, export_path: str) -> None:
         self._inner.export_to(export_path)
-

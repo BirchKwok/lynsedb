@@ -81,7 +81,7 @@ WAL state.
 
 | Method | Description |
 | --- | --- |
-| `build_index(index_mode="FLAT", field_name="default", n_clusters=None)` | Build or change an index. IVF uses `n_clusters`; other index modes ignore it. |
+| `build_index(index_mode="FLAT-IP", field_name="default", n_clusters=None)` | Build or change an index. IVF and SPANN use `n_clusters`; other index modes ignore it. |
 | `remove_index(field_name="default")` | Remove the primary or named-field index. |
 | `create_vector_field(name, dim, metric="ip", index_mode=None)` | Create a named vector field. |
 | `list_vector_fields()` | List `default` and named vector fields. |
@@ -106,10 +106,10 @@ Parameter behavior is the same for local and HTTP Python clients:
   after the first primary vector write so collections with inferred dimensions
   can still be created without specifying `dim`, and the default inner-product
   metric is explicit.
-- `n_clusters` is used only by IVF index modes. Passing it to Flat, PQ, RaBitQ,
-  PolarVec, HNSW, or DiskANN modes is allowed and ignored.
-- `nprobe` controls IVF partitions and HNSW search breadth. Flat, PQ, RaBitQ,
-  PolarVec, and named vector-field searches ignore it.
+- `n_clusters` is used only by IVF and SPANN index modes. Passing it to Flat,
+  PQ, RaBitQ, PolarVec, HNSW, or DiskANN modes is allowed and ignored.
+- `nprobe` controls IVF/SPANN partitions and HNSW search breadth. Flat, PQ,
+  RaBitQ, PolarVec, and named vector-field searches ignore it.
 - `approx` and `eps` apply only to supported flat IP, L2, and cosine paths.
   Hamming/Jaccard metrics and non-approximate paths ignore them.
 

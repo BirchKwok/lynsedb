@@ -400,7 +400,7 @@ impl PyCollection {
     ///     vector: query vector (1D numpy array)
     ///     k: number of results
     ///     where: optional SQL-like filter string
-    ///     nprobe: number of IVF probes (default 10)
+    ///     nprobe: number of IVF/SPANN probes or HNSW search breadth (default 10)
     ///     approx: flat-search approximation for IP/L2/Cosine only; ignored for Hamming/Jaccard
     ///     eps: distance rounding tolerance when approx applies
     ///
@@ -615,7 +615,7 @@ impl PyCollection {
     ///     vectors: numpy array of shape (n_queries, dim) with dtype float32
     ///     k: number of results per query
     ///     where: optional SQL-like filter string
-    ///     nprobe: number of IVF probes (default 10)
+    ///     nprobe: number of IVF/SPANN probes or HNSW search breadth (default 10)
     ///
     /// Returns:
     ///     list of PySearchResult, one per query

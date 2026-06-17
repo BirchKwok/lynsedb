@@ -1,13 +1,14 @@
 //! Vector index module.
 //!
-//! Implements: Flat, IVF, HNSW, DiskANN indices with multiple distance metrics
-//! and quantization support. Designed for billion-scale datasets.
+//! Implements: Flat, IVF, SPANN, HNSW, DiskANN indices with multiple distance
+//! metrics and quantization support. Designed for billion-scale datasets.
 
 pub mod diskann;
 pub mod flat;
 pub mod hnsw;
 pub mod ivf;
 pub(crate) mod kmeans;
+pub mod spann;
 
 use crate::distance::DistanceMetric;
 use crate::error::{LynseError, Result};
@@ -31,6 +32,7 @@ pub enum IndexType {
     HNSW,
     DiskANN,
     IVF,
+    SPANN,
 }
 
 /// Index-specific parameters.
@@ -52,6 +54,11 @@ pub enum IndexParams {
     IVF {
         n_centroids: usize,
         nprobe: usize,
+    },
+    SPANN {
+        n_centroids: usize,
+        nprobe: usize,
+        replica_count: usize,
     },
 }
 
@@ -115,7 +122,7 @@ pub trait VectorIndex: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct SearchParams {
     pub k: usize,
-    pub nprobe: usize,                    // for IVF
+    pub nprobe: usize,                    // for IVF/SPANN
     pub ef_search: Option<usize>,         // for HNSW
     pub subset_indices: Option<Vec<u64>>, // filter IDs
 }
@@ -137,7 +144,7 @@ pub fn resolve_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, Qua
     let u = alias.to_uppercase();
     match u.as_str() {
         // ── Flat ────────────────────────────────────────────────────────────
-        "FLAT" | "FLAT-IP" => Some((
+        "FLAT-IP" => Some((
             IndexType::Flat,
             DistanceMetric::InnerProduct,
             QuantizerType::None,
@@ -177,7 +184,7 @@ pub fn resolve_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, Qua
         )),
 
         // ── HNSW ────────────────────────────────────────────────────────────
-        "HNSW" | "HNSW-IP" => Some((
+        "HNSW-IP" => Some((
             IndexType::HNSW,
             DistanceMetric::InnerProduct,
             QuantizerType::None,
@@ -207,7 +214,7 @@ pub fn resolve_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, Qua
         )),
 
         // ── DiskANN ─────────────────────────────────────────────────────────
-        "DISKANN" | "DISKANN-IP" => Some((
+        "DISKANN-IP" => Some((
             IndexType::DiskANN,
             DistanceMetric::InnerProduct,
             QuantizerType::None,
@@ -239,7 +246,7 @@ pub fn resolve_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, Qua
         )),
 
         // ── IVF ─────────────────────────────────────────────────────────────
-        "IVF" | "IVF-IP" => Some((
+        "IVF-IP" => Some((
             IndexType::IVF,
             DistanceMetric::InnerProduct,
             QuantizerType::None,
@@ -278,6 +285,38 @@ pub fn resolve_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, Qua
             QuantizerType::Binary,
         )),
 
+        // ── SPANN ───────────────────────────────────────────────────────────
+        "SPANN-IP" => Some((
+            IndexType::SPANN,
+            DistanceMetric::InnerProduct,
+            QuantizerType::None,
+        )),
+        "SPANN-L2" => Some((
+            IndexType::SPANN,
+            DistanceMetric::L2Squared,
+            QuantizerType::None,
+        )),
+        "SPANN-COS" | "SPANN-COSINE" => Some((
+            IndexType::SPANN,
+            DistanceMetric::Cosine,
+            QuantizerType::None,
+        )),
+        "SPANN-IP-SQ8" => Some((
+            IndexType::SPANN,
+            DistanceMetric::InnerProduct,
+            QuantizerType::Scalar,
+        )),
+        "SPANN-L2-SQ8" => Some((
+            IndexType::SPANN,
+            DistanceMetric::L2Squared,
+            QuantizerType::Scalar,
+        )),
+        "SPANN-COS-SQ8" | "SPANN-COSINE-SQ8" => Some((
+            IndexType::SPANN,
+            DistanceMetric::Cosine,
+            QuantizerType::Scalar,
+        )),
+
         _ => None,
     }
 }
@@ -299,9 +338,9 @@ pub fn create_index_with_options(
             "n_clusters must be greater than 0".to_string(),
         ));
     }
-    if n_centroids.is_some() && index_type != IndexType::IVF {
+    if n_centroids.is_some() && !matches!(index_type, IndexType::IVF | IndexType::SPANN) {
         return Err(LynseError::InvalidArgument(
-            "n_clusters is only supported for IVF indexes".to_string(),
+            "n_clusters is only supported for IVF and SPANN indexes".to_string(),
         ));
     }
 
@@ -325,5 +364,54 @@ pub fn create_index_with_options(
             n_centroids.unwrap_or(256),
             32, // nprobe
         ))),
+        IndexType::SPANN => Ok(Box::new(spann::SPANNIndex::new(
+            metric,
+            quant,
+            n_centroids.unwrap_or(256),
+            32, // nprobe
+            spann::DEFAULT_REPLICA_COUNT,
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_spann_aliases() {
+        assert_eq!(
+            resolve_index_type("SPANN-L2").unwrap(),
+            (
+                IndexType::SPANN,
+                DistanceMetric::L2Squared,
+                QuantizerType::None
+            )
+        );
+        assert_eq!(
+            resolve_index_type("SPANN-COS-SQ8").unwrap(),
+            (
+                IndexType::SPANN,
+                DistanceMetric::Cosine,
+                QuantizerType::Scalar
+            )
+        );
+    }
+
+    #[test]
+    fn spann_accepts_n_clusters() {
+        let idx = create_index_with_options("SPANN-L2", Some(8)).unwrap();
+        assert_eq!(idx.config().index_type, IndexType::SPANN);
+    }
+
+    #[test]
+    fn bare_index_family_names_are_rejected() {
+        for alias in ["FLAT", "HNSW", "DISKANN", "IVF", "SPANN"] {
+            assert!(
+                resolve_index_type(alias).is_none(),
+                "{alias} should require an explicit metric suffix"
+            );
+            assert!(create_index(alias).is_err());
+        }
     }
 }

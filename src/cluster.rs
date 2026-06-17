@@ -320,7 +320,7 @@ fn normalize_uri(uri: &str) -> String {
 }
 
 pub fn is_ascending_index(index_mode: Option<&str>) -> bool {
-    let upper = index_mode.unwrap_or("FLAT").to_ascii_uppercase();
+    let upper = index_mode.unwrap_or("FLAT-IP").to_ascii_uppercase();
     ["L2", "COS", "HAMMING", "JACCARD"]
         .iter()
         .any(|token| upper.contains(token))

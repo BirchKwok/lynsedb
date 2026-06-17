@@ -260,7 +260,7 @@ before using cluster mode in production.
 
 ## Retrieval Features
 
-- Dense vector search with flat, HNSW, IVF, DiskANN, and quantized index
+- Dense vector search with flat, HNSW, IVF, SPANN, DiskANN, and quantized index
   families.
 - SQL-style metadata filtering through `where` expressions.
 - BM25 search over metadata fields for exact and lexical recall.
@@ -283,12 +283,13 @@ collection = db.require_collection("docs", dim=384, default_index="FLAT-COS")
 ```
 
 Call `build_index()` when you want to rebuild or switch index modes. Move to
-HNSW or IVF when latency matters, DiskANN when memory pressure matters, and
-quantized variants when you want a smaller memory or disk footprint:
+HNSW, IVF, or SPANN when latency matters, DiskANN when memory pressure matters,
+and quantized variants when you want a smaller memory or disk footprint:
 
 ```python
 collection.build_index("HNSW-L2")
 collection.build_index("IVF-L2", n_clusters=256)
+collection.build_index("SPANN-L2", n_clusters=256)
 collection.build_index("DiskANN-L2")
 collection.build_index("FLAT-IP-SQ8")
 collection.build_index("FLAT-L2-PQ")

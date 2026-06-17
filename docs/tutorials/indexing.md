@@ -18,10 +18,10 @@ A practical first decision:
 
 | Collection size and goal | Start with |
 | --- | --- |
-| development, tests, evaluation | `FLAT-L2`, `FLAT-COS`, or `FLAT` |
-| low-latency online ANN | `HNSW-L2`, `HNSW-Cos`, or `HNSW` |
-| large collections with explicit probe tuning | `IVF-L2`, `IVF-COS`, or `IVF` |
-| memory pressure from graph indexes | `DiskANN-L2`, `DiskANN-Cos`, or `DiskANN` |
+| development, tests, evaluation | `FLAT-IP`, `FLAT-L2`, or `FLAT-COS` |
+| low-latency online ANN | `HNSW-IP`, `HNSW-L2`, or `HNSW-Cos` |
+| large collections with explicit probe tuning | `IVF-L2`, `SPANN-L2`, `IVF-COS`, or `SPANN-COS` |
+| memory pressure from graph indexes | `DiskANN-IP`, `DiskANN-L2`, or `DiskANN-Cos` |
 | lower memory or disk footprint | SQ8, PQ, RaBitQ, or PolarVec variants |
 | binary vectors | `FLAT-HAMMING-BINARY`, `FLAT-JACCARD-BINARY`, or IVF binary variants |
 
@@ -29,7 +29,7 @@ A practical first decision:
 
 | Index suffix | Metric | Best for |
 | --- | --- | --- |
-| `FLAT`, `HNSW`, `IVF`, `DiskANN` | Inner product | normalized embeddings, maximum-score retrieval |
+| `*-IP` | Inner product | normalized embeddings, maximum-score retrieval |
 | `-L2` | Squared L2 distance | Euclidean-distance embeddings |
 | `-COS` or `-Cos` | Cosine similarity | embeddings where angular similarity matters |
 | `-HAMMING-BINARY` | Hamming distance | binary vectors |
@@ -52,6 +52,7 @@ Metric guidance:
 | Flat | `FLAT-L2` | highest recall and simplest behavior | Latency grows with collection size. |
 | HNSW | `HNSW-L2` | low-latency ANN | Use `nprobe` as search breadth (`ef_search`). |
 | IVF | `IVF-L2` | large collections with tunable probes | Requires `n_clusters`; use `nprobe` at search time. |
+| SPANN | `SPANN-L2` | partition ANN with boundary replicas | Requires `n_clusters`; use `nprobe` at search time. |
 | DiskANN | `DiskANN-L2` | disk-friendly graph ANN | Useful when memory pressure matters. |
 | Quantized flat | `FLAT-IP-SQ8`, `FLAT-L2-PQ`, `FLAT-IP-RABITQ` | lower memory footprint | Some variants use two-pass search to preserve quality. |
 
@@ -95,20 +96,21 @@ print(collection.index_mode)
 
 Removing an index returns the collection to flat search.
 
-## IVF parameters
+## IVF and SPANN parameters
 
-IVF splits vectors into coarse clusters. `n_clusters` controls how many clusters
-are built.
+IVF and SPANN split vectors into coarse clusters. `n_clusters` controls how many
+clusters are built.
 
 ```python
 collection.build_index("IVF-L2", n_clusters=256)
+collection.build_index("SPANN-L2", n_clusters=256)
 ```
 
 Rules:
 
-- `n_clusters` is used only for IVF indexes.
-- For non-IVF indexes, `n_clusters` is allowed and ignored by the Python API.
-- For IVF indexes, `n_clusters` must be greater than zero.
+- `n_clusters` is used only for IVF and SPANN indexes.
+- For indexes other than IVF/SPANN, `n_clusters` is allowed and ignored by the Python API.
+- For IVF and SPANN indexes, `n_clusters` must be greater than zero.
 - More clusters usually reduce scanned vectors per query but can require higher
   `nprobe` for recall.
 
@@ -118,8 +120,8 @@ Search with:
 result = collection.search(query, k=10, nprobe=20)
 ```
 
-For IVF, `nprobe` is the number of clusters to scan. Higher values improve
-recall and increase latency.
+For IVF and SPANN, `nprobe` is the number of clusters to scan. Higher values
+improve recall and increase latency.
 
 Starting values:
 
@@ -246,7 +248,6 @@ spellings accepted by `build_index()`.
 Dense indexes:
 
 ```python
-collection.build_index("FLAT")
 collection.build_index("FLAT-IP")
 collection.build_index("FLAT-L2")
 collection.build_index("FLAT-COS")
@@ -256,7 +257,6 @@ collection.build_index("FLAT-L2-SQ8")
 collection.build_index("FLAT-COS-SQ8")
 collection.build_index("FLAT-COSINE-SQ8")
 
-collection.build_index("HNSW")
 collection.build_index("HNSW-IP")
 collection.build_index("HNSW-L2")
 collection.build_index("HNSW-COS")
@@ -266,7 +266,6 @@ collection.build_index("HNSW-L2-SQ8")
 collection.build_index("HNSW-COS-SQ8")
 collection.build_index("HNSW-COSINE-SQ8")
 
-collection.build_index("DiskANN")
 collection.build_index("DiskANN-IP")
 collection.build_index("DiskANN-L2")
 collection.build_index("DiskANN-COS")
@@ -276,7 +275,6 @@ collection.build_index("DiskANN-L2-SQ8")
 collection.build_index("DiskANN-COS-SQ8")
 collection.build_index("DiskANN-COSINE-SQ8")
 
-collection.build_index("IVF", n_clusters=256)
 collection.build_index("IVF-IP", n_clusters=256)
 collection.build_index("IVF-L2", n_clusters=256)
 collection.build_index("IVF-COS", n_clusters=256)

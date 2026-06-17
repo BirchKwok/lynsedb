@@ -336,7 +336,7 @@ collection.add_named_vectors(
     np.array([[0.8, 0.2], [0.7, 0.3], [0.1, 0.9]], dtype=np.float32),
     ids=[1, 2, 3],
 )
-collection.build_index("FLAT", field_name="title_embedding")
+collection.build_index("FLAT-IP", field_name="title_embedding")
 collection.commit()
 
 title_result = collection.search(

@@ -645,7 +645,7 @@ class LocalCollection:
 
     def build_index(
             self,
-            index_mode: str = 'FLAT',
+            index_mode: str = 'FLAT-IP',
             field_name: str = 'default',
             n_clusters: Union[int, None] = None,
     ):
@@ -657,7 +657,7 @@ class LocalCollection:
 
                 **Flat (brute-force):**
 
-                - 'FLAT': Flat index with inner product. (Default)
+                - 'FLAT-IP': Flat index with inner product. (Default)
                 - 'FLAT-L2': Flat index with squared L2 distance.
                 - 'FLAT-COS': Flat index with cosine similarity.
                 - 'FLAT-IP-SQ8': Flat index with inner product and SQ8 quantizer.
@@ -692,7 +692,7 @@ class LocalCollection:
 
                 **HNSW (graph-based ANN):**
 
-                - 'HNSW': HNSW index with inner product.
+                - 'HNSW-IP': HNSW index with inner product.
                 - 'HNSW-L2': HNSW index with squared L2 distance.
                 - 'HNSW-Cos': HNSW index with cosine similarity.
                 - 'HNSW-IP-SQ8': HNSW index with inner product and SQ8 quantizer.
@@ -701,16 +701,25 @@ class LocalCollection:
 
                 **DiskANN (disk-friendly graph ANN):**
 
-                - 'DiskANN': DiskANN index with inner product.
+                - 'DiskANN-IP': DiskANN index with inner product.
                 - 'DiskANN-L2': DiskANN index with squared L2 distance.
                 - 'DiskANN-Cos': DiskANN index with cosine similarity.
                 - 'DiskANN-IP-SQ8': DiskANN index with inner product and SQ8 quantizer.
                 - 'DiskANN-L2-SQ8': DiskANN index with squared L2 distance and SQ8 quantizer.
                 - 'DiskANN-Cos-SQ8': DiskANN index with cosine similarity and SQ8 quantizer.
 
+                **SPANN (space-partition ANN):**
+
+                - 'SPANN-IP': SPANN index with inner product.
+                - 'SPANN-L2': SPANN index with squared L2 distance.
+                - 'SPANN-COS': SPANN index with cosine similarity.
+                - 'SPANN-IP-SQ8': SPANN index with inner product and SQ8 quantizer.
+                - 'SPANN-L2-SQ8': SPANN index with squared L2 distance and SQ8 quantizer.
+                - 'SPANN-COS-SQ8': SPANN index with cosine similarity and SQ8 quantizer.
+
                 **IVF (inverted file ANN):**
 
-                - 'IVF': IVF index with inner product.
+                - 'IVF-IP': IVF index with inner product.
                 - 'IVF-L2': IVF index with squared L2 distance.
                 - 'IVF-COS': IVF index with cosine similarity.
                 - 'IVF-IP-SQ8': IVF index with inner product and SQ8 quantizer.
@@ -720,13 +729,17 @@ class LocalCollection:
                 - 'IVF-HAMMING-BINARY': IVF index with Hamming distance (binary vectors).
             field_name (str): Named vector field to build index for.
                 Defaults to "default" (the primary collection vector).
-            n_clusters (int, optional): The number of clusters. Only IVF modes
-                use it; other index modes silently ignore it.
+            n_clusters (int, optional): The number of clusters. IVF and SPANN
+                modes use it; other index modes silently ignore it.
 
         Returns:
             dict: Status message.
         """
-        effective_n_clusters = n_clusters if index_mode.upper().startswith("IVF") else None
+        effective_n_clusters = (
+            n_clusters
+            if index_mode.upper().startswith(("IVF", "SPANN"))
+            else None
+        )
         self._rust_coll.build_index(
             index_mode,
             field_name=field_name,
@@ -832,7 +845,7 @@ class LocalCollection:
             rerank_with_fields (bool): Fetch candidate fields for reranker payload
                 even when ``return_fields=False``.
             nprobe (int): Controls search breadth by index type (default: 10).
-                - **IVF**: number of partitions to probe; higher improves recall and increases latency.
+                - **IVF / SPANN**: number of partitions to probe; higher improves recall and increases latency.
                 - **HNSW**: ef_search beam width; higher improves recall and increases latency.
                 - **Flat / PQ / RaBitQ / PolarVec**: ignored.
                 - Named vector fields: ignored.
@@ -1062,7 +1075,7 @@ class LocalCollection:
             where (str, optional): SQL/WHERE expression string to filter results.
             return_fields (bool): Whether to return the fields.
             nprobe (int): Controls search breadth by index type (default: 10).
-                - **IVF**: number of partitions to probe — higher = better recall, slower.
+                - **IVF / SPANN**: number of partitions to probe — higher = better recall, slower.
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
                 - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).
             reranker (callable, optional): External rerank hook, applied per-query.
