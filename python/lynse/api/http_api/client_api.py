@@ -220,6 +220,8 @@ class HTTPClient:
 
             response = self._session.post(uri, json=data)
             if response.status_code == 200:
+                payload = response.json()
+                config = payload.get("params", {}).get("config", {})
                 collection = Collection(
                     uri=self.uri,
                     database_name=self.database_name,
@@ -232,6 +234,7 @@ class HTTPClient:
                     dtypes=dtypes,
                     api_key=self._api_key,
                     default_index=default_index if not existed_before else None,
+                    integer_id_routing=config.get("integer_id_routing"),
                 )
                 return collection
             else:
@@ -274,6 +277,7 @@ class HTTPClient:
                 dtypes=config.get('dtypes', 'float32'),
                 warm_up=warm_up,
                 api_key=self._api_key,
+                integer_id_routing=config.get('integer_id_routing'),
             )
         else:
             raise_error_response(response)
@@ -598,6 +602,7 @@ class Collection:
             api_key: Union[str, None] = None,
             dtypes: str = "float32",
             default_index: Union[str, None] = None,
+            integer_id_routing: Union[str, None] = None,
     ):
         """
         Initialize the collection.
@@ -651,6 +656,9 @@ class Collection:
             self._cluster_mode = response.status_code == 200
         except Exception:
             self._cluster_mode = False
+        self._integer_id_routing = integer_id_routing
+        self._binary_integer_id_safe = self._cluster_mode and integer_id_routing == "internal"
+        self._index_mode_cache = None
 
     def __enter__(self):
         return self
@@ -680,6 +688,43 @@ class Collection:
     @property
     def vector_dtype(self) -> str:
         return self._init_params.get('dtypes', 'float32')
+
+    @staticmethod
+    def _all_non_negative_int_ids(ids) -> bool:
+        return all(isinstance(item_id, int) and not isinstance(item_id, bool) and item_id >= 0 for item_id in ids)
+
+    def _can_write_cluster_binary_integer_ids(self, ids) -> bool:
+        if not self._cluster_mode or not self._all_non_negative_int_ids(ids):
+            return False
+        if self._integer_id_routing == "external":
+            return False
+        if self._binary_integer_id_safe:
+            return True
+        try:
+            return int(self.shape[0]) == 0
+        except Exception:
+            return False
+
+    def _can_read_cluster_binary_integer_ids(self) -> bool:
+        return self._cluster_mode and self._binary_integer_id_safe
+
+    def _can_read_binary_integer_ids(self) -> bool:
+        return self._binary_integer_id_safe
+
+    def _result_index_mode(self, vector_field: str = "default") -> str:
+        if vector_field == "default":
+            if self._index_mode_cache is None:
+                self._index_mode_cache = self.index_mode
+            return self._index_mode_cache
+        vector_fields = self.list_vector_fields()
+        return next(
+            (
+                field.get("index_mode")
+                for field in vector_fields
+                if field.get("name") == vector_field
+            ),
+            "FLAT",
+        )
 
     def exists(self):
         """
@@ -728,6 +773,18 @@ class Collection:
             n_total, dim = vectors.shape
             start_id = int(self.max_id) + 1
             generated_ids = list(range(start_id, start_id + n_total))
+            use_bulk_binary = (
+                not self._cluster_mode
+                or self._binary_integer_id_safe
+                or start_id == 0
+            )
+            if not use_bulk_binary:
+                return self.add(
+                    ids=generated_ids,
+                    vectors=vectors,
+                    batch_size=batch_size,
+                    wire_dtype=wire_dtype,
+                )
             vector_encoding = _normalize_vector_encoding(wire_dtype)
             total_batches = (n_total + batch_size - 1) // batch_size
 
@@ -756,10 +813,12 @@ class Collection:
                 else:
                     raise_error_response(response)
 
+            if self._cluster_mode or self._binary_integer_id_safe or start_id == 0:
+                self._integer_id_routing = "internal"
+                self._binary_integer_id_safe = True
             self._maybe_build_default_index()
             return generated_ids[0] if n_total == 1 else generated_ids
 
-        del wire_dtype  # JSON HTTP add sends float32-compatible lists.
         external_ids, single_id = normalize_external_ids(ids)
         n_records = len(external_ids)
         validate_unique_external_ids(external_ids)
@@ -777,6 +836,38 @@ class Collection:
             vec_array = normalize_vectors(vectors, n_records)
 
         field_list = attach_documents(normalize_fields(fields, n_records), docs)
+        if self._can_write_cluster_binary_integer_ids(external_ids):
+            returned_ids = []
+            with self._lock:
+                for start in range(0, n_records, batch_size):
+                    end = min(start + batch_size, n_records)
+                    items = [
+                        (vec_array[idx], external_ids[idx], field_list[idx])
+                        for idx in range(start, end)
+                    ]
+                    payload, n_vectors, dim, batch_ids, id_params = self._prepare_binary_items(
+                        items,
+                        upsert=False,
+                        wire_dtype=wire_dtype,
+                    )
+                    response = self._post_binary_items(
+                        "add_binary_ids",
+                        payload,
+                        n_vectors,
+                        dim,
+                        id_params,
+                    )
+                    if response.status_code == 200:
+                        self.COMMIT_FLAG = False
+                        self._set_dim_if_known(dim)
+                        returned_ids.extend(batch_ids)
+                    else:
+                        raise_error_response(response)
+            self._binary_integer_id_safe = True
+            self._integer_id_routing = "internal"
+            self._maybe_build_default_index()
+            return returned_ids[0] if single_id else returned_ids
+
         uri = f'{self._uri}/add'
         added_ids = []
 
@@ -798,6 +889,9 @@ class Collection:
                 else:
                     raise_error_response(response)
 
+        if any(isinstance(item_id, int) and not isinstance(item_id, bool) for item_id in external_ids):
+            self._integer_id_routing = "external"
+        self._binary_integer_id_safe = False
         self._maybe_build_default_index()
         return added_ids[0] if single_id else added_ids
 
@@ -888,7 +982,6 @@ class Collection:
             wire_dtype: str = "float32",
     ):
         """Insert or update one or more records by public ID."""
-        del wire_dtype  # JSON HTTP upsert sends float32-compatible lists.
         external_ids, single_id = normalize_external_ids(ids)
         n_records = len(external_ids)
         validate_unique_external_ids(external_ids)
@@ -896,6 +989,44 @@ class Collection:
         field_list = normalize_fields(fields, n_records) if fields is not None else None
         if not isinstance(batch_size, int) or batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
+
+        if self._can_write_cluster_binary_integer_ids(external_ids):
+            returned_ids = []
+            with self._lock:
+                for start in range(0, n_records, batch_size):
+                    end = min(start + batch_size, n_records)
+                    if field_list is None:
+                        items = [
+                            (vec_array[idx], external_ids[idx])
+                            for idx in range(start, end)
+                        ]
+                    else:
+                        items = [
+                            (vec_array[idx], external_ids[idx], field_list[idx])
+                            for idx in range(start, end)
+                        ]
+                    payload, n_vectors, dim, batch_ids, id_params = self._prepare_binary_items(
+                        items,
+                        upsert=True,
+                        wire_dtype=wire_dtype,
+                    )
+                    response = self._post_binary_items(
+                        "upsert_binary",
+                        payload,
+                        n_vectors,
+                        dim,
+                        id_params,
+                    )
+                    if response.status_code == 200:
+                        self.COMMIT_FLAG = False
+                        self._set_dim_if_known(dim)
+                        returned_ids.extend(batch_ids)
+                    else:
+                        raise_error_response(response)
+            self._binary_integer_id_safe = True
+            self._integer_id_routing = "internal"
+            self._maybe_build_default_index()
+            return returned_ids[0] if single_id else returned_ids
 
         uri = f'{self._uri}/upsert'
         returned_ids = []
@@ -917,6 +1048,9 @@ class Collection:
                 else:
                     raise_error_response(response)
 
+        if any(isinstance(item_id, int) and not isinstance(item_id, bool) for item_id in external_ids):
+            self._integer_id_routing = "external"
+        self._binary_integer_id_safe = False
         self._maybe_build_default_index()
         return returned_ids[0] if single_id else returned_ids
 
@@ -1212,6 +1346,7 @@ class Collection:
         if response.status_code == 200:
             if field_name == "default":
                 self._default_index_built = True
+                self._index_mode_cache = index_mode
             return response.json()
         else:
             raise_error_response(response)
@@ -1249,6 +1384,7 @@ class Collection:
             if field_name == "default":
                 self._default_index = None
                 self._default_index_built = False
+                self._index_mode_cache = None
             return response.json()
         else:
             raise_error_response(response)
@@ -1446,7 +1582,6 @@ class Collection:
             ValueError: If the collection has been deleted or does not exist.
             ExecutionError: If the server returns an error.
         """
-        del wire_dtype  # JSON search is used so public string IDs can round-trip.
         if (vector is None) == (document is None):
             raise ValueError("search() requires exactly one of vector or document")
         send_return_fields = should_fetch_fields(
@@ -1458,6 +1593,35 @@ class Collection:
             vec = embed_documents([document])[0]
         else:
             vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
+        if (
+            document is None
+            and reranker is None
+            and self._can_read_binary_integer_ids()
+        ):
+            raw = self._search(
+                vec,
+                k,
+                where,
+                return_fields=send_return_fields,
+                vector_field=vector_field,
+                nprobe=nprobe,
+                approx=approx,
+                eps=eps,
+                wire_dtype=wire_dtype,
+            )
+            raw_ids, dists, fields, _ = _decode_search_binary(raw)
+            ids = id_array(raw_ids.tolist())
+            index_mode = self._result_index_mode(vector_field)
+            idx_type, metric = _parse_index_mode(index_mode)
+            return ResultView(
+                ids=ids,
+                distances=np.asarray(dists, dtype=np.float32),
+                fields=fields if return_fields else [],
+                k=len(ids),
+                distance=metric,
+                index=idx_type,
+                result_type="search",
+            )
         uri = f'{self._uri}/search'
         data = {
             "database_name": self._database_name,
@@ -1495,18 +1659,7 @@ class Collection:
             },
             rerank_k=rerank_k,
         )
-        if vector_field == "default":
-            index_mode = self.index_mode
-        else:
-            vector_fields = self.list_vector_fields()
-            index_mode = next(
-                (
-                    field.get("index_mode")
-                    for field in vector_fields
-                    if field.get("name") == vector_field
-                ),
-                "FLAT",
-            )
+        index_mode = self._result_index_mode(vector_field)
         idx_type, metric = _parse_index_mode(index_mode)
         return ResultView(
             ids=ids,
@@ -1756,12 +1909,59 @@ class Collection:
         vecs = np.ascontiguousarray(vectors, dtype=np.float32)
         if vecs.ndim == 1:
             vecs = vecs.reshape(1, -1)
-        del wire_dtype
         send_return_fields = should_fetch_fields(
             return_fields=return_fields,
             reranker=reranker,
             rerank_with_fields=rerank_with_fields,
         )
+        if reranker is None and self._can_read_binary_integer_ids():
+            vector_encoding = _normalize_vector_encoding(wire_dtype)
+            if vector_encoding == "float16":
+                body = np.ascontiguousarray(vecs, dtype="<f2").tobytes()
+            else:
+                body = vecs.tobytes()
+            params = {
+                "database_name": self._database_name,
+                "collection_name": self._collection_name,
+                "dim": vecs.shape[1],
+                "n_queries": vecs.shape[0],
+                "k": k,
+                "return_fields": str(send_return_fields).lower(),
+                "vector_encoding": vector_encoding,
+                "nprobe": nprobe,
+            }
+            if where is not None:
+                params["where"] = where
+            response = self._session.post(
+                f'{self._uri}/batch_search_binary',
+                params=params,
+                content=body,
+                headers={'Content-Type': 'application/octet-stream'},
+            )
+            if response.status_code != 200:
+                raise_error_response(response)
+
+            idx_type, metric = _parse_index_mode(self._result_index_mode())
+            output = []
+            offset = 0
+            buf = response.content
+            count = struct.unpack_from('<I', buf, offset)[0]
+            offset += 4
+            if count != vecs.shape[0]:
+                raise ExecutionError(f"batch_search_binary returned {count} queries, expected {vecs.shape[0]}")
+            for _query_index in range(count):
+                ids, dists, fields, offset = _decode_search_binary(buf, offset)
+                output.append(ResultView(
+                    ids=id_array(ids.tolist()),
+                    distances=np.asarray(dists, dtype=np.float32),
+                    fields=fields if return_fields else [],
+                    k=len(ids),
+                    distance=metric,
+                    index=idx_type,
+                    result_type="search",
+                ))
+            return output
+
         uri = f'{self._uri}/batch_search'
         data = {
             "database_name": self._database_name,
@@ -1775,7 +1975,7 @@ class Collection:
         response = self._session.post(uri, json=data)
 
         if response.status_code == 200:
-            idx_type, metric = _parse_index_mode(self.index_mode)
+            idx_type, metric = _parse_index_mode(self._result_index_mode())
             output = []
             for query_index, item in enumerate(response.json()['params']['results']):
                 ids = id_array(item.get('ids', []))
@@ -2077,7 +2277,8 @@ class Collection:
         response = self._session.post(uri, json=data)
 
         if response.status_code == 200:
-            return response.json()['params']['collection_path']
+            params = response.json()['params']
+            return params.get('collection_path') or params.get('shards', [])
         else:
             raise_error_response(response)
 

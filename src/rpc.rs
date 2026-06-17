@@ -15,13 +15,14 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-const OP_PING: u8 = 1;
-const OP_SEARCH: u8 = 2;
-const OP_BATCH_SEARCH: u8 = 3;
-const OP_BULK_ADD_BINARY_IDS: u8 = 4;
-const OP_UPSERT_BINARY_IDS: u8 = 5;
-const OP_DELETE_ITEMS: u8 = 6;
-const OP_RESTORE_ITEMS: u8 = 7;
+pub(crate) const OP_PING: u8 = 1;
+pub(crate) const OP_SEARCH: u8 = 2;
+pub(crate) const OP_BATCH_SEARCH: u8 = 3;
+pub(crate) const OP_BULK_ADD_BINARY_IDS: u8 = 4;
+pub(crate) const OP_UPSERT_BINARY_IDS: u8 = 5;
+pub(crate) const OP_DELETE_ITEMS: u8 = 6;
+pub(crate) const OP_RESTORE_ITEMS: u8 = 7;
+pub(crate) const OP_COLLECTION_CONTROL: u8 = 8;
 
 const STATUS_OK: u8 = 0;
 const STATUS_ERR: u8 = 1;
@@ -86,6 +87,14 @@ struct IdsMeta {
     ids: Vec<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ControlMeta {
+    api_key: Option<String>,
+    database_name: String,
+    collection_name: String,
+    action: String,
+}
+
 #[derive(Debug, Serialize)]
 struct RpcOkMeta {
     ok: bool,
@@ -140,25 +149,52 @@ async fn handle_connection(
     manager: Arc<DatabaseManager>,
     expected_api_key: Option<String>,
 ) -> std::io::Result<()> {
-    let frame = read_frame(&mut stream).await?;
-    let response = match tokio::task::spawn_blocking(move || {
-        handle_frame(&frame, &manager, expected_api_key.as_deref())
-    })
-    .await
-    {
-        Ok(Ok((meta, raw))) => encode_response(STATUS_OK, &meta, &raw),
-        Ok(Err(e)) => encode_response(
-            STATUS_ERR,
-            &serde_json::json!({"error": e.to_string()}),
-            &[],
-        ),
-        Err(e) => encode_response(
-            STATUS_ERR,
-            &serde_json::json!({"error": e.to_string()}),
-            &[],
-        ),
-    };
-    write_frame(&mut stream, &response).await
+    loop {
+        let frame = match read_frame(&mut stream).await {
+            Ok(frame) => frame,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        let manager = Arc::clone(&manager);
+        let expected_api_key = expected_api_key.clone();
+        let response = match tokio::task::spawn_blocking(move || {
+            handle_frame(&frame, &manager, expected_api_key.as_deref())
+        })
+        .await
+        {
+            Ok(Ok((meta, raw))) => encode_response(STATUS_OK, &meta, &raw),
+            Ok(Err(e)) => encode_response(
+                STATUS_ERR,
+                &serde_json::json!({"error": e.to_string()}),
+                &[],
+            ),
+            Err(e) => encode_response(
+                STATUS_ERR,
+                &serde_json::json!({"error": e.to_string()}),
+                &[],
+            ),
+        };
+        if let Err(e) = write_frame(&mut stream, &response).await {
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+            ) {
+                return Ok(());
+            }
+            return Err(e);
+        }
+    }
 }
 
 async fn read_frame(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
@@ -269,6 +305,17 @@ fn handle_frame(
                 .map_err(|e| LynseError::Serialization(e.to_string()))?;
             validate_api_key(expected_api_key, meta.api_key.as_deref())?;
             handle_ids(manager, meta, true)?;
+            Ok((
+                serde_json::to_value(RpcOkMeta { ok: true })
+                    .map_err(|e| LynseError::Serialization(e.to_string()))?,
+                Vec::new(),
+            ))
+        }
+        OP_COLLECTION_CONTROL => {
+            let meta: ControlMeta = serde_json::from_slice(meta_bytes)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?;
+            validate_api_key(expected_api_key, meta.api_key.as_deref())?;
+            handle_control(manager, meta)?;
             Ok((
                 serde_json::to_value(RpcOkMeta { ok: true })
                     .map_err(|e| LynseError::Serialization(e.to_string()))?,
@@ -925,6 +972,35 @@ fn handle_ids(manager: &DatabaseManager, meta: IdsMeta, restore: bool) -> Result
     })
 }
 
+fn handle_control(manager: &DatabaseManager, meta: ControlMeta) -> Result<()> {
+    manager.get_or_open_database(&meta.database_name)?;
+    manager.with_database(&meta.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&meta.collection_name, 0, 100_000)?;
+        match meta.action.as_str() {
+            "commit" => {
+                let coll = coll_arc.read();
+                coll.commit()
+            }
+            "flush" => {
+                let coll = coll_arc.read();
+                coll.flush()
+            }
+            "checkpoint" => {
+                let coll = coll_arc.read();
+                coll.checkpoint()
+            }
+            "close" | "close_collection" => {
+                let mut coll = coll_arc.write();
+                coll.close()
+            }
+            other => Err(LynseError::InvalidArgument(format!(
+                "unsupported internal RPC control action '{}'",
+                other
+            ))),
+        }
+    })
+}
+
 fn encode_response(status: u8, meta: &serde_json::Value, raw: &[u8]) -> Vec<u8> {
     let meta_bytes = serde_json::to_vec(meta).unwrap_or_else(|_| b"{}".to_vec());
     let mut buf = Vec::with_capacity(1 + 4 + meta_bytes.len() + raw.len());
@@ -935,7 +1011,7 @@ fn encode_response(status: u8, meta: &serde_json::Value, raw: &[u8]) -> Vec<u8> 
     buf
 }
 
-fn encode_search_result_binary(
+pub(crate) fn encode_search_result_binary(
     ids: &[u64],
     distances: &[f32],
     fields: &[HashMap<String, serde_json::Value>],

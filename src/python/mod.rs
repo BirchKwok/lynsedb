@@ -6,11 +6,12 @@
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use parking_lot::RwLock;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use pyo3::{IntoPyObjectExt, Py, PyAny};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::engine::{
     Collection, DatabaseEngine, DatabaseManager, ExternalId, SearchResult, VectorFieldConfig,
@@ -25,11 +26,72 @@ pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySearchResult>()?;
     m.add_class::<PyFlatIndex>()?;
     m.add_class::<PyIvfFlatIndex>()?;
+    m.add_class::<PyClusterReadCoordinator>()?;
     m.add_function(wrap_pyfunction!(py_compute_distance, m)?)?;
     m.add_function(wrap_pyfunction!(py_top_k_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_start_server, m)?)?;
     m.add_function(wrap_pyfunction!(py_start_server_background, m)?)?;
     Ok(())
+}
+
+// ─── Cluster read coordinator binding ───────────────────────────────────────
+
+/// Python wrapper around the Rust-side hot read fan-out coordinator.
+#[pyclass(name = "ClusterReadCoordinator")]
+pub struct PyClusterReadCoordinator {
+    inner: crate::cluster::RustReadCoordinator,
+    runtime: tokio::runtime::Runtime,
+}
+
+#[pymethods]
+impl PyClusterReadCoordinator {
+    #[new]
+    #[pyo3(signature = (cluster_state_path, timeout_secs=30.0, api_key=None))]
+    fn new(cluster_state_path: &str, timeout_secs: f64, api_key: Option<String>) -> PyResult<Self> {
+        let timeout = Duration::from_secs_f64(timeout_secs.max(0.001));
+        let inner =
+            crate::cluster::RustReadCoordinator::from_path(cluster_state_path, timeout, api_key)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self { inner, runtime })
+    }
+
+    fn search_binary<'py>(
+        &self,
+        py: Python<'py>,
+        meta_json: &str,
+        raw: &Bound<'_, PyBytes>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let meta = parse_cluster_meta(meta_json)?;
+        let raw = raw.as_bytes().to_vec();
+        let output = py
+            .detach(|| self.runtime.block_on(self.inner.search_binary(meta, raw)))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyBytes::new(py, &output))
+    }
+
+    fn batch_search_binary<'py>(
+        &self,
+        py: Python<'py>,
+        meta_json: &str,
+        raw: &Bound<'_, PyBytes>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let meta = parse_cluster_meta(meta_json)?;
+        let raw = raw.as_bytes().to_vec();
+        let output = py
+            .detach(|| {
+                self.runtime
+                    .block_on(self.inner.batch_search_binary(meta, raw))
+            })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyBytes::new(py, &output))
+    }
+}
+
+fn parse_cluster_meta(meta_json: &str) -> PyResult<serde_json::Value> {
+    serde_json::from_str(meta_json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 // ─── DatabaseEngine binding ──────────────────────────────────────────────────

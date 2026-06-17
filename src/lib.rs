@@ -10,6 +10,7 @@
 #[cfg(target_os = "windows")]
 compile_error!("Native Windows builds are not supported. Use WSL 2 or Docker on Windows.");
 
+pub mod cluster;
 pub mod distance;
 pub mod engine;
 pub mod error;

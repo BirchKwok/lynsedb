@@ -1432,7 +1432,27 @@ fn internal_ids_for_external(
     coll: &crate::engine::Collection,
     ids: &[ExternalId],
 ) -> Result<Vec<u64>, LynseError> {
-    coll.internal_ids_for_external_ids(ids)
+    ids.iter()
+        .map(|external_id| {
+            if let Some(internal_id) = coll.internal_id_for_external_id(external_id) {
+                Ok(internal_id)
+            } else if let ExternalId::Int(id) = external_id {
+                if coll.is_id_exists(*id) {
+                    Ok(*id)
+                } else {
+                    Err(LynseError::InvalidArgument(format!(
+                        "external id {} does not exist",
+                        external_id
+                    )))
+                }
+            } else {
+                Err(LynseError::InvalidArgument(format!(
+                    "external id {} does not exist",
+                    external_id
+                )))
+            }
+        })
+        .collect()
 }
 
 fn existing_internal_ids_for_external(
@@ -1440,7 +1460,13 @@ fn existing_internal_ids_for_external(
     ids: &[ExternalId],
 ) -> Vec<u64> {
     ids.iter()
-        .filter_map(|external_id| coll.internal_id_for_external_id(external_id))
+        .filter_map(|external_id| {
+            coll.internal_id_for_external_id(external_id)
+                .or_else(|| match external_id {
+                    ExternalId::Int(id) if coll.is_id_exists(*id) => Some(*id),
+                    _ => None,
+                })
+        })
         .collect()
 }
 
@@ -4096,7 +4122,16 @@ async fn is_id_exists(
         &state.manager,
         &body.database_name,
         &body.collection_name,
-        |coll| Ok(coll.is_external_id_exists(&body.id)),
+        |coll| {
+            let exists = if coll.is_external_id_exists(&body.id) {
+                true
+            } else if let ExternalId::Int(id) = &body.id {
+                coll.is_id_exists(*id)
+            } else {
+                false
+            };
+            Ok(exists)
+        },
     );
 
     match result {

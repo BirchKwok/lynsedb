@@ -10,7 +10,10 @@ giving the common happy path automatic shard failover.
 
 import argparse
 import array
+import asyncio
+import heapq
 import hashlib
+import importlib
 import json
 import os
 import socket
@@ -40,6 +43,7 @@ RPC_OP_BULK_ADD_BINARY_IDS = 4
 RPC_OP_UPSERT_BINARY_IDS = 5
 RPC_OP_DELETE_ITEMS = 6
 RPC_OP_RESTORE_ITEMS = 7
+RPC_OP_COLLECTION_CONTROL = 8
 FIELDS_BINARY_MAGIC = b"LDBF1"
 
 
@@ -87,20 +91,29 @@ def _is_ascending_index(index_mode: str | None) -> bool:
     return any(token in upper for token in ("L2", "COS", "HAMMING", "JACCARD"))
 
 
+def _shard_artifact_path(base_path: Any, group_name: str) -> str:
+    value = str(base_path)
+    safe_group = "".join(
+        ch if ch.isalnum() or ch in {"-", "_"} else "_"
+        for ch in str(group_name)
+    ) or "shard"
+    slash = max(value.rfind("/"), value.rfind("\\"))
+    prefix = value[:slash + 1] if slash >= 0 else ""
+    name = value[slash + 1:] if slash >= 0 else value
+    dot = name.rfind(".")
+    if dot > 0:
+        return f"{prefix}{name[:dot]}.{safe_group}{name[dot:]}"
+    return f"{value}.{safe_group}"
+
+
 def _split_search_binary(buf: bytes, offset: int = 0):
-    n = int.from_bytes(buf[offset:offset + 4], "little")
+    n = struct.unpack_from("<I", buf, offset)[0]
     offset += 4
-    ids = [
-        int.from_bytes(buf[offset + i * 8:offset + (i + 1) * 8], "little")
-        for i in range(n)
-    ]
+    ids = list(struct.unpack_from(f"<{n}Q", buf, offset)) if n else []
     offset += n * 8
-    distances = []
-    for i in range(n):
-        raw = buf[offset + i * 4:offset + (i + 1) * 4]
-        distances.append(float(struct.unpack("<f", raw)[0]))
+    distances = list(struct.unpack_from(f"<{n}f", buf, offset)) if n else []
     offset += n * 4
-    fields_len = int.from_bytes(buf[offset:offset + 4], "little")
+    fields_len = struct.unpack_from("<I", buf, offset)[0]
     offset += 4
     fields = json.loads(buf[offset:offset + fields_len]) if fields_len else []
     offset += fields_len
@@ -139,10 +152,12 @@ def _encode_search_binary(
     fields: list[dict[str, Any]] | None = None,
 ) -> bytes:
     fields_json = b"" if not fields else json.dumps(fields, separators=(",", ":")).encode("utf-8")
-    parts = [len(ids).to_bytes(4, "little")]
-    parts.extend(int(i).to_bytes(8, "little", signed=False) for i in ids)
-    parts.extend(struct.pack("<f", float(d)) for d in distances)
-    parts.append(len(fields_json).to_bytes(4, "little"))
+    n = len(ids)
+    parts = [struct.pack("<I", n)]
+    if n:
+        parts.append(struct.pack(f"<{n}Q", *(int(item_id) for item_id in ids)))
+        parts.append(struct.pack(f"<{n}f", *(float(distance) for distance in distances)))
+    parts.append(struct.pack("<I", len(fields_json)))
     parts.append(fields_json)
     return b"".join(parts)
 
@@ -382,10 +397,7 @@ def _split_binary_items_payload(
         if len(buf) < offset + id_bytes:
             got = len(buf) - offset
             raise ValueError(f"expected at least {id_bytes} id bytes after vectors, got {got}")
-        ids = [
-            struct.unpack("<Q", view[offset + i * 8:offset + (i + 1) * 8])[0]
-            for i in range(int(n_vectors))
-        ]
+        ids = list(struct.unpack_from(f"<{int(n_vectors)}Q", view, offset)) if int(n_vectors) else []
         offset += id_bytes
     else:
         raise ValueError(f"unsupported ids_encoding {ids_encoding!r}")
@@ -402,13 +414,39 @@ def _merge_pairs(
     ascending: bool,
     return_fields: bool,
 ) -> tuple[list[Any], list[float], list[dict[str, Any]]]:
+    if k <= 0:
+        return [], [], []
+    if not return_fields:
+        merged: list[tuple[Any, float]] = []
+        for ids, scores, _fields in results:
+            merged.extend((item_id, float(score)) for item_id, score in zip(ids, scores))
+        if not merged:
+            return [], [], []
+        key = lambda item: item[1]
+        if len(merged) <= max(k * 4, 64):
+            top = sorted(merged, key=key, reverse=not ascending)[:k]
+        elif len(merged) > k:
+            top = heapq.nsmallest(k, merged, key=key) if ascending else heapq.nlargest(k, merged, key=key)
+        else:
+            top = sorted(merged, key=key, reverse=not ascending)
+        return [item[0] for item in top], [item[1] for item in top], []
+
     merged: list[tuple[Any, float, dict[str, Any] | None]] = []
     for ids, scores, fields in results:
         for idx, (item_id, score) in enumerate(zip(ids, scores)):
             field = fields[idx] if return_fields and idx < len(fields) else None
             merged.append((item_id, float(score), field))
-    merged.sort(key=lambda item: item[1], reverse=not ascending)
-    top = merged[:k]
+    if not merged:
+        return [], [], []
+    if len(merged) <= max(k * 4, 64):
+        top = sorted(merged, key=lambda item: item[1], reverse=not ascending)[:k]
+    elif len(merged) > k:
+        if ascending:
+            top = heapq.nsmallest(k, merged, key=lambda item: item[1])
+        else:
+            top = heapq.nlargest(k, merged, key=lambda item: item[1])
+    else:
+        top = sorted(merged, key=lambda item: item[1], reverse=not ascending)
     ids = [item[0] for item in top]
     distances = [item[1] for item in top]
     out_fields = [item[2] or {} for item in top] if return_fields else []
@@ -563,6 +601,7 @@ class ClusterState:
                 "next_id": 0,
                 "bucket_count": bucket_count,
                 "bucket_to_group": bucket_to_group,
+                "integer_id_routing": None,
             }
             self.data["collections"][key] = coll
             dbs = set(self.data.setdefault("databases", []))
@@ -586,6 +625,14 @@ class ClusterState:
                 self.bump_epoch()
                 self.save()
 
+    def update_collection_description(self, db_name: str, coll_name: str, description: str | None) -> None:
+        with self._lock:
+            coll = self.data.get("collections", {}).get(self.collection_key(db_name, coll_name))
+            if coll is not None:
+                coll["description"] = description
+                self.bump_epoch()
+                self.save()
+
     def update_collection_dim_if_unset(self, db_name: str, coll_name: str, dim: int) -> None:
         if not dim:
             return
@@ -595,6 +642,26 @@ class ClusterState:
                 coll["dim"] = int(dim)
                 self.bump_epoch()
                 self.save()
+
+    def integer_id_routing(self, db_name: str, coll_name: str) -> str | None:
+        with self._lock:
+            coll = self.data["collections"][self.collection_key(db_name, coll_name)]
+            return coll.get("integer_id_routing")
+
+    def mark_integer_id_routing(self, db_name: str, coll_name: str, routing: str) -> None:
+        if routing not in {"external", "internal"}:
+            raise ValueError(f"invalid integer ID routing mode: {routing}")
+        with self._lock:
+            coll = self.data["collections"][self.collection_key(db_name, coll_name)]
+            current = coll.get("integer_id_routing")
+            if current is None:
+                coll["integer_id_routing"] = routing
+                self.bump_epoch()
+                self.save()
+            elif current != routing:
+                raise ValueError(
+                    f"collection {db_name}/{coll_name} already uses {current} integer ID routing"
+                )
 
     def allocate_ids(self, db_name: str, coll_name: str, count: int) -> list[int]:
         with self._lock:
@@ -621,6 +688,12 @@ class ClusterState:
             bucket = _hash_u64(f"{db_name}/{coll_name}/{_external_id_key(item_id)}") % bucket_count
             group_name = coll["bucket_to_group"][bucket]
             return self.group_by_name(group_name)
+
+    def group_for_public_id(self, db_name: str, coll_name: str, item_id: Any) -> dict[str, Any]:
+        if isinstance(item_id, int) and not isinstance(item_id, bool):
+            if self.integer_id_routing(db_name, coll_name) == "internal":
+                return self.group_for_id(db_name, coll_name, int(item_id))
+        return self.group_for_external_id(db_name, coll_name, item_id)
 
     def group_by_name(self, name: str) -> dict[str, Any]:
         for group in self.data["shard_groups"]:
@@ -699,8 +772,21 @@ class ClusterCoordinator:
         self._failures: dict[str, int] = {}
         self._healthy: dict[str, bool] = {}
         self._rpc_available: dict[str, bool] = {}
+        self._rpc_pool: dict[str, list[socket.socket]] = {}
+        self._rpc_pool_lock = threading.Lock()
+        self._rpc_max_idle_per_uri = 8
         self._stop = threading.Event()
         self._health_thread: threading.Thread | None = None
+        self._fanout_pool = ThreadPoolExecutor(max_workers=32)
+        self._replica_pool = ThreadPoolExecutor(max_workers=32)
+        self._async_ready = threading.Event()
+        self._async_loop: asyncio.AbstractEventLoop | None = None
+        self._async_client: httpx.AsyncClient | None = None
+        self._async_thread = threading.Thread(target=self._async_loop_main, daemon=True)
+        self._async_thread.start()
+        self._rust_read_lock = threading.Lock()
+        self._rust_read = None
+        self._rust_read_epoch: int | None = None
 
     def start_health_loop(self) -> None:
         if self._health_thread and self._health_thread.is_alive():
@@ -712,7 +798,15 @@ class ClusterCoordinator:
         self._stop.set()
         if self._health_thread:
             self._health_thread.join(timeout=2)
+        self._fanout_pool.shutdown(wait=True, cancel_futures=False)
+        self._replica_pool.shutdown(wait=True, cancel_futures=False)
         self.client.close()
+        self._close_rpc_pool()
+        if self._async_thread.is_alive() and self._async_ready.wait(timeout=5):
+            loop = self._async_loop
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(loop.stop)
+            self._async_thread.join(timeout=2)
 
     def _headers(self) -> dict[str, str]:
         if self.shard_api_key:
@@ -752,6 +846,162 @@ class ClusterCoordinator:
             raise RuntimeError(payload.get("error") or response.text)
         return payload
 
+    def _async_loop_main(self) -> None:
+        loop = asyncio.new_event_loop()
+        self._async_loop = loop
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self._async_start())
+        self._async_ready.set()
+        try:
+            loop.run_forever()
+        finally:
+            loop.run_until_complete(self._async_stop())
+            loop.close()
+
+    async def _async_start(self) -> None:
+        self._async_client = httpx.AsyncClient(timeout=self.timeout_secs)
+
+    async def _async_stop(self) -> None:
+        if self._async_client is not None:
+            await self._async_client.aclose()
+            self._async_client = None
+
+    def _run_async(self, coro):
+        if not self._async_ready.wait(timeout=5):
+            raise RuntimeError("cluster async fan-out loop did not start")
+        loop = self._async_loop
+        if loop is None or loop.is_closed():
+            raise RuntimeError("cluster async fan-out loop is not running")
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result()
+
+    async def _async_request(
+        self,
+        method: str,
+        uri: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        content: bytes | None = None,
+        content_type: str | None = None,
+    ) -> httpx.Response:
+        if self._async_client is None:
+            raise RuntimeError("cluster async HTTP client is not initialized")
+        headers = self._headers()
+        if content_type:
+            headers["Content-Type"] = content_type
+        url = f"{_normalize_uri(uri)}{path}"
+        return await self._async_client.request(
+            method,
+            url,
+            json=json_body,
+            params=params,
+            content=content,
+            headers=headers,
+        )
+
+    async def _async_json_post(self, uri: str, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        response = await self._async_request("POST", uri, path, json_body=body)
+        if response.status_code != 200:
+            raise RuntimeError(response.text)
+        payload = response.json()
+        if payload.get("status") != "success":
+            raise RuntimeError(payload.get("error") or response.text)
+        return payload
+
+    async def _async_json_post_many(
+        self,
+        calls: list[tuple[str, str, dict[str, Any]]],
+        *,
+        return_exceptions: bool = False,
+    ) -> list[Any]:
+        tasks = [
+            self._async_json_post(uri, path, body)
+            for uri, path, body in calls
+        ]
+        return await asyncio.gather(*tasks, return_exceptions=return_exceptions)
+
+    def _json_post_many(
+        self,
+        calls: list[tuple[str, str, dict[str, Any]]],
+        *,
+        return_exceptions: bool = False,
+    ) -> list[Any]:
+        if not calls:
+            return []
+        if type(self)._json_post is not ClusterCoordinator._json_post:
+            results: list[Any] = []
+            for uri, path, body in calls:
+                try:
+                    results.append(self._json_post(uri, path, body))
+                except Exception as exc:
+                    if not return_exceptions:
+                        raise
+                    results.append(exc)
+            return results
+        return self._run_async(self._async_json_post_many(
+            calls,
+            return_exceptions=return_exceptions,
+        ))
+
+    def _take_rpc_socket(self, uri: str) -> socket.socket:
+        with self._rpc_pool_lock:
+            pool = self._rpc_pool.get(uri)
+            if pool:
+                sock = pool.pop()
+                if not pool:
+                    self._rpc_pool.pop(uri, None)
+                return sock
+        host, port = _derive_rpc_target(uri)
+        sock = socket.create_connection((host, port), timeout=self.timeout_secs)
+        sock.settimeout(self.timeout_secs)
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
+        return sock
+
+    def _return_rpc_socket(self, uri: str, sock: socket.socket) -> None:
+        with self._rpc_pool_lock:
+            pool = self._rpc_pool.setdefault(uri, [])
+            if len(pool) < self._rpc_max_idle_per_uri:
+                pool.append(sock)
+                return
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    def _close_socket(self, sock: socket.socket | None) -> None:
+        if sock is None:
+            return
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    def _close_rpc_pool(self) -> None:
+        with self._rpc_pool_lock:
+            sockets = [sock for pool in self._rpc_pool.values() for sock in pool]
+            self._rpc_pool.clear()
+        for sock in sockets:
+            self._close_socket(sock)
+
+    def _rpc_roundtrip(self, uri: str, payload: bytes) -> bytes:
+        sock: socket.socket | None = None
+        try:
+            sock = self._take_rpc_socket(uri)
+            sock.sendall(struct.pack("<I", len(payload)) + payload)
+            header = self._recv_exact(sock, 4)
+            frame_len = struct.unpack("<I", header)[0]
+            frame = self._recv_exact(sock, frame_len)
+            self._return_rpc_socket(uri, sock)
+            sock = None
+            return frame
+        finally:
+            self._close_socket(sock)
+
     def _rpc_request(
         self,
         uri: str,
@@ -765,32 +1015,35 @@ class ClusterCoordinator:
             meta["api_key"] = self.shard_api_key
         meta_bytes = json.dumps(meta, separators=(",", ":")).encode("utf-8")
         payload = bytes([int(op)]) + struct.pack("<I", len(meta_bytes)) + meta_bytes + raw
-        host, port = _derive_rpc_target(uri)
 
+        last_error: Exception | None = None
+        frame = b""
+        for _attempt in range(2):
+            try:
+                frame = self._rpc_roundtrip(uri, payload)
+                break
+            except Exception as exc:
+                last_error = exc
+        else:
+            self._rpc_available[uri] = False
+            raise last_error or RuntimeError("internal RPC request failed")
+
+        self._rpc_available[uri] = True
         try:
-            with socket.create_connection((host, port), timeout=self.timeout_secs) as sock:
-                sock.settimeout(self.timeout_secs)
-                sock.sendall(struct.pack("<I", len(payload)) + payload)
-                header = self._recv_exact(sock, 4)
-                frame_len = struct.unpack("<I", header)[0]
-                frame = self._recv_exact(sock, frame_len)
+            if len(frame) < 5:
+                raise RuntimeError("internal RPC response frame is too short")
+            status = frame[0]
+            meta_len = struct.unpack("<I", frame[1:5])[0]
+            if len(frame) < 5 + meta_len:
+                raise RuntimeError("internal RPC response metadata length exceeds frame")
+            response_meta = json.loads(frame[5:5 + meta_len]) if meta_len else {}
+            response_raw = frame[5 + meta_len:]
         except Exception:
             self._rpc_available[uri] = False
             raise
 
-        if len(frame) < 5:
-            self._rpc_available[uri] = False
-            raise RuntimeError("internal RPC response frame is too short")
-        status = frame[0]
-        meta_len = struct.unpack("<I", frame[1:5])[0]
-        if len(frame) < 5 + meta_len:
-            raise RuntimeError("internal RPC response metadata length exceeds frame")
-        response_meta = json.loads(frame[5:5 + meta_len]) if meta_len else {}
-        response_raw = frame[5 + meta_len:]
         if status != 0:
-            self._rpc_available[uri] = False
             raise RuntimeError(response_meta.get("error") or "internal RPC request failed")
-        self._rpc_available[uri] = True
         return response_meta, response_raw
 
     @staticmethod
@@ -814,6 +1067,36 @@ class ClusterCoordinator:
             return True
         except Exception:
             return False
+
+    def _rust_read_coordinator(self):
+        core = importlib.import_module("lynse._core")
+        coordinator_cls = getattr(core, "ClusterReadCoordinator")
+
+        epoch = int(self.state.data.get("meta_epoch", 0))
+        with self._rust_read_lock:
+            if self._rust_read is None or self._rust_read_epoch != epoch:
+                self._rust_read = coordinator_cls(
+                    str(self.state.path),
+                    self.timeout_secs,
+                    self.shard_api_key,
+                )
+                self._rust_read_epoch = epoch
+            return self._rust_read
+
+    def _rust_binary_read(
+        self,
+        method: str,
+        params: dict[str, Any],
+        body: bytes,
+        coll: dict[str, Any],
+    ) -> bytes:
+        rust_read = self._rust_read_coordinator()
+
+        meta = dict(params)
+        if coll.get("index_mode") is not None:
+            meta["index_mode"] = coll.get("index_mode")
+        meta_json = json.dumps(meta, separators=(",", ":"))
+        return bytes(getattr(rust_read, method)(meta_json, body))
 
     def _is_uri_healthy(self, uri: str) -> bool:
         with self._health_lock:
@@ -892,46 +1175,96 @@ class ClusterCoordinator:
         if not targets:
             return {}
 
-        first_payload: dict[str, Any] | None = None
         primary_errors = []
-        with ThreadPoolExecutor(max_workers=min(len(targets), 32)) as pool:
-            future_to_target = {
-                pool.submit(self._json_post, uri, path, body): (uri, is_primary)
-                for uri, is_primary in targets
-            }
-            for future in as_completed(future_to_target):
-                uri, is_primary = future_to_target[future]
-                try:
-                    payload = future.result()
-                    if first_payload is None:
-                        first_payload = payload
-                except Exception as exc:
-                    if is_primary:
-                        primary_errors.append(f"{uri}: {exc}")
-                    else:
-                        self.state.mark_replica_stale(uri)
+        first_payload: dict[str, Any] | None = None
+        calls = [(uri, path, body) for uri, _is_primary in targets]
+        for (uri, is_primary), result in zip(
+            targets,
+            self._json_post_many(calls, return_exceptions=True),
+        ):
+            if isinstance(result, Exception):
+                if is_primary:
+                    primary_errors.append(f"{uri}: {result}")
+                else:
+                    self.state.mark_replica_stale(uri)
+            else:
+                payload = result
+                if first_payload is None:
+                    first_payload = payload
         if require_primary and primary_errors:
             raise RuntimeError("; ".join(primary_errors))
         return first_payload or _json_success()
+
+    def broadcast_control(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        futures = [
+            self._fanout_pool.submit(self.write_group_control, group, path, body)
+            for group in self.state.groups()
+        ]
+        first_payload: dict[str, Any] | None = None
+        for future in as_completed(futures):
+            payload = future.result()
+            if first_payload is None:
+                first_payload = payload
+        return first_payload or _json_success({
+            "database_name": body["database_name"],
+            "collection_name": body["collection_name"],
+        })
 
     def write_group_json(self, group: dict[str, Any], path: str, body: dict[str, Any]) -> dict[str, Any]:
         targets = self.state.writable_uris_for_group(group)
         first_payload: dict[str, Any] | None = None
         primary_errors = []
-        with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as pool:
-            future_to_target = {
-                pool.submit(self._json_post, uri, path, body): (uri, is_primary)
-                for uri, is_primary in targets
-            }
-            for future in as_completed(future_to_target):
-                uri, is_primary = future_to_target[future]
+        calls = [(uri, path, body) for uri, _is_primary in targets]
+        for (uri, is_primary), result in zip(
+            targets,
+            self._json_post_many(calls, return_exceptions=True),
+        ):
+            if isinstance(result, Exception):
+                if is_primary:
+                    primary_errors.append(f"{uri}: {result}")
+                else:
+                    self.state.mark_replica_stale(uri)
+            else:
+                payload = result
+                if first_payload is None and is_primary:
+                    first_payload = payload
+        if primary_errors:
+            raise RuntimeError("; ".join(primary_errors))
+        return first_payload or _json_success()
+
+    def write_group_control(self, group: dict[str, Any], path: str, body: dict[str, Any]) -> dict[str, Any]:
+        action = path[1:] if path.startswith("/") else path
+        meta = {
+            "database_name": body["database_name"],
+            "collection_name": body["collection_name"],
+            "action": action,
+        }
+        http_body = {
+            "database_name": body["database_name"],
+            "collection_name": body["collection_name"],
+        }
+        first_payload: dict[str, Any] | None = None
+        primary_errors = []
+        for uri, is_primary in self.state.writable_uris_for_group(group):
+            try:
+                if self._can_rpc(uri):
+                    self._rpc_request(uri, RPC_OP_COLLECTION_CONTROL, meta)
+                    payload = _json_success({
+                        "database_name": body["database_name"],
+                        "collection_name": body["collection_name"],
+                    })
+                else:
+                    payload = self._json_post(uri, path, http_body)
+                if is_primary:
+                    first_payload = payload
+            except Exception:
                 try:
-                    payload = future.result()
-                    if first_payload is None and is_primary:
-                        first_payload = payload
-                except Exception as exc:
+                    payload = self._json_post(uri, path, http_body)
                     if is_primary:
-                        primary_errors.append(f"{uri}: {exc}")
+                        first_payload = payload
+                except Exception as fallback_exc:
+                    if is_primary:
+                        primary_errors.append(f"{uri}: {fallback_exc}")
                     else:
                         self.state.mark_replica_stale(uri)
         if primary_errors:
@@ -1015,7 +1348,11 @@ class ClusterCoordinator:
     ) -> dict[str, Any]:
         op = RPC_OP_UPSERT_BINARY_IDS if path == "/upsert_binary" else RPC_OP_BULK_ADD_BINARY_IDS
         id_raw, id_meta = _encode_ids_for_wire(ids)
-        raw = bytes(vector_raw) + id_raw
+        if isinstance(vector_raw, memoryview):
+            vector_bytes = vector_raw.tobytes()
+        else:
+            vector_bytes = bytes(vector_raw)
+        raw = vector_bytes + id_raw
         if fields is not None:
             raw += _encode_fields_binary(fields)
         meta = {
@@ -1096,6 +1433,36 @@ class ClusterCoordinator:
             raise RuntimeError("; ".join(primary_errors))
         return first_payload or _json_success()
 
+    def write_group_internal_ids(self, group: dict[str, Any], path: str, body: dict[str, Any]) -> dict[str, Any]:
+        op = RPC_OP_RESTORE_ITEMS if path == "/restore" else RPC_OP_DELETE_ITEMS
+        meta = {
+            "database_name": body["database_name"],
+            "collection_name": body["collection_name"],
+            "ids": [int(item_id) for item_id in body.get("ids", [])],
+        }
+        primary_errors = []
+        first_payload: dict[str, Any] | None = None
+        for uri, is_primary in self.state.writable_uris_for_group(group):
+            try:
+                if not self._can_rpc(uri):
+                    raise RuntimeError("internal ID writes require internal RPC")
+                self._rpc_request(uri, op, meta)
+                payload = _json_success({
+                    "database_name": body["database_name"],
+                    "collection_name": body["collection_name"],
+                    "status": "ok",
+                })
+                if is_primary:
+                    first_payload = payload
+            except Exception as exc:
+                if is_primary:
+                    primary_errors.append(f"{uri}: {exc}")
+                else:
+                    self.state.mark_replica_stale(uri)
+        if primary_errors:
+            raise RuntimeError("; ".join(primary_errors))
+        return first_payload or _json_success()
+
     def create_database(self, body: dict[str, Any]) -> dict[str, Any]:
         name = body["database_name"]
         if body.get("drop_if_exists"):
@@ -1149,6 +1516,7 @@ class ClusterCoordinator:
                 "chunk_size": coll.get("chunk_size", 100000),
                 "description": coll.get("description"),
                 "dtypes": coll.get("dtypes", "float32"),
+                "integer_id_routing": coll.get("integer_id_routing"),
             },
         })
 
@@ -1174,23 +1542,22 @@ class ClusterCoordinator:
             group = self.state.group_for_id(db_name, coll_name, int(item["id"]))
             grouped.setdefault(group["name"], (group, []))[1].append(item)
 
-        with ThreadPoolExecutor(max_workers=min(len(grouped), 32) or 1) as pool:
-            futures = []
-            for group, group_items in grouped.values():
-                payload = {
-                    "database_name": db_name,
-                    "collection_name": coll_name,
-                    "items": group_items,
-                }
-                futures.append(pool.submit(
-                    self.write_group_binary_items,
-                    group,
-                    endpoint,
-                    payload,
-                    group_items,
-                ))
-            for future in as_completed(futures):
-                future.result()
+        futures = []
+        for group, group_items in grouped.values():
+            payload = {
+                "database_name": db_name,
+                "collection_name": coll_name,
+                "items": group_items,
+            }
+            futures.append(self._fanout_pool.submit(
+                self.write_group_binary_items,
+                group,
+                endpoint,
+                payload,
+                group_items,
+            ))
+        for future in as_completed(futures):
+            future.result()
         return [int(item["id"]) for item in items]
 
     def add_records(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1207,6 +1574,8 @@ class ClusterCoordinator:
             raise ValueError("fields length must match ids length")
         if vectors:
             self.state.update_collection_dim_if_unset(db_name, coll_name, len(vectors[0]))
+        if any(isinstance(item_id, int) and not isinstance(item_id, bool) for item_id in ids):
+            self.state.mark_integer_id_routing(db_name, coll_name, "external")
 
         grouped: dict[str, dict[str, Any]] = {}
         for idx, item_id in enumerate(ids):
@@ -1220,19 +1589,18 @@ class ClusterCoordinator:
             if fields is not None:
                 bucket["fields"].append(fields[idx])
 
-        with ThreadPoolExecutor(max_workers=min(len(grouped), 32) or 1) as pool:
-            futures = []
-            for bucket in grouped.values():
-                payload = {
-                    "database_name": db_name,
-                    "collection_name": coll_name,
-                    "ids": bucket["ids"],
-                    "vectors": bucket["vectors"],
-                    "fields": bucket["fields"],
-                }
-                futures.append(pool.submit(self.write_group_json, bucket["group"], "/add", payload))
-            for future in as_completed(futures):
-                future.result()
+        futures = []
+        for bucket in grouped.values():
+            payload = {
+                "database_name": db_name,
+                "collection_name": coll_name,
+                "ids": bucket["ids"],
+                "vectors": bucket["vectors"],
+                "fields": bucket["fields"],
+            }
+            futures.append(self._fanout_pool.submit(self.write_group_json, bucket["group"], "/add", payload))
+        for future in as_completed(futures):
+            future.result()
 
         return _json_success({
             "database_name": db_name,
@@ -1254,6 +1622,8 @@ class ClusterCoordinator:
             raise ValueError("fields length must match ids length")
         if vectors:
             self.state.update_collection_dim_if_unset(db_name, coll_name, len(vectors[0]))
+        if any(isinstance(item_id, int) and not isinstance(item_id, bool) for item_id in ids):
+            self.state.mark_integer_id_routing(db_name, coll_name, "external")
 
         grouped: dict[str, dict[str, Any]] = {}
         for idx, item_id in enumerate(ids):
@@ -1267,19 +1637,18 @@ class ClusterCoordinator:
             if fields is not None:
                 bucket["fields"].append(fields[idx])
 
-        with ThreadPoolExecutor(max_workers=min(len(grouped), 32) or 1) as pool:
-            futures = []
-            for bucket in grouped.values():
-                payload = {
-                    "database_name": db_name,
-                    "collection_name": coll_name,
-                    "ids": bucket["ids"],
-                    "vectors": bucket["vectors"],
-                    "fields": bucket["fields"],
-                }
-                futures.append(pool.submit(self.write_group_json, bucket["group"], "/upsert", payload))
-            for future in as_completed(futures):
-                future.result()
+        futures = []
+        for bucket in grouped.values():
+            payload = {
+                "database_name": db_name,
+                "collection_name": coll_name,
+                "ids": bucket["ids"],
+                "vectors": bucket["vectors"],
+                "fields": bucket["fields"],
+            }
+            futures.append(self._fanout_pool.submit(self.write_group_json, bucket["group"], "/upsert", payload))
+        for future in as_completed(futures):
+            future.result()
 
         return _json_success({
             "database_name": db_name,
@@ -1294,6 +1663,7 @@ class ClusterCoordinator:
         n_vectors = int(params["n_vectors"])
         vector_encoding = _normalize_vector_encoding(params.get("vector_encoding"))
         self.state.update_collection_dim_if_unset(db_name, coll_name, dim)
+        self.state.mark_integer_id_routing(db_name, coll_name, "internal")
         vector_raw, ids, fields, _ = _split_binary_items_payload(
             body,
             n_vectors,
@@ -1316,23 +1686,22 @@ class ClusterCoordinator:
             if fields is not None:
                 bucket["fields"].append(fields[idx])
 
-        with ThreadPoolExecutor(max_workers=min(len(grouped), 32) or 1) as pool:
-            futures = []
-            for bucket in grouped.values():
-                futures.append(pool.submit(
-                    self.write_group_binary_payload,
-                    bucket["group"],
-                    path,
-                    db_name,
-                    coll_name,
-                    dim,
-                    vector_encoding,
-                    b"".join(bucket["parts"]),
-                    bucket["ids"],
-                    bucket["fields"],
-                ))
-            for future in as_completed(futures):
-                future.result()
+        futures = []
+        for bucket in grouped.values():
+            futures.append(self._fanout_pool.submit(
+                self.write_group_binary_payload,
+                bucket["group"],
+                path,
+                db_name,
+                coll_name,
+                dim,
+                vector_encoding,
+                b"".join(bucket["parts"]),
+                bucket["ids"],
+                bucket["fields"],
+            ))
+        for future in as_completed(futures):
+            future.result()
 
         return _json_success({
             "database_name": db_name,
@@ -1340,29 +1709,136 @@ class ClusterCoordinator:
             **({"ids": ids} if str(params.get("return_ids", "true")).lower() == "true" else {"n_vectors": n_vectors}),
         })
 
+    def route_bulk_add_binary(self, params: dict[str, Any], body: bytes) -> dict[str, Any]:
+        db_name = str(params["database_name"])
+        coll_name = str(params["collection_name"])
+        dim = int(params["dim"])
+        n_vectors = int(params["n_vectors"])
+        vector_encoding = _normalize_vector_encoding(params.get("vector_encoding"))
+        expected_bytes = n_vectors * dim * _vector_wire_width(vector_encoding)
+        if len(body) != expected_bytes:
+            raise ValueError(
+                f"expected {expected_bytes} encoded vector bytes "
+                f"({n_vectors} vectors x {dim} dim), got {len(body)}"
+            )
+        self.state.update_collection_dim_if_unset(db_name, coll_name, dim)
+        self.state.mark_integer_id_routing(db_name, coll_name, "internal")
+        ids = self.state.allocate_ids(db_name, coll_name, n_vectors)
+
+        vector_raw = memoryview(body)
+        stride = dim * _vector_wire_width(vector_encoding)
+        grouped: dict[str, dict[str, Any]] = {}
+        for idx, item_id in enumerate(ids):
+            group = self.state.group_for_id(db_name, coll_name, int(item_id))
+            bucket = grouped.setdefault(
+                group["name"],
+                {"group": group, "parts": [], "ids": []},
+            )
+            start = idx * stride
+            bucket["parts"].append(vector_raw[start:start + stride])
+            bucket["ids"].append(int(item_id))
+
+        futures = []
+        for bucket in grouped.values():
+            futures.append(self._fanout_pool.submit(
+                self.write_group_binary_payload,
+                bucket["group"],
+                "/add_binary_ids",
+                db_name,
+                coll_name,
+                dim,
+                vector_encoding,
+                b"".join(bucket["parts"]),
+                bucket["ids"],
+                None,
+            ))
+        for future in as_completed(futures):
+            future.result()
+
+        return _json_success({
+            "database_name": db_name,
+            "collection_name": coll_name,
+            **({"ids": ids} if str(params.get("return_ids", "false")).lower() == "true" else {"n_vectors": n_vectors}),
+        })
+
     def route_ids_write(self, body: dict[str, Any], endpoint: str) -> dict[str, Any]:
         db_name = body["database_name"]
         coll_name = body["collection_name"]
         ids = list(body.get("ids", []))
+        internal_integer_ids = (
+            self.state.integer_id_routing(db_name, coll_name) == "internal"
+            and all(isinstance(item_id, int) and not isinstance(item_id, bool) for item_id in ids)
+        )
         grouped: dict[str, tuple[dict[str, Any], list[Any]]] = {}
         for item_id in ids:
-            group = self.state.group_for_external_id(db_name, coll_name, item_id)
+            group = self.state.group_for_public_id(db_name, coll_name, item_id)
             grouped.setdefault(group["name"], (group, []))[1].append(item_id)
-        with ThreadPoolExecutor(max_workers=min(len(grouped), 32) or 1) as pool:
-            futures = []
-            for group, group_ids in grouped.values():
-                futures.append(pool.submit(self.write_group_ids, group, endpoint, {
-                    "database_name": db_name,
-                    "collection_name": coll_name,
-                    "ids": group_ids,
-                }))
-            for future in as_completed(futures):
-                future.result()
+        futures = []
+        for group, group_ids in grouped.values():
+            writer = self.write_group_internal_ids if internal_integer_ids else self.write_group_ids
+            futures.append(self._fanout_pool.submit(writer, group, endpoint, {
+                "database_name": db_name,
+                "collection_name": coll_name,
+                "ids": group_ids,
+            }))
+        for future in as_completed(futures):
+            future.result()
         return _json_success({
             "database_name": db_name,
             "collection_name": coll_name,
             "status": "ok",
         })
+
+    def fanout_json_read(self, path: str, body: dict[str, Any]) -> list[dict[str, Any]]:
+        calls = [
+            (self.read_uri_for_group(group), path, body)
+            for group in self.state.groups()
+        ]
+        return self._json_post_many(calls)
+
+    def merge_search_endpoint(
+        self,
+        path: str,
+        body: dict[str, Any],
+        *,
+        ascending: bool,
+        index: str | None = None,
+        fusion: str | None = None,
+        include_profile: bool = False,
+    ) -> dict[str, Any]:
+        k = int(body.get("k") or 10)
+        return_fields = bool(body.get("return_fields", False))
+        results = []
+        profiles = []
+        for payload in self.fanout_json_read(path, body):
+            params = payload.get("params", {})
+            items = params.get("items", {})
+            results.append((
+                list(items.get("ids", [])),
+                [float(x) for x in items.get("scores", [])],
+                items.get("fields", []) or [],
+            ))
+            if include_profile:
+                profiles.append(params.get("profile", {}))
+        ids, scores, fields = _merge_pairs(results, k, ascending, return_fields)
+        items = {
+            "k": k,
+            "ids": ids,
+            "scores": scores,
+            "fields": fields,
+        }
+        if index is not None:
+            items["index"] = index
+        if fusion is not None:
+            items["fusion"] = fusion
+        payload = _json_success({
+            "database_name": body["database_name"],
+            "collection_name": body["collection_name"],
+            "items": items,
+        })
+        if include_profile:
+            payload["params"]["profile"] = {"shards": profiles}
+        return payload
 
     def search_json(self, body: dict[str, Any]) -> dict[str, Any]:
         db_name = body["database_name"]
@@ -1370,23 +1846,25 @@ class ClusterCoordinator:
         coll = self.state.get_collection(db_name, coll_name)
         if not coll:
             raise KeyError(f"Collection '{coll_name}' not found")
+        groups = self.state.groups()
+        if len(groups) == 1:
+            uri = self.read_uri_for_group(groups[0])
+            return self._json_post(uri, "/search", body)
         k = int(body.get("k") or 10)
         return_fields = bool(body.get("return_fields", False))
         ascending = _is_ascending_index(coll.get("index_mode"))
         results = []
-        with ThreadPoolExecutor(max_workers=min(len(self.state.groups()), 32)) as pool:
-            future_to_group = {}
-            for group in self.state.groups():
-                uri = self.read_uri_for_group(group)
-                future_to_group[pool.submit(self._json_post, uri, "/search", body)] = group
-            for future in as_completed(future_to_group):
-                payload = future.result()
-                items = payload.get("params", {}).get("items", {})
-                results.append((
-                    list(items.get("ids", [])),
-                    [float(x) for x in items.get("scores", [])],
-                    items.get("fields", []) or [],
-                ))
+        calls = [
+            (self.read_uri_for_group(group), "/search", body)
+            for group in groups
+        ]
+        for payload in self._json_post_many(calls):
+            items = payload.get("params", {}).get("items", {})
+            results.append((
+                list(items.get("ids", [])),
+                [float(x) for x in items.get("scores", [])],
+                items.get("fields", []) or [],
+            ))
         ids, scores, fields = _merge_pairs(results, k, ascending, return_fields)
         return _json_success({
             "database_name": db_name,
@@ -1400,25 +1878,74 @@ class ClusterCoordinator:
             },
         })
 
-    def bm25_search_json(self, body: dict[str, Any]) -> dict[str, Any]:
+    def batch_search_json(self, body: dict[str, Any]) -> dict[str, Any]:
         db_name = body["database_name"]
         coll_name = body["collection_name"]
+        coll = self.state.get_collection(db_name, coll_name)
+        if not coll:
+            raise KeyError(f"Collection '{coll_name}' not found")
+        groups = self.state.groups()
+        if len(groups) == 1:
+            uri = self.read_uri_for_group(groups[0])
+            return self._json_post(uri, "/batch_search", body)
         k = int(body.get("k") or 10)
+        vectors = body.get("vectors") or []
         return_fields = bool(body.get("return_fields", False))
-        results = []
-        with ThreadPoolExecutor(max_workers=min(len(self.state.groups()), 32)) as pool:
-            futures = []
-            for group in self.state.groups():
-                uri = self.read_uri_for_group(group)
-                futures.append(pool.submit(self._json_post, uri, "/bm25_search", body))
-            for future in as_completed(futures):
-                payload = future.result()
-                items = payload.get("params", {}).get("items", {})
-                results.append((
+        ascending = _is_ascending_index(coll.get("index_mode"))
+        per_query: list[list[tuple[list[Any], list[float], list[dict[str, Any]]]]] = [
+            [] for _ in range(len(vectors))
+        ]
+
+        calls = [
+            (self.read_uri_for_group(group), "/batch_search", body)
+            for group in groups
+        ]
+        for payload in self._json_post_many(calls):
+            shard_results = payload.get("params", {}).get("results", [])
+            if len(shard_results) != len(vectors):
+                raise RuntimeError(f"batch_search returned {len(shard_results)} queries, expected {len(vectors)}")
+            for query_idx, items in enumerate(shard_results):
+                per_query[query_idx].append((
                     list(items.get("ids", [])),
                     [float(x) for x in items.get("scores", [])],
                     items.get("fields", []) or [],
                 ))
+
+        results = []
+        for query_results in per_query:
+            ids, scores, fields = _merge_pairs(query_results, k, ascending, return_fields)
+            results.append({
+                "ids": ids,
+                "scores": scores,
+                "fields": fields,
+            })
+        return _json_success({
+            "database_name": db_name,
+            "collection_name": coll_name,
+            "results": results,
+        })
+
+    def bm25_search_json(self, body: dict[str, Any]) -> dict[str, Any]:
+        db_name = body["database_name"]
+        coll_name = body["collection_name"]
+        groups = self.state.groups()
+        if len(groups) == 1:
+            uri = self.read_uri_for_group(groups[0])
+            return self._json_post(uri, "/bm25_search", body)
+        k = int(body.get("k") or 10)
+        return_fields = bool(body.get("return_fields", False))
+        results = []
+        calls = [
+            (self.read_uri_for_group(group), "/bm25_search", body)
+            for group in groups
+        ]
+        for payload in self._json_post_many(calls):
+            items = payload.get("params", {}).get("items", {})
+            results.append((
+                list(items.get("ids", [])),
+                [float(x) for x in items.get("scores", [])],
+                items.get("fields", []) or [],
+            ))
         ids, scores, fields = _merge_pairs(results, k, False, return_fields)
         return _json_success({
             "database_name": db_name,
@@ -1442,28 +1969,17 @@ class ClusterCoordinator:
         coll = self.state.get_collection(db_name, coll_name)
         if not coll:
             raise KeyError(f"Collection '{coll_name}' not found")
-        k = int(params.get("k") or 10)
-        return_fields = str(params.get("return_fields", "false")).lower() == "true"
-        ascending = _is_ascending_index(coll.get("index_mode"))
-        results = []
-        with ThreadPoolExecutor(max_workers=min(len(self.state.groups()), 32)) as pool:
-            futures = []
-            for group in self.state.groups():
-                uri = self.read_uri_for_group(group)
-                futures.append(pool.submit(
-                    self._binary_call,
-                    uri,
-                    RPC_OP_SEARCH,
-                    "/search_binary",
-                    params,
-                    body,
-                ))
-            for future in as_completed(futures):
-                raw = future.result()
-                ids, distances, fields, _ = _split_search_binary(raw)
-                results.append((ids, distances, fields))
-        ids, distances, fields = _merge_pairs(results, k, ascending, return_fields)
-        return _encode_search_binary(ids, distances, fields)
+        groups = self.state.groups()
+        if len(groups) == 1:
+            uri = self.read_uri_for_group(groups[0])
+            return self._binary_call(
+                uri,
+                RPC_OP_SEARCH,
+                "/search_binary",
+                params,
+                body,
+            )
+        return self._rust_binary_read("search_binary", params, body, coll)
 
     def _binary_call(
         self,
@@ -1497,65 +2013,39 @@ class ClusterCoordinator:
         coll = self.state.get_collection(db_name, coll_name)
         if not coll:
             raise KeyError(f"Collection '{coll_name}' not found")
-        k = int(params.get("k") or 10)
-        n_queries = int(params.get("n_queries") or 0)
-        return_fields = str(params.get("return_fields", "false")).lower() == "true"
-        ascending = _is_ascending_index(coll.get("index_mode"))
-        per_query: list[list[tuple[list[int], list[float], list[dict[str, Any]]]]] = [
-            [] for _ in range(n_queries)
-        ]
-
-        with ThreadPoolExecutor(max_workers=min(len(self.state.groups()), 32)) as pool:
-            futures = []
-            for group in self.state.groups():
-                uri = self.read_uri_for_group(group)
-                futures.append(pool.submit(
-                    self._binary_call,
-                    uri,
-                    RPC_OP_BATCH_SEARCH,
-                    "/batch_search_binary",
-                    params,
-                    body,
-                ))
-            for future in as_completed(futures):
-                buf = future.result()
-                offset = 0
-                count = int.from_bytes(buf[offset:offset + 4], "little")
-                offset += 4
-                if count != n_queries:
-                    raise RuntimeError(f"batch_search_binary returned {count} queries, expected {n_queries}")
-                for query_idx in range(count):
-                    ids, distances, fields, offset = _split_search_binary(buf, offset)
-                    per_query[query_idx].append((ids, distances, fields))
-
-        parts = [n_queries.to_bytes(4, "little")]
-        for query_results in per_query:
-            ids, distances, fields = _merge_pairs(query_results, k, ascending, return_fields)
-            parts.append(_encode_search_binary(ids, distances, fields))
-        return b"".join(parts)
+        groups = self.state.groups()
+        if len(groups) == 1:
+            uri = self.read_uri_for_group(groups[0])
+            return self._binary_call(
+                uri,
+                RPC_OP_BATCH_SEARCH,
+                "/batch_search_binary",
+                params,
+                body,
+            )
+        return self._rust_binary_read("batch_search_binary", params, body, coll)
 
     def head_tail_binary(self, endpoint: str, params: dict[str, Any]) -> bytes:
         n = int(params.get("n") or 5)
         rows: list[tuple[list[float], int, dict[str, Any]]] = []
-        with ThreadPoolExecutor(max_workers=min(len(self.state.groups()), 32)) as pool:
-            futures = []
-            for group in self.state.groups():
-                uri = self.read_uri_for_group(group)
-                futures.append(pool.submit(
-                    self._request,
-                    "GET",
-                    uri,
-                    endpoint,
-                    params=params,
-                ))
-            for future in as_completed(futures):
-                response = future.result()
-                if response.status_code != 200:
-                    raise RuntimeError(response.text)
-                vectors, ids, fields, _dim, _offset = _split_vectors_binary(response.content)
-                for idx, (vector, item_id) in enumerate(zip(vectors, ids)):
-                    field = fields[idx] if idx < len(fields) else {}
-                    rows.append((vector, item_id, field))
+        futures = []
+        for group in self.state.groups():
+            uri = self.read_uri_for_group(group)
+            futures.append(self._fanout_pool.submit(
+                self._request,
+                "GET",
+                uri,
+                endpoint,
+                params=params,
+            ))
+        for future in as_completed(futures):
+            response = future.result()
+            if response.status_code != 200:
+                raise RuntimeError(response.text)
+            vectors, ids, fields, _dim, _offset = _split_vectors_binary(response.content)
+            for idx, (vector, item_id) in enumerate(zip(vectors, ids)):
+                field = fields[idx] if idx < len(fields) else {}
+                rows.append((vector, item_id, field))
 
         rows.sort(key=lambda item: item[1], reverse=endpoint == "/tail_binary")
         rows = rows[:n]
@@ -1570,18 +2060,17 @@ class ClusterCoordinator:
         n = int(body.get("n") or 5)
         result_key = "tail" if endpoint == "/tail" else "head"
         rows: list[tuple[list[float], Any, dict[str, Any]]] = []
-        with ThreadPoolExecutor(max_workers=min(len(self.state.groups()), 32)) as pool:
-            futures = []
-            for group in self.state.groups():
-                uri = self.read_uri_for_group(group)
-                futures.append(pool.submit(self._json_post, uri, endpoint, body))
-            for future in as_completed(futures):
-                payload = future.result()
-                result = payload.get("params", {}).get(result_key, [[], [], []])
-                vectors, ids, fields = result[0] or [], result[1] or [], result[2] or []
-                for idx, (vector, item_id) in enumerate(zip(vectors, ids)):
-                    field = fields[idx] if idx < len(fields) else {}
-                    rows.append((vector, item_id, field))
+        futures = []
+        for group in self.state.groups():
+            uri = self.read_uri_for_group(group)
+            futures.append(self._fanout_pool.submit(self._json_post, uri, endpoint, body))
+        for future in as_completed(futures):
+            payload = future.result()
+            result = payload.get("params", {}).get(result_key, [[], [], []])
+            vectors, ids, fields = result[0] or [], result[1] or [], result[2] or []
+            for idx, (vector, item_id) in enumerate(zip(vectors, ids)):
+                field = fields[idx] if idx < len(fields) else {}
+                rows.append((vector, item_id, field))
 
         rows.sort(key=lambda item: (type(item[1]).__name__, str(item[1])), reverse=endpoint == "/tail")
         rows = rows[:n]
@@ -1598,29 +2087,28 @@ class ClusterCoordinator:
 
     def query_all_json(self, body: dict[str, Any], endpoint: str) -> dict[str, Any]:
         results = []
-        with ThreadPoolExecutor(max_workers=min(len(self.state.groups()), 32)) as pool:
-            futures = []
-            filter_ids = body.get("filter_ids") or []
-            if filter_ids and body.get("where") is None:
-                grouped: dict[str, tuple[dict[str, Any], list[Any]]] = {}
-                for item_id in filter_ids:
-                    group = self.state.group_for_external_id(
-                        body["database_name"],
-                        body["collection_name"],
-                        item_id,
-                    )
-                    grouped.setdefault(group["name"], (group, []))[1].append(item_id)
-                for group, group_ids in grouped.values():
-                    uri = self.read_uri_for_group(group)
-                    payload = {**body, "filter_ids": group_ids}
-                    futures.append(pool.submit(self._json_post, uri, endpoint, payload))
-            else:
-                for group in self.state.groups():
-                    uri = self.read_uri_for_group(group)
-                    futures.append(pool.submit(self._json_post, uri, endpoint, body))
-            for future in as_completed(futures):
-                payload = future.result()
-                results.append(payload.get("params", {}).get("result"))
+        futures = []
+        filter_ids = body.get("filter_ids") or []
+        if filter_ids and body.get("where") is None:
+            grouped: dict[str, tuple[dict[str, Any], list[Any]]] = {}
+            for item_id in filter_ids:
+                group = self.state.group_for_public_id(
+                    body["database_name"],
+                    body["collection_name"],
+                    item_id,
+                )
+                grouped.setdefault(group["name"], (group, []))[1].append(item_id)
+            for group, group_ids in grouped.values():
+                uri = self.read_uri_for_group(group)
+                payload = {**body, "filter_ids": group_ids}
+                futures.append(self._fanout_pool.submit(self._json_post, uri, endpoint, payload))
+        else:
+            for group in self.state.groups():
+                uri = self.read_uri_for_group(group)
+                futures.append(self._fanout_pool.submit(self._json_post, uri, endpoint, body))
+        for future in as_completed(futures):
+            payload = future.result()
+            results.append(payload.get("params", {}).get("result"))
 
         if endpoint == "/query_vectors":
             vectors: list[Any] = []
@@ -1677,7 +2165,7 @@ class ClusterCoordinator:
         return _json_success({"database_name": db_name, "collections": details})
 
     def is_id_exists(self, body: dict[str, Any]) -> dict[str, Any]:
-        group = self.state.group_for_external_id(
+        group = self.state.group_for_public_id(
             body["database_name"],
             body["collection_name"],
             body["id"],
@@ -1696,19 +2184,18 @@ class ClusterCoordinator:
         max_results = int(body.get("max_results") or 1000)
         ascending = _is_ascending_index(coll.get("index_mode"))
         results = []
-        with ThreadPoolExecutor(max_workers=min(len(self.state.groups()), 32)) as pool:
-            futures = []
-            for group in self.state.groups():
-                uri = self.read_uri_for_group(group)
-                futures.append(pool.submit(self._json_post, uri, "/search_range", body))
-            for future in as_completed(futures):
-                payload = future.result()
-                result = payload.get("params", {}).get("result", {})
-                results.append((
-                    list(result.get("ids", [])),
-                    [float(x) for x in result.get("distances", [])],
-                    [],
-                ))
+        futures = []
+        for group in self.state.groups():
+            uri = self.read_uri_for_group(group)
+            futures.append(self._fanout_pool.submit(self._json_post, uri, "/search_range", body))
+        for future in as_completed(futures):
+            payload = future.result()
+            result = payload.get("params", {}).get("result", {})
+            results.append((
+                list(result.get("ids", [])),
+                [float(x) for x in result.get("distances", [])],
+                [],
+            ))
         ids, distances, _ = _merge_pairs(results, max_results, ascending, False)
         return _json_success({
             "database_name": body["database_name"],
@@ -1718,18 +2205,151 @@ class ClusterCoordinator:
 
     def list_deleted_ids(self, body: dict[str, Any]) -> dict[str, Any]:
         ids = set()
-        with ThreadPoolExecutor(max_workers=min(len(self.state.groups()), 32)) as pool:
-            futures = []
-            for group in self.state.groups():
-                uri = self.read_uri_for_group(group)
-                futures.append(pool.submit(self._json_post, uri, "/list_deleted_ids", body))
-            for future in as_completed(futures):
-                payload = future.result()
-                ids.update(payload.get("params", {}).get("ids", []))
+        futures = []
+        for group in self.state.groups():
+            uri = self.read_uri_for_group(group)
+            futures.append(self._fanout_pool.submit(self._json_post, uri, "/list_deleted_ids", body))
+        for future in as_completed(futures):
+            payload = future.result()
+            ids.update(payload.get("params", {}).get("ids", []))
         return _json_success({
             "database_name": body["database_name"],
             "collection_name": body["collection_name"],
             "ids": sorted(ids, key=lambda value: (type(value).__name__, str(value))),
+        })
+
+    def list_vector_fields(self, body: dict[str, Any]) -> dict[str, Any]:
+        by_name: dict[str, dict[str, Any]] = {}
+        for payload in self.fanout_json_read("/list_vector_fields", body):
+            for field in payload.get("params", {}).get("fields", []):
+                name = field.get("name")
+                if name is not None and name not in by_name:
+                    by_name[name] = field
+        return _json_success({
+            "database_name": body["database_name"],
+            "collection_name": body["collection_name"],
+            "fields": list(by_name.values()),
+        })
+
+    def route_vector_payloads(self, body: dict[str, Any], endpoint: str) -> dict[str, Any]:
+        db_name = body["database_name"]
+        coll_name = body["collection_name"]
+        ids = list(body.get("ids") or [])
+        vectors = list(body.get("vectors") or [])
+        if len(ids) != len(vectors):
+            raise ValueError("ids length must match vectors length")
+        grouped: dict[str, dict[str, Any]] = {}
+        for idx, item_id in enumerate(ids):
+            group = self.state.group_for_public_id(db_name, coll_name, item_id)
+            bucket = grouped.setdefault(
+                group["name"],
+                {"group": group, "ids": [], "vectors": []},
+            )
+            bucket["ids"].append(item_id)
+            bucket["vectors"].append(vectors[idx])
+        futures = []
+        for bucket in grouped.values():
+            payload = {
+                **body,
+                "ids": bucket["ids"],
+                "vectors": bucket["vectors"],
+            }
+            futures.append(self._fanout_pool.submit(self.write_group_json, bucket["group"], endpoint, payload))
+        for future in as_completed(futures):
+            future.result()
+        return _json_success({
+            "database_name": db_name,
+            "collection_name": coll_name,
+            "ids": ids,
+        })
+
+    def compact(self, body: dict[str, Any]) -> dict[str, Any]:
+        removed = 0
+        for payload in self.fanout_json_read("/compact", body):
+            removed += int(payload.get("params", {}).get("vectors_removed", 0))
+        return _json_success({
+            "database_name": body["database_name"],
+            "collection_name": body["collection_name"],
+            "vectors_removed": removed,
+        })
+
+    def stats(self, body: dict[str, Any]) -> dict[str, Any]:
+        totals = {
+            "n_vectors": 0,
+            "n_live": 0,
+            "n_tombstoned": 0,
+            "dimension": 0,
+            "index_mode": None,
+            "max_id": -1,
+        }
+        for payload in self.fanout_json_read("/stats", body):
+            stats = payload.get("params", {}).get("stats", {})
+            totals["n_vectors"] += int(stats.get("n_vectors", 0))
+            totals["n_live"] += int(stats.get("n_live", 0))
+            totals["n_tombstoned"] += int(stats.get("n_tombstoned", 0))
+            totals["dimension"] = int(stats.get("dimension") or totals["dimension"])
+            totals["max_id"] = max(int(totals["max_id"]), int(stats.get("max_id", -1)))
+        coll = self.state.get_collection(body["database_name"], body["collection_name"]) or {}
+        totals["index_mode"] = coll.get("index_mode")
+        return _json_success({
+            "database_name": body["database_name"],
+            "collection_name": body["collection_name"],
+            "stats": totals,
+        })
+
+    def artifact_fanout(
+        self,
+        path: str,
+        body: dict[str, Any],
+        path_key: str,
+    ) -> dict[str, Any]:
+        base_path = body[path_key]
+        futures = []
+        for group in self.state.groups():
+            uri = group["primary"]
+            shard_path = _shard_artifact_path(base_path, group["name"])
+            payload = {**body, path_key: shard_path}
+            futures.append((
+                group["name"],
+                uri,
+                shard_path,
+                self._fanout_pool.submit(self._json_post, uri, path, payload),
+            ))
+
+        shards = []
+        for group_name, uri, shard_path, future in futures:
+            payload = future.result()
+            shards.append({
+                "group": group_name,
+                "uri": uri,
+                path_key: shard_path,
+                "params": payload.get("params", {}),
+            })
+
+        params = {
+            "database_name": body["database_name"],
+            path_key: str(base_path),
+            "shards": shards,
+        }
+        if "collection_name" in body:
+            params["collection_name"] = body["collection_name"]
+        return _json_success(params)
+
+    def collection_paths(self, body: dict[str, Any]) -> dict[str, Any]:
+        shards = []
+        for group in self.state.groups():
+            uri = self.read_uri_for_group(group)
+            payload = self._json_post(uri, "/get_collection_path", body)
+            shards.append({
+                "group": group["name"],
+                "uri": uri,
+                "collection_path": payload.get("params", {}).get("collection_path"),
+            })
+        return _json_success({
+            "database_name": body["database_name"],
+            "collection_name": body["collection_name"],
+            "collection_path": None,
+            "shards": shards,
         })
 
 
@@ -1800,6 +2420,11 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                 buf = self.coordinator.batch_search_binary(params, self._read_body())
                 self._send_binary(buf)
                 return
+            if path == "/bulk_add_binary":
+                params = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
+                payload = self.coordinator.route_bulk_add_binary(params, self._read_body())
+                self._send_json(payload)
+                return
             if path in {"/add_binary_ids", "/upsert_binary"}:
                 params = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
                 payload = self.coordinator.route_binary_items(params, self._read_body(), path)
@@ -1816,6 +2441,11 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                     "database_name": body["database_name"],
                     "exists": body["database_name"] in self.coordinator.state.databases(),
                 })
+            elif path == "/snapshot_database":
+                payload = self.coordinator.artifact_fanout(path, body, "snapshot_path")
+            elif path == "/restore_database":
+                self._send_error_json("restore_database is not supported by the cluster coordinator yet", status=501)
+                return
             elif path == "/show_collections":
                 payload = self.coordinator.show_collections(body)
             elif path == "/show_collections_details":
@@ -1824,6 +2454,13 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                 payload = self.coordinator.require_collection(body)
             elif path == "/drop_collection":
                 payload = self.coordinator.drop_collection(body)
+            elif path == "/snapshot_collection":
+                payload = self.coordinator.artifact_fanout(path, body, "snapshot_path")
+            elif path == "/export_collection":
+                payload = self.coordinator.artifact_fanout(path, body, "export_path")
+            elif path in {"/restore_collection", "/import_collection"}:
+                self._send_error_json(f"{path[1:]} is not supported by the cluster coordinator yet", status=501)
+                return
             elif path == "/is_collection_exists":
                 payload = self.coordinator.collection_exists_response(body)
             elif path == "/get_collection_config":
@@ -1840,8 +2477,34 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                 payload = self.coordinator.route_ids_write(body, "/restore")
             elif path == "/search":
                 payload = self.coordinator.search_json(body)
+            elif path == "/batch_search":
+                payload = self.coordinator.batch_search_json(body)
+            elif path == "/search_profile":
+                coll = self.coordinator.state.get_collection(body["database_name"], body["collection_name"]) or {}
+                payload = self.coordinator.merge_search_endpoint(
+                    "/search_profile",
+                    body,
+                    ascending=_is_ascending_index(coll.get("index_mode")),
+                    index=coll.get("index_mode") or "FLAT",
+                    include_profile=True,
+                )
             elif path == "/bm25_search":
                 payload = self.coordinator.bm25_search_json(body)
+            elif path == "/sparse_search":
+                payload = self.coordinator.merge_search_endpoint(
+                    "/sparse_search",
+                    body,
+                    ascending=False,
+                    index="SPARSE-FLAT-IP",
+                )
+            elif path == "/hybrid_search":
+                payload = self.coordinator.merge_search_endpoint(
+                    "/hybrid_search",
+                    body,
+                    ascending=False,
+                    index="HYBRID-RRF",
+                    fusion=body.get("fusion") or "rrf",
+                )
             elif path == "/search_range":
                 payload = self.coordinator.search_range(body)
             elif path == "/list_deleted_ids":
@@ -1850,6 +2513,12 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                 payload = self.coordinator.head_tail_json(path, body)
             elif path in {"/query", "/query_vectors"}:
                 payload = self.coordinator.query_all_json(body, path)
+            elif path == "/create_vector_field":
+                payload = self.coordinator.broadcast_json(path, body)
+            elif path == "/list_vector_fields":
+                payload = self.coordinator.list_vector_fields(body)
+            elif path in {"/add_named_vectors", "/add_sparse_vectors"}:
+                payload = self.coordinator.route_vector_payloads(body, path)
             elif path in {"/commit", "/flush", "/checkpoint", "/close_collection"}:
                 payload = self.coordinator.broadcast_json(path, body)
             elif path == "/build_index":
@@ -1859,6 +2528,8 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                     body["collection_name"],
                     body.get("index_mode") or "FLAT",
                 )
+            elif path == "/build_vector_field_index":
+                payload = self.coordinator.broadcast_json(path, body)
             elif path == "/remove_index":
                 payload = self.coordinator.broadcast_json(path, body)
                 self.coordinator.state.update_collection_index(
@@ -1866,12 +2537,26 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                     body["collection_name"],
                     None,
                 )
+            elif path == "/remove_vector_field_index":
+                payload = self.coordinator.broadcast_json(path, body)
+            elif path == "/update_collection_description":
+                payload = self.coordinator.broadcast_json(path, body)
+                self.coordinator.state.update_collection_description(
+                    body["database_name"],
+                    body["collection_name"],
+                    body.get("description"),
+                )
+            elif path == "/compact":
+                payload = self.coordinator.compact(body)
+            elif path == "/stats":
+                payload = self.coordinator.stats(body)
             elif path in {
                 "/collection_shape",
                 "/max_id",
                 "/index_mode",
                 "/list_fields",
                 "/read_by_only_id",
+                "/get_collection_path",
             }:
                 # These endpoints are safe to answer from all shards and merge only
                 # where needed. For now, use shard fan-out for id reads and query-like
@@ -1931,12 +2616,14 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                 "collection_name": body["collection_name"],
                 "fields": sorted(fields),
             })
+        if path == "/get_collection_path":
+            return coord.collection_paths(body)
         if path == "/read_by_only_id":
             raw_id = body.get("id")
             ids = raw_id if isinstance(raw_id, list) else [raw_id]
             by_group: dict[str, tuple[dict[str, Any], list[Any]]] = {}
             for item_id in ids:
-                group = coord.state.group_for_external_id(body["database_name"], body["collection_name"], item_id)
+                group = coord.state.group_for_public_id(body["database_name"], body["collection_name"], item_id)
                 by_group.setdefault(group["name"], (group, []))[1].append(item_id)
             vectors = []
             returned_ids = []
