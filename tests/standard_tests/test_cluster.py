@@ -12,8 +12,16 @@ from lynse.cluster import (
     REPLICA_ACTIVE,
     REPLICA_STALE,
     RPC_OP_COLLECTION_CONTROL,
+    RPC_OP_METADATA_CAS,
+    RPC_OP_METADATA_GET,
     ClusterCoordinator,
     ClusterState,
+    MetadataConflict,
+    MetadataCoordinatorLease,
+    MetadataStore,
+    QuorumMetadataStore,
+    ShardMetadataStore,
+    _default_metadata_owners_from_config,
     _derive_rpc_target,
     _encode_fields_binary,
     _encode_ids_for_wire,
@@ -86,6 +94,29 @@ def _read_exact(conn, size):
     return b"".join(chunks)
 
 
+class MemoryMetadataStore(MetadataStore):
+    def __init__(self, cache_path):
+        self.cache_path = cache_path
+        self._lock = threading.Lock()
+        self._records = {}
+
+    def get(self, key):
+        with self._lock:
+            version, value = self._records.get(key, (0, None))
+            return version, json.loads(json.dumps(value)) if value is not None else None
+
+    def cas(self, key, expected_version, value):
+        with self._lock:
+            version, _current = self._records.get(key, (0, None))
+            if version != int(expected_version):
+                raise MetadataConflict(
+                    f"metadata version conflict for {key}: expected {expected_version}, got {version}"
+                )
+            next_version = version + 1
+            self._records[key] = (next_version, json.loads(json.dumps(value)))
+            return next_version
+
+
 def test_cluster_state_initializes_and_routes_ids(tmp_path):
     state_path = tmp_path / "cluster_state.json"
     state = ClusterState(state_path, seed_config=_seed_config())
@@ -132,6 +163,383 @@ def test_mark_replica_stale_persists(tmp_path):
     reloaded = ClusterState(state_path)
     group = reloaded.group_by_name("sg1")
     assert group["replicas"][0]["state"] == REPLICA_STALE
+
+
+def test_coordinator_lease_allows_takeover_after_expiry(tmp_path):
+    store = MemoryMetadataStore(tmp_path / "cluster_state_cache.json")
+    leader = MetadataCoordinatorLease(store, "coord-a", "http://127.0.0.1:9101", lease_secs=5)
+    standby = MetadataCoordinatorLease(store, "coord-b", "http://127.0.0.1:9102", lease_secs=5)
+
+    acquired, record = leader.try_acquire(now=100.0)
+    assert acquired
+    assert record["leader_id"] == "coord-a"
+
+    acquired, record = standby.try_acquire(now=101.0)
+    assert not acquired
+    assert record["leader_id"] == "coord-a"
+
+    acquired, record = standby.try_acquire(now=106.0)
+    assert acquired
+    assert record["leader_id"] == "coord-b"
+    assert record["lease_epoch"] == 2
+
+
+def test_default_metadata_owners_use_three_primaries_when_available():
+    config = {
+        "shard_groups": [
+            {"primary": "http://127.0.0.1:8101"},
+            {"primary": "http://127.0.0.1:8201"},
+            {"primary": "http://127.0.0.1:8301"},
+            {"primary": "http://127.0.0.1:8401"},
+        ]
+    }
+
+    assert _default_metadata_owners_from_config(config) == [
+        "http://127.0.0.1:8101",
+        "http://127.0.0.1:8201",
+        "http://127.0.0.1:8301",
+    ]
+
+
+def test_default_metadata_owners_fall_back_to_one_primary_for_small_clusters():
+    config = {
+        "shard_groups": [
+            {"primary": "http://127.0.0.1:8101"},
+            {"primary": "http://127.0.0.1:8201"},
+        ]
+    }
+
+    assert _default_metadata_owners_from_config(config) == ["http://127.0.0.1:8101"]
+
+
+def test_quorum_metadata_ignores_and_repairs_minority_partial_write(tmp_path):
+    stores = [MemoryMetadataStore(tmp_path / f"owner_{idx}.json") for idx in range(3)]
+    quorum = QuorumMetadataStore(
+        [
+            "http://127.0.0.1:9101",
+            "http://127.0.0.1:9102",
+            "http://127.0.0.1:9103",
+        ],
+        cache_path=tmp_path / "cache.json",
+        owner_stores=stores,
+    )
+
+    version = quorum.cas("cluster_state", 0, {"value": "committed"})
+    assert version == 1
+
+    owner_version, _owner_value = stores[0].get("cluster_state")
+    stores[0].cas(
+        "cluster_state",
+        owner_version,
+        {
+            "format": "lynsedb-metadata-record",
+            "key": "cluster_state",
+            "version": 1,
+            "logical_version": 2,
+            "value_hash": "minority",
+            "value": {"value": "minority"},
+        },
+    )
+
+    assert quorum.get("cluster_state") == (1, {"value": "committed"})
+    _repaired_version, repaired_raw = stores[0].get("cluster_state")
+    assert repaired_raw["value"] == {"value": "committed"}
+    assert repaired_raw["logical_version"] == 1
+
+    assert quorum.cas("cluster_state", 1, {"value": "next"}) == 2
+    assert quorum.get("cluster_state") == (2, {"value": "next"})
+
+
+def test_coordinator_takeover_reloads_latest_state(tmp_path):
+    store = MemoryMetadataStore(tmp_path / "cluster_state_cache.json")
+    active_state = ClusterState(
+        tmp_path / "active_cluster_state_cache.json",
+        seed_config=_single_seed_config(),
+        metadata_store=store,
+    )
+    active_state.upsert_collection("db", "docs", 4, None, "float32", False)
+    standby_state = ClusterState(
+        tmp_path / "standby_cluster_state_cache.json",
+        metadata_store=store,
+    )
+
+    active = ClusterCoordinator(
+        active_state,
+        coordinator_id="coord-a",
+        coordinator_uri="http://127.0.0.1:9101",
+        coordinator_lease_secs=5,
+        coordinator_lease=MetadataCoordinatorLease(
+            store,
+            "coord-a",
+            "http://127.0.0.1:9101",
+            lease_secs=5,
+        ),
+    )
+    standby = ClusterCoordinator(
+        standby_state,
+        coordinator_id="coord-b",
+        coordinator_uri="http://127.0.0.1:9102",
+        coordinator_lease_secs=5,
+        coordinator_lease=MetadataCoordinatorLease(
+            store,
+            "coord-b",
+            "http://127.0.0.1:9102",
+            lease_secs=5,
+        ),
+    )
+    try:
+        assert active.try_become_leader_once()
+        assert active_state.allocate_ids("db", "docs", 3) == [0, 1, 2]
+        assert standby_state.get_collection("db", "docs")["next_id"] == 0
+
+        active._lease.release()
+        assert standby.try_become_leader_once()
+        assert standby_state.get_collection("db", "docs")["next_id"] == 3
+    finally:
+        active.stop()
+        standby.stop()
+
+
+def test_standby_proxy_forwards_binary_body_to_leader(tmp_path):
+    received = {}
+
+    class EchoHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            return
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length)
+            received["path"] = self.path
+            received["content_type"] = self.headers.get("Content-Type")
+            received["body"] = body
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), EchoHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    leader_uri = f"http://127.0.0.1:{server.server_port}"
+
+    store = MemoryMetadataStore(tmp_path / "cluster_state_cache.json")
+    state = ClusterState(
+        tmp_path / "cluster_state_cache.json",
+        seed_config=_single_seed_config(),
+        metadata_store=store,
+    )
+    lease = MetadataCoordinatorLease(store, "leader", leader_uri, lease_secs=5)
+    lease.try_acquire()
+    standby = ClusterCoordinator(
+        state,
+        coordinator_id="standby",
+        coordinator_uri="http://127.0.0.1:9102",
+        coordinator_lease_secs=5,
+        coordinator_lease=MetadataCoordinatorLease(
+            store,
+            "standby",
+            "http://127.0.0.1:9102",
+            lease_secs=5,
+        ),
+    )
+    try:
+        response = standby.proxy_request_to_leader(
+            "POST",
+            "/bulk_add_binary?database_name=db&collection_name=docs",
+            headers={"Content-Type": "application/octet-stream"},
+            body=b"\x01\x02\x03",
+        )
+        assert response.status_code == 200
+        assert response.content == b"\x01\x02\x03"
+        assert received["path"] == "/bulk_add_binary?database_name=db&collection_name=docs"
+        assert received["content_type"] == "application/octet-stream"
+        assert received["body"] == b"\x01\x02\x03"
+    finally:
+        standby.stop()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_shard_metadata_store_prefers_rpc(tmp_path):
+    http_port, rpc_port = _find_rpc_test_ports()
+    owner_uri = f"http://127.0.0.1:{http_port}"
+    records = {}
+    rpc_calls = []
+    ready = threading.Event()
+    stop = threading.Event()
+
+    def encode_response(status, meta, raw=b""):
+        meta_raw = json.dumps(meta, separators=(",", ":")).encode("utf-8")
+        frame = bytes([status]) + struct.pack("<I", len(meta_raw)) + meta_raw + raw
+        return struct.pack("<I", len(frame)) + frame
+
+    def serve_rpc():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", rpc_port))
+            server.listen()
+            ready.set()
+            server.settimeout(0.1)
+            while not stop.is_set():
+                try:
+                    conn, _addr = server.accept()
+                except socket.timeout:
+                    continue
+                with conn:
+                    while not stop.is_set():
+                        try:
+                            header = _read_exact(conn, 4)
+                        except Exception:
+                            break
+                        frame_len = struct.unpack("<I", header)[0]
+                        frame = _read_exact(conn, frame_len)
+                        op = frame[0]
+                        meta_len = struct.unpack("<I", frame[1:5])[0]
+                        meta = json.loads(frame[5:5 + meta_len])
+                        raw = frame[5 + meta_len:]
+                        rpc_calls.append(op)
+                        key = meta["key"]
+                        if op == RPC_OP_METADATA_GET:
+                            version, value = records.get(key, (0, None))
+                            body = b"" if value is None else json.dumps(value).encode("utf-8")
+                            conn.sendall(encode_response(0, {
+                                "version": version,
+                                "exists": value is not None,
+                            }, body))
+                        elif op == RPC_OP_METADATA_CAS:
+                            expected = int(meta["expected_version"])
+                            version, _value = records.get(key, (0, None))
+                            if version != expected:
+                                conn.sendall(encode_response(1, {
+                                    "error": f"metadata version conflict for key '{key}'"
+                                }))
+                            else:
+                                value = json.loads(raw)
+                                records[key] = (version + 1, value)
+                                conn.sendall(encode_response(0, {
+                                    "version": version + 1,
+                                    "exists": True,
+                                }))
+                        else:
+                            conn.sendall(encode_response(1, {"error": "unknown op"}))
+
+    thread = threading.Thread(target=serve_rpc, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=2)
+    store = ShardMetadataStore(owner_uri, cache_path=tmp_path / "cache.json", timeout_secs=1)
+    try:
+        assert store.get("cluster_state") == (0, None)
+        version = store.cas("cluster_state", 0, {"hello": "world"})
+        assert version == 1
+        assert store.get("cluster_state") == (1, {"hello": "world"})
+        assert rpc_calls == [
+            RPC_OP_METADATA_GET,
+            RPC_OP_METADATA_CAS,
+            RPC_OP_METADATA_GET,
+        ]
+    finally:
+        store.close()
+        stop.set()
+        try:
+            with socket.create_connection(("127.0.0.1", rpc_port), timeout=0.2):
+                pass
+        except Exception:
+            pass
+        thread.join(timeout=2)
+
+
+def test_cluster_state_can_use_shard_metadata_store_over_rpc(tmp_path):
+    http_port, rpc_port = _find_rpc_test_ports()
+    owner_uri = f"http://127.0.0.1:{http_port}"
+    records = {}
+    ready = threading.Event()
+    stop = threading.Event()
+
+    def encode_response(status, meta, raw=b""):
+        meta_raw = json.dumps(meta, separators=(",", ":")).encode("utf-8")
+        frame = bytes([status]) + struct.pack("<I", len(meta_raw)) + meta_raw + raw
+        return struct.pack("<I", len(frame)) + frame
+
+    def serve_rpc():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", rpc_port))
+            server.listen()
+            ready.set()
+            server.settimeout(0.1)
+            while not stop.is_set():
+                try:
+                    conn, _addr = server.accept()
+                except socket.timeout:
+                    continue
+                with conn:
+                    while not stop.is_set():
+                        try:
+                            header = _read_exact(conn, 4)
+                        except Exception:
+                            break
+                        frame_len = struct.unpack("<I", header)[0]
+                        frame = _read_exact(conn, frame_len)
+                        op = frame[0]
+                        meta_len = struct.unpack("<I", frame[1:5])[0]
+                        meta = json.loads(frame[5:5 + meta_len])
+                        raw = frame[5 + meta_len:]
+                        key = meta["key"]
+                        if op == RPC_OP_METADATA_GET:
+                            version, value = records.get(key, (0, None))
+                            body = b"" if value is None else json.dumps(value).encode("utf-8")
+                            conn.sendall(encode_response(0, {
+                                "version": version,
+                                "exists": value is not None,
+                            }, body))
+                        elif op == RPC_OP_METADATA_CAS:
+                            expected = int(meta["expected_version"])
+                            version, _value = records.get(key, (0, None))
+                            if version != expected:
+                                conn.sendall(encode_response(1, {
+                                    "error": f"metadata version conflict for key '{key}'"
+                                }))
+                            else:
+                                value = json.loads(raw)
+                                records[key] = (version + 1, value)
+                                conn.sendall(encode_response(0, {
+                                    "version": version + 1,
+                                    "exists": True,
+                                }))
+                        else:
+                            conn.sendall(encode_response(1, {"error": "unknown op"}))
+
+    thread = threading.Thread(target=serve_rpc, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=2)
+    store = ShardMetadataStore(owner_uri, cache_path=tmp_path / "cluster_state_cache.json", timeout_secs=1)
+    try:
+        state = ClusterState(tmp_path / "cluster_state_cache.json", seed_config=_single_seed_config(), metadata_store=store)
+        state.upsert_collection("db", "docs", 2, None, "float32", False)
+        store.close()
+
+        reloaded_store = ShardMetadataStore(owner_uri, cache_path=tmp_path / "cluster_state_cache2.json", timeout_secs=1)
+        try:
+            reloaded = ClusterState(
+                tmp_path / "cluster_state_cache2.json",
+                metadata_store=reloaded_store,
+            )
+            assert reloaded.get_collection("db", "docs")["dim"] == 2
+            assert (tmp_path / "cluster_state_cache2.json").exists()
+        finally:
+            reloaded_store.close()
+    finally:
+        store.close()
+        stop.set()
+        try:
+            with socket.create_connection(("127.0.0.1", rpc_port), timeout=0.2):
+                pass
+        except Exception:
+            pass
+        thread.join(timeout=2)
 
 
 def test_search_merge_obeys_metric_order():

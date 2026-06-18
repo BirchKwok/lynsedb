@@ -149,6 +149,14 @@ def test_parse_coordinator_args():
             "0.5",
             "--health-failures",
             "2",
+            "--coordinator-id",
+            "coord-a",
+            "--coordinator-uri",
+            "http://127.0.0.1:9101",
+            "--coordinator-lease-secs",
+            "2.5",
+            "--metadata-owners",
+            "http://10.0.0.11:7638,http://10.0.0.12:7638,http://10.0.0.13:7638",
         ]
     )
     assert args.role == "coordinator"
@@ -156,3 +164,7 @@ def test_parse_coordinator_args():
     assert args.cluster_state == "/tmp/cluster-state.json"
     assert args.health_interval_secs == 0.5
     assert args.health_failures == 2
+    assert args.coordinator_id == "coord-a"
+    assert args.coordinator_uri == "http://127.0.0.1:9101"
+    assert args.coordinator_lease_secs == 2.5
+    assert args.metadata_owners == "http://10.0.0.11:7638,http://10.0.0.12:7638,http://10.0.0.13:7638"

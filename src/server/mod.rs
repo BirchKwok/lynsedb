@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use actix_web::body::EitherBody;
@@ -29,6 +29,7 @@ struct AppState {
     start_time_unix_seconds: u64,
     metrics: Arc<HttpMetrics>,
     limits: ServerLimits,
+    cluster_metadata_lock: Arc<Mutex<()>>,
 }
 
 const DEFAULT_SLOW_QUERY_WARN_MS: u64 = 1000;
@@ -1345,6 +1346,18 @@ struct ReadByIdRequest {
     id: serde_json::Value, // can be int or list of ints
 }
 
+#[derive(Deserialize)]
+struct ClusterMetadataGetRequest {
+    key: String,
+}
+
+#[derive(Deserialize)]
+struct ClusterMetadataCasRequest {
+    key: String,
+    expected_version: u64,
+    value: serde_json::Value,
+}
+
 #[derive(Serialize)]
 struct ApiResponse<T: Serialize> {
     status: String,
@@ -2454,6 +2467,64 @@ async fn list_databases(state: web::Data<AppState>) -> HttpResponse {
     ApiResponse::success(serde_json::json!({
         "databases": databases
     }))
+}
+
+async fn cluster_metadata_get(
+    state: web::Data<AppState>,
+    body: web::Json<ClusterMetadataGetRequest>,
+) -> HttpResponse {
+    let _guard = match state.cluster_metadata_lock.lock() {
+        Ok(guard) => guard,
+        Err(_) => return error_response("cluster metadata lock poisoned"),
+    };
+    match crate::rpc::metadata_get(state.manager.root_path(), &body.key) {
+        Ok((version, raw)) => {
+            let value = if raw.is_empty() {
+                serde_json::Value::Null
+            } else {
+                match serde_json::from_slice(&raw) {
+                    Ok(value) => value,
+                    Err(e) => return error_response(&e.to_string()),
+                }
+            };
+            ApiResponse::success(serde_json::json!({
+                "key": body.key,
+                "version": version,
+                "exists": !raw.is_empty(),
+                "value": value,
+            }))
+        }
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn cluster_metadata_cas(
+    state: web::Data<AppState>,
+    body: web::Json<ClusterMetadataCasRequest>,
+) -> HttpResponse {
+    let _guard = match state.cluster_metadata_lock.lock() {
+        Ok(guard) => guard,
+        Err(_) => return error_response("cluster metadata lock poisoned"),
+    };
+    match crate::rpc::metadata_cas(
+        state.manager.root_path(),
+        &body.key,
+        body.expected_version,
+        body.value.clone(),
+    ) {
+        Ok(version) => ApiResponse::success(serde_json::json!({
+            "key": body.key,
+            "version": version,
+        })),
+        Err(e) => {
+            let text = e.to_string();
+            if text.contains("metadata version conflict") {
+                bad_request(&text)
+            } else {
+                error_response(&text)
+            }
+        }
+    }
 }
 
 async fn delete_database(
@@ -4531,6 +4602,14 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/database_exists", web::post().to(database_exists))
         .route("/list_databases", web::get().to(list_databases))
         .route("/delete_database", web::post().to(delete_database))
+        .route(
+            "/cluster_metadata/get",
+            web::post().to(cluster_metadata_get),
+        )
+        .route(
+            "/cluster_metadata/cas",
+            web::post().to(cluster_metadata_cas),
+        )
         // Collection operations
         .route("/required_collection", web::post().to(required_collection))
         .route("/drop_collection", web::post().to(drop_collection))
@@ -4673,16 +4752,19 @@ pub fn run_server(
 
         let app_manager = Arc::clone(&manager);
         let app_metrics = Arc::clone(&metrics);
+        let app_cluster_metadata_lock = Arc::new(Mutex::new(()));
         let app_runtime_cfg = runtime_cfg;
         let server = HttpServer::new(move || {
             let key_clone: Option<String> = (*api_key).clone();
             let metrics_clone = Arc::clone(&app_metrics);
+            let cluster_metadata_lock = Arc::clone(&app_cluster_metadata_lock);
             App::new()
                 .app_data(web::Data::new(AppState {
                     manager: Arc::clone(&app_manager),
                     start_time_unix_seconds,
                     metrics: Arc::clone(&metrics_clone),
                     limits: app_runtime_cfg.limits,
+                    cluster_metadata_lock,
                 }))
                 .app_data(web::JsonConfig::default().limit(app_runtime_cfg.json_limit_bytes))
                 .app_data(web::PayloadConfig::default().limit(app_runtime_cfg.payload_limit_bytes))
@@ -4935,6 +5017,7 @@ mod tests {
             start_time_unix_seconds: 123,
             metrics: http_metrics,
             limits: test_limits(),
+            cluster_metadata_lock: Arc::new(std::sync::Mutex::new(())),
         }))
         .await;
         assert_eq!(response.status(), StatusCode::OK);

@@ -52,7 +52,7 @@ def _wait_http(url: str, timeout: float = 20.0) -> None:
     last_error: Exception | None = None
     while time.perf_counter() < deadline:
         try:
-            response = httpx.get(url, timeout=1.0)
+            response = httpx.get(url, timeout=1.0, trust_env=False)
             if response.status_code == 200:
                 return
         except Exception as exc:  # pragma: no cover - diagnostic path
@@ -117,6 +117,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     env = os.environ.copy()
     env.setdefault("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "python"))
     env.setdefault("RUST_LOG", "error")
+    env.setdefault("NO_PROXY", "127.0.0.1,localhost")
+    env.setdefault("no_proxy", "127.0.0.1,localhost")
 
     try:
         for idx, port in enumerate(shard_ports):
@@ -161,7 +163,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         }
         config_path = root / "cluster.json"
         config_path.write_text(json.dumps(config), encoding="utf-8")
-        state_path = root / "cluster_state.json"
+        state_path = root / "cluster_state.cache.json"
         coord_cmd = [
             sys.executable,
             "-m",

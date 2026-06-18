@@ -375,12 +375,49 @@ def _parse_args(argv=None):
     parser.add_argument(
         "--cluster-state",
         default=_resolve_str("cluster_state", ("LYNSE_CLUSTER_STATE",), config, None),
-        help="Coordinator mode: mutable cluster metadata state path",
+        help=(
+            "Coordinator mode: local metadata cache path. Authoritative metadata "
+            "is stored on metadata owner shard(s)."
+        ),
     )
     parser.add_argument(
         "--shard-api-key",
         default=_resolve_str("shard_api_key", ("LYNSE_SHARD_API_KEY",), config, None),
         help="Coordinator mode: API key used when forwarding requests to shards",
+    )
+    parser.add_argument(
+        "--coordinator-id",
+        default=_resolve_str("coordinator_id", ("LYNSE_COORDINATOR_ID",), config, None),
+        help="Coordinator mode: stable ID for leader election (default: advertised URI)",
+    )
+    parser.add_argument(
+        "--coordinator-uri",
+        default=_resolve_str("coordinator_uri", ("LYNSE_COORDINATOR_URI",), config, None),
+        help="Coordinator mode: URI other coordinators use to proxy to this process",
+    )
+    parser.add_argument(
+        "--coordinator-lease-secs",
+        type=float,
+        default=float(_resolve_str(
+            "coordinator_lease_secs",
+            ("LYNSE_COORDINATOR_LEASE_SECS",),
+            config,
+            "5.0",
+        )),
+        help="Coordinator mode: leader lease duration in seconds",
+    )
+    parser.add_argument(
+        "--metadata-owners",
+        default=_resolve_str(
+            "metadata_owners",
+            ("LYNSE_CLUSTER_METADATA_OWNERS",),
+            config,
+            None,
+        ),
+        help=(
+            "Coordinator mode: comma-separated metadata owner shard HTTP URIs. "
+            "Omit to infer from shard primaries; provide 3+ for replicated metadata."
+        ),
     )
     parser.add_argument(
         "--health-interval-secs",
@@ -401,16 +438,11 @@ def main(argv=None):
     args = _parse_args(argv)
 
     if args.role == "coordinator":
-        if not args.cluster_config and not args.cluster_state:
-            raise SystemExit(
-                "Coordinator mode requires --cluster-config on first start, "
-                "or --cluster-state when reusing an existing state file."
-            )
         from .cluster import run_coordinator
 
         print(
             f"Starting LynseDB coordinator on {args.host}:{args.port} "
-            f"(state: {args.cluster_state or 'cluster_state.json'})"
+            f"(metadata cache: {args.cluster_state or 'cluster_state.cache.json'})"
         )
         try:
             run_coordinator(
@@ -422,6 +454,14 @@ def main(argv=None):
                 request_timeout_secs=args.request_timeout_secs,
                 health_interval_secs=args.health_interval_secs,
                 health_failures=args.health_failures,
+                coordinator_id=args.coordinator_id,
+                coordinator_uri=args.coordinator_uri,
+                coordinator_lease_secs=args.coordinator_lease_secs,
+                metadata_owners=[
+                    item.strip()
+                    for item in str(args.metadata_owners or "").split(",")
+                    if item.strip()
+                ],
             )
         except KeyboardInterrupt:
             print("\nCoordinator stopped.")

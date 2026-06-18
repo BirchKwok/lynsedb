@@ -4,13 +4,15 @@
 //! with the existing LynseDB Python interface.
 
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use pyo3::{IntoPyObjectExt, Py, PyAny};
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::engine::{
@@ -29,12 +31,18 @@ pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyClusterReadCoordinator>()?;
     m.add_function(wrap_pyfunction!(py_compute_distance, m)?)?;
     m.add_function(wrap_pyfunction!(py_top_k_search, m)?)?;
+    m.add_function(wrap_pyfunction!(metadata_rpc_get, m)?)?;
+    m.add_function(wrap_pyfunction!(metadata_rpc_cas, m)?)?;
     m.add_function(wrap_pyfunction!(py_start_server, m)?)?;
     m.add_function(wrap_pyfunction!(py_start_server_background, m)?)?;
     Ok(())
 }
 
 // ─── Cluster read coordinator binding ───────────────────────────────────────
+
+const MAX_METADATA_RPC_FRAME_BYTES: usize = 512 * 1024 * 1024;
+const MAX_METADATA_RPC_IDLE_PER_OWNER: usize = 4;
+static METADATA_RPC_POOL: OnceLock<Mutex<HashMap<String, Vec<TcpStream>>>> = OnceLock::new();
 
 /// Python wrapper around the Rust-side hot read fan-out coordinator.
 #[pyclass(name = "ClusterReadCoordinator")]
@@ -92,6 +100,310 @@ impl PyClusterReadCoordinator {
 fn parse_cluster_meta(meta_json: &str) -> PyResult<serde_json::Value> {
     serde_json::from_str(meta_json)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(signature = (owner_uri, key, timeout_secs=30.0, api_key=None))]
+fn metadata_rpc_get(
+    py: Python<'_>,
+    owner_uri: String,
+    key: String,
+    timeout_secs: f64,
+    api_key: Option<String>,
+) -> PyResult<(u64, Option<String>)> {
+    let timeout = Duration::from_secs_f64(timeout_secs.max(0.001));
+    let mut meta = serde_json::Map::new();
+    meta.insert("key".to_string(), serde_json::Value::String(key));
+    if let Some(api_key) = api_key {
+        meta.insert("api_key".to_string(), serde_json::Value::String(api_key));
+    }
+    let meta = serde_json::Value::Object(meta);
+
+    let (response_meta, raw) = py.detach(move || {
+        metadata_rpc_request(&owner_uri, crate::rpc::OP_METADATA_GET, meta, &[], timeout)
+    })?;
+    let version = metadata_response_version(&response_meta)?;
+    let exists = response_meta
+        .get("exists")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(!raw.is_empty());
+    if !exists {
+        return Ok((version, None));
+    }
+    let value = String::from_utf8(raw)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok((version, Some(value)))
+}
+
+#[pyfunction]
+#[pyo3(signature = (owner_uri, key, expected_version, value_json, timeout_secs=30.0, api_key=None))]
+fn metadata_rpc_cas(
+    py: Python<'_>,
+    owner_uri: String,
+    key: String,
+    expected_version: u64,
+    value_json: String,
+    timeout_secs: f64,
+    api_key: Option<String>,
+) -> PyResult<u64> {
+    let timeout = Duration::from_secs_f64(timeout_secs.max(0.001));
+    let mut meta = serde_json::Map::new();
+    meta.insert("key".to_string(), serde_json::Value::String(key));
+    meta.insert(
+        "expected_version".to_string(),
+        serde_json::Value::Number(expected_version.into()),
+    );
+    if let Some(api_key) = api_key {
+        meta.insert("api_key".to_string(), serde_json::Value::String(api_key));
+    }
+    let meta = serde_json::Value::Object(meta);
+    let raw = value_json.into_bytes();
+
+    let (response_meta, _) = py.detach(move || {
+        metadata_rpc_request(&owner_uri, crate::rpc::OP_METADATA_CAS, meta, &raw, timeout)
+    })?;
+    metadata_response_version(&response_meta)
+}
+
+fn metadata_rpc_request(
+    owner_uri: &str,
+    op: u8,
+    meta: serde_json::Value,
+    raw: &[u8],
+    timeout: Duration,
+) -> PyResult<(serde_json::Value, Vec<u8>)> {
+    let (host, port) = derive_metadata_rpc_target(owner_uri)?;
+    let meta_bytes = serde_json::to_vec(&meta)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let payload_len = 1usize
+        .checked_add(4)
+        .and_then(|len| len.checked_add(meta_bytes.len()))
+        .and_then(|len| len.checked_add(raw.len()))
+        .ok_or_else(|| py_runtime_err("metadata RPC payload is too large"))?;
+    if payload_len > u32::MAX as usize || payload_len > MAX_METADATA_RPC_FRAME_BYTES {
+        return Err(py_runtime_err(format!(
+            "metadata RPC payload too large: {} bytes",
+            payload_len
+        )));
+    }
+
+    let mut payload = Vec::with_capacity(payload_len);
+    payload.push(op);
+    payload.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&meta_bytes);
+    payload.extend_from_slice(raw);
+
+    let pool_key = format!("{}|{}:{}", owner_uri, host, port);
+    let (mut stream, pooled) = match take_metadata_rpc_stream(&pool_key) {
+        Some(stream) => (stream, true),
+        None => (
+            connect_metadata_rpc(owner_uri, &host, port, timeout)?,
+            false,
+        ),
+    };
+    match metadata_rpc_roundtrip(owner_uri, &mut stream, &payload, timeout) {
+        Ok(response) => {
+            return_metadata_rpc_stream(&pool_key, stream);
+            Ok(response)
+        }
+        Err(_err) if pooled => {
+            drop(stream);
+            let mut fresh = connect_metadata_rpc(owner_uri, &host, port, timeout)?;
+            let response = metadata_rpc_roundtrip(owner_uri, &mut fresh, &payload, timeout)?;
+            return_metadata_rpc_stream(&pool_key, fresh);
+            Ok(response)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn metadata_rpc_roundtrip(
+    owner_uri: &str,
+    stream: &mut TcpStream,
+    payload: &[u8],
+    timeout: Duration,
+) -> PyResult<(serde_json::Value, Vec<u8>)> {
+    stream
+        .set_nodelay(true)
+        .map_err(|e| py_runtime_err(format!("metadata RPC setup failed: {}", e)))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| py_runtime_err(format!("metadata RPC setup failed: {}", e)))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| py_runtime_err(format!("metadata RPC setup failed: {}", e)))?;
+
+    stream
+        .write_all(&(payload.len() as u32).to_le_bytes())
+        .and_then(|_| stream.write_all(&payload))
+        .map_err(|e| {
+            py_runtime_err(format!("metadata RPC write to {} failed: {}", owner_uri, e))
+        })?;
+
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header).map_err(|e| {
+        py_runtime_err(format!(
+            "metadata RPC read from {} failed: {}",
+            owner_uri, e
+        ))
+    })?;
+    let frame_len = u32::from_le_bytes(header) as usize;
+    if frame_len > MAX_METADATA_RPC_FRAME_BYTES {
+        return Err(py_runtime_err(format!(
+            "metadata RPC response too large: {} bytes",
+            frame_len
+        )));
+    }
+    let mut frame = vec![0u8; frame_len];
+    stream.read_exact(&mut frame).map_err(|e| {
+        py_runtime_err(format!(
+            "metadata RPC read from {} failed: {}",
+            owner_uri, e
+        ))
+    })?;
+
+    decode_metadata_rpc_response(&frame)
+}
+
+fn metadata_rpc_pool() -> &'static Mutex<HashMap<String, Vec<TcpStream>>> {
+    METADATA_RPC_POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn take_metadata_rpc_stream(pool_key: &str) -> Option<TcpStream> {
+    let mut pool = metadata_rpc_pool().lock();
+    let stream = pool.get_mut(pool_key).and_then(Vec::pop);
+    if pool.get(pool_key).is_some_and(Vec::is_empty) {
+        pool.remove(pool_key);
+    }
+    stream
+}
+
+fn return_metadata_rpc_stream(pool_key: &str, stream: TcpStream) {
+    let mut pool = metadata_rpc_pool().lock();
+    let streams = pool.entry(pool_key.to_string()).or_default();
+    if streams.len() < MAX_METADATA_RPC_IDLE_PER_OWNER {
+        streams.push(stream);
+    }
+}
+
+fn connect_metadata_rpc(
+    owner_uri: &str,
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> PyResult<TcpStream> {
+    let addrs = (host, port).to_socket_addrs().map_err(|e| {
+        py_runtime_err(format!(
+            "metadata RPC resolve failed for {}: {}",
+            owner_uri, e
+        ))
+    })?;
+    let mut last_error = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(err) => last_error = Some(err),
+        }
+    }
+    let message = match last_error {
+        Some(err) => format!("metadata RPC connect to {} failed: {}", owner_uri, err),
+        None => format!(
+            "metadata RPC resolve failed for {}: no socket addresses",
+            owner_uri
+        ),
+    };
+    Err(py_runtime_err(message))
+}
+
+fn decode_metadata_rpc_response(frame: &[u8]) -> PyResult<(serde_json::Value, Vec<u8>)> {
+    if frame.len() < 5 {
+        return Err(py_runtime_err("metadata RPC response frame is too short"));
+    }
+    let status = frame[0];
+    let meta_len = u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+    if frame.len() < 5 + meta_len {
+        return Err(py_runtime_err(
+            "metadata RPC response metadata length exceeds frame",
+        ));
+    }
+    let meta = if meta_len == 0 {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_slice(&frame[5..5 + meta_len])
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+    };
+    if status != 0 {
+        let message = meta
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("metadata RPC request failed");
+        return Err(py_runtime_err(message.to_string()));
+    }
+    Ok((meta, frame[5 + meta_len..].to_vec()))
+}
+
+fn metadata_response_version(meta: &serde_json::Value) -> PyResult<u64> {
+    meta.get("version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| py_runtime_err("metadata RPC response missing version"))
+}
+
+fn derive_metadata_rpc_target(uri: &str) -> PyResult<(String, u16)> {
+    let trimmed = uri.trim().trim_end_matches('/');
+    let (scheme, without_scheme) = if let Some(rest) = trimmed.strip_prefix("http://") {
+        ("http", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("https://") {
+        ("https", rest)
+    } else {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid metadata owner URI '{}'",
+            uri
+        )));
+    };
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
+    let default_port = if scheme == "https" { 443 } else { 80 };
+
+    let (host, http_port) = if let Some(rest) = authority.strip_prefix('[') {
+        let end = rest.find(']').ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid metadata owner URI '{}'", uri))
+        })?;
+        let host = &rest[..end];
+        let after_host = &rest[end + 1..];
+        let port = if let Some(port_text) = after_host.strip_prefix(':') {
+            parse_metadata_uri_port(uri, port_text)?
+        } else {
+            default_port
+        };
+        (host.to_string(), port)
+    } else if let Some((host, port_text)) = authority.rsplit_once(':') {
+        (host.to_string(), parse_metadata_uri_port(uri, port_text)?)
+    } else {
+        (authority.to_string(), default_port)
+    };
+    if host.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid metadata owner URI '{}'",
+            uri
+        )));
+    }
+    Ok((host, crate::rpc::derive_rpc_port(http_port)))
+}
+
+fn parse_metadata_uri_port(uri: &str, port_text: &str) -> PyResult<u16> {
+    port_text.parse::<u16>().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid metadata owner URI port in '{}': {}",
+            uri, e
+        ))
+    })
+}
+
+fn py_runtime_err<T: ToString>(message: T) -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(message.to_string())
 }
 
 // ─── DatabaseEngine binding ──────────────────────────────────────────────────

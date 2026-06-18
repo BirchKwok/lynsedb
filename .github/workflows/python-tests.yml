@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to test and publish, for example v0.4.0"
+        description: "Release tag to test and publish, for example v0.5.0"
         required: true
         type: string
 
@@ -31,7 +31,7 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+)*([-.][0-9A-Za-z]+)*$ ]]; then
-            echo "Release tag must look like v0.4.0; got '$RELEASE_TAG'."
+            echo "Release tag must look like v0.5.0; got '$RELEASE_TAG'."
             exit 1
           fi
           git fetch origin +refs/tags/*:refs/tags/* +refs/heads/main:refs/remotes/origin/main

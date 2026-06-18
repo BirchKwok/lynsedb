@@ -2,7 +2,8 @@
 
 LynseDB cluster mode is a lightweight sharding layer for remote HTTP
 deployments. You start several ordinary LynseDB servers as shard nodes, then
-start one coordinator in front of them. Applications keep using
+start a coordinator in front of them. For high availability, you may run extra
+standby coordinators that use the same metadata authority. Applications keep using
 `VectorDBClient("http://coordinator:7637")` just like a single remote server.
 
 Use cluster mode when one server is not enough for your data size or query
@@ -30,7 +31,7 @@ Coordinator :7637
 
 The coordinator owns cluster metadata and request routing:
 
-- collection metadata is stored in the coordinator state file;
+- collection metadata is stored on the metadata owner shard(s);
 - IDs are mapped to shard groups with stable hash buckets;
 - writes are routed to the owning shard group;
 - searches fan out to all shard groups and are merged by the coordinator;
@@ -56,16 +57,40 @@ Plan these pieces before production:
 
 | Item | Recommendation |
 | --- | --- |
-| Coordinator | Run one active coordinator. Keep its state file on persistent storage. |
+| Coordinator | Run one active coordinator for the simplest setup. For HA, run standby coordinators with the same metadata owner shard(s). |
 | Shards | Run one LynseDB server per primary or replica data directory. |
 | Data directories | Give every shard process its own persistent directory. Do not share one directory between nodes. |
 | Network | Let clients reach the coordinator. Let the coordinator reach every shard HTTP port and derived RPC port. |
 | Auth | Use `--api-key` on shards and `--shard-api-key` on the coordinator. Protect the coordinator with a private network or reverse proxy. |
-| Backups | Back up every shard data directory and the coordinator state file together. |
+| Backups | Back up every shard data directory. Metadata owner shard data directories include coordinator metadata. |
 
 The coordinator currently does not enforce client authentication itself. If the
 coordinator is reachable outside a trusted network, put it behind a reverse
 proxy, gateway, firewall, or service mesh that provides authentication.
+
+### Coordinator Metadata Mental Model
+
+Coordinator metadata includes routing tables, generated ID allocation, shard
+promotions, replica state, and the active coordinator lease. It is stored on
+metadata owner shard(s), so cluster mode does not need a shared disk.
+
+By default, the coordinator infers metadata owners from `cluster.json`. If the
+config has three or more shard primaries, the first three primaries are used as
+replicated metadata owners with majority writes and automatic repair. Smaller
+clusters use the first primary as a single metadata owner.
+
+Use `--metadata-owners` only when you want explicit control:
+
+| Owners | Behavior |
+| --- | --- |
+| omitted | Use the first three shard primaries when available; otherwise use the first primary. |
+| one URI | Store coordinator metadata on that shard through internal RPC. |
+| three or more URIs | Store coordinator metadata with majority CAS and repair stale or missing owners from the committed majority. |
+
+`--cluster-state` is only a local cache path for the coordinator process. Each
+coordinator can use its own local path, even if the path text is the same on
+different machines. The authoritative metadata lives on the metadata owner
+shard(s).
 
 ## Quick Local Cluster
 
@@ -114,7 +139,7 @@ lynse serve \
   --host 127.0.0.1 \
   --port 7637 \
   --cluster-config ./cluster.json \
-  --cluster-state ./cluster_state.json
+  --cluster-state ./cluster_state.cache.json
 ```
 
 Check that the coordinator is running:
@@ -198,15 +223,71 @@ lynse serve \
   --host 0.0.0.0 \
   --port 7637 \
   --cluster-config /etc/lynsedb/cluster.json \
-  --cluster-state /var/lib/lynsedb/coordinator/cluster_state.json \
+  --cluster-state /var/lib/lynsedb/coordinator/cluster_state.cache.json \
   --shard-api-key "${LYNSE_SHARD_API_KEY}" \
   --health-interval-secs 1.0 \
   --health-failures 3
 ```
 
-On later coordinator restarts, keep using the same `--cluster-state` file. You
-may pass both `--cluster-config` and `--cluster-state`, but the existing state
-file is the source of truth after the first start.
+For coordinator HA, run another coordinator with the same `cluster.json`. If
+`--metadata-owners` is omitted, every coordinator infers the same metadata owner
+set from the shard primaries:
+
+```shell title="node-a"
+lynse serve \
+  --role coordinator \
+  --host 0.0.0.0 \
+  --port 7637 \
+  --cluster-config /etc/lynsedb/cluster.json \
+  --cluster-state /var/lib/lynsedb/coordinator/cluster_state.cache.json \
+  --coordinator-uri http://node-a:7637 \
+  --shard-api-key "${LYNSE_SHARD_API_KEY}"
+```
+
+```shell title="node-b"
+lynse serve \
+  --role coordinator \
+  --host 0.0.0.0 \
+  --port 7637 \
+  --cluster-config /etc/lynsedb/cluster.json \
+  --cluster-state /var/lib/lynsedb/coordinator/cluster_state.cache.json \
+  --coordinator-uri http://node-b:7637 \
+  --shard-api-key "${LYNSE_SHARD_API_KEY}"
+```
+
+In this mode, `cluster_state.cache.json` is only a local cache on each
+coordinator. The authoritative metadata is stored on the inferred metadata
+owner shard(s). With the two-shard example above, the first primary
+`http://10.0.0.11:7638` is the single metadata owner. With three or more shard
+primaries, the first three primaries are used automatically and a stale or
+restarted metadata owner is repaired from the committed majority.
+
+If you prefer to pin a single metadata owner explicitly, add:
+
+```shell
+--metadata-owners http://10.0.0.11:7638
+```
+
+If you prefer to pin replicated metadata owners explicitly, pass three or more
+owners:
+
+```shell
+lynse serve \
+  --role coordinator \
+  --host 0.0.0.0 \
+  --port 7637 \
+  --cluster-config /etc/lynsedb/cluster.json \
+  --cluster-state /var/lib/lynsedb/coordinator/cluster_state.cache.json \
+  --metadata-owners http://10.0.0.11:7638,http://10.0.0.12:7638,http://10.0.0.21:7638 \
+  --coordinator-uri http://node-a:7637 \
+  --shard-api-key "${LYNSE_SHARD_API_KEY}"
+```
+
+On later coordinator restarts, keep using the same `cluster.json` and
+`--metadata-owners` value if you set one. `--cluster-state` remains only the
+local cache path. You may pass both `--cluster-config` and `--cluster-state`,
+but existing metadata on the owner shard(s) is the source of truth after the
+first start.
 
 ## Configuration Reference
 
@@ -217,8 +298,9 @@ Cluster config fields:
 | `bucket_count` | `4096` | Number of routing buckets assigned to shard groups when a collection is created. Keep this value stable after data exists. |
 | `write_mirror_replicas` | `true` | Mirror writes to replicas whose state is `active`. |
 | `shard_groups` | required | List of shard groups. Each group needs a `primary` URI and may have `replicas`. |
-| `state_path` | `cluster_state.json` | Optional coordinator state path when `--cluster-state` is not provided. |
+| `state_path` | `cluster_state.cache.json` | Optional local coordinator metadata cache path when `--cluster-state` is not provided. |
 | `shard_api_key` | none | Optional key used by the coordinator when forwarding requests to shards. |
+| `metadata_owners` or `metadata.owners` | inferred from shard primaries | Optional metadata owner shard URI(s). Omit to use the first three primaries when available, or the first primary for small clusters. Use one URI to force single-owner metadata, or 3+ URIs for replicated metadata. |
 
 Replica entries can be simple strings:
 
@@ -239,9 +321,13 @@ Coordinator CLI flags:
 | Flag | Description |
 | --- | --- |
 | `--role coordinator` | Start coordinator mode instead of a normal shard server. |
-| `--cluster-config` | JSON config used to seed the state file on first start. |
-| `--cluster-state` | Mutable coordinator metadata file. Back this up. |
+| `--cluster-config` | JSON config used to seed metadata on first start and infer the default metadata owners. |
+| `--cluster-state` | Local coordinator metadata cache path. It does not need to be shared between machines. |
 | `--shard-api-key` | API key sent to shard nodes as `Authorization: Bearer ...`. |
+| `--metadata-owners` | Optional comma-separated metadata owner shard HTTP URIs. Omit to infer owners from shard primaries; provide 3+ URIs for replicated metadata. |
+| `--coordinator-uri` | Advertised URI for this coordinator. Other coordinators proxy to this address when this process is leader. |
+| `--coordinator-id` | Stable coordinator ID. Defaults to `--coordinator-uri`; most deployments do not need to set it. |
+| `--coordinator-lease-secs` | Leader lease duration. Lower values detect coordinator failure faster but are more sensitive to storage or scheduling stalls. |
 | `--request-timeout-secs` | Timeout for coordinator-to-shard requests. |
 | `--health-interval-secs` | Interval between shard health probes. |
 | `--health-failures` | Consecutive failed probes before a node is considered unhealthy. |
@@ -251,16 +337,18 @@ Environment variables are also supported:
 ```shell
 export LYNSE_ROLE=coordinator
 export LYNSE_CLUSTER_CONFIG=/etc/lynsedb/cluster.json
-export LYNSE_CLUSTER_STATE=/var/lib/lynsedb/coordinator/cluster_state.json
+export LYNSE_CLUSTER_STATE=/var/lib/lynsedb/coordinator/cluster_state.cache.json
 export LYNSE_SHARD_API_KEY=your_shard_key
+export LYNSE_CLUSTER_METADATA_OWNERS=http://10.0.0.11:7638
+export LYNSE_COORDINATOR_URI=http://node-a:7637
 export LYNSE_HEALTH_INTERVAL_SECS=1.0
 export LYNSE_HEALTH_FAILURES=3
 ```
 
 ## How Routing Works
 
-When a collection is created, the coordinator stores its routing table in
-`cluster_state.json`. Each bucket points to one shard group.
+When a collection is created, the coordinator stores its routing table in the
+metadata authority. Each bucket points to one shard group.
 
 For explicit string or integer IDs, LynseDB hashes the external ID and routes
 the item to the owning shard group. For records that need generated integer
@@ -273,6 +361,8 @@ node per group, merges the per-shard top results, and returns one result set to
 the client.
 
 ## Health and Failover
+
+### Shard Failover
 
 The coordinator probes every primary and replica. A node is marked unhealthy
 after `--health-failures` consecutive failed probes.
@@ -305,6 +395,35 @@ Important behavior:
 - If a shard group has no healthy active node, reads and writes for that group
   will fail until a node is restored.
 
+### Coordinator Failover
+
+Coordinator failover protects the coordinator process itself. It does not copy
+or repair shard data; shard primary promotion is handled separately by the
+active coordinator.
+
+When coordinator failover is enabled, one coordinator holds the leader lease and
+serves as leader. Other coordinators stay online as standbys. A standby can
+accept client traffic and proxy it to the leader. If the leader stops renewing
+its lease, a standby takes over, reloads the latest metadata, and starts
+serving requests directly.
+
+Check coordinator status:
+
+```shell
+curl http://coordinator:7637/coordinator_status
+```
+
+Look for:
+
+- `role`: `leader`, `standby`, or `single`;
+- `coordinator_uri`: the URI this coordinator advertises;
+- `leader.leader_uri`: the current leader address;
+- `leader.lease_epoch`: increments when leadership moves to another
+  coordinator;
+- `metadata.mode`: `single` or `replicated`;
+- `metadata.degraded`: whether replicated metadata has unavailable or stale
+  owners.
+
 ## Maintenance Tasks
 
 ### Restart a Shard
@@ -321,20 +440,21 @@ and is marked `stale`, rebuild it before relying on it.
 
 ### Restart the Coordinator
 
-The coordinator is stateless except for its state file. Restart it with the same
-`--cluster-state` path:
+The coordinator keeps only a local metadata cache. Restart it with the same
+`cluster.json` and the same `--metadata-owners` value if you set one:
 
 ```shell
 lynse serve \
   --role coordinator \
   --host 0.0.0.0 \
   --port 7637 \
-  --cluster-state /var/lib/lynsedb/coordinator/cluster_state.json \
+  --cluster-config /etc/lynsedb/cluster.json \
+  --cluster-state /var/lib/lynsedb/coordinator/cluster_state.cache.json \
   --shard-api-key "${LYNSE_SHARD_API_KEY}"
 ```
 
-Pass `--cluster-config` again only if you want it available for validation or
-for first-start convenience. Existing state is loaded from `--cluster-state`.
+Existing metadata is loaded from the metadata owner shard(s). The cache file can
+be deleted and rebuilt by the coordinator.
 
 ### Rebuild a Stale Replica
 
@@ -350,9 +470,9 @@ Recommended process:
 4. Restore that copy into the replica data directory.
 5. Start the replica with the same port and API key.
 6. Verify the replica health endpoint.
-7. Update `cluster_state.json` and change that replica state from `stale` to
+7. Update coordinator metadata so that replica state changes from `stale` to
    `active`.
-8. Restart the coordinator so it reloads the edited state file.
+8. Restart or refresh the coordinator so it observes the updated metadata.
 
 Only mark a replica `active` after you are confident it has the same data as the
 current primary.
@@ -380,7 +500,7 @@ Back up these items together:
 
 - every shard primary data directory;
 - every replica data directory if you want faster replica restore;
-- the coordinator `cluster_state.json`;
+- metadata owner shard data directories, which include coordinator metadata;
 - the cluster config and service files.
 
 Before a planned backup, run checkpoints through the coordinator:
@@ -395,13 +515,14 @@ collection.checkpoint()
 ```
 
 For multiple collections, checkpoint each collection. Then snapshot or copy the
-coordinator state file and shard data directories as one backup set.
+metadata owner shard data directories and shard data directories as one backup
+set.
 
 ### Upgrade
 
 Use a maintenance window for upgrades:
 
-1. Back up all shard data directories and `cluster_state.json`.
+1. Back up all shard data directories, including metadata owner shards.
 2. Stop writes at the application layer.
 3. Checkpoint active collections.
 4. Upgrade replicas first and start them.
@@ -427,12 +548,14 @@ Monitor the coordinator:
 ```shell
 curl http://coordinator:7637/
 curl http://coordinator:7637/cluster_info
+curl http://coordinator:7637/coordinator_status
 ```
 
 Alert on:
 
 - shard health or readiness failures;
 - coordinator process down;
+- unexpected coordinator leader changes;
 - replica state changing to `stale`;
 - unexpected `primary_epoch` changes;
 - disk usage on shard data volumes;
@@ -442,10 +565,12 @@ Alert on:
 
 | Symptom | What to check |
 | --- | --- |
-| Coordinator will not start | On first start, pass `--cluster-config`. On later starts, pass an existing `--cluster-state`. |
+| Coordinator will not start | Pass `--cluster-config`, or pass `--metadata-owners` explicitly when no config is available. |
 | `cluster config requires at least one shard group` | The config must contain `shard_groups` or `shards` with at least one entry. |
 | Shard requests return unauthorized | Make sure shards use `--api-key` and the coordinator uses the same `--shard-api-key`. |
-| RPC is not used | Open the derived RPC port between coordinator and shard, or let the coordinator fall back to HTTP. |
+| Metadata owner is unreachable | Open the derived RPC port from each coordinator to each metadata owner shard. Metadata reads, writes, lease renewals, and owner repair use internal RPC. |
+| Data RPC is not used | Open the derived RPC port between coordinator and shard. Ordinary shard data requests can fall back to HTTP, but metadata owner traffic requires RPC. |
+| `metadata.degraded` is true | A replicated metadata owner is unavailable or behind. The coordinator repairs stale owners from the committed majority when they are reachable again. |
 | Replica becomes `stale` | It missed a mirrored write. Rebuild it from the primary before marking it active. |
 | Search misses recent writes | Confirm writes were sent to the coordinator, check shard health, then inspect `cluster_info` for stale or promoted nodes. |
 | Existing data does not rebalance after adding a shard | Existing collection routing is fixed. Create a new collection and migrate or re-ingest. |
@@ -455,7 +580,7 @@ Alert on:
 Before accepting production traffic:
 
 - shard nodes have persistent data directories;
-- the coordinator state file is on persistent storage;
+- metadata owner shard data directories are on persistent storage;
 - coordinator-to-shard HTTP and derived RPC ports are reachable;
 - shard authentication is configured if the shard network is not fully trusted;
 - coordinator access is protected by network policy or a proxy;

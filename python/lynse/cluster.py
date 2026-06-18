@@ -20,6 +20,7 @@ import socket
 import struct
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,6 +34,7 @@ DEFAULT_BUCKET_COUNT = 4096
 DEFAULT_HEALTH_INTERVAL_SECS = 1.0
 DEFAULT_HEALTH_FAILURES = 3
 DEFAULT_REQUEST_TIMEOUT_SECS = 30.0
+DEFAULT_COORDINATOR_LEASE_SECS = 5.0
 REPLICA_ACTIVE = "active"
 REPLICA_STALE = "stale"
 
@@ -44,7 +46,12 @@ RPC_OP_UPSERT_BINARY_IDS = 5
 RPC_OP_DELETE_ITEMS = 6
 RPC_OP_RESTORE_ITEMS = 7
 RPC_OP_COLLECTION_CONTROL = 8
+RPC_OP_METADATA_GET = 9
+RPC_OP_METADATA_CAS = 10
 FIELDS_BINARY_MAGIC = b"LDBF1"
+CLUSTER_STATE_METADATA_KEY = "cluster_state"
+COORDINATOR_LEASE_METADATA_KEY = "coordinator_lease"
+METADATA_RECORD_FORMAT = "lynsedb-metadata-record"
 
 
 def _normalize_uri(uri: str) -> str:
@@ -65,6 +72,63 @@ def _derive_rpc_target(uri: str) -> tuple[str, int]:
 
 def _json_success(params: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"status": "success", "params": params or {}}
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return bool(value)
+
+
+def _default_coordinator_uri(host: str, port: int) -> str:
+    host = str(host or "127.0.0.1")
+    if host in {"0.0.0.0", "::", ""}:
+        host = "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{int(port)}"
+
+
+def _lease_record_is_expired(record: dict[str, Any], now: float | None = None) -> bool:
+    if not record.get("leader_id") or not record.get("leader_uri"):
+        return True
+    return float(record.get("expires_at", 0.0)) <= (time.time() if now is None else now)
+
+
+def _metadata_value_hash(value: Any) -> str:
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _metadata_record(key: str, logical_version: int, value: Any) -> dict[str, Any]:
+    return {
+        "format": METADATA_RECORD_FORMAT,
+        "key": key,
+        "version": 1,
+        "logical_version": int(logical_version),
+        "value_hash": _metadata_value_hash(value),
+        "value": value,
+    }
+
+
+def _unwrap_metadata_record(key: str, version: int, value: Any | None) -> tuple[int, Any | None, str, bool]:
+    if value is None:
+        return 0, None, "", True
+    if isinstance(value, dict) and value.get("format") == METADATA_RECORD_FORMAT:
+        if value.get("key") not in {None, key}:
+            raise ValueError(f"metadata record key mismatch: expected {key}, got {value.get('key')}")
+        inner = value.get("value")
+        logical_version = int(value.get("logical_version", version) or 0)
+        value_hash = str(value.get("value_hash") or _metadata_value_hash(inner))
+        return logical_version, inner, value_hash, True
+    return int(version), value, _metadata_value_hash(value), False
 
 
 def _hash_u64(value: str) -> int:
@@ -463,22 +527,553 @@ def _merge_pairs(
     return ids, distances, out_fields
 
 
+class MetadataConflict(RuntimeError):
+    pass
+
+
+class MetadataStore:
+    cache_path: Path
+
+    def get(self, key: str) -> tuple[int, Any | None]:
+        raise NotImplementedError
+
+    def cas(self, key: str, expected_version: int, value: Any) -> int:
+        raise NotImplementedError
+
+    def metadata_status(self) -> dict[str, Any]:
+        return {"mode": "local"}
+
+
+class LocalMetadataStore(MetadataStore):
+    def __init__(self, state_path: Path):
+        self.cache_path = Path(state_path)
+
+    def get(self, key: str) -> tuple[int, Any | None]:
+        if key != CLUSTER_STATE_METADATA_KEY:
+            raise KeyError(f"unsupported local metadata key: {key}")
+        try:
+            with self.cache_path.open("r", encoding="utf-8") as f:
+                value = json.load(f)
+        except FileNotFoundError:
+            return 0, None
+        return int(value.get("meta_epoch", 0) or 0), value
+
+    def cas(self, key: str, expected_version: int, value: Any) -> int:
+        if key != CLUSTER_STATE_METADATA_KEY:
+            raise KeyError(f"unsupported local metadata key: {key}")
+        current_version, current = self.get(key)
+        if current is not None and current_version != int(expected_version):
+            raise MetadataConflict(
+                f"metadata version conflict for {key}: expected {expected_version}, got {current_version}"
+            )
+        if current is None and int(expected_version) != 0:
+            raise MetadataConflict(
+                f"metadata version conflict for {key}: expected {expected_version}, got 0"
+            )
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
+        payload = json.dumps(value, indent=2, sort_keys=True).encode("utf-8")
+        with tmp.open("wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.cache_path)
+        return int(value.get("meta_epoch", 0) or 0)
+
+    def metadata_status(self) -> dict[str, Any]:
+        return {
+            "mode": "local",
+            "cache_path": str(self.cache_path),
+            "replicated": False,
+        }
+
+
+class ShardMetadataStore(MetadataStore):
+    def __init__(
+        self,
+        owner_uri: str,
+        *,
+        cache_path: Path,
+        timeout_secs: float = DEFAULT_REQUEST_TIMEOUT_SECS,
+        api_key: str | None = None,
+    ):
+        self.owner_uri = _normalize_uri(owner_uri)
+        self.cache_path = Path(cache_path)
+        self.timeout_secs = float(timeout_secs)
+        self.api_key = api_key
+        self._core = None
+
+    def close(self) -> None:
+        self._core = None
+
+    def _metadata_rpc_core(self):
+        if self._core is not None:
+            return self._core
+        try:
+            core = importlib.import_module("lynse._core")
+        except Exception as exc:
+            raise RuntimeError(
+                "metadata RPC requires the LynseDB Rust extension. "
+                "Rebuild/reinstall LynseDB so lynse._core exposes metadata_rpc_get/cas."
+            ) from exc
+        if not hasattr(core, "metadata_rpc_get") or not hasattr(core, "metadata_rpc_cas"):
+            raise RuntimeError(
+                "metadata RPC requires a newer LynseDB Rust extension with "
+                "metadata_rpc_get/cas support."
+            )
+        self._core = core
+        return core
+
+    def _raise_metadata_rpc_error(self, exc: Exception) -> None:
+        message = str(exc)
+        if "metadata version conflict" in message:
+            raise MetadataConflict(message) from exc
+        raise RuntimeError(f"metadata RPC request to {self.owner_uri} failed: {message}") from exc
+
+    def get(self, key: str) -> tuple[int, Any | None]:
+        try:
+            version, raw = self._metadata_rpc_core().metadata_rpc_get(
+                self.owner_uri,
+                key,
+                self.timeout_secs,
+                self.api_key,
+            )
+        except Exception as exc:
+            self._raise_metadata_rpc_error(exc)
+        if raw is None:
+            return int(version), None
+        return int(version), json.loads(raw)
+
+    def cas(self, key: str, expected_version: int, value: Any) -> int:
+        raw = json.dumps(value, separators=(",", ":"))
+        try:
+            return int(
+                self._metadata_rpc_core().metadata_rpc_cas(
+                    self.owner_uri,
+                    key,
+                    int(expected_version),
+                    raw,
+                    self.timeout_secs,
+                    self.api_key,
+                )
+            )
+        except Exception as exc:
+            self._raise_metadata_rpc_error(exc)
+
+    def metadata_status(self) -> dict[str, Any]:
+        return {
+            "mode": "single",
+            "owners": [self.owner_uri],
+            "replicated": False,
+            "rpc_client": "rust",
+        }
+
+
+class QuorumMetadataStore(MetadataStore):
+    def __init__(
+        self,
+        owner_uris: list[str],
+        *,
+        cache_path: Path,
+        timeout_secs: float = DEFAULT_REQUEST_TIMEOUT_SECS,
+        api_key: str | None = None,
+        owner_stores: list[MetadataStore] | None = None,
+    ):
+        if len(owner_uris) < 3:
+            raise ValueError("quorum metadata requires at least 3 owners")
+        self.owner_uris = [_normalize_uri(uri) for uri in owner_uris]
+        if owner_stores is not None:
+            if len(owner_stores) != len(owner_uris):
+                raise ValueError("owner_stores length must match owner_uris")
+            self.owners = list(owner_stores)
+            self._owns_child_stores = False
+        else:
+            self.owners = [
+                ShardMetadataStore(
+                    uri,
+                    cache_path=cache_path,
+                    timeout_secs=timeout_secs,
+                    api_key=api_key,
+                )
+                for uri in self.owner_uris
+            ]
+            self._owns_child_stores = True
+        self.cache_path = Path(cache_path)
+        self._pool = ThreadPoolExecutor(max_workers=min(16, len(self.owners)))
+        self._status_lock = threading.Lock()
+        self._last_owner_status: list[dict[str, Any]] = [
+            {"uri": uri, "healthy": None, "version": 0, "logical_version": 0}
+            for uri in self.owner_uris
+        ]
+        self._last_committed_version = 0
+        self._last_degraded = False
+
+    @property
+    def majority(self) -> int:
+        return len(self.owners) // 2 + 1
+
+    def close(self) -> None:
+        if self._owns_child_stores:
+            for owner in self.owners:
+                close = getattr(owner, "close", None)
+                if close:
+                    close()
+        self._pool.shutdown(wait=True, cancel_futures=False)
+
+    def _owner_read(self, idx: int, key: str) -> dict[str, Any]:
+        owner = self.owners[idx]
+        uri = self.owner_uris[idx]
+        try:
+            version, raw_value = owner.get(key)
+            logical_version, value, value_hash, enveloped = _unwrap_metadata_record(key, int(version), raw_value)
+            return {
+                "idx": idx,
+                "uri": uri,
+                "healthy": True,
+                "storage_version": int(version),
+                "logical_version": logical_version,
+                "value": value,
+                "value_hash": value_hash,
+                "exists": value is not None,
+                "enveloped": enveloped,
+                "error": None,
+            }
+        except Exception as exc:
+            return {
+                "idx": idx,
+                "uri": uri,
+                "healthy": False,
+                "storage_version": 0,
+                "logical_version": 0,
+                "value": None,
+                "value_hash": "",
+                "exists": False,
+                "enveloped": True,
+                "error": str(exc),
+            }
+
+    def _read_all(self, key: str) -> list[dict[str, Any]]:
+        futures = [self._pool.submit(self._owner_read, idx, key) for idx in range(len(self.owners))]
+        reads = [future.result() for future in as_completed(futures)]
+        reads.sort(key=lambda item: int(item["idx"]))
+        self._update_owner_status(reads)
+        return reads
+
+    def _update_owner_status(self, reads: list[dict[str, Any]]) -> None:
+        with self._status_lock:
+            self._last_owner_status = [
+                {
+                    "uri": read["uri"],
+                    "healthy": bool(read["healthy"]),
+                    "version": int(read.get("storage_version", 0) or 0),
+                    "logical_version": int(read.get("logical_version", 0) or 0),
+                    "error": read.get("error"),
+                }
+                for read in reads
+            ]
+
+    def _select_committed(self, key: str, reads: list[dict[str, Any]]) -> dict[str, Any]:
+        healthy = [read for read in reads if read.get("healthy")]
+        if len(healthy) < self.majority:
+            errors = [read.get("error") for read in reads if read.get("error")]
+            raise RuntimeError(
+                f"metadata quorum read failed: {len(healthy)}/{self.majority} owners available; "
+                + "; ".join(str(error) for error in errors[:3])
+            )
+
+        non_empty = [read for read in healthy if read.get("exists")]
+        if len(non_empty) == 1 and len(non_empty) + sum(1 for read in healthy if not read.get("exists")) >= self.majority:
+            chosen = dict(non_empty[0])
+            chosen["bootstrap_repair"] = True
+            return chosen
+
+        groups: dict[tuple[bool, int, str], list[dict[str, Any]]] = {}
+        for read in healthy:
+            group_key = (
+                bool(read.get("exists")),
+                int(read.get("logical_version", 0) or 0),
+                str(read.get("value_hash") or ""),
+            )
+            groups.setdefault(group_key, []).append(read)
+
+        majority_groups = [
+            (group_key, group_reads)
+            for group_key, group_reads in groups.items()
+            if len(group_reads) >= self.majority
+        ]
+        if not majority_groups:
+            summary = [
+                {
+                    "exists": key_part[0],
+                    "logical_version": key_part[1],
+                    "count": len(group_reads),
+                }
+                for key_part, group_reads in groups.items()
+            ]
+            raise RuntimeError(f"metadata quorum has no committed majority for {key}: {summary}")
+
+        majority_groups.sort(key=lambda item: (item[0][1], item[0][0]), reverse=True)
+        _group_key, group_reads = majority_groups[0]
+        chosen = dict(group_reads[0])
+        chosen["bootstrap_repair"] = False
+        return chosen
+
+    def _repair_to_chosen(self, key: str, chosen: dict[str, Any], reads: list[dict[str, Any]]) -> None:
+        if not chosen.get("exists"):
+            return
+        logical_version = int(chosen.get("logical_version", 0) or 0)
+        value = chosen.get("value")
+        value_hash = str(chosen.get("value_hash") or _metadata_value_hash(value))
+        envelope = _metadata_record(key, logical_version, value)
+        repairs = []
+        for read in reads:
+            if not read.get("healthy"):
+                continue
+            needs_repair = (
+                not read.get("exists")
+                or int(read.get("logical_version", 0) or 0) != logical_version
+                or str(read.get("value_hash") or "") != value_hash
+                or not read.get("enveloped", True)
+            )
+            if needs_repair:
+                repairs.append(self._pool.submit(
+                    self.owners[int(read["idx"])].cas,
+                    key,
+                    int(read.get("storage_version", 0) or 0),
+                    envelope,
+                ))
+        for future in repairs:
+            try:
+                future.result()
+            except Exception:
+                pass
+
+    def _set_committed_status(self, chosen: dict[str, Any], reads: list[dict[str, Any]]) -> None:
+        healthy_count = sum(1 for read in reads if read.get("healthy"))
+        in_sync = 0
+        chosen_version = int(chosen.get("logical_version", 0) or 0)
+        chosen_hash = str(chosen.get("value_hash") or "")
+        for read in reads:
+            if (
+                read.get("healthy")
+                and bool(read.get("exists")) == bool(chosen.get("exists"))
+                and int(read.get("logical_version", 0) or 0) == chosen_version
+                and str(read.get("value_hash") or "") == chosen_hash
+            ):
+                in_sync += 1
+        with self._status_lock:
+            self._last_committed_version = chosen_version
+            self._last_degraded = healthy_count < len(self.owners) or in_sync < len(self.owners)
+
+    def get(self, key: str) -> tuple[int, Any | None]:
+        reads = self._read_all(key)
+        chosen = self._select_committed(key, reads)
+        self._repair_to_chosen(key, chosen, reads)
+        self._set_committed_status(chosen, reads)
+        return int(chosen.get("logical_version", 0) or 0), chosen.get("value")
+
+    def cas(self, key: str, expected_version: int, value: Any) -> int:
+        reads = self._read_all(key)
+        chosen = self._select_committed(key, reads)
+        current_version = int(chosen.get("logical_version", 0) or 0)
+        if current_version != int(expected_version):
+            self._repair_to_chosen(key, chosen, reads)
+            self._set_committed_status(chosen, reads)
+            raise MetadataConflict(
+                f"metadata version conflict for {key}: expected {expected_version}, got {current_version}"
+            )
+
+        next_version = current_version + 1
+        envelope = _metadata_record(key, next_version, value)
+        future_reads = {
+            self._pool.submit(
+                self.owners[int(read["idx"])].cas,
+                key,
+                int(read.get("storage_version", 0) or 0),
+                envelope,
+            ): read
+            for read in reads
+            if read.get("healthy")
+        }
+        versions = []
+        success_reads = []
+        conflicts = []
+        errors = []
+        for future in as_completed(list(future_reads.keys())):
+            try:
+                versions.append(int(future.result()))
+                success_reads.append(future_reads[future])
+            except MetadataConflict as exc:
+                conflicts.append(exc)
+            except Exception as exc:
+                errors.append(exc)
+        if len(versions) >= self.majority:
+            value_hash = _metadata_value_hash(value)
+            status_reads = []
+            success_indices = {int(read["idx"]) for read in success_reads}
+            for read in reads:
+                updated = dict(read)
+                if int(read["idx"]) in success_indices:
+                    updated["storage_version"] = int(read.get("storage_version", 0) or 0) + 1
+                    updated["logical_version"] = next_version
+                    updated["value"] = value
+                    updated["value_hash"] = value_hash
+                    updated["exists"] = value is not None
+                    updated["enveloped"] = True
+                    updated["healthy"] = True
+                    updated["error"] = None
+                status_reads.append(updated)
+            self._update_owner_status(status_reads)
+            self._set_committed_status({
+                "logical_version": next_version,
+                "value": value,
+                "value_hash": value_hash,
+                "exists": value is not None,
+            }, status_reads)
+            return next_version
+        if conflicts:
+            raise MetadataConflict("; ".join(str(exc) for exc in conflicts[:3]))
+        raise RuntimeError(
+            f"metadata quorum write failed: {len(versions)}/{self.majority} owners accepted; "
+            + "; ".join(str(error) for error in errors[:3])
+        )
+
+    def metadata_status(self) -> dict[str, Any]:
+        with self._status_lock:
+            owners = [dict(item) for item in self._last_owner_status]
+            committed_version = self._last_committed_version
+            degraded = self._last_degraded
+        healthy_count = sum(1 for item in owners if item.get("healthy"))
+        return {
+            "mode": "replicated",
+            "replicated": True,
+            "owners": owners,
+            "owner_count": len(self.owners),
+            "healthy_owners": healthy_count,
+            "quorum": self.majority,
+            "degraded": bool(degraded or healthy_count < self.majority),
+            "committed_version": committed_version,
+        }
+
+
+class MetadataCoordinatorLease:
+    def __init__(
+        self,
+        store: MetadataStore,
+        coordinator_id: str,
+        coordinator_uri: str,
+        lease_secs: float = DEFAULT_COORDINATOR_LEASE_SECS,
+        key: str = COORDINATOR_LEASE_METADATA_KEY,
+    ):
+        self.store = store
+        self.key = key
+        self.coordinator_id = str(coordinator_id)
+        self.coordinator_uri = _normalize_uri(coordinator_uri)
+        self.lease_secs = float(lease_secs)
+        if self.lease_secs <= 0:
+            raise ValueError("coordinator lease seconds must be > 0")
+
+    def read(self) -> dict[str, Any]:
+        _version, value = self.store.get(self.key)
+        return dict(value or {})
+
+    def _new_record(self, previous: dict[str, Any], now: float) -> dict[str, Any]:
+        previous_id = previous.get("leader_id")
+        previous_epoch = int(previous.get("lease_epoch", 0) or 0)
+        epoch = previous_epoch if previous_id == self.coordinator_id else previous_epoch + 1
+        return {
+            "format": "lynsedb-coordinator-lease",
+            "version": 1,
+            "leader_id": self.coordinator_id,
+            "leader_uri": self.coordinator_uri,
+            "lease_epoch": epoch,
+            "updated_at": now,
+            "expires_at": now + self.lease_secs,
+        }
+
+    def try_acquire(self, now: float | None = None) -> tuple[bool, dict[str, Any]]:
+        now = time.time() if now is None else float(now)
+        version, current = self.store.get(self.key)
+        current = dict(current or {})
+        if (
+            not current
+            or _lease_record_is_expired(current, now)
+            or current.get("leader_id") == self.coordinator_id
+        ):
+            record = self._new_record(current, now)
+            try:
+                self.store.cas(self.key, version, record)
+                return True, record
+            except MetadataConflict:
+                return False, self.read()
+        return False, current
+
+    def renew(self, now: float | None = None) -> tuple[bool, dict[str, Any]]:
+        now = time.time() if now is None else float(now)
+        version, current = self.store.get(self.key)
+        current = dict(current or {})
+        if current.get("leader_id") != self.coordinator_id:
+            return False, current
+        record = self._new_record(current, now)
+        try:
+            self.store.cas(self.key, version, record)
+            return True, record
+        except MetadataConflict:
+            return False, self.read()
+
+    def release(self) -> None:
+        version, current = self.store.get(self.key)
+        current = dict(current or {})
+        if current.get("leader_id") != self.coordinator_id:
+            return
+        record = dict(current)
+        record["updated_at"] = time.time()
+        record["expires_at"] = 0.0
+        try:
+            self.store.cas(self.key, version, record)
+        except MetadataConflict:
+            pass
+
+
 class ClusterState:
-    def __init__(self, path: Path, seed_config: dict[str, Any] | None = None):
-        self.path = Path(path)
+    def __init__(
+        self,
+        path: Path,
+        seed_config: dict[str, Any] | None = None,
+        metadata_store: MetadataStore | None = None,
+    ):
+        self.store = metadata_store or LocalMetadataStore(Path(path))
+        self.path = Path(getattr(self.store, "cache_path", Path(path)))
         self._lock = threading.RLock()
-        if self.path.exists():
-            self.data = self._read_state()
+        version, value = self.store.get(CLUSTER_STATE_METADATA_KEY)
+        if value is not None:
+            self.data = value
+            self._normalize_state(self.data)
+            self._metadata_version = int(version)
+            self._write_cache()
         else:
             if not seed_config:
                 raise ValueError("cluster state does not exist and no cluster config was provided")
             self.data = self._initial_state(seed_config)
-            self.save()
+            try:
+                self._metadata_version = self.store.cas(CLUSTER_STATE_METADATA_KEY, 0, self.data)
+                self._write_cache()
+            except MetadataConflict:
+                version, value = self.store.get(CLUSTER_STATE_METADATA_KEY)
+                if value is None:
+                    raise
+                self.data = value
+                self._normalize_state(self.data)
+                self._metadata_version = int(version)
+                self._write_cache()
 
     def _read_state(self) -> dict[str, Any]:
-        with self.path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
+        version, data = self.store.get(CLUSTER_STATE_METADATA_KEY)
+        if data is None:
+            raise ValueError("cluster state does not exist")
         self._normalize_state(data)
+        self._metadata_version = int(version)
+        self._write_cache(data)
         return data
 
     @staticmethod
@@ -542,14 +1137,26 @@ class ClusterState:
 
     def save(self) -> None:
         with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            payload = json.dumps(self.data, indent=2, sort_keys=True).encode("utf-8")
-            with tmp.open("wb") as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
+            self._metadata_version = self.store.cas(
+                CLUSTER_STATE_METADATA_KEY,
+                int(self._metadata_version),
+                self.data,
+            )
+            self._write_cache()
+
+    def _write_cache(self, data: dict[str, Any] | None = None) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        payload = json.dumps(data or self.data, indent=2, sort_keys=True).encode("utf-8")
+        with tmp.open("wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.path)
+
+    def reload(self) -> None:
+        with self._lock:
+            self.data = self._read_state()
 
     def bump_epoch(self) -> None:
         self.data["meta_epoch"] = int(self.data.get("meta_epoch", 0)) + 1
@@ -795,12 +1402,18 @@ class ClusterCoordinator:
         health_interval_secs: float = DEFAULT_HEALTH_INTERVAL_SECS,
         health_failures: int = DEFAULT_HEALTH_FAILURES,
         shard_api_key: str | None = None,
+        coordinator_id: str | None = None,
+        coordinator_uri: str | None = None,
+        coordinator_lease_secs: float = DEFAULT_COORDINATOR_LEASE_SECS,
+        coordinator_lease: Any | None = None,
     ):
         self.state = state
         self.timeout_secs = float(timeout_secs)
         self.health_interval_secs = float(health_interval_secs)
         self.health_failures = int(health_failures)
         self.shard_api_key = shard_api_key
+        self.coordinator_uri = _normalize_uri(coordinator_uri or "")
+        self.coordinator_id = str(coordinator_id or self.coordinator_uri or f"{socket.gethostname()}:{os.getpid()}")
         self.client = httpx.Client(timeout=self.timeout_secs)
         self._health_lock = threading.Lock()
         self._failures: dict[str, int] = {}
@@ -811,6 +1424,18 @@ class ClusterCoordinator:
         self._rpc_max_idle_per_uri = 8
         self._stop = threading.Event()
         self._health_thread: threading.Thread | None = None
+        self._lease: Any | None = None
+        self._lease_thread: threading.Thread | None = None
+        self._lease_lock = threading.Lock()
+        self._lease_record: dict[str, Any] = {}
+        self._is_leader = coordinator_lease is None
+        self._leader_valid_until = float("inf") if coordinator_lease is None else 0.0
+        if coordinator_lease is not None:
+            if not self.coordinator_uri:
+                raise ValueError("coordinator_uri is required when coordinator failover is enabled")
+            self._lease = coordinator_lease
+            self._is_leader = False
+            self._leader_valid_until = 0.0
         self._fanout_pool = ThreadPoolExecutor(max_workers=32)
         self._replica_pool = ThreadPoolExecutor(max_workers=32)
         self._async_ready = threading.Event()
@@ -822,6 +1447,15 @@ class ClusterCoordinator:
         self._rust_read = None
         self._rust_read_epoch: int | None = None
 
+    def start_coordinator_lease_loop(self) -> None:
+        if self._lease is None:
+            return
+        if self._lease_thread and self._lease_thread.is_alive():
+            return
+        self.try_become_leader_once()
+        self._lease_thread = threading.Thread(target=self._coordinator_lease_loop, daemon=True)
+        self._lease_thread.start()
+
     def start_health_loop(self) -> None:
         if self._health_thread and self._health_thread.is_alive():
             return
@@ -830,8 +1464,18 @@ class ClusterCoordinator:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._lease_thread:
+            self._lease_thread.join(timeout=2)
         if self._health_thread:
             self._health_thread.join(timeout=2)
+        was_leader = self.is_active_coordinator()
+        if self._lease is not None:
+            try:
+                if was_leader:
+                    self._lease.release()
+                self._set_leader_view(self.current_leader_record(), is_self=False)
+            except Exception:
+                pass
         self._fanout_pool.shutdown(wait=True, cancel_futures=False)
         self._replica_pool.shutdown(wait=True, cancel_futures=False)
         self.client.close()
@@ -841,6 +1485,135 @@ class ClusterCoordinator:
             if loop is not None and not loop.is_closed():
                 loop.call_soon_threadsafe(loop.stop)
             self._async_thread.join(timeout=2)
+
+    def _set_leader_view(
+        self,
+        record: dict[str, Any],
+        *,
+        is_self: bool,
+        local_deadline: float | None = None,
+    ) -> None:
+        with self._lease_lock:
+            self._lease_record = dict(record or {})
+            self._is_leader = bool(is_self)
+            if is_self:
+                self._leader_valid_until = (
+                    time.monotonic() + (self._lease.lease_secs if self._lease else 0.0)
+                    if local_deadline is None
+                    else local_deadline
+                )
+            else:
+                self._leader_valid_until = 0.0
+
+    def _coordinator_lease_loop(self) -> None:
+        assert self._lease is not None
+        interval = max(0.1, min(self._lease.lease_secs / 3.0, 1.0))
+        while not self._stop.wait(interval):
+            try:
+                if self.is_active_coordinator():
+                    ok, record = self._lease.renew()
+                    self._set_leader_view(record, is_self=ok)
+                else:
+                    self.try_become_leader_once()
+            except Exception:
+                self._set_leader_view(self.current_leader_record(), is_self=False)
+
+    def try_become_leader_once(self) -> bool:
+        if self._lease is None:
+            return True
+        was_active = self.is_active_coordinator()
+        try:
+            acquired, record = self._lease.try_acquire()
+        except Exception:
+            return False
+        self._set_leader_view(record, is_self=acquired)
+        if acquired and not was_active:
+            try:
+                self.state.reload()
+            except Exception:
+                self._set_leader_view(record, is_self=False)
+                return False
+        return acquired
+
+    def is_active_coordinator(self) -> bool:
+        if self._lease is None:
+            return True
+        return bool(self._is_leader and time.monotonic() < self._leader_valid_until)
+
+    def current_leader_record(self) -> dict[str, Any]:
+        if self._lease is None:
+            return {
+                "leader_id": self.coordinator_id,
+                "leader_uri": self.coordinator_uri,
+                "lease_epoch": 0,
+                "expires_at": float("inf"),
+            }
+        record = self._lease.read()
+        with self._lease_lock:
+            if record:
+                self._lease_record = dict(record)
+            elif self._lease_record:
+                record = dict(self._lease_record)
+        return record
+
+    def coordinator_status(self) -> dict[str, Any]:
+        leader = self.current_leader_record()
+        active = self.is_active_coordinator()
+        role = "leader" if active else "standby"
+        if self._lease is None:
+            role = "single"
+        metadata_status = {}
+        status_fn = getattr(self.state.store, "metadata_status", None)
+        if callable(status_fn):
+            try:
+                metadata_status = status_fn()
+            except Exception as exc:
+                metadata_status = {"mode": "unknown", "error": str(exc)}
+        return _json_success({
+            "role": role,
+            "coordinator_id": self.coordinator_id,
+            "coordinator_uri": self.coordinator_uri,
+            "leader": leader,
+            "lease_enabled": self._lease is not None,
+            "metadata": metadata_status,
+        })
+
+    def proxy_request_to_leader(
+        self,
+        method: str,
+        target: str,
+        *,
+        headers: dict[str, str] | None = None,
+        body: bytes = b"",
+    ) -> httpx.Response:
+        leader = self.current_leader_record()
+        if not leader or _lease_record_is_expired(leader):
+            if self.try_become_leader_once():
+                raise RuntimeError("coordinator became leader; retry locally")
+            leader = self.current_leader_record()
+
+        leader_uri = _normalize_uri(str(leader.get("leader_uri") or ""))
+        if not leader_uri:
+            raise RuntimeError("no active coordinator leader is available")
+        if self.coordinator_uri and leader_uri == self.coordinator_uri:
+            raise RuntimeError("local coordinator is not ready to serve as leader")
+
+        forwarded_headers: dict[str, str] = {"X-Lynse-Coordinator-Proxy": "1"}
+        for name, value in (headers or {}).items():
+            lower = name.lower()
+            if lower in {
+                "accept",
+                "authorization",
+                "content-type",
+            }:
+                forwarded_headers[name] = value
+
+        return self.client.request(
+            method,
+            f"{leader_uri}{target}",
+            content=body,
+            headers=forwarded_headers,
+        )
 
     def _headers(self) -> dict[str, str]:
         if self.shard_api_key:
@@ -1158,6 +1931,8 @@ class ClusterCoordinator:
         return ok
 
     def refresh_health_once(self) -> None:
+        if not self.is_active_coordinator():
+            return
         uris = set()
         for group in self.state.groups():
             uris.add(group["primary"])
@@ -2413,6 +3188,9 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
 
     def _read_json(self) -> dict[str, Any]:
         body = self._read_body()
+        return self._json_from_body(body)
+
+    def _json_from_body(self, body: bytes) -> dict[str, Any]:
         if not body:
             return {}
         return json.loads(body.decode("utf-8"))
@@ -2435,15 +3213,57 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_proxy_response(self, response: httpx.Response) -> None:
+        data = response.content
+        self.send_response(response.status_code)
+        content_type = response.headers.get("Content-Type")
+        if content_type:
+            self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _proxy_if_standby(self, method: str, body: bytes = b"") -> bool:
+        parsed = urlparse(self.path)
+        if method == "GET" and parsed.path in {"/", "/coordinator_status"}:
+            return False
+        coord = self.coordinator
+        if coord.is_active_coordinator() or coord.try_become_leader_once():
+            return False
+        if self.headers.get("X-Lynse-Coordinator-Proxy") == "1":
+            self._send_error_json("coordinator is standby and cannot proxy this request", status=503)
+            return True
+        try:
+            response = coord.proxy_request_to_leader(
+                method,
+                self.path,
+                headers=dict(self.headers.items()),
+                body=body,
+            )
+        except RuntimeError as exc:
+            if "retry locally" in str(exc) and coord.is_active_coordinator():
+                return False
+            self._send_error_json(str(exc), status=503)
+            return True
+        except httpx.RequestError as exc:
+            self._send_error_json(f"failed to proxy request to active coordinator: {exc}", status=503)
+            return True
+        self._send_proxy_response(response)
+        return True
+
     def do_GET(self) -> None:
         try:
             parsed = urlparse(self.path)
+            if self._proxy_if_standby("GET"):
+                return
             if parsed.path == "/":
                 self._send_json(_json_success({"message": "LynseDB cluster coordinator"}))
             elif parsed.path == "/list_databases":
                 self._send_json(_json_success({"databases": self.coordinator.state.databases()}))
             elif parsed.path == "/cluster_info":
                 self._send_json(_json_success(self.coordinator.state.data))
+            elif parsed.path == "/coordinator_status":
+                self._send_json(self.coordinator.coordinator_status())
             elif parsed.path in {"/head_binary", "/tail_binary"}:
                 params = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
                 self._send_binary(self.coordinator.head_tail_binary(parsed.path, params))
@@ -2456,28 +3276,31 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             path = parsed.path
+            raw_body = self._read_body()
+            if self._proxy_if_standby("POST", raw_body):
+                return
             if path == "/search_binary":
                 params = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
-                buf = self.coordinator.search_binary(params, self._read_body())
+                buf = self.coordinator.search_binary(params, raw_body)
                 self._send_binary(buf)
                 return
             if path == "/batch_search_binary":
                 params = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
-                buf = self.coordinator.batch_search_binary(params, self._read_body())
+                buf = self.coordinator.batch_search_binary(params, raw_body)
                 self._send_binary(buf)
                 return
             if path == "/bulk_add_binary":
                 params = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
-                payload = self.coordinator.route_bulk_add_binary(params, self._read_body())
+                payload = self.coordinator.route_bulk_add_binary(params, raw_body)
                 self._send_json(payload)
                 return
             if path in {"/add_binary_ids", "/upsert_binary"}:
                 params = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
-                payload = self.coordinator.route_binary_items(params, self._read_body(), path)
+                payload = self.coordinator.route_binary_items(params, raw_body, path)
                 self._send_json(payload)
                 return
 
-            body = self._read_json()
+            body = self._json_from_body(raw_body)
             if path == "/create_database":
                 payload = self.coordinator.create_database(body)
             elif path in {"/delete_database", "/drop_database"}:
@@ -2696,6 +3519,67 @@ def load_cluster_config(path: str | None) -> dict[str, Any]:
         return json.load(f)
 
 
+def _split_csv(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+def _metadata_config(config: dict[str, Any]) -> dict[str, Any]:
+    value = config.get("metadata") or config.get("metadata_store") or {}
+    if isinstance(value, str):
+        return {"owners": value}
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+def _default_metadata_owners_from_config(config: dict[str, Any]) -> list[str]:
+    raw_groups = config.get("shard_groups") or config.get("shards") or []
+    if not raw_groups:
+        return []
+    primaries = [
+        _normalize_uri(group["primary"])
+        for group in raw_groups
+        if isinstance(group, dict) and group.get("primary")
+    ]
+    if len(primaries) >= 3:
+        return primaries[:3]
+    return primaries[:1]
+
+
+def build_metadata_store(
+    *,
+    owners: list[str] | None,
+    cache_path: Path,
+    timeout_secs: float,
+    api_key: str | None,
+) -> MetadataStore:
+    owners = owners or []
+    if len(owners) == 1:
+        return ShardMetadataStore(
+            owners[0],
+            cache_path=cache_path,
+            timeout_secs=timeout_secs,
+            api_key=api_key,
+        )
+    if len(owners) >= 3:
+        return QuorumMetadataStore(
+            owners,
+            cache_path=cache_path,
+            timeout_secs=timeout_secs,
+            api_key=api_key,
+        )
+    if not owners:
+        raise ValueError(
+            "cluster metadata owner could not be inferred. Provide --cluster-config "
+            "with at least one shard group, or pass --metadata-owners."
+        )
+    raise ValueError("metadata owners must contain exactly 1 URI, or 3+ URIs for replicated metadata")
+
+
 def run_coordinator(
     host: str,
     port: int,
@@ -2706,22 +3590,76 @@ def run_coordinator(
     request_timeout_secs: float = DEFAULT_REQUEST_TIMEOUT_SECS,
     health_interval_secs: float = DEFAULT_HEALTH_INTERVAL_SECS,
     health_failures: int = DEFAULT_HEALTH_FAILURES,
+    coordinator_id: str | None = None,
+    coordinator_uri: str | None = None,
+    coordinator_lease_secs: float | None = None,
+    metadata_owners: list[str] | None = None,
 ) -> None:
     config = load_cluster_config(cluster_config)
+    metadata_cfg = _metadata_config(config)
     state_path = Path(
         cluster_state
         or config.get("state_path")
         or os.environ.get("LYNSE_CLUSTER_STATE")
-        or "cluster_state.json"
+        or "cluster_state.cache.json"
     )
-    state = ClusterState(state_path, seed_config=config)
+    advertised_uri = _normalize_uri(
+        coordinator_uri
+        or config.get("coordinator_uri")
+        or os.environ.get("LYNSE_COORDINATOR_URI")
+        or _default_coordinator_uri(host, int(port))
+    )
+    lease_secs = float(
+        coordinator_lease_secs
+        if coordinator_lease_secs is not None
+        else config.get(
+            "coordinator_lease_secs",
+            os.environ.get("LYNSE_COORDINATOR_LEASE_SECS", DEFAULT_COORDINATOR_LEASE_SECS),
+        )
+    )
+    shard_key = shard_api_key or config.get("shard_api_key")
+    effective_metadata_owners = (
+        metadata_owners
+        or _split_csv(config.get("metadata_owners") or config.get("metadata_owner"))
+        or _split_csv(metadata_cfg.get("owners") or metadata_cfg.get("owner"))
+        or _split_csv(os.environ.get("LYNSE_CLUSTER_METADATA_OWNERS"))
+        or _default_metadata_owners_from_config(config)
+    )
+    metadata_store = build_metadata_store(
+        owners=effective_metadata_owners,
+        cache_path=state_path,
+        timeout_secs=request_timeout_secs,
+        api_key=shard_key,
+    )
+    state = ClusterState(state_path, seed_config=config, metadata_store=metadata_store)
+    coordinator_lease = MetadataCoordinatorLease(
+        metadata_store,
+        coordinator_id=(
+            coordinator_id
+            or config.get("coordinator_id")
+            or os.environ.get("LYNSE_COORDINATOR_ID")
+            or advertised_uri
+        ),
+        coordinator_uri=advertised_uri,
+        lease_secs=lease_secs,
+    )
     coordinator = ClusterCoordinator(
         state,
         timeout_secs=request_timeout_secs,
         health_interval_secs=health_interval_secs,
         health_failures=health_failures,
-        shard_api_key=shard_api_key or config.get("shard_api_key"),
+        shard_api_key=shard_key,
+        coordinator_id=(
+            coordinator_id
+            or config.get("coordinator_id")
+            or os.environ.get("LYNSE_COORDINATOR_ID")
+            or advertised_uri
+        ),
+        coordinator_uri=advertised_uri,
+        coordinator_lease_secs=lease_secs,
+        coordinator_lease=coordinator_lease,
     )
+    coordinator.start_coordinator_lease_loop()
     coordinator.start_health_loop()
 
     class Handler(ClusterRequestHandler):
@@ -2733,6 +3671,9 @@ def run_coordinator(
         httpd.serve_forever()
     finally:
         coordinator.stop()
+        close = getattr(metadata_store, "close", None)
+        if close:
+            close()
         httpd.server_close()
 
 
@@ -2741,11 +3682,27 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7637)
     parser.add_argument("--cluster-config", required=True)
-    parser.add_argument("--cluster-state")
+    parser.add_argument(
+        "--cluster-state",
+        help=(
+            "Local coordinator metadata cache path. Authoritative metadata is stored "
+            "on the metadata owner shard(s)."
+        ),
+    )
     parser.add_argument("--shard-api-key")
     parser.add_argument("--request-timeout-secs", type=float, default=DEFAULT_REQUEST_TIMEOUT_SECS)
     parser.add_argument("--health-interval-secs", type=float, default=DEFAULT_HEALTH_INTERVAL_SECS)
     parser.add_argument("--health-failures", type=int, default=DEFAULT_HEALTH_FAILURES)
+    parser.add_argument("--coordinator-id")
+    parser.add_argument("--coordinator-uri")
+    parser.add_argument("--coordinator-lease-secs", type=float, default=None)
+    parser.add_argument(
+        "--metadata-owners",
+        help=(
+            "Comma-separated metadata owner shard HTTP URIs. Omit to infer from "
+            "shard primaries; provide 3+ URIs for replicated metadata."
+        ),
+    )
     args = parser.parse_args(argv)
     run_coordinator(
         args.host,
@@ -2756,6 +3713,10 @@ def main(argv: list[str] | None = None) -> None:
         request_timeout_secs=args.request_timeout_secs,
         health_interval_secs=args.health_interval_secs,
         health_failures=args.health_failures,
+        coordinator_id=args.coordinator_id,
+        coordinator_uri=args.coordinator_uri,
+        coordinator_lease_secs=args.coordinator_lease_secs,
+        metadata_owners=_split_csv(args.metadata_owners),
     )
 
 

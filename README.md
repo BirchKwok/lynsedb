@@ -223,6 +223,14 @@ Cluster workflow:
 4. Point application clients at the coordinator.
 5. Monitor `/cluster_info` for shard health, replica state, and promotions.
 
+Cluster mode does not require shared storage. Coordinator metadata is stored on
+metadata owner shard(s) over internal RPC, and `--cluster-state` is only a local
+cache path for the coordinator process. Make sure each coordinator can reach the
+metadata owner shard RPC ports. By default, clusters with three or more
+shard primaries use the first three primaries as replicated metadata owners;
+smaller clusters use the first primary. Pass `--metadata-owners` only when you
+want to pin the owner set explicitly.
+
 ```shell
 lynse serve --host 127.0.0.1 --port 7638 --data-dir ./data/sg0-primary
 lynse serve --host 127.0.0.1 --port 7639 --data-dir ./data/sg0-replica
@@ -236,7 +244,7 @@ lynse serve \
   --host 127.0.0.1 \
   --port 7637 \
   --cluster-config ./cluster.json \
-  --cluster-state ./cluster_state.json
+  --cluster-state ./cluster_state.cache.json
 ```
 
 Cluster advantages:
@@ -251,9 +259,9 @@ Cluster advantages:
   a healthy active replica can be promoted if a primary fails.
 - **No client rewrite**: application code keeps using `VectorDBClient` and the
   normal database, collection, add, upsert, delete, search, and query APIs.
-- **Clear operations model**: the mutable coordinator state lives in
-  `cluster_state.json`; shard data directories and coordinator state can be
-  backed up and restored as explicit operational artifacts.
+- **Clear operations model**: authoritative coordinator metadata lives on the
+  metadata owner shard(s), while each coordinator keeps only a local
+  `cluster_state.cache.json` cache.
 
 Read the full [cluster deployment guide](docs/deployment/cluster-deployment.md)
 before using cluster mode in production.

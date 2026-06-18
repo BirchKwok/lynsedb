@@ -22,7 +22,7 @@ This page documents the major features and improvements in each version of Lynse
   `add(documents=...)` and `search(document=...)` usage.
 - Added a `LynseDB vs ChromaDB` comparison and migration guide.
 
-## v0.4.0
+## v0.5.0
 
 **Major Release - Cluster Coordination, Transport, and API Consistency**
 
@@ -48,7 +48,7 @@ This page documents the major features and improvements in each version of Lynse
 **Testing:**
 - Added standard cluster tests covering state initialization, ID routing, replica state changes, binary item preparation, and coordinator behavior.
 - Added explicit API parameter tests to keep local and HTTP collection signatures aligned and verify `n_clusters` and `wire_dtype` behavior.
-- Expanded collection, search, metadata index, Docker API, and server CLI coverage for the v0.4.0 API surface.
+- Expanded collection, search, metadata index, Docker API, and server CLI coverage for the v0.5.0 API surface.
 
 **Compatibility Notes:**
 - No required data migration is expected from v0.3.0 for single-node local or HTTP deployments.
@@ -226,7 +226,7 @@ This page documents the major features and improvements in each version of Lynse
 
 ## Migration Guide
 
-### From v0.3.0 to v0.4.0
+### From v0.3.0 to v0.5.0
 - Single-node local and HTTP deployments do not require a storage migration.
 - Cluster mode is new and opt-in. Start ordinary LynseDB HTTP servers as shards, then run a coordinator with `lynse serve --role coordinator --cluster-config ... --cluster-state ...`.
 - Keep the coordinator `cluster_state.json` on persistent storage and back it up together with all shard data directories.

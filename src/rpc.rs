@@ -11,7 +11,9 @@ use half::f16;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -23,11 +25,14 @@ pub(crate) const OP_UPSERT_BINARY_IDS: u8 = 5;
 pub(crate) const OP_DELETE_ITEMS: u8 = 6;
 pub(crate) const OP_RESTORE_ITEMS: u8 = 7;
 pub(crate) const OP_COLLECTION_CONTROL: u8 = 8;
+pub(crate) const OP_METADATA_GET: u8 = 9;
+pub(crate) const OP_METADATA_CAS: u8 = 10;
 
 const STATUS_OK: u8 = 0;
 const STATUS_ERR: u8 = 1;
 const MAX_FRAME_BYTES: usize = 512 * 1024 * 1024;
 pub(crate) const FIELDS_BINARY_MAGIC: &[u8] = b"LDBF1";
+static METADATA_CAS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 struct BaseMeta {
@@ -95,6 +100,19 @@ struct ControlMeta {
     action: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct MetadataGetMeta {
+    api_key: Option<String>,
+    key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataCasMeta {
+    api_key: Option<String>,
+    key: String,
+    expected_version: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 struct RpcOkMeta {
     ok: bool,
@@ -109,6 +127,18 @@ struct RpcIdsMeta {
 struct RpcPongMeta {
     protocol: &'static str,
     version: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct RpcMetadataMeta {
+    version: u64,
+    exists: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredMetadataRecord {
+    version: u64,
+    value: serde_json::Value,
 }
 
 /// Derive the internal RPC port from the public HTTP port.
@@ -322,6 +352,41 @@ fn handle_frame(
                 Vec::new(),
             ))
         }
+        OP_METADATA_GET => {
+            let meta: MetadataGetMeta = serde_json::from_slice(meta_bytes)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?;
+            validate_api_key(expected_api_key, meta.api_key.as_deref())?;
+            let (version, raw) = metadata_get(manager.root_path(), &meta.key)?;
+            Ok((
+                serde_json::to_value(RpcMetadataMeta {
+                    version,
+                    exists: !raw.is_empty(),
+                })
+                .map_err(|e| LynseError::Serialization(e.to_string()))?,
+                raw,
+            ))
+        }
+        OP_METADATA_CAS => {
+            let meta: MetadataCasMeta = serde_json::from_slice(meta_bytes)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?;
+            validate_api_key(expected_api_key, meta.api_key.as_deref())?;
+            let value: serde_json::Value = serde_json::from_slice(raw)
+                .map_err(|e| LynseError::Serialization(e.to_string()))?;
+            let version = metadata_cas(
+                manager.root_path(),
+                &meta.key,
+                meta.expected_version.unwrap_or(0),
+                value,
+            )?;
+            Ok((
+                serde_json::to_value(RpcMetadataMeta {
+                    version,
+                    exists: true,
+                })
+                .map_err(|e| LynseError::Serialization(e.to_string()))?,
+                Vec::new(),
+            ))
+        }
         _ => Err(LynseError::InvalidArgument(format!(
             "unknown internal RPC op {}",
             op
@@ -338,6 +403,83 @@ fn validate_api_key(expected: Option<&str>, supplied: Option<&str>) -> Result<()
         }
     }
     Ok(())
+}
+
+pub(crate) fn metadata_key_path(root: &Path, key: &str) -> Result<PathBuf> {
+    if key.is_empty()
+        || key.len() > 128
+        || key
+            .bytes()
+            .any(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
+    {
+        return Err(LynseError::InvalidArgument(
+            "metadata key must contain only letters, numbers, '.', '-' or '_'".to_string(),
+        ));
+    }
+    Ok(root
+        .join("__lynsedb_cluster_metadata__")
+        .join(format!("{key}.json")))
+}
+
+pub(crate) fn metadata_get(root: &Path, key: &str) -> Result<(u64, Vec<u8>)> {
+    let path = metadata_key_path(root, key)?;
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, Vec::new())),
+        Err(e) => return Err(LynseError::Storage(e.to_string())),
+    };
+    let record: StoredMetadataRecord =
+        serde_json::from_slice(&raw).map_err(|e| LynseError::Serialization(e.to_string()))?;
+    let value =
+        serde_json::to_vec(&record.value).map_err(|e| LynseError::Serialization(e.to_string()))?;
+    Ok((record.version, value))
+}
+
+pub(crate) fn metadata_cas(
+    root: &Path,
+    key: &str,
+    expected_version: u64,
+    value: serde_json::Value,
+) -> Result<u64> {
+    let _guard = METADATA_CAS_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| LynseError::Storage("metadata CAS lock poisoned".into()))?;
+    let path = metadata_key_path(root, key)?;
+    let current_version = metadata_get(root, key)?.0;
+    if current_version != expected_version {
+        return Err(LynseError::InvalidArgument(format!(
+            "metadata version conflict for key '{}': expected {}, got {}",
+            key, expected_version, current_version
+        )));
+    }
+    let next_version = current_version
+        .checked_add(1)
+        .ok_or_else(|| LynseError::InvalidArgument("metadata version overflow".into()))?;
+    let record = StoredMetadataRecord {
+        version: next_version,
+        value,
+    };
+    let raw = serde_json::to_vec(&record).map_err(|e| LynseError::Serialization(e.to_string()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| LynseError::Storage("invalid metadata path".into()))?;
+    std::fs::create_dir_all(parent).map_err(|e| LynseError::Storage(e.to_string()))?;
+    let tmp = path.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("rpc")
+    ));
+    {
+        let mut file =
+            std::fs::File::create(&tmp).map_err(|e| LynseError::Storage(e.to_string()))?;
+        file.write_all(&raw)
+            .map_err(|e| LynseError::Storage(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| LynseError::Storage(e.to_string()))?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| LynseError::Storage(e.to_string()))?;
+    Ok(next_version)
 }
 
 pub(crate) fn raw_f32_cow<'a>(raw: &'a [u8], expected_floats: usize) -> Result<Cow<'a, [f32]>> {
@@ -1032,4 +1174,45 @@ pub(crate) fn encode_search_result_binary(
     buf.extend_from_slice(&(fields_json.len() as u32).to_le_bytes());
     buf.extend_from_slice(&fields_json);
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn metadata_get_and_cas_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+
+        let (version, raw) = metadata_get(tmp.path(), "cluster_state").unwrap();
+        assert_eq!(version, 0);
+        assert!(raw.is_empty());
+
+        let next = metadata_cas(
+            tmp.path(),
+            "cluster_state",
+            0,
+            serde_json::json!({"hello": "world"}),
+        )
+        .unwrap();
+        assert_eq!(next, 1);
+
+        let (version, raw) = metadata_get(tmp.path(), "cluster_state").unwrap();
+        assert_eq!(version, 1);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&raw).unwrap(),
+            serde_json::json!({"hello": "world"})
+        );
+
+        let conflict = metadata_cas(
+            tmp.path(),
+            "cluster_state",
+            0,
+            serde_json::json!({"hello": "again"}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(conflict.contains("metadata version conflict"));
+    }
 }
