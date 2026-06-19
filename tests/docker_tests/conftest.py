@@ -9,8 +9,9 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
-import httpx
 import pytest
 
 
@@ -39,10 +40,11 @@ def _wait_for_server(base_url: str, api_key: str | None = None, timeout: float =
     last_error = None
     while time.time() < deadline:
         try:
-            response = httpx.get(base_url, headers=headers, timeout=1.0)
-            if response.status_code == 200:
-                return
-        except httpx.HTTPError as exc:
+            request = Request(base_url, headers=headers)
+            with urlopen(request, timeout=1.0) as response:
+                if response.status == 200:
+                    return
+        except URLError as exc:
             last_error = exc
         time.sleep(0.1)
 

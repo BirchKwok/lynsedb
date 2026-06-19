@@ -14,6 +14,7 @@ use crate::distance::DistanceMetric;
 use crate::error::{LynseError, Result};
 use crate::quantizer::QuantizerType;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Common index configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,9 +123,9 @@ pub trait VectorIndex: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct SearchParams {
     pub k: usize,
-    pub nprobe: usize,                    // for IVF/SPANN
-    pub ef_search: Option<usize>,         // for HNSW
-    pub subset_indices: Option<Vec<u64>>, // filter IDs
+    pub nprobe: usize,                         // for IVF/SPANN
+    pub ef_search: Option<usize>,              // for HNSW
+    pub subset_indices: Option<Arc<Vec<u64>>>, // filter row IDs
 }
 
 impl Default for SearchParams {

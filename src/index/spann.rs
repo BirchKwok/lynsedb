@@ -571,7 +571,7 @@ mod tests {
             k: 2,
             nprobe: 1,
             ef_search: None,
-            subset_indices: Some(vec![0, 1]),
+            subset_indices: Some(vec![0, 1].into()),
         };
         let (result_ids, _) = idx.search(&[5.1, 5.0], 2, &params).unwrap();
 

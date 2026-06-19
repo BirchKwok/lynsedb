@@ -6,11 +6,11 @@
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use parking_lot::{Mutex, RwLock};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use pyo3::{IntoPyObjectExt, Py, PyAny};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -19,6 +19,7 @@ use crate::engine::{
     Collection, DatabaseEngine, DatabaseManager, ExternalId, SearchResult, VectorFieldConfig,
 };
 use crate::storage::dtype::VectorDtype;
+use numpy::ndarray::ArrayView2;
 
 /// Register all Python classes and functions into the module.
 pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -29,10 +30,12 @@ pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFlatIndex>()?;
     m.add_class::<PyIvfFlatIndex>()?;
     m.add_class::<PyClusterReadCoordinator>()?;
+    m.add_class::<PyRemoteHttpClient>()?;
     m.add_function(wrap_pyfunction!(py_compute_distance, m)?)?;
     m.add_function(wrap_pyfunction!(py_top_k_search, m)?)?;
     m.add_function(wrap_pyfunction!(metadata_rpc_get, m)?)?;
     m.add_function(wrap_pyfunction!(metadata_rpc_cas, m)?)?;
+    m.add_function(wrap_pyfunction!(metadata_rpc_close, m)?)?;
     m.add_function(wrap_pyfunction!(py_start_server, m)?)?;
     m.add_function(wrap_pyfunction!(py_start_server_background, m)?)?;
     Ok(())
@@ -43,6 +46,400 @@ pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 const MAX_METADATA_RPC_FRAME_BYTES: usize = 512 * 1024 * 1024;
 const MAX_METADATA_RPC_IDLE_PER_OWNER: usize = 4;
 static METADATA_RPC_POOL: OnceLock<Mutex<HashMap<String, Vec<TcpStream>>>> = OnceLock::new();
+
+#[pyclass(name = "RemoteHttpClient")]
+pub struct PyRemoteHttpClient {
+    agent: ureq::Agent,
+    base_url: String,
+    api_key: Option<String>,
+}
+
+#[pymethods]
+impl PyRemoteHttpClient {
+    #[new]
+    #[pyo3(signature = (base_url, api_key=None))]
+    fn new(base_url: &str, api_key: Option<String>) -> PyResult<Self> {
+        Ok(Self {
+            agent: ureq::Agent::new(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key,
+        })
+    }
+
+    #[pyo3(signature = (path, params=None))]
+    fn get<'py>(
+        &self,
+        py: Python<'py>,
+        path: &str,
+        params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let params = query_params_from_pydict(params)?;
+        let url = self.url_with_query(path, &params);
+        let (status, raw) = py.detach(|| self.request_raw("GET", &url, None, None))?;
+        remote_response_tuple(py, status, raw)
+    }
+
+    #[pyo3(signature = (path, json_body=None, params=None))]
+    fn post_json<'py>(
+        &self,
+        py: Python<'py>,
+        path: &str,
+        json_body: Option<&Bound<'_, PyAny>>,
+        params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let value = match json_body {
+            Some(obj) if !obj.is_none() => py_to_json_value(obj)?,
+            _ => serde_json::Value::Object(serde_json::Map::new()),
+        };
+        let body = serde_json::to_vec(&value)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        let params = query_params_from_pydict(params)?;
+        let url = self.url_with_query(path, &params);
+        let (status, raw) =
+            py.detach(|| self.request_raw("POST", &url, Some(&body), Some("application/json")))?;
+        remote_response_tuple(py, status, raw)
+    }
+
+    #[pyo3(signature = (path, content, params=None, content_type="application/octet-stream"))]
+    fn post_binary_raw<'py>(
+        &self,
+        py: Python<'py>,
+        path: &str,
+        content: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyDict>>,
+        content_type: &str,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let body = content.extract::<Vec<u8>>()?;
+        let params = query_params_from_pydict(params)?;
+        let url = self.url_with_query(path, &params);
+        let (status, raw) =
+            py.detach(|| self.request_raw("POST", &url, Some(&body), Some(content_type)))?;
+        remote_response_tuple(py, status, raw)
+    }
+
+    #[pyo3(signature = (database_name, collection_name, vectors, vector_encoding="float32", return_ids=false))]
+    fn bulk_add_binary<'py>(
+        &self,
+        py: Python<'py>,
+        database_name: &str,
+        collection_name: &str,
+        vectors: PyReadonlyArray2<'_, f32>,
+        vector_encoding: &str,
+        return_ids: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let matrix = vectors.as_array();
+        let shape = matrix.shape();
+        if shape.len() != 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "vectors must be a 2D matrix",
+            ));
+        }
+        let n_vectors = shape[0];
+        let dim = shape[1];
+        let body = encode_f32_matrix_for_wire(matrix, vector_encoding)?;
+        let url = self.url_with_query(
+            "/bulk_add_binary",
+            &[
+                ("database_name", database_name.to_string()),
+                ("collection_name", collection_name.to_string()),
+                ("dim", dim.to_string()),
+                ("n_vectors", n_vectors.to_string()),
+                ("vector_encoding", normalize_remote_vector_encoding(vector_encoding)?),
+                ("return_ids", return_ids.to_string()),
+            ],
+        );
+        let raw = py.detach(|| self.post_binary(&url, &body))?;
+        if !return_ids {
+            return Ok(py.None());
+        }
+        let ids = parse_json_response_ids(&raw)?;
+        Ok(ids.into_pyarray(py).into_any().unbind())
+    }
+
+    #[pyo3(signature = (endpoint, database_name, collection_name, vectors, ids, vector_encoding="float32"))]
+    fn write_binary_ids(
+        &self,
+        py: Python<'_>,
+        endpoint: &str,
+        database_name: &str,
+        collection_name: &str,
+        vectors: PyReadonlyArray2<'_, f32>,
+        ids: Vec<u64>,
+        vector_encoding: &str,
+    ) -> PyResult<()> {
+        if endpoint != "add_binary_ids" && endpoint != "upsert_binary" {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "endpoint must be add_binary_ids or upsert_binary",
+            ));
+        }
+        let matrix = vectors.as_array();
+        let shape = matrix.shape();
+        if shape.len() != 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "vectors must be a 2D matrix",
+            ));
+        }
+        let n_vectors = shape[0];
+        let dim = shape[1];
+        if ids.len() != n_vectors {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "ids length must match vector row count",
+            ));
+        }
+        let normalized_encoding = normalize_remote_vector_encoding(vector_encoding)?;
+        let mut body = encode_f32_matrix_for_wire(matrix, &normalized_encoding)?;
+        let mut params = vec![
+            ("database_name", database_name.to_string()),
+            ("collection_name", collection_name.to_string()),
+            ("dim", dim.to_string()),
+            ("n_vectors", n_vectors.to_string()),
+            ("vector_encoding", normalized_encoding),
+            ("return_ids", "false".to_string()),
+        ];
+        if let Some(start) = contiguous_id_start(&ids) {
+            params.push(("ids_encoding", "range".to_string()));
+            params.push(("ids_start", start.to_string()));
+        } else {
+            params.push(("ids_encoding", "raw".to_string()));
+            for id in ids {
+                body.extend_from_slice(&id.to_le_bytes());
+            }
+        }
+        let url = self.url_with_query(&format!("/{}", endpoint), &params);
+        py.detach(|| self.post_binary(&url, &body)).map(|_| ())
+    }
+
+    #[pyo3(signature = (endpoint, database_name, collection_name, vectors, ids, fields=None, vector_encoding="float32"))]
+    fn write_records_binary<'py>(
+        &self,
+        py: Python<'py>,
+        endpoint: &str,
+        database_name: &str,
+        collection_name: &str,
+        vectors: PyReadonlyArray2<'_, f32>,
+        ids: Vec<u64>,
+        fields: Option<&Bound<'_, PyList>>,
+        vector_encoding: &str,
+    ) -> PyResult<Py<PyAny>> {
+        if endpoint != "add_records_binary" && endpoint != "upsert_records_binary" {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "endpoint must be add_records_binary or upsert_records_binary",
+            ));
+        }
+        let matrix = vectors.as_array();
+        let shape = matrix.shape();
+        if shape.len() != 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "vectors must be a 2D matrix",
+            ));
+        }
+        let n_vectors = shape[0];
+        let dim = shape[1];
+        if ids.len() != n_vectors {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "ids length must match vector row count",
+            ));
+        }
+        let normalized_encoding = normalize_remote_vector_encoding(vector_encoding)?;
+        let mut body = encode_f32_matrix_for_wire(matrix, &normalized_encoding)?;
+        let mut params = vec![
+            ("database_name", database_name.to_string()),
+            ("collection_name", collection_name.to_string()),
+            ("dim", dim.to_string()),
+            ("n_vectors", n_vectors.to_string()),
+            ("vector_encoding", normalized_encoding),
+        ];
+        if let Some(start) = contiguous_id_start(&ids) {
+            params.push(("ids_encoding", "range".to_string()));
+            params.push(("ids_start", start.to_string()));
+        } else {
+            params.push(("ids_encoding", "raw".to_string()));
+            for id in ids {
+                body.extend_from_slice(&id.to_le_bytes());
+            }
+        }
+        if let Some(field_maps) = py_fields_to_json(fields, n_vectors)? {
+            encode_fields_binary(&field_maps, &mut body)?;
+        }
+        let url = self.url_with_query(&format!("/{}", endpoint), &params);
+        let raw = py.detach(|| self.post_binary(&url, &body))?;
+        let ids = parse_json_response_ids(&raw)?;
+        Ok(ids.into_pyarray(py).into_any().unbind())
+    }
+
+    #[pyo3(signature = (database_name, collection_name, vector, k=10, where_expr=None, return_fields=false, vector_field="default", nprobe=10, approx=false, eps=1e-4, vector_encoding="float32"))]
+    fn search_binary<'py>(
+        &self,
+        py: Python<'py>,
+        database_name: &str,
+        collection_name: &str,
+        vector: PyReadonlyArray1<'_, f32>,
+        k: usize,
+        where_expr: Option<String>,
+        return_fields: bool,
+        vector_field: &str,
+        nprobe: usize,
+        approx: bool,
+        eps: f32,
+        vector_encoding: &str,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let values = vector.as_array();
+        let dim = values.len();
+        let normalized_encoding = normalize_remote_vector_encoding(vector_encoding)?;
+        let body = if let Some(values) = values.as_slice() {
+            encode_f32_slice_for_wire(values, &normalized_encoding)?
+        } else {
+            encode_f32_values_for_wire(values.iter().copied(), &normalized_encoding)?
+        };
+        let mut params = vec![
+            ("database_name", database_name.to_string()),
+            ("collection_name", collection_name.to_string()),
+            ("dim", dim.to_string()),
+            ("k", k.to_string()),
+            ("return_fields", return_fields.to_string()),
+            ("vector_encoding", normalized_encoding),
+            ("nprobe", nprobe.to_string()),
+            ("approx", approx.to_string()),
+            ("eps", eps.to_string()),
+        ];
+        if let Some(expr) = where_expr {
+            params.push(("where", expr));
+        }
+        if vector_field != "default" {
+            params.push(("vector_field", vector_field.to_string()));
+        }
+        let url = self.url_with_query("/search_binary", &params);
+        let raw = py.detach(|| self.post_binary(&url, &body))?;
+        decode_remote_search_block(py, &raw, 0).map(|(tuple, _)| tuple)
+    }
+
+    #[pyo3(signature = (database_name, collection_name, vectors, k=10, where_expr=None, return_fields=false, nprobe=10, vector_encoding="float32"))]
+    fn batch_search_binary<'py>(
+        &self,
+        py: Python<'py>,
+        database_name: &str,
+        collection_name: &str,
+        vectors: PyReadonlyArray2<'_, f32>,
+        k: usize,
+        where_expr: Option<String>,
+        return_fields: bool,
+        nprobe: usize,
+        vector_encoding: &str,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let matrix = vectors.as_array();
+        let shape = matrix.shape();
+        if shape.len() != 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "vectors must be a 2D matrix",
+            ));
+        }
+        let n_queries = shape[0];
+        let dim = shape[1];
+        let normalized_encoding = normalize_remote_vector_encoding(vector_encoding)?;
+        let body = encode_f32_matrix_for_wire(matrix, &normalized_encoding)?;
+        let mut params = vec![
+            ("database_name", database_name.to_string()),
+            ("collection_name", collection_name.to_string()),
+            ("dim", dim.to_string()),
+            ("n_queries", n_queries.to_string()),
+            ("k", k.to_string()),
+            ("return_fields", return_fields.to_string()),
+            ("vector_encoding", normalized_encoding),
+            ("nprobe", nprobe.to_string()),
+        ];
+        if let Some(expr) = where_expr {
+            params.push(("where", expr));
+        }
+        let url = self.url_with_query("/batch_search_binary", &params);
+        let raw = py.detach(|| self.post_binary(&url, &body))?;
+        decode_remote_batch_search(py, &raw, n_queries)
+    }
+
+    fn close(&self) {}
+}
+
+impl PyRemoteHttpClient {
+    fn url_with_query<K>(&self, path: &str, params: &[(K, String)]) -> String
+    where
+        K: AsRef<str>,
+    {
+        let mut url = if path.starts_with("http://") || path.starts_with("https://") {
+            path.to_string()
+        } else {
+            format!("{}{}", self.base_url, path)
+        };
+        if !params.is_empty() {
+            if url.contains('?') {
+                url.push('&');
+            } else {
+                url.push('?');
+            }
+            for (idx, (key, value)) in params.iter().enumerate() {
+                if idx > 0 {
+                    url.push('&');
+                }
+                url.push_str(&percent_encode(key.as_ref()));
+                url.push('=');
+                url.push_str(&percent_encode(value));
+            }
+        }
+        url
+    }
+
+    fn request_raw(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<&[u8]>,
+        content_type: Option<&str>,
+    ) -> PyResult<(u16, Vec<u8>)> {
+        let mut request = match method {
+            "GET" => self.agent.get(url),
+            "POST" => self.agent.post(url),
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unsupported HTTP method '{}'",
+                    other
+                )))
+            }
+        };
+        if let Some(api_key) = &self.api_key {
+            request = request.set("Authorization", &format!("Bearer {}", api_key));
+        }
+        if let Some(content_type) = content_type {
+            request = request.set("Content-Type", content_type);
+        }
+
+        let result = match body {
+            Some(bytes) => request.send_bytes(bytes),
+            None => request.call(),
+        };
+        match result {
+            Ok(response) => {
+                let status = response.status();
+                let raw = read_ureq_response(response)?;
+                Ok((status, raw))
+            }
+            Err(ureq::Error::Status(status, response)) => {
+                let raw = read_ureq_response(response)?;
+                Ok((status, raw))
+            }
+            Err(ureq::Error::Transport(err)) => Err(pyo3::exceptions::PyConnectionError::new_err(
+                format!("remote HTTP request failed: {}", err),
+            )),
+        }
+    }
+
+    fn post_binary(&self, url: &str, body: &[u8]) -> PyResult<Vec<u8>> {
+        let (status, raw) =
+            self.request_raw("POST", url, Some(body), Some("application/octet-stream"))?;
+        if (200..300).contains(&status) {
+            Ok(raw)
+        } else {
+            Err(remote_http_status_error(status, raw))
+        }
+    }
+}
 
 /// Python wrapper around the Rust-side hot read fan-out coordinator.
 #[pyclass(name = "ClusterReadCoordinator")]
@@ -163,6 +560,28 @@ fn metadata_rpc_cas(
         metadata_rpc_request(&owner_uri, crate::rpc::OP_METADATA_CAS, meta, &raw, timeout)
     })?;
     metadata_response_version(&response_meta)
+}
+
+#[pyfunction]
+#[pyo3(signature = (owner_uri=None))]
+fn metadata_rpc_close(owner_uri: Option<String>) -> PyResult<usize> {
+    let streams = if let Some(owner_uri) = owner_uri {
+        let normalized_owner = owner_uri.trim().trim_end_matches('/');
+        let (host, port) = derive_metadata_rpc_target(normalized_owner)?;
+        let pool_key = format!("{}|{}:{}", normalized_owner, host, port);
+        let mut pool = metadata_rpc_pool().lock();
+        pool.remove(&pool_key).unwrap_or_default()
+    } else {
+        let mut pool = metadata_rpc_pool().lock();
+        pool.drain()
+            .flat_map(|(_key, streams)| streams)
+            .collect::<Vec<_>>()
+    };
+    let count = streams.len();
+    for stream in streams {
+        let _ = stream.shutdown(Shutdown::Both);
+    }
+    Ok(count)
 }
 
 fn metadata_rpc_request(
@@ -1158,8 +1577,8 @@ impl PyCollection {
         let dim = coll.dimension();
         let n_ids = ids.len();
 
-        let (flat, _fields) = coll
-            .read_vectors_by_ids(&ids)
+        let flat = coll
+            .read_vectors_by_ids_only(&ids)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let arr = unsafe { numpy::PyArray2::<f32>::new(py, [n_ids, dim], false) };
@@ -1175,6 +1594,29 @@ impl PyCollection {
         let coll = self.inner.read();
         coll.query_fields(where_expr)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Query fields and return public external IDs as efficiently as possible.
+    ///
+    /// Integer-only IDs are returned as a numpy int64 array; mixed/string IDs
+    /// fall back to a Python list.
+    fn query_external_ids_array<'py>(
+        &self,
+        py: Python<'py>,
+        where_expr: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let coll = self.inner.read();
+        let internal_ids = coll
+            .query_fields(where_expr)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        if let Some(values) = coll.external_int_ids_for_internal_ids(&internal_ids) {
+            return Ok(values.into_pyarray(py).into_any().unbind());
+        }
+        Ok(
+            external_ids_to_pylist(py, &coll.external_ids_for_internal_ids(&internal_ids))?
+                .into_any()
+                .unbind(),
+        )
     }
 
     /// Query fields with a SQL-like filter. Returns (ids, fields) in a single
@@ -1205,6 +1647,22 @@ impl PyCollection {
     fn external_ids<'py>(&self, py: Python<'py>, ids: Vec<u64>) -> PyResult<Bound<'py, PyList>> {
         let coll = self.inner.read();
         external_ids_to_pylist(py, &coll.external_ids_for_internal_ids(&ids))
+    }
+
+    /// Convert internal numeric IDs to public external IDs as efficiently as possible.
+    ///
+    /// Integer-only IDs are returned as a numpy int64 array; mixed/string IDs
+    /// fall back to a Python list for object dtype handling in the Python layer.
+    fn external_ids_array<'py>(&self, py: Python<'py>, ids: Vec<u64>) -> PyResult<Py<PyAny>> {
+        let coll = self.inner.read();
+        if let Some(values) = coll.external_int_ids_for_internal_ids(&ids) {
+            return Ok(values.into_pyarray(py).into_any().unbind());
+        }
+        let external_ids = coll.external_ids_for_internal_ids(&ids);
+
+        Ok(external_ids_to_pylist(py, &external_ids)?
+            .into_any()
+            .unbind())
     }
 
     /// Convert public external IDs to internal numeric IDs.
@@ -1878,6 +2336,21 @@ impl PyDatabaseManager {
             .map(|c| (c.dim, c.chunk_size, c.description.clone(), c.dtypes.clone())))
     }
 
+    /// Get all collection configs from collections.json in one read.
+    fn get_collection_configs(
+        &self,
+        db_name: &str,
+    ) -> PyResult<HashMap<String, (usize, usize, Option<String>, String)>> {
+        let configs = self
+            .inner
+            .get_collection_configs(db_name)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(configs
+            .into_iter()
+            .map(|(name, c)| (name, (c.dim, c.chunk_size, c.description, c.dtypes)))
+            .collect())
+    }
+
     fn root_path(&self) -> String {
         self.inner.root_path().to_string_lossy().to_string()
     }
@@ -1925,6 +2398,398 @@ fn py_start_server_background(
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+fn normalize_remote_vector_encoding(value: &str) -> PyResult<String> {
+    match value.to_ascii_lowercase().as_str() {
+        "" | "float32" | "f32" => Ok("float32".to_string()),
+        "float16" | "f16" => Ok("float16".to_string()),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unsupported vector_encoding '{}'",
+            other
+        ))),
+    }
+}
+
+fn encode_f32_values_for_wire<I>(values: I, vector_encoding: &str) -> PyResult<Vec<u8>>
+where
+    I: IntoIterator<Item = f32>,
+{
+    match normalize_remote_vector_encoding(vector_encoding)?.as_str() {
+        "float16" => {
+            let mut out = Vec::new();
+            for value in values {
+                out.extend_from_slice(&half::f16::from_f32(value).to_le_bytes());
+            }
+            Ok(out)
+        }
+        _ => {
+            let mut out = Vec::new();
+            for value in values {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn encode_f32_slice_for_wire(values: &[f32], vector_encoding: &str) -> PyResult<Vec<u8>> {
+    match normalize_remote_vector_encoding(vector_encoding)?.as_str() {
+        "float16" => encode_f32_values_for_wire(values.iter().copied(), "float16"),
+        _ => {
+            #[cfg(target_endian = "little")]
+            {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        values.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(values),
+                    )
+                };
+                Ok(bytes.to_vec())
+            }
+            #[cfg(not(target_endian = "little"))]
+            {
+                encode_f32_values_for_wire(values.iter().copied(), "float32")
+            }
+        }
+    }
+}
+
+fn encode_f32_matrix_for_wire(
+    matrix: ArrayView2<'_, f32>,
+    vector_encoding: &str,
+) -> PyResult<Vec<u8>> {
+    if let Some(values) = matrix.as_slice() {
+        encode_f32_slice_for_wire(values, vector_encoding)
+    } else {
+        encode_f32_values_for_wire(matrix.iter().copied(), vector_encoding)
+    }
+}
+
+fn contiguous_id_start(ids: &[u64]) -> Option<u64> {
+    let (&first, rest) = ids.split_first()?;
+    if rest
+        .iter()
+        .enumerate()
+        .all(|(offset, &id)| id == first + offset as u64 + 1)
+    {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~' => out.push(byte as char),
+            _ => {
+                out.push('%');
+                out.push_str(&format!("{:02X}", byte));
+            }
+        }
+    }
+    out
+}
+
+fn query_params_from_pydict(
+    params: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<(String, String)>> {
+    let Some(params) = params else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(params.len());
+    for (key, value) in params.iter() {
+        if value.is_none() {
+            continue;
+        }
+        let key = key.str()?.to_str()?.to_string();
+        let value = if let Ok(value) = value.extract::<bool>() {
+            value.to_string()
+        } else if let Ok(value) = value.extract::<i64>() {
+            value.to_string()
+        } else if let Ok(value) = value.extract::<u64>() {
+            value.to_string()
+        } else if let Ok(value) = value.extract::<f64>() {
+            value.to_string()
+        } else if let Ok(value) = value.extract::<String>() {
+            value
+        } else {
+            value.str()?.to_str()?.to_string()
+        };
+        out.push((key, value));
+    }
+    Ok(out)
+}
+
+fn remote_response_tuple<'py>(
+    py: Python<'py>,
+    status: u16,
+    raw: Vec<u8>,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let (json_ok, json_value) = match serde_json::from_slice::<serde_json::Value>(&raw) {
+        Ok(value) => (true, json_to_py(py, &value)?),
+        Err(_) => (false, py.None()),
+    };
+    let items = vec![
+        status.into_py_any(py)?,
+        PyBytes::new(py, &raw).into_any().unbind(),
+        json_ok.into_py_any(py)?,
+        json_value,
+    ];
+    PyTuple::new(py, items)
+}
+
+fn remote_http_status_error(status: u16, raw: Vec<u8>) -> PyErr {
+    let body = String::from_utf8(raw).unwrap_or_default();
+    pyo3::exceptions::PyRuntimeError::new_err(format!(
+        "remote HTTP request failed with status {}: {}",
+        status, body
+    ))
+}
+
+fn read_ureq_response(response: ureq::Response) -> PyResult<Vec<u8>> {
+    let mut reader = response.into_reader();
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok(bytes)
+}
+
+fn parse_json_response_ids(raw: &[u8]) -> PyResult<Vec<i64>> {
+    let value: serde_json::Value = serde_json::from_slice(raw)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    if value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| status != "success")
+    {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            value
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("remote API request failed")
+                .to_string(),
+        ));
+    }
+    let ids = value
+        .get("params")
+        .and_then(|params| params.get("ids"))
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_i64)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(ids)
+}
+
+fn write_u32_le(out: &mut Vec<u8>, value: usize) -> PyResult<()> {
+    let value = u32::try_from(value)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("binary payload count exceeds u32"))?;
+    out.extend_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn write_string_binary(out: &mut Vec<u8>, value: &str) -> PyResult<()> {
+    let bytes = value.as_bytes();
+    write_u32_le(out, bytes.len())?;
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn encode_json_value_binary(value: &serde_json::Value, out: &mut Vec<u8>) -> PyResult<()> {
+    match value {
+        serde_json::Value::Null => out.push(0),
+        serde_json::Value::Bool(false) => out.push(1),
+        serde_json::Value::Bool(true) => out.push(2),
+        serde_json::Value::Number(number) => {
+            if let Some(value) = number.as_u64() {
+                out.push(4);
+                out.extend_from_slice(&value.to_le_bytes());
+            } else if let Some(value) = number.as_i64() {
+                out.push(3);
+                out.extend_from_slice(&value.to_le_bytes());
+            } else if let Some(value) = number.as_f64() {
+                out.push(5);
+                out.extend_from_slice(&value.to_le_bytes());
+            } else {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "unsupported JSON number in fields payload",
+                ));
+            }
+        }
+        serde_json::Value::String(value) => {
+            out.push(6);
+            write_string_binary(out, value)?;
+        }
+        serde_json::Value::Array(items) => {
+            out.push(7);
+            write_u32_le(out, items.len())?;
+            for item in items {
+                encode_json_value_binary(item, out)?;
+            }
+        }
+        serde_json::Value::Object(map) => {
+            out.push(8);
+            write_u32_le(out, map.len())?;
+            for (key, item) in map {
+                write_string_binary(out, key)?;
+                encode_json_value_binary(item, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn encode_fields_binary(
+    fields: &[HashMap<String, serde_json::Value>],
+    out: &mut Vec<u8>,
+) -> PyResult<()> {
+    out.extend_from_slice(crate::rpc::FIELDS_BINARY_MAGIC);
+    write_u32_le(out, fields.len())?;
+    for field in fields {
+        out.push(1);
+        write_u32_le(out, field.len())?;
+        for (key, value) in field {
+            write_string_binary(out, key)?;
+            encode_json_value_binary(value, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_u32_le(buf: &[u8], offset: &mut usize) -> PyResult<u32> {
+    let end = offset
+        .checked_add(4)
+        .ok_or_else(|| py_runtime_err("remote binary offset overflow"))?;
+    if end > buf.len() {
+        return Err(py_runtime_err("remote binary response is truncated"));
+    }
+    let value = u32::from_le_bytes([
+        buf[*offset],
+        buf[*offset + 1],
+        buf[*offset + 2],
+        buf[*offset + 3],
+    ]);
+    *offset = end;
+    Ok(value)
+}
+
+fn decode_i64_le_vec(buf: &[u8]) -> Vec<i64> {
+    #[cfg(target_endian = "little")]
+    {
+        let mut out = Vec::<i64>::with_capacity(buf.len() / 8);
+        unsafe {
+            out.set_len(buf.len() / 8);
+            std::ptr::copy_nonoverlapping(buf.as_ptr(), out.as_mut_ptr().cast::<u8>(), buf.len());
+        }
+        out
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        buf.chunks_exact(8)
+            .map(|chunk| {
+                u64::from_le_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+                ]) as i64
+            })
+            .collect()
+    }
+}
+
+fn decode_f32_le_vec(buf: &[u8]) -> Vec<f32> {
+    #[cfg(target_endian = "little")]
+    {
+        let mut out = Vec::<f32>::with_capacity(buf.len() / 4);
+        unsafe {
+            out.set_len(buf.len() / 4);
+            std::ptr::copy_nonoverlapping(buf.as_ptr(), out.as_mut_ptr().cast::<u8>(), buf.len());
+        }
+        out
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        buf.chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect()
+    }
+}
+
+fn decode_remote_search_block<'py>(
+    py: Python<'py>,
+    buf: &[u8],
+    mut offset: usize,
+) -> PyResult<(Bound<'py, PyTuple>, usize)> {
+    let n = read_u32_le(buf, &mut offset)? as usize;
+    let id_bytes = n
+        .checked_mul(8)
+        .ok_or_else(|| py_runtime_err("remote binary id byte size overflow"))?;
+    let dist_bytes = n
+        .checked_mul(4)
+        .ok_or_else(|| py_runtime_err("remote binary distance byte size overflow"))?;
+    if offset + id_bytes + dist_bytes > buf.len() {
+        return Err(py_runtime_err("remote binary response is truncated"));
+    }
+    let ids = decode_i64_le_vec(&buf[offset..offset + id_bytes]);
+    offset += id_bytes;
+
+    let dists = decode_f32_le_vec(&buf[offset..offset + dist_bytes]);
+    offset += dist_bytes;
+
+    let fields_len = read_u32_le(buf, &mut offset)? as usize;
+    if offset + fields_len > buf.len() {
+        return Err(py_runtime_err("remote binary fields payload is truncated"));
+    }
+    let fields: Vec<HashMap<String, serde_json::Value>> = if fields_len == 0 {
+        Vec::new()
+    } else {
+        serde_json::from_slice(&buf[offset..offset + fields_len])
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+    };
+    offset += fields_len;
+
+    let items = vec![
+        ids.into_pyarray(py).into_any().unbind(),
+        dists.into_pyarray(py).into_any().unbind(),
+        fields_to_pylist(py, &fields)?.into_any().unbind(),
+    ];
+    Ok((PyTuple::new(py, items)?, offset))
+}
+
+fn decode_remote_batch_search<'py>(
+    py: Python<'py>,
+    buf: &[u8],
+    expected_queries: usize,
+) -> PyResult<Bound<'py, PyList>> {
+    let mut offset = 0usize;
+    let count = read_u32_le(buf, &mut offset)? as usize;
+    if count != expected_queries {
+        return Err(py_runtime_err(format!(
+            "batch_search_binary returned {} queries, expected {}",
+            count, expected_queries
+        )));
+    }
+    let list = PyList::empty(py);
+    for _ in 0..count {
+        let (tuple, next_offset) = decode_remote_search_block(py, buf, offset)?;
+        offset = next_offset;
+        list.append(tuple)?;
+    }
+    if offset != buf.len() {
+        return Err(py_runtime_err("trailing bytes in remote batch search response"));
+    }
+    Ok(list)
+}
 
 /// Convert a Vec of field HashMaps to a Python list of dicts.
 fn fields_to_pylist<'py>(

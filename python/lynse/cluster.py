@@ -27,7 +27,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-import httpx
+from .utils.poster import RustRemoteSession
+
+if not getattr(ThreadingHTTPServer.serve_forever, "_lynse_fast_shutdown", False):
+    _threading_http_serve_forever = ThreadingHTTPServer.serve_forever
+
+    def _lynse_fast_serve_forever(self, poll_interval: float = 0.05):
+        return _threading_http_serve_forever(self, poll_interval=poll_interval)
+
+    _lynse_fast_serve_forever._lynse_fast_shutdown = True
+    ThreadingHTTPServer.serve_forever = _lynse_fast_serve_forever
 
 
 DEFAULT_BUCKET_COUNT = 4096
@@ -604,6 +613,18 @@ class ShardMetadataStore(MetadataStore):
         self._core = None
 
     def close(self) -> None:
+        core = self._core
+        if core is None:
+            try:
+                core = importlib.import_module("lynse._core")
+            except Exception:
+                core = None
+        close_rpc = getattr(core, "metadata_rpc_close", None) if core is not None else None
+        if close_rpc is not None:
+            try:
+                close_rpc(self.owner_uri)
+            except Exception:
+                pass
         self._core = None
 
     def _metadata_rpc_core(self):
@@ -1414,7 +1435,7 @@ class ClusterCoordinator:
         self.shard_api_key = shard_api_key
         self.coordinator_uri = _normalize_uri(coordinator_uri or "")
         self.coordinator_id = str(coordinator_id or self.coordinator_uri or f"{socket.gethostname()}:{os.getpid()}")
-        self.client = httpx.Client(timeout=self.timeout_secs)
+        self.client = RustRemoteSession(api_key=shard_api_key)
         self._health_lock = threading.Lock()
         self._failures: dict[str, int] = {}
         self._healthy: dict[str, bool] = {}
@@ -1440,7 +1461,7 @@ class ClusterCoordinator:
         self._replica_pool = ThreadPoolExecutor(max_workers=32)
         self._async_ready = threading.Event()
         self._async_loop: asyncio.AbstractEventLoop | None = None
-        self._async_client: httpx.AsyncClient | None = None
+        self._async_client = self.client
         self._async_thread = threading.Thread(target=self._async_loop_main, daemon=True)
         self._async_thread.start()
         self._rust_read_lock = threading.Lock()
@@ -1585,7 +1606,7 @@ class ClusterCoordinator:
         *,
         headers: dict[str, str] | None = None,
         body: bytes = b"",
-    ) -> httpx.Response:
+    ):
         leader = self.current_leader_record()
         if not leader or _lease_record_is_expired(leader):
             if self.try_become_leader_once():
@@ -1630,7 +1651,7 @@ class ClusterCoordinator:
         params: dict[str, Any] | None = None,
         content: bytes | None = None,
         content_type: str | None = None,
-    ) -> httpx.Response:
+    ):
         headers = self._headers()
         if content_type:
             headers["Content-Type"] = content_type
@@ -1666,12 +1687,10 @@ class ClusterCoordinator:
             loop.close()
 
     async def _async_start(self) -> None:
-        self._async_client = httpx.AsyncClient(timeout=self.timeout_secs)
+        self._async_client = self.client
 
     async def _async_stop(self) -> None:
-        if self._async_client is not None:
-            await self._async_client.aclose()
-            self._async_client = None
+        self._async_client = None
 
     def _run_async(self, coro):
         if not self._async_ready.wait(timeout=5):
@@ -1692,20 +1711,24 @@ class ClusterCoordinator:
         params: dict[str, Any] | None = None,
         content: bytes | None = None,
         content_type: str | None = None,
-    ) -> httpx.Response:
+    ):
         if self._async_client is None:
             raise RuntimeError("cluster async HTTP client is not initialized")
         headers = self._headers()
         if content_type:
             headers["Content-Type"] = content_type
         url = f"{_normalize_uri(uri)}{path}"
-        return await self._async_client.request(
-            method,
-            url,
-            json=json_body,
-            params=params,
-            content=content,
-            headers=headers,
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._fanout_pool,
+            lambda: self._async_client.request(
+                method,
+                url,
+                json=json_body,
+                params=params,
+                content=content,
+                headers=headers,
+            ),
         )
 
     async def _async_json_post(self, uri: str, path: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -3213,7 +3236,7 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_proxy_response(self, response: httpx.Response) -> None:
+    def _send_proxy_response(self, response) -> None:
         data = response.content
         self.send_response(response.status_code)
         content_type = response.headers.get("Content-Type")
@@ -3245,7 +3268,7 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
                 return False
             self._send_error_json(str(exc), status=503)
             return True
-        except httpx.RequestError as exc:
+        except OSError as exc:
             self._send_error_json(f"failed to proxy request to active coordinator: {exc}", status=503)
             return True
         self._send_proxy_response(response)

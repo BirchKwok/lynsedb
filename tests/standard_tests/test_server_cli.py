@@ -86,6 +86,32 @@ def test_parse_json_config_file(tmp_path):
     assert args.audit_log is False
 
 
+def test_parse_ini_config_file_with_comments(tmp_path):
+    config_path = tmp_path / "server.ini"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[server]",
+                "# Bind address.",
+                "host = 0.0.0.0",
+                "# Port.",
+                "port = 9003",
+                "# Data directory.",
+                "data_dir = /tmp/from-ini",
+                "# Enable audit logs.",
+                "audit_log = false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    args = _parse_args(["serve", "--config", str(config_path)])
+    assert args.host == "0.0.0.0"
+    assert args.port == 9003
+    assert args.data_dir == "/tmp/from-ini"
+    assert args.audit_log is False
+
+
 def test_env_overrides_config(tmp_path, monkeypatch):
     config_path = tmp_path / "server.json"
     config_path.write_text(

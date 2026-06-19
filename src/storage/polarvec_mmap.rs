@@ -141,8 +141,6 @@ impl PolarVecIndex {
         } else {
             n_vectors / n_sample
         };
-        let sample_indices: Vec<usize> = (0..n_sample).map(|i| i * stride).collect();
-
         let stat_chunk = 1024usize;
         let n_stat_chunks = (n_sample + stat_chunk - 1) / stat_chunk;
 
@@ -157,7 +155,7 @@ impl PolarVecIndex {
                 let mut buf = vec![0.0f32; padded_dim];
 
                 for si in start..end {
-                    let vi = sample_indices[si];
+                    let vi = si * stride;
                     let src = &data[vi * dim..(vi + 1) * dim];
                     buf[..dim].copy_from_slice(src);
                     for j in dim..padded_dim {
@@ -211,76 +209,7 @@ impl PolarVecIndex {
 
         // Pass 2: encode all vectors in parallel
         let enc_chunk = 4096usize;
-        let n_enc_chunks = (n_vectors + enc_chunk - 1) / enc_chunk;
 
-        let results: Vec<(usize, Vec<u8>, Vec<f32>, Vec<f32>)> = (0..n_enc_chunks)
-            .into_par_iter()
-            .map(|chunk| {
-                let start = chunk * enc_chunk;
-                let end = (start + enc_chunk).min(n_vectors);
-                let n_in = end - start;
-
-                let mut chunk_codes = vec![0u8; n_in * bytes_per_vec];
-                let mut chunk_residual_sq = if store_residual_sq {
-                    vec![0.0f32; n_in]
-                } else {
-                    Vec::new()
-                };
-                let mut chunk_inv_v_hat_norms = if store_inv_v_hat_norms {
-                    vec![0.0f32; n_in]
-                } else {
-                    Vec::new()
-                };
-                let mut buf = vec![0.0f32; padded_dim];
-
-                for i in 0..n_in {
-                    let vi = start + i;
-                    let src = &data[vi * dim..(vi + 1) * dim];
-
-                    // Apply RHT
-                    buf[..dim].copy_from_slice(src);
-                    for j in dim..padded_dim {
-                        buf[j] = 0.0;
-                    }
-                    apply_signs(&mut buf, &sign_words, padded_dim);
-                    fwht(&mut buf[..padded_dim]);
-
-                    // Quantize each dimension to b bits and pack.
-                    // Simultaneously compute residual squared norm:
-                    //   residual_sq[i] = sum_d (v_rot[d] - v_hat_rot[d])^2
-                    // so that coarse L2 score = LUT + residual_sq ≈ ||q_rot - v_rot||^2.
-                    let code_base = i * bytes_per_vec;
-                    let n_levels_m1 = (n_levels - 1) as f32;
-                    let mut res_sq = 0.0f32;
-                    let mut v_hat_sq = 0.0f32;
-                    for d in 0..padded_dim {
-                        let val = buf[d];
-                        let raw_code = (val - dim_mins[d]) / dim_scales[d];
-                        let code = raw_code.round().max(0.0).min(n_levels_m1) as u8;
-                        pack_code_at(&mut chunk_codes, code_base, d, code, bits);
-                        if store_residual_sq || store_inv_v_hat_norms {
-                            let v_hat_d = dim_mins[d] + code as f32 * dim_scales[d];
-                            if store_residual_sq {
-                                let diff = val - v_hat_d;
-                                res_sq += diff * diff;
-                            }
-                            if store_inv_v_hat_norms {
-                                v_hat_sq += v_hat_d * v_hat_d;
-                            }
-                        }
-                    }
-                    if store_residual_sq {
-                        chunk_residual_sq[i] = res_sq;
-                    }
-                    if store_inv_v_hat_norms {
-                        chunk_inv_v_hat_norms[i] = 1.0 / v_hat_sq.sqrt().max(1e-12);
-                    }
-                }
-                (start, chunk_codes, chunk_residual_sq, chunk_inv_v_hat_norms)
-            })
-            .collect();
-
-        // Merge encoding results
         let mut codes = vec![0u8; n_vectors * bytes_per_vec];
         let mut residual_sq = if store_residual_sq {
             vec![0.0f32; n_vectors]
@@ -292,18 +221,31 @@ impl PolarVecIndex {
         } else {
             Vec::new()
         };
-        for (start, chunk_codes, chunk_residual_sq, chunk_inv_v_hat_norms) in results {
-            let end = (start + enc_chunk).min(n_vectors);
-            let n_in = end - start;
-            codes[start * bytes_per_vec..end * bytes_per_vec]
-                .copy_from_slice(&chunk_codes[..n_in * bytes_per_vec]);
+
+        encode_all_vectors_in_place(
+            data,
+            n_vectors,
+            dim,
+            padded_dim,
+            bits,
+            n_levels,
+            bytes_per_vec,
+            &sign_words,
+            &dim_mins,
+            &dim_scales,
+            enc_chunk,
+            &mut codes,
             if store_residual_sq {
-                residual_sq[start..end].copy_from_slice(&chunk_residual_sq[..n_in]);
-            }
+                Some(&mut residual_sq)
+            } else {
+                None
+            },
             if store_inv_v_hat_norms {
-                inv_v_hat_norms[start..end].copy_from_slice(&chunk_inv_v_hat_norms[..n_in]);
-            }
-        }
+                Some(&mut inv_v_hat_norms)
+            } else {
+                None
+            },
+        );
 
         PolarVecIndex {
             dim,
@@ -366,7 +308,7 @@ impl PolarVecIndex {
         // For 4-bit codes: build byte-combined LUT (bytes_per_vec × 256).
         // Each entry covers 2 nibbles → halves the number of LUT lookups per vector.
         let byte_lut_4bit: Vec<f32> = if self.bits == 4 {
-            build_byte_lut_4bit(&lut, self.bytes_per_vec)
+            build_byte_lut_4bit(&lut, self.padded_dim, self.bytes_per_vec)
         } else {
             Vec::new()
         };
@@ -582,6 +524,201 @@ impl PolarVecIndex {
     }
 }
 
+fn encode_all_vectors_in_place(
+    data: &[f32],
+    n_vectors: usize,
+    dim: usize,
+    padded_dim: usize,
+    bits: usize,
+    n_levels: usize,
+    bytes_per_vec: usize,
+    sign_words: &[u64],
+    dim_mins: &[f32],
+    dim_scales: &[f32],
+    enc_chunk: usize,
+    codes: &mut [u8],
+    residual_sq: Option<&mut [f32]>,
+    inv_v_hat_norms: Option<&mut [f32]>,
+) {
+    debug_assert_eq!(codes.len(), n_vectors * bytes_per_vec);
+    let chunk_bytes = enc_chunk * bytes_per_vec;
+
+    match (residual_sq, inv_v_hat_norms) {
+        (Some(residual_sq), Some(inv_v_hat_norms)) => {
+            debug_assert_eq!(residual_sq.len(), n_vectors);
+            debug_assert_eq!(inv_v_hat_norms.len(), n_vectors);
+            codes
+                .par_chunks_mut(chunk_bytes)
+                .zip(residual_sq.par_chunks_mut(enc_chunk))
+                .zip(inv_v_hat_norms.par_chunks_mut(enc_chunk))
+                .enumerate()
+                .for_each(|(chunk, ((code_chunk, residual_chunk), inv_chunk))| {
+                    encode_vector_chunk_in_place(
+                        data,
+                        dim,
+                        padded_dim,
+                        bits,
+                        n_levels,
+                        bytes_per_vec,
+                        sign_words,
+                        dim_mins,
+                        dim_scales,
+                        chunk * enc_chunk,
+                        code_chunk,
+                        Some(residual_chunk),
+                        Some(inv_chunk),
+                    );
+                });
+        }
+        (Some(residual_sq), None) => {
+            debug_assert_eq!(residual_sq.len(), n_vectors);
+            codes
+                .par_chunks_mut(chunk_bytes)
+                .zip(residual_sq.par_chunks_mut(enc_chunk))
+                .enumerate()
+                .for_each(|(chunk, (code_chunk, residual_chunk))| {
+                    encode_vector_chunk_in_place(
+                        data,
+                        dim,
+                        padded_dim,
+                        bits,
+                        n_levels,
+                        bytes_per_vec,
+                        sign_words,
+                        dim_mins,
+                        dim_scales,
+                        chunk * enc_chunk,
+                        code_chunk,
+                        Some(residual_chunk),
+                        None,
+                    );
+                });
+        }
+        (None, Some(inv_v_hat_norms)) => {
+            debug_assert_eq!(inv_v_hat_norms.len(), n_vectors);
+            codes
+                .par_chunks_mut(chunk_bytes)
+                .zip(inv_v_hat_norms.par_chunks_mut(enc_chunk))
+                .enumerate()
+                .for_each(|(chunk, (code_chunk, inv_chunk))| {
+                    encode_vector_chunk_in_place(
+                        data,
+                        dim,
+                        padded_dim,
+                        bits,
+                        n_levels,
+                        bytes_per_vec,
+                        sign_words,
+                        dim_mins,
+                        dim_scales,
+                        chunk * enc_chunk,
+                        code_chunk,
+                        None,
+                        Some(inv_chunk),
+                    );
+                });
+        }
+        (None, None) => {
+            codes
+                .par_chunks_mut(chunk_bytes)
+                .enumerate()
+                .for_each(|(chunk, code_chunk)| {
+                    encode_vector_chunk_in_place(
+                        data,
+                        dim,
+                        padded_dim,
+                        bits,
+                        n_levels,
+                        bytes_per_vec,
+                        sign_words,
+                        dim_mins,
+                        dim_scales,
+                        chunk * enc_chunk,
+                        code_chunk,
+                        None,
+                        None,
+                    );
+                });
+        }
+    }
+}
+
+fn encode_vector_chunk_in_place(
+    data: &[f32],
+    dim: usize,
+    padded_dim: usize,
+    bits: usize,
+    n_levels: usize,
+    bytes_per_vec: usize,
+    sign_words: &[u64],
+    dim_mins: &[f32],
+    dim_scales: &[f32],
+    start: usize,
+    code_chunk: &mut [u8],
+    mut residual_sq: Option<&mut [f32]>,
+    mut inv_v_hat_norms: Option<&mut [f32]>,
+) {
+    let n_in = code_chunk.len() / bytes_per_vec;
+    debug_assert_eq!(code_chunk.len(), n_in * bytes_per_vec);
+    debug_assert!(residual_sq
+        .as_ref()
+        .map(|values| values.len() == n_in)
+        .unwrap_or(true));
+    debug_assert!(inv_v_hat_norms
+        .as_ref()
+        .map(|values| values.len() == n_in)
+        .unwrap_or(true));
+
+    let n_levels_m1 = (n_levels - 1) as f32;
+    let store_residual_sq = residual_sq.is_some();
+    let store_inv_v_hat_norms = inv_v_hat_norms.is_some();
+    let mut buf = vec![0.0f32; padded_dim];
+
+    for i in 0..n_in {
+        let vi = start + i;
+        let src = &data[vi * dim..(vi + 1) * dim];
+
+        buf[..dim].copy_from_slice(src);
+        for v in &mut buf[dim..padded_dim] {
+            *v = 0.0;
+        }
+        apply_signs(&mut buf, sign_words, padded_dim);
+        fwht(&mut buf[..padded_dim]);
+
+        let code_base = i * bytes_per_vec;
+        let code_row = &mut code_chunk[code_base..code_base + bytes_per_vec];
+        let mut res_sq = 0.0f32;
+        let mut v_hat_sq = 0.0f32;
+
+        for d in 0..padded_dim {
+            let val = unsafe { *buf.get_unchecked(d) };
+            let raw_code = (val - unsafe { *dim_mins.get_unchecked(d) })
+                / unsafe { *dim_scales.get_unchecked(d) };
+            let code = raw_code.round().max(0.0).min(n_levels_m1) as u8;
+            pack_code_at_row(code_row, d, code, bits);
+
+            if store_residual_sq || store_inv_v_hat_norms {
+                let v_hat_d = unsafe { *dim_mins.get_unchecked(d) }
+                    + code as f32 * unsafe { *dim_scales.get_unchecked(d) };
+                if store_residual_sq {
+                    let diff = val - v_hat_d;
+                    res_sq += diff * diff;
+                }
+                if store_inv_v_hat_norms {
+                    v_hat_sq += v_hat_d * v_hat_d;
+                }
+            }
+        }
+
+        if let Some(values) = residual_sq.as_deref_mut() {
+            values[i] = res_sq;
+        }
+        if let Some(values) = inv_v_hat_norms.as_deref_mut() {
+            values[i] = 1.0 / v_hat_sq.sqrt().max(1e-12);
+        }
+    }
+}
+
 // ─── Bit packing helpers ──────────────────────────────────────────────────────
 
 /// Compute packed bytes per vector: ceil(padded_dim × bits / 8).
@@ -616,6 +753,26 @@ fn pack_code_at(codes: &mut [u8], vec_base: usize, d: usize, code: u8, bits: usi
         // Upper bits go into [0, hi_bits-1] of byte_idx+1
         let hi_mask = (1u8 << hi_bits) - 1;
         codes[byte_idx + 1] = (codes[byte_idx + 1] & !hi_mask) | (code >> lo_bits);
+    }
+}
+
+#[inline(always)]
+fn pack_code_at_row(row: &mut [u8], d: usize, code: u8, bits: usize) {
+    match bits {
+        4 => {
+            let byte_idx = d >> 1;
+            let code = code & 0x0f;
+            let byte = unsafe { row.get_unchecked_mut(byte_idx) };
+            if d & 1 == 0 {
+                *byte = (*byte & 0xf0) | code;
+            } else {
+                *byte = (*byte & 0x0f) | (code << 4);
+            }
+        }
+        8 => unsafe {
+            *row.get_unchecked_mut(d) = code;
+        },
+        _ => pack_code_at(row, 0, d, code, bits),
     }
 }
 
@@ -669,11 +826,13 @@ fn generate_sign_words(n_words: usize, seed: u64) -> Vec<u64> {
 
 #[inline]
 fn apply_signs(buf: &mut [f32], sign_words: &[u64], n: usize) {
-    for i in 0..n {
-        let word_idx = i / 64;
-        let bit_idx = i % 64;
-        if word_idx < sign_words.len() && (sign_words[word_idx] >> bit_idx) & 1 == 1 {
-            buf[i] = -buf[i];
+    for (word_idx, chunk) in buf[..n].chunks_mut(64).enumerate() {
+        let mut word = sign_words.get(word_idx).copied().unwrap_or(0);
+        for v in chunk {
+            if word & 1 == 1 {
+                *v = -*v;
+            }
+            word >>= 1;
         }
     }
 }
@@ -764,38 +923,40 @@ fn build_lut(
 /// Size: `bytes_per_vec × 256` f32 entries (64 × 256 = 16,384 entries = 64 KB for dim=128).
 /// Halves the number of LUT accesses per vector vs the per-nibble path.
 #[inline]
-fn build_byte_lut_4bit(lut: &[f32], bytes_per_vec: usize) -> Vec<f32> {
+fn build_byte_lut_4bit(lut: &[f32], padded_dim: usize, bytes_per_vec: usize) -> Vec<f32> {
     let mut byte_lut = vec![0.0f32; bytes_per_vec * 256];
     for b in 0..bytes_per_vec {
-        let base_even = (b * 2) * 16; // lut[d_even * 16 ..]
-        let base_odd = (b * 2 + 1) * 16; // lut[d_odd  * 16 ..]
+        let even_dim = b * 2;
+        let odd_dim = even_dim + 1;
+        let base_even = even_dim * 16; // lut[d_even * 16 ..]
+        let base_odd = odd_dim * 16; // lut[d_odd  * 16 ..]
         let out_base = b * 256;
         for v in 0..256usize {
             let lo = v & 0x0f;
             let hi = v >> 4;
-            byte_lut[out_base + v] = unsafe { *lut.get_unchecked(base_even + lo) }
-                + unsafe { *lut.get_unchecked(base_odd + hi) };
+            let mut score = unsafe { *lut.get_unchecked(base_even + lo) };
+            if odd_dim < padded_dim {
+                score += unsafe { *lut.get_unchecked(base_odd + hi) };
+            }
+            byte_lut[out_base + v] = score;
         }
     }
     byte_lut
 }
 
-/// Compute the LUT-based score for vector `vi`.
+/// Compute the LUT-based score for one packed code row.
 ///
-/// - bits=4 with non-empty `byte_lut`: 64 byte-level lookups (fastest path).
+/// - bits=4 with non-empty `byte_lut`: byte-level lookups (fastest path).
 /// - bits=4 fallback / bits=8: per-code lookups.
 /// - other bits: general bit-unpack path.
 #[inline(always)]
-fn compute_lut_score(
-    codes: &[u8],
-    vi: usize,
-    bytes_per_vec: usize,
+fn compute_lut_score_row(
+    code_row: &[u8],
     bits: usize,
     lut: &[f32],
     n_levels: usize,
     byte_lut: &[f32],
 ) -> f32 {
-    let vec_base = vi * bytes_per_vec;
     let mut score = 0.0f32;
 
     if bits == 4 && !byte_lut.is_empty() {
@@ -805,21 +966,21 @@ fn compute_lut_score(
         let mut s1 = 0.0f32;
         let mut s2 = 0.0f32;
         let mut s3 = 0.0f32;
-        let full = (bytes_per_vec / 4) * 4;
+        let full = (code_row.len() / 4) * 4;
         let mut b = 0usize;
         while b < full {
-            let v0 = unsafe { *codes.get_unchecked(vec_base + b) } as usize;
-            let v1 = unsafe { *codes.get_unchecked(vec_base + b + 1) } as usize;
-            let v2 = unsafe { *codes.get_unchecked(vec_base + b + 2) } as usize;
-            let v3 = unsafe { *codes.get_unchecked(vec_base + b + 3) } as usize;
+            let v0 = unsafe { *code_row.get_unchecked(b) } as usize;
+            let v1 = unsafe { *code_row.get_unchecked(b + 1) } as usize;
+            let v2 = unsafe { *code_row.get_unchecked(b + 2) } as usize;
+            let v3 = unsafe { *code_row.get_unchecked(b + 3) } as usize;
             s0 += unsafe { *byte_lut.get_unchecked(b * 256 + v0) };
             s1 += unsafe { *byte_lut.get_unchecked((b + 1) * 256 + v1) };
             s2 += unsafe { *byte_lut.get_unchecked((b + 2) * 256 + v2) };
             s3 += unsafe { *byte_lut.get_unchecked((b + 3) * 256 + v3) };
             b += 4;
         }
-        while b < bytes_per_vec {
-            let v = unsafe { *codes.get_unchecked(vec_base + b) } as usize;
+        while b < code_row.len() {
+            let v = unsafe { *code_row.get_unchecked(b) } as usize;
             s0 += unsafe { *byte_lut.get_unchecked(b * 256 + v) };
             b += 1;
         }
@@ -829,7 +990,7 @@ fn compute_lut_score(
         match bits {
             4 => {
                 for d in 0..padded_dim {
-                    let byte = unsafe { *codes.get_unchecked(vec_base + d / 2) };
+                    let byte = unsafe { *code_row.get_unchecked(d / 2) };
                     let code = if d & 1 == 0 {
                         (byte & 0x0f) as usize
                     } else {
@@ -845,21 +1006,21 @@ fn compute_lut_score(
                 let mut s1 = 0.0f32;
                 let mut s2 = 0.0f32;
                 let mut s3 = 0.0f32;
-                let full = (bytes_per_vec / 4) * 4;
+                let full = (code_row.len() / 4) * 4;
                 let mut b = 0usize;
                 while b < full {
-                    let c0 = unsafe { *codes.get_unchecked(vec_base + b) } as usize;
-                    let c1 = unsafe { *codes.get_unchecked(vec_base + b + 1) } as usize;
-                    let c2 = unsafe { *codes.get_unchecked(vec_base + b + 2) } as usize;
-                    let c3 = unsafe { *codes.get_unchecked(vec_base + b + 3) } as usize;
+                    let c0 = unsafe { *code_row.get_unchecked(b) } as usize;
+                    let c1 = unsafe { *code_row.get_unchecked(b + 1) } as usize;
+                    let c2 = unsafe { *code_row.get_unchecked(b + 2) } as usize;
+                    let c3 = unsafe { *code_row.get_unchecked(b + 3) } as usize;
                     s0 += unsafe { *lut.get_unchecked(b * n_levels + c0) };
                     s1 += unsafe { *lut.get_unchecked((b + 1) * n_levels + c1) };
                     s2 += unsafe { *lut.get_unchecked((b + 2) * n_levels + c2) };
                     s3 += unsafe { *lut.get_unchecked((b + 3) * n_levels + c3) };
                     b += 4;
                 }
-                while b < bytes_per_vec {
-                    let code = unsafe { *codes.get_unchecked(vec_base + b) } as usize;
+                while b < code_row.len() {
+                    let code = unsafe { *code_row.get_unchecked(b) } as usize;
                     s0 += unsafe { *lut.get_unchecked(b * n_levels + code) };
                     b += 1;
                 }
@@ -880,10 +1041,10 @@ fn compute_lut_score(
                 let mut s3 = 0.0f32;
                 let n_groups = padded_dim / 8;
                 for g in 0..n_groups {
-                    let byte_base = vec_base + g * 3;
-                    let b0 = unsafe { *codes.get_unchecked(byte_base) } as u32;
-                    let b1 = unsafe { *codes.get_unchecked(byte_base + 1) } as u32;
-                    let b2 = unsafe { *codes.get_unchecked(byte_base + 2) } as u32;
+                    let byte_base = g * 3;
+                    let b0 = unsafe { *code_row.get_unchecked(byte_base) } as u32;
+                    let b1 = unsafe { *code_row.get_unchecked(byte_base + 1) } as u32;
+                    let b2 = unsafe { *code_row.get_unchecked(byte_base + 2) } as u32;
                     let w = b0 | (b1 << 8) | (b2 << 16);
                     let base_d = g * 8;
                     let c0 = (w & 0x7) as usize;
@@ -907,7 +1068,7 @@ fn compute_lut_score(
             }
             _ => {
                 for d in 0..padded_dim {
-                    let code = unpack_code_at(codes, vec_base, d, bits);
+                    let code = unpack_code_at(code_row, 0, d, bits);
                     score += unsafe { *lut.get_unchecked(d * n_levels + code) };
                 }
             }
@@ -970,14 +1131,17 @@ fn scan_topn(
         .map(|chunk_idx| {
             let start = chunk_idx * chunk_vecs;
             let end = (start + chunk_vecs).min(n_vectors);
+            let code_start = start * bytes_per_vec;
+            let code_end = end * bytes_per_vec;
+            let code_rows = codes[code_start..code_end].chunks_exact(bytes_per_vec);
 
             let has_correction = !correction_scores.is_empty();
             let has_multiplier = !multiplier_scores.is_empty();
             if ascending {
                 let mut heap: BinaryHeap<ScanEntry> = BinaryHeap::with_capacity(n_candidates + 1);
-                for vi in start..end {
-                    let mut score =
-                        compute_lut_score(codes, vi, bytes_per_vec, bits, lut, n_levels, byte_lut);
+                for (offset, code_row) in code_rows.enumerate() {
+                    let vi = start + offset;
+                    let mut score = compute_lut_score_row(code_row, bits, lut, n_levels, byte_lut);
                     if has_correction {
                         score += unsafe { *correction_scores.get_unchecked(vi) };
                     }
@@ -1001,9 +1165,9 @@ fn scan_topn(
             } else {
                 let mut heap: BinaryHeap<std::cmp::Reverse<ScanEntry>> =
                     BinaryHeap::with_capacity(n_candidates + 1);
-                for vi in start..end {
-                    let mut score =
-                        compute_lut_score(codes, vi, bytes_per_vec, bits, lut, n_levels, byte_lut);
+                for (offset, code_row) in code_rows.enumerate() {
+                    let vi = start + offset;
+                    let mut score = compute_lut_score_row(code_row, bits, lut, n_levels, byte_lut);
                     if has_correction {
                         score += unsafe { *correction_scores.get_unchecked(vi) };
                     }
@@ -1258,6 +1422,20 @@ mod tests {
         assert_eq!(idx.padded_dim, 128);
 
         let query = random_data(1, dim, 55);
+        let (ids, _) = idx.search(&query, 5, &data, DistanceMetric::InnerProduct, 40);
+        assert_eq!(ids.len(), 5);
+    }
+
+    #[test]
+    fn test_polarvec_dim_one_bits4() {
+        let n = 128;
+        let dim = 1;
+        let data = random_data(n, dim, 17);
+        let idx = PolarVecIndex::build(&data, n, dim, 4);
+        assert_eq!(idx.padded_dim, 1);
+        assert_eq!(idx.bytes_per_vec, 1);
+
+        let query = random_data(1, dim, 71);
         let (ids, _) = idx.search(&query, 5, &data, DistanceMetric::InnerProduct, 40);
         assert_eq!(ids.len(), 5);
     }

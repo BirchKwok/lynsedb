@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import configparser
 import json
 import os
 import sys
@@ -60,17 +61,17 @@ def _load_config(path: str | None) -> dict:
         except json.JSONDecodeError as exc:
             raise SystemExit(f"Invalid JSON config file: {path}") from exc
     else:
+        parser = configparser.ConfigParser()
+        parser.optionxform = str
         try:
-            from ruamel.yaml import YAML
-        except Exception as exc:
-            raise SystemExit(
-                "YAML config requires ruamel.yaml; install dependencies or use JSON."
-            ) from exc
-        yaml = YAML(typ="safe")
-        try:
-            data = yaml.load(content)
-        except Exception as exc:
-            raise SystemExit(f"Invalid YAML config file: {path}") from exc
+            parser.read_string(content)
+        except configparser.Error as exc:
+            raise SystemExit(f"Invalid INI config file: {path}") from exc
+        data = {}
+        if parser.defaults():
+            data.update(parser.defaults())
+        for section in parser.sections():
+            data[section] = dict(parser[section])
 
     if data is None:
         return {}
@@ -240,7 +241,7 @@ def _parse_args(argv=None):
     parser.add_argument(
         "--config",
         default=pre_args.config,
-        help="Path to JSON/YAML server config file",
+        help="Path to JSON/INI server config file",
     )
     parser.add_argument(
         "--role",

@@ -1,10 +1,9 @@
+import configparser
 import os
 from copy import deepcopy
 from pathlib import Path
 
 from ..utils.asserts import raise_if, augmented_isinstance
-from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap
 
 
 class Config:
@@ -135,67 +134,97 @@ class Config:
         }
 
 
+def _config_path() -> Path:
+    return Path(os.path.expanduser('~')) / '.lynsedb_configs.ini'
+
+
+def _parse_config_value(value, default):
+    if isinstance(value, str):
+        text = value.strip()
+        lowered = text.lower()
+        if lowered in {'none', 'null', '~'}:
+            return None
+        if isinstance(default, bool):
+            return lowered in {'1', 'true', 'yes', 'on'}
+        if isinstance(default, Path):
+            return Path(text)
+        if isinstance(default, int) and not isinstance(default, bool):
+            return int(text)
+        return text
+    return value
+
+
+def _dump_ini_config(values, comments):
+    lines = ['[lynse]']
+    for key, value in values.items():
+        comment = comments.get(key)
+        if comment:
+            lines.append(f'# {comment}')
+        lines.append(f'{key} = {value}')
+    return '\n'.join(lines) + '\n'
+
+
 def generate_config_file(regenerate=False):
     config = Config()
-    user_path = Path(os.path.expanduser('~'))
-    config_path = user_path / '.lynsedb_configs.yaml'
+    config_path = _config_path()
 
     config_dict = deepcopy(config.get_all_configs())
-    yaml = YAML()
-    yaml.default_flow_style = False
-
-    commented_config_dict = CommentedMap()
+    comments = {}
 
     for k, v in config_dict.items():
         if isinstance(v, Path):
             v = str(v)
-        commented_config_dict[k] = v
+            config_dict[k] = v
         # Get the property's docstring and add it as a comment
         docstring = getattr(config.__class__, k).fget.__doc__
-        commented_config_dict.yaml_set_comment_before_after_key(k, before=docstring)
+        comments[k] = docstring or ""
 
     if config_path.exists() and not regenerate:
         insert = False
-        with open(config_path, 'r') as file:
-            saved_config_dict = yaml.load(file)
-            if saved_config_dict is None:
-                saved_config_dict = {}
-            for k, v in config_dict.items():
-                if k not in saved_config_dict:
-                    saved_config_dict[k] = v
-                    insert = True
+        parser = configparser.ConfigParser()
+        parser.optionxform = str
+        parser.read(config_path, encoding='utf-8')
+        saved_config_dict = dict(parser['lynse']) if parser.has_section('lynse') else {}
+        for k, v in config_dict.items():
+            if k not in saved_config_dict:
+                saved_config_dict[k] = v
+                insert = True
 
         # If the config file is missing some keys, add them
         if insert:
-            with open(config_path, 'w') as file:
-                yaml.dump(saved_config_dict, file)
+            with open(config_path, 'w', encoding='utf-8') as file:
+                file.write(_dump_ini_config(saved_config_dict, comments))
     else:
-        with open(config_path, 'w') as file:
-            yaml.dump(commented_config_dict, file)
+        with open(config_path, 'w', encoding='utf-8') as file:
+            file.write(_dump_ini_config(config_dict, comments))
 
 
-def load_config_file(path=Path(os.path.expanduser('~')) / '.lynsedb_configs.yaml'):
+def load_config_file(path=None):
     _config = Config()
-    yaml = YAML()
+    if path is None:
+        path = _config_path()
     if not isinstance(path, Path):
         raise ValueError('path must be a Path object')
 
     if not path.exists():
         generate_config_file(regenerate=False)
 
-    with open(path, 'r') as file:
-        config_dict = yaml.load(file)
-        if config_dict is None:
-            config_dict = {}
+    parser = configparser.ConfigParser()
+    parser.optionxform = str
+    parser.read(path, encoding='utf-8')
+    config_dict = dict(parser['lynse']) if parser.has_section('lynse') else {}
+    defaults = _config.get_all_configs()
 
-        for key, value in config_dict.items():
-            if "PATH" in key and isinstance(value, str):
-                value = Path(value)
-            setattr(_config, f'_{key}', value)
+    for key, value in config_dict.items():
+        if key not in defaults:
+            continue
+        value = _parse_config_value(value, defaults[key])
+        setattr(_config, f'_{key}', value)
 
     return _config
 
 
+generate_config_file(regenerate=False)
 config = load_config_file()
 get_all_configs = config.get_all_configs
 

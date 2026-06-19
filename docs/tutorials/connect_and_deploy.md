@@ -38,7 +38,7 @@ client = lynse.VectorDBClient()
 ```
 
 By default this comes from `LYNSE_DEFAULT_ROOT_PATH` in the generated
-`~/.lynsedb_configs.yaml` file. Passing an explicit path is usually clearer for
+`~/.lynsedb_configs.ini` file. Passing an explicit path is usually clearer for
 applications and tests:
 
 ```python
@@ -174,38 +174,52 @@ container filesystem and can disappear when the container is removed.
 
 ## Server configuration file
 
-`lynse serve` accepts a JSON or YAML config file. Environment variables override
+`lynse serve` accepts a JSON or INI config file. Environment variables override
 the config file, and explicit CLI flags override both.
 
-Example JSON:
+Example INI:
 
-```json
-{
-  "host": "0.0.0.0",
-  "port": 7637,
-  "data_dir": "./server-data",
-  "api_key": "your_key",
-  "workers": 4,
-  "keep_alive_secs": 75,
-  "request_timeout_secs": 300,
-  "json_limit_mb": 256,
-  "payload_limit_mb": 512,
-  "slow_query_warn_ms": 1000,
-  "max_top_k": 10000,
-  "max_batch_vectors": 100000,
-  "max_collection_vectors": 10000000,
-  "max_collection_vector_bytes": 1099511627776,
-  "audit_log": true
-}
+```ini
+[server]
+# Bind address for the HTTP server.
+host = 0.0.0.0
+# TCP port for the HTTP server.
+port = 7637
+# Root directory for database files.
+data_dir = ./server-data
+# Optional API key for Bearer or Basic auth.
+api_key = your_key
+# HTTP worker thread count; omit to let the server choose.
+workers = 4
+# HTTP keep-alive timeout in seconds.
+keep_alive_secs = 75
+# Client request timeout in seconds.
+request_timeout_secs = 300
+# Maximum JSON request body size in MB.
+json_limit_mb = 256
+# Maximum raw payload request body size in MB.
+payload_limit_mb = 512
+# Search/query latency threshold for slow-query warnings; 0 disables it.
+slow_query_warn_ms = 1000
+# Maximum top-k style result size accepted by the server; 0 disables it.
+max_top_k = 10000
+# Maximum vectors, IDs, or queries accepted in one request; 0 disables it.
+max_batch_vectors = 100000
+# Maximum primary vectors allowed per collection; 0 disables it.
+max_collection_vectors = 10000000
+# Maximum vector bytes allowed per collection; 0 disables it.
+max_collection_vector_bytes = 1099511627776
+# Whether to emit audit logs for server requests.
+audit_log = true
 ```
 
 Run with:
 
 ```shell
-lynse serve --config ./server.json
+lynse serve --config ./server.ini
 ```
 
-The config may also be nested under a `server` key:
+JSON config files are also supported:
 
 ```json
 {
@@ -216,8 +230,6 @@ The config may also be nested under a `server` key:
   }
 }
 ```
-
-YAML config files require `ruamel.yaml` to be installed.
 
 ## Environment variables
 

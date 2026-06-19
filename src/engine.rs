@@ -5,7 +5,7 @@
 
 use crate::distance::DistanceMetric;
 use crate::error::{LynseError, Result};
-use crate::index::{self, SearchParams, VectorIndex};
+use crate::index::{self, IndexType, SearchParams, VectorIndex};
 use crate::storage::dtype::{
     decode_vector_bytes_to_f32, encode_f32_slice_as_le_bytes, f16_bits_to_f32, VectorDtype,
 };
@@ -698,6 +698,7 @@ struct InvertedTextIndex {
     path: PathBuf,
     postings: HashMap<String, HashMap<u64, HashMap<String, u32>>>,
     doc_lengths: HashMap<u64, HashMap<String, usize>>,
+    doc_total_lengths: HashMap<u64, usize>,
     doc_count_by_field: HashMap<String, usize>,
     total_doc_len_by_field: HashMap<String, usize>,
     all_doc_count: usize,
@@ -724,6 +725,7 @@ impl InvertedTextIndex {
                 path: index_path,
                 postings: HashMap::new(),
                 doc_lengths: HashMap::new(),
+                doc_total_lengths: HashMap::new(),
                 doc_count_by_field: HashMap::new(),
                 total_doc_len_by_field: HashMap::new(),
                 all_doc_count: 0,
@@ -751,6 +753,7 @@ impl InvertedTextIndex {
             path: index_path,
             postings: data.postings,
             doc_lengths: data.doc_lengths,
+            doc_total_lengths: HashMap::new(),
             doc_count_by_field: HashMap::new(),
             total_doc_len_by_field: HashMap::new(),
             all_doc_count: 0,
@@ -786,6 +789,7 @@ impl InvertedTextIndex {
 
         self.postings.clear();
         self.doc_lengths.clear();
+        self.doc_total_lengths.clear();
         self.clear_length_stats();
         self.clear_df_cache();
         for (&id, field_map) in ids.iter().zip(fields.iter()) {
@@ -1048,6 +1052,10 @@ impl InvertedTextIndex {
 
         if !lengths.is_empty() {
             self.add_length_stats(&lengths);
+            let total: usize = lengths.values().copied().sum();
+            if total > 0 {
+                self.doc_total_lengths.insert(id, total);
+            }
             self.doc_lengths.insert(id, lengths);
         }
     }
@@ -1056,6 +1064,7 @@ impl InvertedTextIndex {
         if let Some(lengths) = self.doc_lengths.remove(&id) {
             self.remove_length_stats(&lengths);
         }
+        self.doc_total_lengths.remove(&id);
         self.postings.retain(|_, posting| {
             posting.remove(&id);
             !posting.is_empty()
@@ -1075,8 +1084,17 @@ impl InvertedTextIndex {
 
     fn rebuild_length_stats(&mut self) {
         self.clear_length_stats();
-        let lengths: Vec<HashMap<String, usize>> = self.doc_lengths.values().cloned().collect();
-        for item in lengths {
+        self.doc_total_lengths.clear();
+        let lengths: Vec<(u64, HashMap<String, usize>)> = self
+            .doc_lengths
+            .iter()
+            .map(|(&id, lengths)| (id, lengths.clone()))
+            .collect();
+        for (id, item) in lengths {
+            let total: usize = item.values().copied().sum();
+            if total > 0 {
+                self.doc_total_lengths.insert(id, total);
+            }
             self.add_length_stats(&item);
         }
     }
@@ -1151,14 +1169,62 @@ impl InvertedTextIndex {
 
         let mut corpus_docs = 0usize;
         let mut total_doc_len = 0usize;
-        for (&id, lengths) in &self.doc_lengths {
-            if !text_doc_allowed(id, allowed_ids, tombstones) {
-                continue;
+        if let Some(allowed) = allowed_ids {
+            match field_filter {
+                TextFieldSelection::All => {
+                    for &id in allowed {
+                        if tombstones.contains(&id) {
+                            continue;
+                        }
+                        if let Some(&len) = self.doc_total_lengths.get(&id) {
+                            if len > 0 {
+                                corpus_docs += 1;
+                                total_doc_len += len;
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    for &id in allowed {
+                        if tombstones.contains(&id) {
+                            continue;
+                        }
+                        let Some(lengths) = self.doc_lengths.get(&id) else {
+                            continue;
+                        };
+                        let len = selected_doc_length(lengths, field_filter);
+                        if len > 0 {
+                            corpus_docs += 1;
+                            total_doc_len += len;
+                        }
+                    }
+                }
             }
-            let len = selected_doc_length(lengths, field_filter);
-            if len > 0 {
-                corpus_docs += 1;
-                total_doc_len += len;
+        } else {
+            match field_filter {
+                TextFieldSelection::All => {
+                    for (&id, &len) in &self.doc_total_lengths {
+                        if tombstones.contains(&id) {
+                            continue;
+                        }
+                        if len > 0 {
+                            corpus_docs += 1;
+                            total_doc_len += len;
+                        }
+                    }
+                }
+                _ => {
+                    for (&id, lengths) in &self.doc_lengths {
+                        if tombstones.contains(&id) {
+                            continue;
+                        }
+                        let len = selected_doc_length(lengths, field_filter);
+                        if len > 0 {
+                            corpus_docs += 1;
+                            total_doc_len += len;
+                        }
+                    }
+                }
             }
         }
         (corpus_docs > 0).then_some((corpus_docs, total_doc_len))
@@ -2904,6 +2970,19 @@ impl Collection {
             .collect()
     }
 
+    pub fn external_int_ids_for_internal_ids(&self, internal_ids: &[u64]) -> Option<Vec<i64>> {
+        let mut out = Vec::with_capacity(internal_ids.len());
+        for &internal_id in internal_ids {
+            let value = match self.internal_to_external_id.get(&internal_id) {
+                Some(ExternalId::Int(value)) => *value,
+                Some(ExternalId::String(_)) => return None,
+                None => internal_id,
+            };
+            out.push(i64::try_from(value).ok()?);
+        }
+        Some(out)
+    }
+
     pub fn all_internal_ids(&self) -> Vec<u64> {
         self.id_map.clone()
     }
@@ -4289,12 +4368,31 @@ impl Collection {
             });
         }
 
-        // Apply field filter
         let subset_indices = if let Some(filter) = where_expr {
-            Some(self.field_store.query(filter)?)
+            Some(Arc::new(self.field_store.query(filter)?))
         } else {
             None
         };
+
+        self.search_with_precomputed_filter(query, k, subset_indices, nprobe, approx, eps)
+    }
+
+    fn search_with_precomputed_filter(
+        &self,
+        query: &[f32],
+        k: usize,
+        subset_indices: Option<Arc<Vec<u64>>>,
+        nprobe: usize,
+        approx: bool,
+        eps: f32,
+    ) -> Result<SearchResult> {
+        let dim = self.meta.dimension;
+        if query.len() != dim {
+            return Err(LynseError::DimensionMismatch {
+                expected: dim,
+                got: query.len(),
+            });
+        }
 
         let tombstone_count = self.tombstone.read().len();
         let search_params = SearchParams {
@@ -4316,9 +4414,32 @@ impl Collection {
             None
         };
 
-        let (result_ids, result_dists) = if let Some(ref idx) = self.index {
+        let filtered_index_requires_exact = search_params.subset_indices.is_some()
+            && self
+                .index
+                .as_ref()
+                .map(|idx| {
+                    matches!(
+                        idx.config().index_type,
+                        IndexType::HNSW | IndexType::DiskANN
+                    )
+                })
+                .unwrap_or(false);
+
+        let (result_ids, result_dists) = if filtered_index_requires_exact {
+            // HNSW and DiskANN do not currently apply subset_indices inside
+            // their graph searches. Use the exact filtered path to avoid
+            // returning rows outside the metadata predicate.
+            self.brute_force_search_filtered(query, search_k, &search_params)?
+        } else if let Some(ref idx) = self.index {
             // ANN structure index path
             idx.search(query, search_k, &search_params)?
+        } else if search_params.subset_indices.is_some() {
+            // Filtered flat-family search must evaluate only allowed row IDs.
+            // Auxiliary flat quantizers (PQ/RaBitQ/PolarVec) are whole-corpus
+            // candidate generators, so filtered queries use the exact filtered
+            // mmap path for correctness.
+            self.brute_force_search_filtered(query, search_k, &search_params)?
         } else if let Some(ref pq) = self.pq_index {
             // PQ (Product Quantization) two-pass search
             let metric = collection_metric;
@@ -4361,9 +4482,6 @@ impl Collection {
                     (ids, dists)
                 }
             }
-        } else if search_params.subset_indices.is_some() {
-            // Filtered brute-force on mmap data
-            self.brute_force_search_filtered(query, search_k, &search_params)?
         } else {
             // Unfiltered: zero-copy mmap + fused parallel topk (~5ms for 1M×128)
             let metric = collection_metric;
@@ -4382,7 +4500,10 @@ impl Collection {
         let (pending_ids, pending_dists) = self.pending_search(
             query,
             search_k,
-            search_params.subset_indices.as_deref(),
+            search_params
+                .subset_indices
+                .as_ref()
+                .map(|subset| subset.as_slice()),
             collection_metric,
         );
         let (result_ids, result_dists) = self.merge_row_results(
@@ -4590,15 +4711,19 @@ impl Collection {
         let mut filter_us = 0u64;
         let mut filter_matches = None;
 
-        if let Some(expr) = where_expr {
+        let subset_indices = if let Some(expr) = where_expr {
             let filter_started = Instant::now();
             let ids = self.field_store.query(expr)?;
             filter_us = elapsed_micros_u64(filter_started);
             filter_matches = Some(ids.len());
-        }
+            Some(Arc::new(ids))
+        } else {
+            None
+        };
 
         let search_started = Instant::now();
-        let result = self.search(query, k, where_expr, nprobe, approx, eps)?;
+        let result =
+            self.search_with_precomputed_filter(query, k, subset_indices, nprobe, approx, eps)?;
         let search_us = elapsed_micros_u64(search_started);
         let total_vectors = self.shape()?.0;
         let filtered = where_expr.is_some();
@@ -4669,10 +4794,20 @@ impl Collection {
 
         let candidate_limit = candidate_limit.max(k).max(1);
         let mut fused: HashMap<u64, f32> = HashMap::new();
-
+        let subset_indices = if let Some(filter) = where_expr {
+            Some(Arc::new(self.field_store.query(filter)?))
+        } else {
+            None
+        };
         if let Some(vector) = query {
-            let vector_result =
-                self.search(vector, candidate_limit, where_expr, nprobe, false, 1e-4)?;
+            let vector_result = self.search_with_precomputed_filter(
+                vector,
+                candidate_limit,
+                subset_indices.clone(),
+                nprobe,
+                false,
+                1e-4,
+            )?;
             let vector_scores =
                 normalize_vector_scores(&vector_result.distances, self.resolve_metric());
             add_fused_scores(
@@ -4687,8 +4822,17 @@ impl Collection {
 
         if let Some(text) = query_text {
             if !text.trim().is_empty() {
-                let (text_scores, _) =
-                    self.bm25_text_scores(text, text_fields, where_expr, candidate_limit)?;
+                let allowed_text_ids = subset_indices.as_ref().map(|rows| {
+                    rows.iter()
+                        .map(|&row| self.row_to_user_id(row))
+                        .collect::<HashSet<u64>>()
+                });
+                let (text_scores, _) = self.bm25_text_scores_with_allowed_ids(
+                    text,
+                    text_fields,
+                    allowed_text_ids.as_ref(),
+                    candidate_limit,
+                )?;
                 let ids: Vec<u64> = text_scores.iter().map(|(id, _)| *id).collect();
                 let scores: Vec<f32> = text_scores.iter().map(|(_, score)| *score).collect();
                 let normalized = normalize_scores(&scores, false);
@@ -4755,12 +4899,6 @@ impl Collection {
         where_expr: Option<&str>,
         limit: usize,
     ) -> Result<(Vec<(u64, f32)>, &'static str)> {
-        if self.text_index.is_empty() {
-            return self
-                .bm25_text_scores_scan(query_text, text_fields, where_expr, limit)
-                .map(|scores| (scores, "BM25-SCAN"));
-        }
-
         let allowed_ids = if let Some(expr) = where_expr {
             let rows = self.field_store.query(expr)?;
             Some(
@@ -4771,15 +4909,46 @@ impl Collection {
         } else {
             None
         };
+
+        self.bm25_text_scores_with_allowed_ids(query_text, text_fields, allowed_ids.as_ref(), limit)
+    }
+
+    fn bm25_text_scores_with_allowed_ids(
+        &self,
+        query_text: &str,
+        text_fields: Option<&[String]>,
+        allowed_ids: Option<&HashSet<u64>>,
+        limit: usize,
+    ) -> Result<(Vec<(u64, f32)>, &'static str)> {
+        if self.text_index.is_empty() {
+            return self
+                .bm25_text_scores_scan_allowed_ids(query_text, text_fields, allowed_ids, limit)
+                .map(|scores| (scores, "BM25-SCAN"));
+        }
+
         let tombstones = self.tombstone.read();
-        let scores = self.text_index.search(
-            query_text,
-            text_fields,
-            limit,
-            allowed_ids.as_ref(),
-            &tombstones,
-        );
+        let scores =
+            self.text_index
+                .search(query_text, text_fields, limit, allowed_ids, &tombstones);
         Ok((scores, "BM25-INVERTED"))
+    }
+
+    fn bm25_text_scores_scan_allowed_ids(
+        &self,
+        query_text: &str,
+        text_fields: Option<&[String]>,
+        allowed_ids: Option<&HashSet<u64>>,
+        limit: usize,
+    ) -> Result<Vec<(u64, f32)>> {
+        if let Some(allowed) = allowed_ids {
+            let row_ids: Vec<u64> = allowed
+                .iter()
+                .filter_map(|&user_id| self.user_id_to_row(user_id).map(|row| row as u64))
+                .collect();
+            self.bm25_text_scores_scan_rows(query_text, text_fields, &row_ids, limit)
+        } else {
+            self.bm25_text_scores_scan(query_text, text_fields, None, limit)
+        }
     }
 
     fn bm25_text_scores_scan(
@@ -4789,11 +4958,6 @@ impl Collection {
         where_expr: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(u64, f32)>> {
-        let query_terms = tokenize_text(query_text);
-        if query_terms.is_empty() || limit == 0 {
-            return Ok(Vec::new());
-        }
-
         let row_ids: Vec<u64> = if let Some(expr) = where_expr {
             self.field_store.query(expr)?
         } else {
@@ -4801,10 +4965,24 @@ impl Collection {
             (0..n).collect()
         };
 
+        self.bm25_text_scores_scan_rows(query_text, text_fields, &row_ids, limit)
+    }
+
+    fn bm25_text_scores_scan_rows(
+        &self,
+        query_text: &str,
+        text_fields: Option<&[String]>,
+        row_ids: &[u64],
+        limit: usize,
+    ) -> Result<Vec<(u64, f32)>> {
+        let query_terms = tokenize_text(query_text);
+        if query_terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
         let field_filter = TextFieldSelection::from_fields(text_fields);
 
         let mut docs: Vec<(u64, Vec<String>)> = Vec::new();
-        let fields_list = self.field_store.retrieve_many(&row_ids)?;
+        let fields_list = self.field_store.retrieve_many(row_ids)?;
         for (row_id, fields) in row_ids.iter().copied().zip(fields_list.into_iter()) {
             let user_id = self.row_to_user_id(row_id);
             if self.tombstone.read().contains(&user_id) {
@@ -4908,7 +5086,7 @@ impl Collection {
 
         // Pre-compute filter once (shared across all queries)
         let subset_indices = if let Some(filter) = where_expr {
-            Some(self.field_store.query(filter)?)
+            Some(Arc::new(self.field_store.query(filter)?))
         } else {
             None
         };
@@ -5094,7 +5272,7 @@ impl Collection {
         };
 
         let subset = match &params.subset_indices {
-            Some(s) => s,
+            Some(s) => s.as_slice(),
             None => {
                 // No filter — use unfiltered path
                 let use_sq8 = self.resolve_use_sq8();
@@ -5794,6 +5972,18 @@ impl Collection {
         &self,
         ids: &[u64],
     ) -> Result<(Vec<f32>, Vec<HashMap<String, serde_json::Value>>)> {
+        let (result_data, row_offsets) = self.read_vectors_by_ids_only_with_rows(ids)?;
+        let fields = self.field_store.retrieve_many(&row_offsets)?;
+        Ok((result_data, fields))
+    }
+
+    /// Read vectors by their external IDs without fetching fields.
+    pub fn read_vectors_by_ids_only(&self, ids: &[u64]) -> Result<Vec<f32>> {
+        self.read_vectors_by_ids_only_with_rows(ids)
+            .map(|(vectors, _)| vectors)
+    }
+
+    fn read_vectors_by_ids_only_with_rows(&self, ids: &[u64]) -> Result<(Vec<f32>, Vec<u64>)> {
         let dim = self.meta.dimension;
         let pending_snapshot = {
             let pending = self.pending_ingest.lock();
@@ -5857,8 +6047,7 @@ impl Collection {
         }
         drop(guard);
 
-        let fields = self.field_store.retrieve_many(&row_offsets)?;
-        Ok((result_data, fields))
+        Ok((result_data, row_offsets))
     }
 
     /// Range search: return all (non-deleted) vectors within a distance threshold.
@@ -5874,6 +6063,10 @@ impl Collection {
         threshold: f32,
         max_results: usize,
     ) -> Result<(Vec<u64>, Vec<f32>)> {
+        if max_results == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
         let dim = self.meta.dimension;
         if query.len() != dim {
             return Err(LynseError::DimensionMismatch {
@@ -5919,13 +6112,29 @@ impl Collection {
         drop(tombstone);
         drop(guard);
 
-        if ascending {
-            result.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        } else {
-            result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        if result.len() > max_results {
+            if ascending {
+                result.select_nth_unstable_by(max_results - 1, |a, b| {
+                    a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            } else {
+                result.select_nth_unstable_by(max_results - 1, |a, b| {
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            result.truncate(max_results);
         }
 
-        result.truncate(max_results);
+        if ascending {
+            result.sort_unstable_by(|a, b| {
+                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        } else {
+            result.sort_unstable_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
         let (ids, dists) = result.into_iter().unzip();
         Ok((ids, dists))
     }
@@ -6891,7 +7100,10 @@ impl DatabaseEngine {
         let collections: Vec<Arc<RwLock<Collection>>> =
             self.collections.read().values().cloned().collect();
         for coll in collections {
-            coll.read().checkpoint()?;
+            let coll = coll.read();
+            if coll.has_uncommitted_data() {
+                coll.checkpoint()?;
+            }
         }
         Ok(())
     }

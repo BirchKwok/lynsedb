@@ -117,6 +117,46 @@ class TestSearch:
         for f in result.fields:
             assert f["group"] == 0
 
+    @pytest.mark.parametrize(
+        "index_mode",
+        [
+            "FLAT-IP-PQ",
+            "FLAT-L2-RABITQ",
+            "FLAT-COS-POLARVEC",
+            "HNSW-IP",
+            "DISKANN-L2",
+        ],
+    )
+    def test_filtered_search_respects_where_for_quantized_and_graph_indexes(
+        self, db, index_mode
+    ):
+        n = 200
+        dim = 8
+        rng = np.random.default_rng(20260619)
+        coll = db.require_collection(
+            f"filtered_{index_mode.lower().replace('-', '_')}",
+            dim=dim,
+            drop_if_exists=True,
+            default_index=None,
+        )
+        coll.add(
+            ids=list(range(n)),
+            vectors=rng.random((n, dim), dtype=np.float32),
+            fields=[{"bucket": i % 100} for i in range(n)],
+            batch_size=n,
+        )
+        coll.commit()
+        coll.build_index(index_mode)
+
+        result = coll.search(
+            rng.random(dim, dtype=np.float32),
+            k=10,
+            where='"bucket" < 10',
+        )
+
+        assert len(result.ids) == 10
+        assert all(int(item_id) % 100 < 10 for item_id in result.ids.tolist())
+
     def test_search_with_where_no_match(self, populated_collection, query_vec):
         result = populated_collection.search(
             query_vec, k=5, where='"group" = 999'

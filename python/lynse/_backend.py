@@ -229,6 +229,14 @@ class DatabaseManager:
         dim, _chunk_size, description, dtypes = result
         return {"dim": dim, "description": description, "dtypes": dtypes}
 
+    def get_collection_configs(self, db_name: str) -> Dict[str, Dict[str, Any]]:
+        """Get all collection configs from collections.json in one backend call."""
+        result = self._manager.get_collection_configs(db_name)
+        return {
+            name: {"dim": dim, "description": description, "dtypes": dtypes}
+            for name, (dim, _chunk_size, description, dtypes) in result.items()
+        }
+
     @property
     def root_path(self) -> str:
         return self._manager.root_path()
@@ -405,6 +413,13 @@ class Collection:
     def external_ids(self, ids: List[int]) -> List[Union[str, int]]:
         """Convert internal numeric IDs to public external IDs."""
         return list(self._inner.external_ids([int(i) for i in ids]))
+
+    def external_ids_array(self, ids: List[int]) -> "np.ndarray":
+        """Convert internal numeric IDs to public external IDs as a numpy array when possible."""
+        result = self._inner.external_ids_array([int(i) for i in ids])
+        if isinstance(result, np.ndarray):
+            return result
+        return np.asarray(list(result), dtype=object)
 
     def internal_ids(self, ids: List[Union[str, int]]) -> List[int]:
         """Convert public external IDs to internal numeric IDs."""
@@ -835,6 +850,13 @@ class Collection:
     def query_fields(self, where: str) -> List[int]:
         """Query field metadata with SQL-like filter. Returns matching IDs."""
         return self._inner.query_fields(where)
+
+    def query_external_ids_array(self, where: str) -> "np.ndarray":
+        """Query field metadata and return public IDs as a numpy array when possible."""
+        result = self._inner.query_external_ids_array(where)
+        if isinstance(result, np.ndarray):
+            return result
+        return np.asarray(list(result), dtype=object)
 
     def query_with_fields(self, where: str) -> Tuple[List[int], List[Dict[str, Any]]]:
         """Query field metadata with SQL-like filter. Returns (ids, fields) in one call."""

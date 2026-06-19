@@ -9,9 +9,6 @@ FILE_PATH = Path(__file__).parent.parent
 __version__ = '0.5.0'
 
 
-generate_config_file(), load_config_file()
-
-
 class VectorDBClient:
     """
     LynseDB client.
@@ -53,38 +50,23 @@ class VectorDBClient:
         self._api_key = api_key
 
         if self._is_remote:
-            import httpx
-            headers = {}
-            if api_key:
-                headers['Authorization'] = f'Bearer {api_key}'
-            # Connect to existing remote server
-            try:
-                response = httpx.get(uri, headers=headers)
-                if response.status_code == 401:
-                    raise ConnectionError('Authentication failed: invalid api_key.')
-                if response.status_code != 200:
-                    raise ConnectionError(f'Failed to connect to the server at {uri}.')
-                rj = response.json()
-                if rj.get('status') != 'success':
-                    raise ConnectionError(f'Failed to connect to the server at {uri}.')
+            from .utils.poster import RustRemoteSession
 
-                auth_response = httpx.get(f'{uri.rstrip("/")}/list_databases', headers=headers)
+            remote_client = RustRemoteSession(base_url=uri, api_key=api_key)
+            try:
+                auth_response = remote_client.get('/list_databases')
                 if auth_response.status_code == 401:
                     raise ConnectionError('Authentication failed: invalid api_key.')
                 if auth_response.status_code != 200:
                     raise ConnectionError(f'Failed to connect to the server at {uri}.')
-            except httpx.RequestError:
-                raise ConnectionError(f'Failed to connect to the server at {uri}.')
+            except Exception:
+                remote_client.close()
+                raise
 
             self._uri = uri
             self._root_path = None
             self._manager = None
-
-            # Persistent connection pool for remote HTTP requests
-            transport = httpx.HTTPTransport(retries=3)
-            self._client = httpx.Client(
-                transport=transport, timeout=300, base_url=self._uri, headers=headers
-            )
+            self._client = remote_client
         else:
             # Local mode: direct Rust backend, no HTTP overhead
             from .configs.config import config
@@ -104,26 +86,28 @@ class VectorDBClient:
 
     def _post(self, endpoint: str, data: dict = None):
         """Send POST request to the server (remote mode only)."""
-        import httpx
         try:
             response = self._client.post(endpoint, json=data or {})
             if response.status_code != 200:
                 rj = response.json()
                 raise RuntimeError(rj.get('error', f'Server error: {response.status_code}'))
             return response.json()
-        except httpx.RequestError:
+        except ConnectionError:
+            raise
+        except OSError:
             raise ConnectionError(f'Failed to connect to the server at {self._uri}.')
 
     def _get(self, endpoint: str):
         """Send GET request to the server (remote mode only)."""
-        import httpx
         try:
             response = self._client.get(endpoint)
             if response.status_code != 200:
                 rj = response.json()
                 raise RuntimeError(rj.get('error', f'Server error: {response.status_code}'))
             return response.json()
-        except httpx.RequestError:
+        except ConnectionError:
+            raise
+        except OSError:
             raise ConnectionError(f'Failed to connect to the server at {self._uri}.')
 
     # ── Public API ───────────────────────────────────────────────────────────
@@ -308,7 +292,11 @@ class VectorDBClient:
 
     def close(self):
         """Release the local storage handle (writer lock) for this root path."""
-        if not self._is_remote and self._manager is not None:
+        if self._is_remote:
+            if self._client is not None:
+                self._client.close()
+                self._client = None
+        elif self._manager is not None:
             self._manager.close()
             self._manager = None
 

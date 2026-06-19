@@ -250,9 +250,10 @@ class LocalClient:
             list or pandas.DataFrame: The details of the collections.
         """
         collections = self._manager.show_collections(self.database_name)
+        configs = self._manager.get_collection_configs(self.database_name)
         details = []
         for coll_name in collections:
-            config = self._manager.get_collection_config(self.database_name, coll_name)
+            config = configs.get(coll_name)
             if config:
                 details.append({
                     'collection': coll_name,
@@ -477,6 +478,25 @@ class LocalCollection:
         external_ids = id_array(self._rust_coll.external_ids(internal_list)) if internal_list else id_array([])
         fields = [dict(f) for f in self._rust_coll.retrieve_fields(internal_list)] if fetch_fields and internal_list else []
         return external_ids, fields
+
+    def _external_ids_array(self, internal_ids):
+        if internal_ids is None:
+            return id_array([])
+        if isinstance(internal_ids, np.ndarray):
+            if internal_ids.size == 0:
+                return id_array([])
+            internal_ids_arg = internal_ids.tolist()
+        else:
+            if not internal_ids:
+                return id_array([])
+            internal_ids_arg = internal_ids
+        external_ids_array = getattr(self._rust_coll, "external_ids_array", None)
+        if external_ids_array is not None:
+            result = external_ids_array(internal_ids_arg)
+            if isinstance(result, np.ndarray):
+                return result
+            return id_array(list(result))
+        return id_array(self._rust_coll.external_ids(internal_ids_arg))
 
     def _add_items_encoded_f16(self, vectors, ids, fields=None):
         add_encoded = getattr(self._rust_coll, "add_items_encoded_f16", None)
@@ -1173,8 +1193,12 @@ class LocalCollection:
             ResultView: Query result with ids and optional fields.
         """
         if where is not None:
+            if return_ids_only:
+                query_external_ids_array = getattr(self._rust_coll, "query_external_ids_array", None)
+                if query_external_ids_array is not None:
+                    return ResultView(ids=query_external_ids_array(where), result_type="query")
             internal_ids = self._rust_coll.query_fields(where)
-            ids_arr = id_array(self._rust_coll.external_ids(internal_ids)) if internal_ids else id_array([])
+            ids_arr = self._external_ids_array(internal_ids)
             if return_ids_only:
                 return ResultView(ids=ids_arr, result_type="query")
             if internal_ids:
@@ -1187,7 +1211,7 @@ class LocalCollection:
         else:
             ids = []
 
-        ids_arr = id_array(self._rust_coll.external_ids(ids)) if ids else id_array([])
+        ids_arr = self._external_ids_array(ids)
 
         if return_ids_only:
             return ResultView(ids=ids_arr, result_type="query")
@@ -1212,11 +1236,11 @@ class LocalCollection:
         """
         if where is not None:
             ids, fields = self._rust_coll.query_with_fields(where)
-            ids_arr = id_array(self._rust_coll.external_ids(ids)) if ids else id_array([])
+            ids_arr = self._external_ids_array(ids)
             internal_ids = ids
         elif filter_ids is not None:
             internal_ids = self._internal_ids(filter_ids)
-            ids_arr = id_array(self._rust_coll.external_ids(internal_ids)) if internal_ids else id_array([])
+            ids_arr = self._external_ids_array(internal_ids)
             fields = [dict(f) for f in self._rust_coll.retrieve_fields(internal_ids)] if internal_ids else []
         else:
             internal_ids = []

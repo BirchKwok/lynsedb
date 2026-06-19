@@ -7,12 +7,11 @@ from typing import Union, List, Tuple, Dict, Any, Optional, Callable
 from threading import Lock
 
 import numpy as np
-import httpx
 
 from ...cluster import _encode_fields_binary, _encode_ids_for_wire, _normalize_vector_encoding
 from ...api import logger
 from ...utils.asserts import raise_if
-from ...utils.poster import Poster
+from ...utils.poster import RustRemoteSession
 from ...utils.utils import collection_repr
 from ...result_view import ResultView, _parse_index_mode
 from .._embedding import embed_documents
@@ -147,10 +146,7 @@ class HTTPClient:
         raise_if(ValueError, not (uri.startswith('http://') or uri.startswith('https://')),
                  'The URI must start with "http://" or "https://".')
 
-        headers = {}
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
-        self._session = httpx.Client(headers=headers)
+        self._session = RustRemoteSession(base_url=uri, api_key=api_key)
         self._api_key = api_key
 
         if uri.endswith('/'):
@@ -159,6 +155,15 @@ class HTTPClient:
             self.uri = uri
 
         self.database_name = database_name
+
+    def close(self):
+        self._session.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def require_collection(
             self,
@@ -235,11 +240,12 @@ class HTTPClient:
                     api_key=self._api_key,
                     default_index=default_index if not existed_before else None,
                     integer_id_routing=config.get("integer_id_routing"),
+                    cluster_mode="integer_id_routing" in config,
                 )
                 return collection
             else:
                 raise_error_response(response)
-        except httpx.RequestError:
+        except OSError:
             raise ConnectionError(f'Failed to connect to the server at {uri}.')
 
     def get_collection(self, collection: str, warm_up=True):
@@ -278,6 +284,7 @@ class HTTPClient:
                 warm_up=warm_up,
                 api_key=self._api_key,
                 integer_id_routing=config.get('integer_id_routing'),
+                cluster_mode="integer_id_routing" in config,
             )
         else:
             raise_error_response(response)
@@ -603,6 +610,7 @@ class Collection:
             dtypes: str = "float32",
             default_index: Union[str, None] = None,
             integer_id_routing: Union[str, None] = None,
+            cluster_mode: Union[bool, None] = None,
     ):
         """
         Initialize the collection.
@@ -631,7 +639,9 @@ class Collection:
         self._uri = uri
         self._database_name = database_name
         self._collection_name = collection_name
-        self._session = Poster(api_key=api_key)
+        self._session = RustRemoteSession(base_url=uri, api_key=api_key)
+        self._api_key = api_key
+        self._rust_http = self._session._client
         self._init_params = {
             'dim': dim,
             'chunk_size': chunk_size,
@@ -650,15 +660,24 @@ class Collection:
 
         self._mesosphere_list = queue.Queue()
         self._lock = Lock()
-        self._cluster_mode = False
-        try:
-            response = self._session.get(f'{self._uri}/cluster_info')
-            self._cluster_mode = response.status_code == 200
-        except Exception:
-            self._cluster_mode = False
+        self._cluster_mode = cluster_mode
         self._integer_id_routing = integer_id_routing
-        self._binary_integer_id_safe = self._cluster_mode and integer_id_routing == "internal"
+        self._binary_integer_id_safe = bool(self._cluster_mode) and integer_id_routing == "internal"
         self._index_mode_cache = None
+
+    def _close_session(self):
+        close_rust = getattr(getattr(self, "_rust_http", None), "close", None)
+        if close_rust is not None:
+            close_rust()
+        close = getattr(self._session, "close", None)
+        if close is not None:
+            close()
+
+    def __del__(self):
+        try:
+            self._close_session()
+        except Exception:
+            pass
 
     def __enter__(self):
         return self
@@ -693,8 +712,19 @@ class Collection:
     def _all_non_negative_int_ids(ids) -> bool:
         return all(isinstance(item_id, int) and not isinstance(item_id, bool) and item_id >= 0 for item_id in ids)
 
+    def _ensure_cluster_mode(self) -> bool:
+        if self._cluster_mode is None:
+            try:
+                response = self._session.get(f'{self._uri}/cluster_info')
+                self._cluster_mode = response.status_code == 200
+            except Exception:
+                self._cluster_mode = False
+            if not self._cluster_mode:
+                self._binary_integer_id_safe = False
+        return bool(self._cluster_mode)
+
     def _can_write_cluster_binary_integer_ids(self, ids) -> bool:
-        if not self._cluster_mode or not self._all_non_negative_int_ids(ids):
+        if self._cluster_mode is not True or not self._all_non_negative_int_ids(ids):
             return False
         if self._integer_id_routing == "external":
             return False
@@ -706,10 +736,63 @@ class Collection:
             return False
 
     def _can_read_cluster_binary_integer_ids(self) -> bool:
-        return self._cluster_mode and self._binary_integer_id_safe
+        return bool(self._cluster_mode) and self._binary_integer_id_safe
 
     def _can_read_binary_integer_ids(self) -> bool:
         return self._binary_integer_id_safe
+
+    def _rust_http_client(self):
+        if "_rust_http" not in self.__dict__:
+            return None
+        rust_http = getattr(self, "_rust_http", None)
+        if rust_http is not None:
+            return rust_http
+        from ... import _core as _lynse_core
+        self._rust_http = _lynse_core.RemoteHttpClient(self._uri, getattr(self, "_api_key", None))
+        return self._rust_http
+
+    def _rust_bulk_add_binary(self, vectors, vector_encoding: str, return_ids: bool):
+        rust_http = self._rust_http_client()
+        if rust_http is None:
+            return False, None
+        return True, rust_http.bulk_add_binary(
+            self._database_name,
+            self._collection_name,
+            vectors,
+            vector_encoding,
+            return_ids,
+        )
+
+    def _rust_write_binary_ids(self, endpoint: str, vectors, ids, vector_encoding: str) -> bool:
+        rust_http = self._rust_http_client()
+        if rust_http is None:
+            return False
+        rust_http.write_binary_ids(
+            endpoint,
+            self._database_name,
+            self._collection_name,
+            vectors,
+            ids,
+            vector_encoding,
+        )
+        return True
+
+    def _rust_write_records_binary(self, endpoint: str, vectors, ids, fields, vector_encoding: str):
+        if self._cluster_mode is True or not self._all_non_negative_int_ids(ids):
+            return False, None
+        rust_http = self._rust_http_client()
+        if rust_http is None:
+            return False, None
+        returned = rust_http.write_records_binary(
+            endpoint,
+            self._database_name,
+            self._collection_name,
+            vectors,
+            ids,
+            fields,
+            vector_encoding,
+        )
+        return True, np.asarray(returned, dtype=np.int64).tolist()
 
     def _result_index_mode(self, vector_field: str = "default") -> str:
         if vector_field == "default":
@@ -772,7 +855,8 @@ class Collection:
             vectors = np.ascontiguousarray(vectors, dtype=np.float32)
             n_total, dim = vectors.shape
             vector_encoding = _normalize_vector_encoding(wire_dtype)
-            if self._cluster_mode and self._integer_id_routing != "external":
+            cluster_mode = self._ensure_cluster_mode()
+            if cluster_mode and self._integer_id_routing != "external":
                 returned_ids = []
                 total_batches = (n_total + batch_size - 1) // batch_size
                 for i in range(total_batches):
@@ -780,6 +864,16 @@ class Collection:
                     end = min((i + 1) * batch_size, n_total)
                     batch = vectors[start:end]
                     n_vecs = batch.shape[0]
+                    used_rust, rust_ids = self._rust_bulk_add_binary(
+                        batch,
+                        vector_encoding,
+                        True,
+                    )
+                    if used_rust:
+                        self.COMMIT_FLAG = False
+                        self._set_dim_if_known(dim)
+                        returned_ids.extend(np.asarray(rust_ids, dtype=np.int64).tolist())
+                        continue
                     if vector_encoding == "float16":
                         body = np.ascontiguousarray(batch, dtype="<f2").tobytes()
                     else:
@@ -812,7 +906,7 @@ class Collection:
             start_id = int(self.max_id) + 1
             generated_ids = list(range(start_id, start_id + n_total))
             use_bulk_binary = (
-                not self._cluster_mode
+                not cluster_mode
                 or self._binary_integer_id_safe
                 or start_id == 0
             )
@@ -830,6 +924,15 @@ class Collection:
                 end = min((i + 1) * batch_size, n_total)
                 batch = vectors[start:end]
                 n_vecs = batch.shape[0]
+                used_rust, _rust_ids = self._rust_bulk_add_binary(
+                    batch,
+                    vector_encoding,
+                    False,
+                )
+                if used_rust:
+                    self.COMMIT_FLAG = False
+                    self._set_dim_if_known(dim)
+                    continue
                 if vector_encoding == "float16":
                     body = np.ascontiguousarray(batch, dtype="<f2").tobytes()
                 else:
@@ -850,7 +953,7 @@ class Collection:
                 else:
                     raise_error_response(response)
 
-            if self._cluster_mode or self._binary_integer_id_safe or start_id == 0:
+            if cluster_mode or self._binary_integer_id_safe or start_id == 0:
                 self._integer_id_routing = "internal"
                 self._binary_integer_id_safe = True
             self._maybe_build_default_index()
@@ -884,6 +987,16 @@ class Collection:
                     end = min(start + batch_size, n_records)
                     batch_ids = external_ids[start:end]
                     batch_fields = None if field_list is None else field_list[start:end]
+                    if batch_fields is None and self._rust_write_binary_ids(
+                        "add_binary_ids",
+                        vec_array[start:end],
+                        batch_ids,
+                        wire_dtype,
+                    ):
+                        self.COMMIT_FLAG = False
+                        self._set_dim_if_known(vec_array.shape[1])
+                        returned_ids.extend(batch_ids)
+                        continue
                     payload, n_vectors, dim, batch_ids, id_params = self._prepare_binary_matrix(
                         vec_array[start:end],
                         batch_ids,
@@ -908,6 +1021,30 @@ class Collection:
             self._integer_id_routing = "internal"
             self._maybe_build_default_index()
             return returned_ids[0] if single_id else returned_ids
+
+        if self._cluster_mode is not True and self._all_non_negative_int_ids(external_ids):
+            added_ids = []
+            with self._lock:
+                for start in range(0, n_records, batch_size):
+                    end = min(start + batch_size, n_records)
+                    used_rust, returned = self._rust_write_records_binary(
+                        "add_records_binary",
+                        vec_array[start:end],
+                        external_ids[start:end],
+                        field_list[start:end] if field_list is not None else None,
+                        wire_dtype,
+                    )
+                    if not used_rust:
+                        added_ids = []
+                        break
+                    self.COMMIT_FLAG = False
+                    self._set_dim_if_known(vec_array.shape[1])
+                    added_ids.extend(returned)
+                else:
+                    self._integer_id_routing = "external"
+                    self._binary_integer_id_safe = False
+                    self._maybe_build_default_index()
+                    return added_ids[0] if single_id else added_ids
 
         uri = f'{self._uri}/add'
         added_ids = []
@@ -1083,6 +1220,16 @@ class Collection:
                     end = min(start + batch_size, n_records)
                     batch_ids = external_ids[start:end]
                     batch_fields = None if field_list is None else field_list[start:end]
+                    if batch_fields is None and self._rust_write_binary_ids(
+                        "upsert_binary",
+                        vec_array[start:end],
+                        batch_ids,
+                        wire_dtype,
+                    ):
+                        self.COMMIT_FLAG = False
+                        self._set_dim_if_known(vec_array.shape[1])
+                        returned_ids.extend(batch_ids)
+                        continue
                     payload, n_vectors, dim, batch_ids, id_params = self._prepare_binary_matrix(
                         vec_array[start:end],
                         batch_ids,
@@ -1107,6 +1254,30 @@ class Collection:
             self._integer_id_routing = "internal"
             self._maybe_build_default_index()
             return returned_ids[0] if single_id else returned_ids
+
+        if self._cluster_mode is not True and self._all_non_negative_int_ids(external_ids):
+            returned_ids = []
+            with self._lock:
+                for start in range(0, n_records, batch_size):
+                    end = min(start + batch_size, n_records)
+                    used_rust, returned = self._rust_write_records_binary(
+                        "upsert_records_binary",
+                        vec_array[start:end],
+                        external_ids[start:end],
+                        field_list[start:end] if field_list is not None else None,
+                        wire_dtype,
+                    )
+                    if not used_rust:
+                        returned_ids = []
+                        break
+                    self.COMMIT_FLAG = False
+                    self._set_dim_if_known(vec_array.shape[1])
+                    returned_ids.extend(returned)
+                else:
+                    self._integer_id_routing = "external"
+                    self._binary_integer_id_safe = False
+                    self._maybe_build_default_index()
+                    return returned_ids[0] if single_id else returned_ids
 
         uri = f'{self._uri}/upsert'
         returned_ids = []
@@ -1237,7 +1408,9 @@ class Collection:
         response = self._session.post(uri, json=data)
         if response.status_code == 200:
             self.COMMIT_FLAG = True
-            return response.json()
+            payload = response.json()
+            self._close_session()
+            return payload
         else:
             raise_error_response(response)
 
@@ -1699,18 +1872,34 @@ class Collection:
             and reranker is None
             and self._can_read_binary_integer_ids()
         ):
-            raw = self._search(
-                vec,
-                k,
-                where,
-                return_fields=send_return_fields,
-                vector_field=vector_field,
-                nprobe=nprobe,
-                approx=approx,
-                eps=eps,
-                wire_dtype=wire_dtype,
-            )
-            raw_ids, dists, fields, _ = _decode_search_binary(raw)
+            rust_http = self._rust_http_client()
+            if rust_http is not None:
+                raw_ids, dists, fields = rust_http.search_binary(
+                    self._database_name,
+                    self._collection_name,
+                    vec,
+                    k,
+                    where,
+                    send_return_fields,
+                    vector_field,
+                    nprobe,
+                    approx,
+                    float(eps),
+                    wire_dtype,
+                )
+            else:
+                raw = self._search(
+                    vec,
+                    k,
+                    where,
+                    return_fields=send_return_fields,
+                    vector_field=vector_field,
+                    nprobe=nprobe,
+                    approx=approx,
+                    eps=eps,
+                    wire_dtype=wire_dtype,
+                )
+                raw_ids, dists, fields, _ = _decode_search_binary(raw)
             index_mode = self._result_index_mode(vector_field)
             idx_type, metric = _parse_index_mode(index_mode)
             return ResultView(
@@ -2016,41 +2205,58 @@ class Collection:
         )
         if reranker is None and self._can_read_binary_integer_ids():
             vector_encoding = _normalize_vector_encoding(wire_dtype)
-            if vector_encoding == "float16":
-                body = np.ascontiguousarray(vecs, dtype="<f2").tobytes()
-            else:
-                body = vecs.tobytes()
-            params = {
-                "database_name": self._database_name,
-                "collection_name": self._collection_name,
-                "dim": vecs.shape[1],
-                "n_queries": vecs.shape[0],
-                "k": k,
-                "return_fields": str(send_return_fields).lower(),
-                "vector_encoding": vector_encoding,
-                "nprobe": nprobe,
-            }
-            if where is not None:
-                params["where"] = where
-            response = self._session.post(
-                f'{self._uri}/batch_search_binary',
-                params=params,
-                content=body,
-                headers={'Content-Type': 'application/octet-stream'},
-            )
-            if response.status_code != 200:
-                raise_error_response(response)
-
             idx_type, metric = _parse_index_mode(self._result_index_mode())
             output = []
-            offset = 0
-            buf = response.content
-            count = struct.unpack_from('<I', buf, offset)[0]
-            offset += 4
-            if count != vecs.shape[0]:
-                raise ExecutionError(f"batch_search_binary returned {count} queries, expected {vecs.shape[0]}")
-            for _query_index in range(count):
-                ids, dists, fields, offset = _decode_search_binary(buf, offset)
+            rust_http = self._rust_http_client()
+            if rust_http is not None:
+                decoded_results = rust_http.batch_search_binary(
+                    self._database_name,
+                    self._collection_name,
+                    vecs,
+                    k,
+                    where,
+                    send_return_fields,
+                    nprobe,
+                    vector_encoding,
+                )
+            else:
+                if vector_encoding == "float16":
+                    body = np.ascontiguousarray(vecs, dtype="<f2").tobytes()
+                else:
+                    body = vecs.tobytes()
+                params = {
+                    "database_name": self._database_name,
+                    "collection_name": self._collection_name,
+                    "dim": vecs.shape[1],
+                    "n_queries": vecs.shape[0],
+                    "k": k,
+                    "return_fields": str(send_return_fields).lower(),
+                    "vector_encoding": vector_encoding,
+                    "nprobe": nprobe,
+                }
+                if where is not None:
+                    params["where"] = where
+                response = self._session.post(
+                    f'{self._uri}/batch_search_binary',
+                    params=params,
+                    content=body,
+                    headers={'Content-Type': 'application/octet-stream'},
+                )
+                if response.status_code != 200:
+                    raise_error_response(response)
+
+                offset = 0
+                buf = response.content
+                count = struct.unpack_from('<I', buf, offset)[0]
+                offset += 4
+                if count != vecs.shape[0]:
+                    raise ExecutionError(f"batch_search_binary returned {count} queries, expected {vecs.shape[0]}")
+                decoded_results = []
+                for _query_index in range(count):
+                    ids, dists, fields, offset = _decode_search_binary(buf, offset)
+                    decoded_results.append((ids, dists, fields))
+
+            for ids, dists, fields in decoded_results:
                 output.append(ResultView(
                     ids=ids,
                     distances=np.asarray(dists, dtype=np.float32),

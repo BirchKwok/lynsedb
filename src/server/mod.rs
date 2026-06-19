@@ -1290,6 +1290,17 @@ struct BulkAddBinaryQuery {
 }
 
 #[derive(Deserialize)]
+struct RecordsBinaryQuery {
+    database_name: String,
+    collection_name: String,
+    dim: usize,
+    n_vectors: usize,
+    vector_encoding: Option<String>,
+    ids_encoding: Option<String>,
+    ids_start: Option<u64>,
+}
+
+#[derive(Deserialize)]
 struct SearchBinaryQuery {
     database_name: String,
     collection_name: String,
@@ -2739,6 +2750,73 @@ async fn add_records(
     }
 }
 
+async fn add_records_binary(
+    state: web::Data<AppState>,
+    query: web::Query<RecordsBinaryQuery>,
+    body: web::Bytes,
+) -> HttpResponse {
+    let dim = query.dim;
+    let n_vectors = query.n_vectors;
+    if n_vectors == 0 {
+        return bad_request("ids cannot be empty");
+    }
+    if dim == 0 {
+        return bad_request("vectors cannot be empty");
+    }
+    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "vectors") {
+        return limit_bad_request(e);
+    }
+    let vector_bytes = match checked_vector_bytes(n_vectors, dim) {
+        Ok(bytes) => bytes,
+        Err(e) => return limit_bad_request(e),
+    };
+    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "vectors") {
+        return limit_bad_request(e);
+    }
+    let (vectors, ids, fields_payload) = match crate::rpc::split_binary_item_payload_with_ids(
+        &body,
+        n_vectors * dim,
+        n_vectors,
+        query.vector_encoding.as_deref(),
+        query.ids_encoding.as_deref(),
+        query.ids_start,
+    ) {
+        Ok(payload) => payload,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    if ids.len() != n_vectors {
+        return bad_request("ids length must match vectors length");
+    }
+    let fields = crate::rpc::add_fields_from_payload(fields_payload.as_ref());
+    let external_ids: Vec<ExternalId> = ids.iter().copied().map(ExternalId::Int).collect();
+
+    if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
+        return error_response(&e.to_string());
+    }
+    let limits = state.limits;
+    let result = state.manager.with_database(&query.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&query.collection_name, 0, 100_000)?;
+        let mut coll = coll_arc.write();
+        validate_collection_insert(&limits, &coll, n_vectors as u64, vector_bytes)?;
+        coll.add_records(
+            vectors.as_ref(),
+            n_vectors,
+            &external_ids,
+            fields.as_ref().map(|items| items.as_slice()),
+        )?;
+        Ok(ids)
+    });
+
+    match result {
+        Ok(ids) => ApiResponse::success(serde_json::json!({
+            "database_name": query.database_name,
+            "collection_name": query.collection_name,
+            "ids": ids
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
 async fn upsert_records(
     state: web::Data<AppState>,
     body: web::Json<AddRecordsRequest>,
@@ -2947,6 +3025,138 @@ async fn bulk_add_binary(
             "database_name": query.database_name,
             "collection_name": query.collection_name,
             "n_vectors": n_vectors
+        })),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn upsert_records_binary(
+    state: web::Data<AppState>,
+    query: web::Query<RecordsBinaryQuery>,
+    body: web::Bytes,
+) -> HttpResponse {
+    let dim = query.dim;
+    let n_vectors = query.n_vectors;
+    if n_vectors == 0 {
+        return bad_request("ids cannot be empty");
+    }
+    if dim == 0 {
+        return bad_request("vectors cannot be empty");
+    }
+    if let Err(e) = validate_batch_vectors(&state.limits, n_vectors, "vectors") {
+        return limit_bad_request(e);
+    }
+    if let Err(e) = validate_request_vector_bytes(&state.limits, n_vectors, dim, "vectors") {
+        return limit_bad_request(e);
+    }
+    let (vectors, ids, fields_payload) = match crate::rpc::split_binary_item_payload_with_ids(
+        &body,
+        n_vectors * dim,
+        n_vectors,
+        query.vector_encoding.as_deref(),
+        query.ids_encoding.as_deref(),
+        query.ids_start,
+    ) {
+        Ok(payload) => payload,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    if ids.len() != n_vectors {
+        return bad_request("ids length must match vectors length");
+    }
+    if let Some(fields) = fields_payload.as_ref() {
+        if fields.len() != n_vectors {
+            return bad_request("fields length must match vectors length");
+        }
+    }
+    let external_ids: Vec<ExternalId> = ids.iter().copied().map(ExternalId::Int).collect();
+
+    if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
+        return error_response(&e.to_string());
+    }
+    let limits = state.limits;
+    let result = state.manager.with_database(&query.database_name, |engine| {
+        let coll_arc = engine.get_or_open_collection(&query.collection_name, 0, 100_000)?;
+        let mut coll = coll_arc.write();
+
+        let existing_positions: Vec<usize> = external_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, external_id)| {
+                coll.internal_id_for_external_id(external_id)
+                    .map(|_internal_id| idx)
+            })
+            .collect();
+        let existing_internal_ids: Vec<u64> = external_ids
+            .iter()
+            .filter_map(|external_id| coll.internal_id_for_external_id(external_id))
+            .collect();
+        let new_positions: Vec<usize> = external_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, external_id)| {
+                if coll.internal_id_for_external_id(external_id).is_none() {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let additional_vectors = new_positions.len() as u64;
+        let additional_bytes = checked_vector_bytes(additional_vectors as usize, dim)?;
+        validate_collection_insert(&limits, &coll, additional_vectors, additional_bytes)?;
+
+        if !existing_positions.is_empty() {
+            let mut existing_vectors = Vec::with_capacity(existing_positions.len() * dim);
+            for &idx in &existing_positions {
+                let start = idx * dim;
+                existing_vectors.extend_from_slice(&vectors.as_ref()[start..start + dim]);
+            }
+            let existing_fields = fields_payload.as_ref().map(|all_fields| {
+                existing_positions
+                    .iter()
+                    .map(|&idx| all_fields[idx].clone())
+                    .collect::<Vec<_>>()
+            });
+            crate::rpc::upsert_binary_items(
+                &mut coll,
+                &existing_internal_ids,
+                dim,
+                &existing_vectors,
+                existing_fields.as_ref(),
+            )?;
+        }
+
+        if !new_positions.is_empty() {
+            let mut new_vectors = Vec::with_capacity(new_positions.len() * dim);
+            let mut new_ids = Vec::with_capacity(new_positions.len());
+            for &idx in &new_positions {
+                let start = idx * dim;
+                new_vectors.extend_from_slice(&vectors.as_ref()[start..start + dim]);
+                new_ids.push(external_ids[idx].clone());
+            }
+            let new_fields_payload = fields_payload.as_ref().map(|all_fields| {
+                new_positions
+                    .iter()
+                    .map(|&idx| all_fields[idx].clone())
+                    .collect::<Vec<_>>()
+            });
+            let new_fields = crate::rpc::add_fields_from_payload(new_fields_payload.as_ref());
+            coll.add_records(
+                &new_vectors,
+                new_positions.len(),
+                &new_ids,
+                new_fields.as_ref().map(|items| items.as_slice()),
+            )?;
+        }
+        Ok(ids)
+    });
+
+    match result {
+        Ok(ids) => ApiResponse::success(serde_json::json!({
+            "database_name": query.database_name,
+            "collection_name": query.collection_name,
+            "ids": ids
         })),
         Err(e) => error_response(&e.to_string()),
     }
@@ -4619,6 +4829,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/import_collection", web::post().to(import_collection))
         .route("/show_collections", web::post().to(show_collections))
         .route("/add", web::post().to(add_records))
+        .route("/add_records_binary", web::post().to(add_records_binary))
         .route("/create_vector_field", web::post().to(create_vector_field))
         .route("/list_vector_fields", web::post().to(list_vector_fields))
         .route("/add_named_vectors", web::post().to(add_named_vectors))
@@ -4632,6 +4843,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
             web::post().to(remove_vector_field_index),
         )
         .route("/upsert", web::post().to(upsert_records))
+        .route("/upsert_records_binary", web::post().to(upsert_records_binary))
         .route("/bulk_add_binary", web::post().to(bulk_add_binary))
         .route("/search", web::post().to(search))
         .route("/search_profile", web::post().to(search_profile))
@@ -4788,7 +5000,7 @@ pub fn run_server(
         let handle = server.handle();
         tokio::spawn(async move {
             wait_for_shutdown_signal().await;
-            handle.stop(true).await;
+            handle.stop(false).await;
         });
 
         let result = server.await;

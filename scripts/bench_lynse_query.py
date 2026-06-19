@@ -1,70 +1,228 @@
 #!/usr/bin/env python3
-"""Benchmark LynseDB metadata query paths after performance fixes."""
+"""Benchmark LynseDB query/search paths on a 1M x 128 dataset.
+
+The default target matches the large local benchmark requested for query,
+filtered vector search, batch search, BM25, and hybrid vector+text search.
+
+Environment knobs:
+  LYNSE_BENCH_N=1000000
+  LYNSE_BENCH_DIM=128
+  LYNSE_BENCH_LOOPS=30
+  LYNSE_BENCH_BUILD_CHUNK=100000
+  LYNSE_BENCH_FORCE_REBUILD=1
+  LYNSE_BENCH_REUSE=0
+"""
+
+from __future__ import annotations
+
+import os
 import shutil
 import time
 from pathlib import Path
+from statistics import mean
 
 import numpy as np
 
 import lynse
 
-DATA_DIR = Path("/tmp/lynse_bench_query")
-N = 1_000_000
-LOOPS_FAST = 500
-LOOPS_SLOW = 100
+
+DATA_DIR = Path(os.environ.get("LYNSE_BENCH_QUERY_DIR", "/tmp/lynse_bench_query"))
+N = int(os.environ.get("LYNSE_BENCH_N", "1000000"))
+DIM = int(os.environ.get("LYNSE_BENCH_DIM", "128"))
+K = int(os.environ.get("LYNSE_BENCH_K", "10"))
+BUILD_CHUNK = int(os.environ.get("LYNSE_BENCH_BUILD_CHUNK", "100000"))
+WARMUP = int(os.environ.get("LYNSE_BENCH_WARMUP", "8"))
+LOOPS = int(os.environ.get("LYNSE_BENCH_LOOPS", "30"))
+BATCH_QUERIES = int(os.environ.get("LYNSE_BENCH_BATCH_QUERIES", "16"))
+SEED = int(os.environ.get("LYNSE_BENCH_SEED", "20260618"))
+REUSE = os.environ.get("LYNSE_BENCH_REUSE", "1") != "0"
+FORCE_REBUILD = os.environ.get("LYNSE_BENCH_FORCE_REBUILD", "0") == "1"
 
 
-def bench(label, fn, loops):
-    for _ in range(20):
+def percentile(values: list[float], pct: float) -> float:
+    arr = np.asarray(values, dtype=np.float64)
+    return float(np.percentile(arr, pct))
+
+
+def bench(label: str, fn, *, loops: int = LOOPS, warmup: int = WARMUP) -> dict[str, float]:
+    for _ in range(warmup):
         fn()
-    t0 = time.perf_counter()
+
+    samples = []
     for _ in range(loops):
+        t0 = time.perf_counter()
         fn()
-    us = (time.perf_counter() - t0) / loops * 1e6
-    print(f"  {label:40s} {us:8.1f} us")
-    return us
+        samples.append((time.perf_counter() - t0) * 1e3)
+
+    row = {
+        "p50_ms": percentile(samples, 50),
+        "p90_ms": percentile(samples, 90),
+        "p99_ms": percentile(samples, 99),
+        "mean_ms": mean(samples),
+        "loops": float(loops),
+    }
+    print(
+        f"{label:36s} "
+        f"p50={row['p50_ms']:9.3f} ms "
+        f"p90={row['p90_ms']:9.3f} ms "
+        f"p99={row['p99_ms']:9.3f} ms "
+        f"mean={row['mean_ms']:9.3f} ms",
+        flush=True,
+    )
+    return row
 
 
-def main():
+def make_fields(start: int, size: int) -> list[dict]:
+    fields = []
+    for row_id in range(start, start + size):
+        bucket = row_id % 1000
+        topic = row_id % 100
+        tenant = row_id % 10
+        fields.append(
+            {
+                "order": row_id,
+                "bucket": bucket,
+                "category": f"cat{topic}",
+                "title": f"topic{topic}",
+                "body": f"topic{topic} tenant{tenant} bucket{bucket}",
+            }
+        )
+    return fields
+
+
+def open_collection():
+    client = lynse.VectorDBClient(str(DATA_DIR))
+    db = client.create_database("bench_db", drop_if_exists=False)
+    return db.require_collection(
+        "vectors",
+        dim=DIM,
+        drop_if_exists=False,
+        default_index=None,
+    )
+
+
+def prepare_collection():
+    if DATA_DIR.exists() and REUSE and not FORCE_REBUILD:
+        collection = open_collection()
+        if collection.shape[0] >= N and collection.shape[1] == DIM:
+            print(f"Using existing dataset at {DATA_DIR}", flush=True)
+            return collection
+        print("Existing dataset shape mismatch; rebuilding.", flush=True)
+
     if DATA_DIR.exists():
         shutil.rmtree(DATA_DIR)
 
     client = lynse.VectorDBClient(str(DATA_DIR))
     db = client.create_database("bench_db", drop_if_exists=True)
-    collection = db.require_collection("vectors", dim=128, drop_if_exists=True)
+    collection = db.require_collection(
+        "vectors",
+        dim=DIM,
+        drop_if_exists=True,
+        default_index=None,
+    )
 
-    query = np.random.random(128)
-    print(f"Inserting {N:,} rows...")
+    rng = np.random.default_rng(SEED)
+    print(
+        f"Building dataset: {N:,} vectors x {DIM}d, chunk={BUILD_CHUNK:,}",
+        flush=True,
+    )
     t0 = time.perf_counter()
-    with collection.insert_session() as session:
-        for i in range(N):
-            vec = query if i == 0 else np.random.random(128)
-            session.add_item(vec, id=i, field={"test": f"test_{i // 1000}", "order": i})
-    print(f"Insert done in {time.perf_counter() - t0:.1f}s\n")
+    inserted = 0
+    while inserted < N:
+        size = min(BUILD_CHUNK, N - inserted)
+        vectors = rng.random((size, DIM), dtype=np.float32)
+        fields = make_fields(inserted, size)
+        collection.add(vectors=vectors, fields=fields, batch_size=size)
+        inserted += size
+        print(f"  inserted {inserted:,}/{N:,}", flush=True)
 
-    print("LynseDB benchmarks (lower is better):")
-    bench('query(\'"order"=1\')', lambda: collection.query('"order"=1'), LOOPS_FAST)
-    bench(
-        'query(\'"order"=1\', return_ids_only=True)',
-        lambda: collection.query('"order"=1', return_ids_only=True),
-        LOOPS_FAST,
+    collection.commit()
+    collection.build_index("FLAT-IP")
+    print(f"Build done in {time.perf_counter() - t0:.1f}s", flush=True)
+    return collection
+
+
+def main():
+    collection = prepare_collection()
+    rng = np.random.default_rng(SEED + 1)
+    query = rng.random(DIM, dtype=np.float32)
+    batch_queries = rng.random((BATCH_QUERIES, DIM), dtype=np.float32)
+
+    exact_order = min(123_456, N - 1)
+    filters = {
+        "1 row": f'"order" = {exact_order}',
+        "1%": '"bucket" < 10',
+        "10%": '"bucket" < 100',
+        "50%": '"bucket" < 500',
+    }
+
+    print("=" * 104, flush=True)
+    print(
+        f"Benchmark: {N:,} vectors x {DIM}d, k={K}, loops={LOOPS}, "
+        f"batch_queries={BATCH_QUERIES}, index={collection.index_mode}",
+        flush=True,
     )
-    bench('query(\'"order" IN (1,2)\')', lambda: collection.query('"order" IN (1, 2)'), LOOPS_SLOW)
+    print("=" * 104, flush=True)
+
+    print("\nMetadata query:", flush=True)
+    bench("query_fields exact backend", lambda: collection._rust_coll.query_fields(filters["1 row"]), loops=LOOPS * 4)
     bench(
-        'query(\'"order"=1 OR "order"=2\')',
-        lambda: collection.query('"order" = 1 OR "order" = 2'),
-        LOOPS_SLOW,
+        "query exact public ids-only",
+        lambda: collection.query(filters["1 row"], return_ids_only=True),
+        loops=LOOPS * 4,
     )
-    bench('search(k=10)', lambda: collection.search(query, k=10), LOOPS_SLOW)
+    bench("query bucket < 10 (1%)", lambda: collection._rust_coll.query_fields(filters["1%"]))
+    bench("query bucket < 100 (10%)", lambda: collection._rust_coll.query_fields(filters["10%"]))
+    bench("query bucket < 500 (50%)", lambda: collection._rust_coll.query_fields(filters["50%"]))
+
+    print("\nVector search:", flush=True)
+    bench("search backend unfiltered", lambda: collection._rust_coll.search(query, k=K))
+    bench("search public unfiltered", lambda: collection.search(query, k=K))
+    for label, where in filters.items():
+        bench(f"search filtered {label}", lambda where=where: collection._rust_coll.search(query, k=K, where=where))
+
+    print("\nBatch vector search:", flush=True)
     bench(
-        'search(k=10, where=\'"order"=1\')',
-        lambda: collection.search(query, k=10, where='"order"=1'),
-        LOOPS_SLOW,
+        f"batch_search {BATCH_QUERIES}q backend",
+        lambda: collection._rust_coll.batch_search(batch_queries, k=K),
+        loops=max(5, LOOPS // 2),
     )
     bench(
-        'search(k=10, where IN)',
-        lambda: collection.search(query, k=10, where='"order" IN (1, 2)'),
-        LOOPS_SLOW,
+        f"batch_search {BATCH_QUERIES}q 10% filter",
+        lambda: collection._rust_coll.batch_search(batch_queries, k=K, where=filters["10%"]),
+        loops=max(5, LOOPS // 2),
+    )
+
+    print("\nText and hybrid search:", flush=True)
+    bench("bm25 topic42", lambda: collection._rust_coll.text_search("topic42", k=K))
+    bench(
+        "bm25 topic42 10% filter",
+        lambda: collection._rust_coll.text_search("topic42", k=K, where=filters["10%"]),
+    )
+    bench(
+        "hybrid topic42+vector",
+        lambda: collection._rust_coll.hybrid_search(
+            vector=query,
+            text="topic42",
+            k=K,
+            candidate_limit=100,
+        ),
+    )
+    bench(
+        "hybrid topic42+vector 10% filter",
+        lambda: collection._rust_coll.hybrid_search(
+            vector=query,
+            text="topic42",
+            k=K,
+            where=filters["10%"],
+            candidate_limit=100,
+        ),
+    )
+
+    print("\nProfile path:", flush=True)
+    bench(
+        "search_profile 10% filter",
+        lambda: collection._rust_coll.search_profile(query, k=K, where=filters["10%"]),
     )
 
 
