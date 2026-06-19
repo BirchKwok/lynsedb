@@ -1,79 +1,146 @@
-"""Benchmark flat/brute-force search on 1M × 128 vectors.
+"""Reproducible flat-search performance benchmark.
 
-Uses Rust backend directly for fast bulk writes.
+The benchmark uses the Rust backend directly so Python collection buffering does
+not affect either ingest or search measurements.
 """
-import numpy as np
-import time
-import shutil
-import os
 
-def bench():
-    # Use Rust backend directly for fast writes
+import argparse
+import json
+import os
+import platform
+import shutil
+import statistics
+import tempfile
+import time
+from pathlib import Path
+
+import numpy as np
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rows", type=int, default=1_000_000)
+    parser.add_argument("--dim", type=int, default=128)
+    parser.add_argument("--k", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=100_000)
+    parser.add_argument("--warmups", type=int, default=20)
+    parser.add_argument("--trials", type=int, default=30)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--max-regression", type=float, default=0.05)
+    parser.add_argument("--keep-data", action="store_true")
+    return parser.parse_args()
+
+
+def percentile(sorted_values, fraction):
+    index = min(len(sorted_values) - 1, int(len(sorted_values) * fraction))
+    return sorted_values[index]
+
+
+def bench(args):
     import lynse._core as rb
 
-    test_dir = '/tmp/lynse_flat_bench'
-    if os.path.exists(test_dir):
+    test_dir = Path(tempfile.gettempdir()) / "lynse_flat_bench"
+    if test_dir.exists():
         shutil.rmtree(test_dir)
 
-    d = 128
-    n = 1_000_000
+    rng = np.random.default_rng(args.seed)
+    query = rng.random(args.dim, dtype=np.float32)
 
-    mgr = rb.DatabaseManager(test_dir)
+    mgr = rb.DatabaseManager(str(test_dir))
     mgr.create_database("bench_db")
-    mgr.require_collection("bench_db", "bench_vectors", d)
-    coll = mgr.get_collection("bench_db", "bench_vectors", d)
+    mgr.require_collection("bench_db", "bench_vectors", args.dim)
+    coll = mgr.get_collection("bench_db", "bench_vectors", args.dim)
 
-    print(f"Writing {n} vectors (dim={d})...")
-    query = np.random.random(d).astype(np.float32)
-
-    # Bulk write via Rust (fast — no Python per-item overhead)
-    batch_size = 100_000
-    for start in range(0, n, batch_size):
-        end = min(start + batch_size, n)
-        vecs = np.random.random((end - start, d)).astype(np.float32)
+    print(f"Writing {args.rows} vectors (dim={args.dim})...")
+    ingest_started = time.perf_counter()
+    for start in range(0, args.rows, args.batch_size):
+        end = min(start + args.batch_size, args.rows)
+        vectors = rng.random((end - start, args.dim), dtype=np.float32)
         if start == 0:
-            vecs[0] = query
-        coll.add_items(vecs, None)
-        print(f"  Written {end}/{n}")
+            vectors[0] = query
+        coll.add_items(vectors, list(range(start, end)))
+        print(f"  Written {end}/{args.rows}")
 
     coll.commit()
-    shape = coll.shape()
-    print(f"Shape: {shape}")
+    ingest_seconds = time.perf_counter() - ingest_started
+    print(f"Shape: {coll.shape()}")
 
-    # Warmup (first search triggers mmap creation + page faults)
-    # 20 warmups to ensure all 512MB is resident in page cache
-    print("\nWarmup searches...")
-    for _ in range(20):
-        coll.search(query, 10, None, 10)
+    print(f"\nWarmup searches ({args.warmups})...")
+    for _ in range(args.warmups):
+        coll.search(query, args.k, None, 10)
 
-    # Benchmark
-    n_trials = 30
-    times = []
-    print(f"\nBenchmarking {n_trials} searches (k=10)...")
-    for i in range(n_trials):
-        t0 = time.perf_counter()
-        result = coll.search(query, 10, None, 10)
-        t1 = time.perf_counter()
-        ms = (t1 - t0) * 1000
-        times.append(ms)
+    print(f"Benchmarking {args.trials} searches (k={args.k})...")
+    times_ms = []
+    for _ in range(args.trials):
+        started = time.perf_counter()
+        coll.search(query, args.k, None, 10)
+        times_ms.append((time.perf_counter() - started) * 1000)
 
-    times.sort()
-    median = times[len(times) // 2]
-    p10 = times[int(len(times) * 0.1)]
-    p90 = times[int(len(times) * 0.9)]
-    mean = sum(times) / len(times)
+    times_ms.sort()
+    collection_dir = test_dir / "bench_db" / "bench_vectors"
+    vector_manifest = collection_dir / "vector_manifest.json"
+    if vector_manifest.exists():
+        segment_count = len(json.loads(vector_manifest.read_text())["segments"])
+    else:
+        segment_count = 1 if args.rows else 0
+    result = {
+        "schema_version": 1,
+        "rows": args.rows,
+        "dimension": args.dim,
+        "k": args.k,
+        "seed": args.seed,
+        "warmups": args.warmups,
+        "trials": args.trials,
+        "rayon_threads": os.environ.get("RAYON_NUM_THREADS", "default"),
+        "segment_count": segment_count,
+        "compatibility_file_created": (collection_dir / "vectors.compat.bin").exists(),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "ingest_seconds": ingest_seconds,
+        "median_ms": statistics.median(times_ms),
+        "mean_ms": statistics.mean(times_ms),
+        "p10_ms": percentile(times_ms, 0.10),
+        "p90_ms": percentile(times_ms, 0.90),
+        "min_ms": min(times_ms),
+        "max_ms": max(times_ms),
+    }
 
-    n_threads = os.environ.get('RAYON_NUM_THREADS', 'default')
-    print(f"\n=== Results ({n} × {d}, top-10, threads={n_threads}) ===")
-    print(f"  Median: {median:.2f} ms")
-    print(f"  Mean:   {mean:.2f} ms")
-    print(f"  P10:    {p10:.2f} ms")
-    print(f"  P90:    {p90:.2f} ms")
-    print(f"  Min:    {min(times):.2f} ms")
-    print(f"  Max:    {max(times):.2f} ms")
+    print("\n=== Results ===")
+    print(json.dumps(result, indent=2, sort_keys=True))
 
-    # Cleanup
-    shutil.rmtree(test_dir)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+
+    exit_code = 0
+    if args.baseline:
+        baseline = json.loads(args.baseline.read_text())
+        search_ratio = result["median_ms"] / baseline["median_ms"] - 1.0
+        ingest_ratio = result["ingest_seconds"] / baseline["ingest_seconds"] - 1.0
+        result["median_regression"] = search_ratio
+        result["ingest_regression"] = ingest_ratio
+        print(f"Median change from baseline: {search_ratio:+.2%}")
+        print(f"Ingest change from baseline: {ingest_ratio:+.2%}")
+        if search_ratio > args.max_regression:
+            print(
+                f"Regression exceeds allowed {args.max_regression:.2%}: "
+                f"{result['median_ms']:.3f} ms vs {baseline['median_ms']:.3f} ms"
+            )
+            exit_code = 1
+        if ingest_ratio > args.max_regression:
+            print(
+                f"Ingest regression exceeds allowed {args.max_regression:.2%}: "
+                f"{result['ingest_seconds']:.3f} s vs "
+                f"{baseline['ingest_seconds']:.3f} s"
+            )
+            exit_code = 1
+
+    if not args.keep_data:
+        shutil.rmtree(test_dir, ignore_errors=True)
+    return exit_code
+
 
 if __name__ == "__main__":
-    bench()
+    raise SystemExit(bench(parse_args()))

@@ -571,10 +571,10 @@ pub struct FieldStore {
     next_id: Arc<RwLock<u64>>,
     /// In-memory cache: external_id -> fields (populated during insert, O(1) retrieval)
     cache: RwLock<HashMap<u64, HashMap<String, serde_json::Value>>>,
-    /// Maps external_id → ApexBase internal _id for O(1) mmap point lookups.
-    /// Indexed directly by external_id (Vec[ext_id] = apex_id, TOMBSTONE = deleted/absent).
+    /// Maps stable collection ID → ApexBase internal _id for O(1) point lookups.
+    /// A hash map keeps arbitrary numeric IDs from allocating up to max(id).
     /// Persisted to `map_path`; loaded on open, updated on every write.
-    apex_id_map: RwLock<Vec<u64>>,
+    apex_id_map: RwLock<HashMap<u64, u64>>,
     /// Path to the persistent .apex_id_map binary log file.
     map_path: PathBuf,
     /// In-memory equality index with automatic high-cardinality field exclusion.
@@ -613,7 +613,7 @@ impl FieldStore {
         // Fast path: load apex_id_map from persisted file
         let apex_id_map = if map_path.exists() {
             let map = Self::load_map_file(&map_path).unwrap_or_default();
-            if next_id > 0 && map.iter().any(|&apex_id| apex_id == 0) {
+            if next_id > 0 && map.values().any(|&apex_id| apex_id == 0) {
                 // Older map files used 0 as the tombstone sentinel, which
                 // conflicts with ApexBase's first real row id. Rebuild once
                 // from the table and persist using the current sentinel.
@@ -629,7 +629,7 @@ impl FieldStore {
             let _ = Self::save_map_file(&vec, &map_path);
             vec
         } else {
-            Vec::new()
+            HashMap::new()
         };
 
         let store = Self {
@@ -688,11 +688,7 @@ impl FieldStore {
 
         // Update apex_id_map, cache (capped), field_eq_index, and persist
         {
-            let mut map = self.apex_id_map.write();
-            if ext_id as usize >= map.len() {
-                map.resize(ext_id as usize + 1, TOMBSTONE);
-            }
-            map[ext_id as usize] = apex_id;
+            self.apex_id_map.write().insert(ext_id, apex_id);
         }
         {
             let mut cache = self.cache.write();
@@ -763,10 +759,7 @@ impl FieldStore {
             for ((&ext_id, &apex_id), flds) in
                 ids.iter().zip(apex_ids.iter()).zip(fields_list.iter())
             {
-                if ext_id as usize >= map.len() {
-                    map.resize(ext_id as usize + 1, TOMBSTONE);
-                }
-                map[ext_id as usize] = apex_id;
+                map.insert(ext_id, apex_id);
                 if cache.len() < MAX_CACHE_ENTRIES {
                     cache.insert(ext_id, flds.clone());
                 }
@@ -853,10 +846,7 @@ impl FieldStore {
                 ids.iter().zip(apex_ids.iter()).zip(field_indices.iter())
             {
                 let flds = &fields_list[field_idx];
-                if ext_id as usize >= map.len() {
-                    map.resize(ext_id as usize + 1, TOMBSTONE);
-                }
-                map[ext_id as usize] = apex_id;
+                map.insert(ext_id, apex_id);
                 if cache.len() < MAX_CACHE_ENTRIES {
                     cache.insert(ext_id, flds.clone());
                 }
@@ -903,12 +893,7 @@ impl FieldStore {
             external_ids
                 .iter()
                 .filter_map(|&ext_id| {
-                    let i = ext_id as usize;
-                    if i < map.len() && map[i] != TOMBSTONE {
-                        Some(map[i])
-                    } else {
-                        None
-                    }
+                    map.get(&ext_id).copied().filter(|&id| id != TOMBSTONE)
                 })
                 .collect::<Vec<_>>()
         };
@@ -924,10 +909,7 @@ impl FieldStore {
             let mut cache = self.cache.write();
             let mut idx = self.field_eq_index.write();
             for (&ext_id, old) in external_ids.iter().zip(old_fields.iter()) {
-                let i = ext_id as usize;
-                if i < map.len() {
-                    map[i] = TOMBSTONE;
-                }
+                map.remove(&ext_id);
                 cache.remove(&ext_id);
                 for (field, value) in old {
                     idx.remove_value(field, value, ext_id);
@@ -1087,12 +1069,9 @@ impl FieldStore {
         // Fast path: apex_id mmap point lookup
         let apex_id = {
             let map = self.apex_id_map.read();
-            let i = external_id as usize;
-            if i < map.len() && map[i] != TOMBSTONE {
-                Some(map[i])
-            } else {
-                None
-            }
+            map.get(&external_id)
+                .copied()
+                .filter(|&id| id != TOMBSTONE)
         };
         if let Some(apex_id) = apex_id {
             if let Some(row) = table
@@ -1175,9 +1154,8 @@ impl FieldStore {
         let mut mapped: Vec<(usize, u64, u64)> = Vec::new();
         let mut unmapped: Vec<(usize, u64)> = Vec::new();
         for (&idx, &ext_id) in miss_indices.iter().zip(miss_ids.iter()) {
-            let i = ext_id as usize;
-            if i < apex_id_map.len() && apex_id_map[i] != TOMBSTONE {
-                mapped.push((idx, ext_id, apex_id_map[i]));
+            if let Some(&apex_id) = apex_id_map.get(&ext_id).filter(|&&id| id != TOMBSTONE) {
+                mapped.push((idx, ext_id, apex_id));
             } else {
                 unmapped.push((idx, ext_id));
             }
@@ -1284,10 +1262,7 @@ impl FieldStore {
             let mut map = self.apex_id_map.write();
             let mut cache = self.cache.write();
             for &id in ext_ids {
-                let i = id as usize;
-                if i < map.len() {
-                    map[i] = TOMBSTONE;
-                }
+                map.remove(&id);
                 // Remove from cache; skip field_eq_index cleanup (will be filtered on query)
                 cache.remove(&id);
             }
@@ -1401,8 +1376,7 @@ impl FieldStore {
         let map = self.apex_id_map.read();
         ids.into_iter()
             .filter(|&ext_id| {
-                let i = ext_id as usize;
-                i < map.len() && map[i] != TOMBSTONE
+                map.get(&ext_id).is_some_and(|&id| id != TOMBSTONE)
             })
             .collect()
     }
@@ -1417,8 +1391,7 @@ impl FieldStore {
         let mut ids = Vec::with_capacity(batch.num_rows());
 
         for (apex_id, ext_id) in apex_ids.into_iter().zip(ext_ids.into_iter()) {
-            let i = ext_id as usize;
-            if i < map.len() && map[i] == apex_id && map[i] != TOMBSTONE {
+            if map.get(&ext_id).copied() == Some(apex_id) && apex_id != TOMBSTONE {
                 ids.push(ext_id);
             }
         }
@@ -1443,8 +1416,7 @@ impl FieldStore {
         for row_idx in 0..batch.num_rows() {
             let apex_id = apex_ids[row_idx];
             let ext_id = ext_ids[row_idx];
-            let i = ext_id as usize;
-            if i >= map.len() || map[i] != apex_id || map[i] == TOMBSTONE {
+            if map.get(&ext_id).copied() != Some(apex_id) || apex_id == TOMBSTONE {
                 continue;
             }
 
@@ -1460,43 +1432,36 @@ impl FieldStore {
     /// Load the apex_id_map from the binary log file.
     /// Format: sequence of 16-byte records [u64 ext_id LE][u64 apex_id LE].
     /// Records are applied in order (last write wins); TOMBSTONE=deleted.
-    /// Returns a Vec<u64> directly indexed by external_id.
-    fn load_map_file(map_path: &Path) -> Result<Vec<u64>> {
+    fn load_map_file(map_path: &Path) -> Result<HashMap<u64, u64>> {
         let data = std::fs::read(map_path)?;
         let n = data.len() / MAP_RECORD_SIZE;
         if n == 0 {
-            return Ok(Vec::new());
-        }
-        // Find the max ext_id to size the Vec
-        let mut max_ext = 0u64;
-        for i in 0..n {
-            let off = i * MAP_RECORD_SIZE;
-            let ext_id = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
-            if ext_id > max_ext {
-                max_ext = ext_id;
-            }
+            return Ok(HashMap::new());
         }
         // Apply all records in order (last write wins)
-        let mut vec = vec![TOMBSTONE; max_ext as usize + 1];
+        let mut map = HashMap::with_capacity(n);
         for i in 0..n {
             let off = i * MAP_RECORD_SIZE;
             let ext_id = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
             let apex_id = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
-            vec[ext_id as usize] = apex_id;
+            if apex_id == TOMBSTONE {
+                map.remove(&ext_id);
+            } else {
+                map.insert(ext_id, apex_id);
+            }
         }
-        Ok(vec)
+        Ok(map)
     }
 
     /// Write the entire Vec as a clean binary log (used after DB rebuild).
     /// Skips TOMBSTONE entries to keep the file compact.
-    fn save_map_file(vec: &[u64], map_path: &Path) -> Result<()> {
-        let active = vec.iter().filter(|&&a| a != TOMBSTONE).count();
-        let mut buf = Vec::with_capacity(active * MAP_RECORD_SIZE);
-        for (ext_id, &apex_id) in vec.iter().enumerate() {
-            if apex_id != TOMBSTONE {
-                buf.extend_from_slice(&(ext_id as u64).to_le_bytes());
-                buf.extend_from_slice(&apex_id.to_le_bytes());
-            }
+    fn save_map_file(map: &HashMap<u64, u64>, map_path: &Path) -> Result<()> {
+        let mut entries: Vec<_> = map.iter().collect();
+        entries.sort_unstable_by_key(|(ext_id, _)| **ext_id);
+        let mut buf = Vec::with_capacity(entries.len() * MAP_RECORD_SIZE);
+        for (&ext_id, &apex_id) in entries {
+            buf.extend_from_slice(&ext_id.to_le_bytes());
+            buf.extend_from_slice(&apex_id.to_le_bytes());
         }
         std::fs::write(map_path, &buf)?;
         Ok(())
@@ -1521,8 +1486,10 @@ impl FieldStore {
     }
 
     /// Rebuild the apex_id_map from ApexBase (slow path, O(N)).
-    /// Returns a Vec<u64> directly indexed by external_id.
-    fn rebuild_map_from_db(db: &apexbase::embedded::ApexDB, table_name: &str) -> Result<Vec<u64>> {
+    fn rebuild_map_from_db(
+        db: &apexbase::embedded::ApexDB,
+        table_name: &str,
+    ) -> Result<HashMap<u64, u64>> {
         let table = db
             .table(table_name)
             .map_err(|e| LynseError::ApexBase(format!("Table error: {}", e)))?;
@@ -1539,14 +1506,9 @@ impl FieldStore {
             }
         }
         if pairs.is_empty() {
-            return Ok(Vec::new());
+            return Ok(HashMap::new());
         }
-        let max_ext = pairs.iter().map(|&(e, _)| e).max().unwrap_or(0);
-        let mut vec = vec![TOMBSTONE; max_ext as usize + 1];
-        for (ext_id, apex_id) in pairs {
-            vec[ext_id as usize] = apex_id;
-        }
-        Ok(vec)
+        Ok(pairs.into_iter().collect())
     }
 }
 
@@ -2339,5 +2301,22 @@ mod tests {
         let mut expected_in: Vec<u64> = ids_in.into_iter().collect();
         expected_in.sort_unstable();
         assert_eq!(expected_in, vec![1, 2]);
+    }
+
+    #[test]
+    fn stable_sparse_ids_do_not_require_dense_map_allocation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = FieldStore::new(tmp.path(), "fields").unwrap();
+        let id = 1_000_000_000_000u64;
+        store
+            .batch_store_at_ids(&[id], &[HashMap::from([(
+                "tag".to_string(),
+                serde_json::json!("sparse"),
+            )])])
+            .unwrap();
+
+        assert_eq!(store.apex_id_map.read().len(), 1);
+        assert_eq!(store.query("\"tag\" = 'sparse'").unwrap(), vec![id]);
+        assert_eq!(store.retrieve(id).unwrap()["tag"], "sparse");
     }
 }

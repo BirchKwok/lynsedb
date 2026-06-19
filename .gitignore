@@ -167,6 +167,7 @@ Benchmarks.ipynb
 
 
 *.json
+!benchmarks/baselines/*.json
 *.jsonl
 fingerprint
 *.fingerprint

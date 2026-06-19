@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 const STORAGE_MANIFEST_FILE: &str = "storage_manifest.json";
+const STABLE_FIELD_IDS_FILE: &str = "fields.stable_ids";
 const SNAPSHOT_MANIFEST_FILE: &str = "snapshot_manifest.json";
 const DATABASE_SNAPSHOT_MANIFEST_FILE: &str = "database_snapshot_manifest.json";
 const COLLECTION_EXPORT_MANIFEST_FILE: &str = "export_manifest.json";
@@ -77,6 +78,8 @@ pub struct Collection {
     vector_dtype: VectorDtype,
     vector_store: VectorStore,
     field_store: FieldStore,
+    /// True when FieldStore records are keyed by stable internal IDs instead of rows.
+    fields_use_stable_ids: bool,
     wal: WALStorage,
     pending_ingest: Mutex<PendingIngestBuffer>,
     index: Option<Box<dyn VectorIndex>>,
@@ -1552,7 +1555,7 @@ impl Collection {
     pub fn vector_store_info(&self) -> Result<(String, usize, usize)> {
         self.flush_pending_ingest()?;
         let (n, dim) = self.shape()?;
-        let path = self.vector_store.vectors_path();
+        let path = self.vector_store.contiguous_path()?;
         Ok((path.to_string_lossy().to_string(), n as usize, dim))
     }
 
@@ -1642,7 +1645,13 @@ impl Collection {
         let vector_store = VectorStore::new(&collection_path, dimension, chunk_size, vector_dtype)?;
 
         let field_db_path = collection_path.join("fields_db");
-        let field_store = FieldStore::new(&field_db_path, "fields")?;
+        let fields_use_stable_ids = collection_path.join(STABLE_FIELD_IDS_FILE).exists();
+        let field_table = if fields_use_stable_ids {
+            "fields_v2"
+        } else {
+            "fields"
+        };
+        let field_store = FieldStore::new(&field_db_path, field_table)?;
 
         // Initialize WAL
         let wal = WALStorage::new(name, chunk_size, &collection_path, 5000)?;
@@ -1678,6 +1687,7 @@ impl Collection {
             vector_dtype,
             vector_store,
             field_store,
+            fields_use_stable_ids,
             wal,
             pending_ingest: Mutex::new(PendingIngestBuffer::default()),
             index,
@@ -1700,10 +1710,16 @@ impl Collection {
         };
 
         if mode == OpenMode::ReadWrite {
+            // A positional update publishes its replay journal before touching
+            // live segment bytes. Reapply it before loading IDs or WAL records.
+            let recovered_vector_updates = coll.vector_store.recover_pending_updates()?;
+
             // Establish the durable row boundary before WAL replay. If a previous
             // process crashed after appending vectors but before appending id_map,
             // id_map is the authoritative set of fully applied rows.
             let id_map_repaired = coll.initialize_id_map_for_open()?;
+
+            coll.migrate_fields_to_stable_ids()?;
 
             // Load external IDs before WAL replay because public IDs are
             // persisted before the WAL in the record add path.
@@ -1714,12 +1730,22 @@ impl Collection {
 
             let external_map_repaired = coll.repair_external_id_map_for_open()?;
 
-            if id_map_repaired || recovered_wal || external_map_repaired {
+            if recovered_vector_updates
+                || id_map_repaired
+                || recovered_wal
+                || external_map_repaired
+            {
                 if let Some(mode) = coll.index_mode.clone() {
                     coll.build_index(&mode)?;
                 }
             }
         } else {
+            if coll.vector_store.has_pending_updates() {
+                return Err(LynseError::Storage(
+                    "collection has pending vector updates; open it writable to recover before using read-only mode"
+                        .to_string(),
+                ));
+            }
             coll.initialize_id_map_for_read_only()?;
             coll.initialize_external_id_map_for_read_only()?;
             if coll.has_uncommitted_data() {
@@ -2074,7 +2100,8 @@ impl Collection {
                 });
             }
 
-            let mut id_map = Self::load_id_map_file(&field_path);
+            let id_map_path = store.id_map_path();
+            let mut id_map = Self::load_id_map_path(&id_map_path);
             let n_vecs = n_vecs as usize;
             if id_map.len() < n_vecs {
                 if mode == OpenMode::ReadOnly {
@@ -2092,7 +2119,7 @@ impl Collection {
                     )));
                 }
                 id_map.truncate(n_vecs);
-                Self::write_id_map(&field_path, &id_map)?;
+                Self::write_id_map_path(&id_map_path, &id_map)?;
             }
 
             fields.insert(
@@ -2134,6 +2161,26 @@ impl Collection {
         let tmp_path = path.with_extension("tmp");
         std::fs::write(&tmp_path, data)?;
         std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
+
+    fn atomic_write_file_durable(path: &Path, data: &[u8]) -> Result<()> {
+        use std::io::Write;
+
+        let tmp_path = path.with_extension("tmp");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp_path)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp_path, path)?;
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
         Ok(())
     }
 
@@ -2181,7 +2228,6 @@ impl Collection {
     fn sync_checkpoint_files(&self) -> Result<()> {
         for name in [
             "vectors.bin",
-            "id_map.bin",
             "info.json",
             "fingerprint",
             "storage_manifest.json",
@@ -2191,9 +2237,12 @@ impl Collection {
             TEXT_INDEX_FILE,
             LEGACY_TEXT_INDEX_FILE,
             "sync_fingerprint",
+            "vector_manifest.json",
         ] {
             Self::sync_file_if_exists(&self.path.join(name))?;
         }
+        Self::sync_file_if_exists(&self.vector_store.id_map_path())?;
+        Self::sync_path_recursively(&self.path.join("vector_segments"))?;
 
         Self::sync_path_recursively(&self.path.join("fields_db"))?;
         Self::sync_path_recursively(&self.path.join("index_meta"))?;
@@ -2213,8 +2262,8 @@ impl Collection {
     }
 
     fn rebuild_text_index(&mut self, persist: bool) -> Result<()> {
-        let row_offsets: Vec<u64> = (0..self.id_map.len() as u64).collect();
-        let fields = self.field_store.retrieve_many(&row_offsets)?;
+        let field_keys = self.field_lookup_keys(&self.id_map);
+        let fields = self.field_store.retrieve_many(&field_keys)?;
         let user_ids = self.id_map.clone();
         self.text_index.rebuild(&user_ids, &fields, persist)
     }
@@ -2342,6 +2391,9 @@ impl Collection {
             let mut missing_encoded_vectors = Vec::new();
             let mut missing_ids = Vec::new();
             let mut missing_fields = Vec::new();
+            let mut existing_vector_rows = Vec::new();
+            let mut existing_encoded_vectors = Vec::new();
+            let mut existing_decoded_vectors = Vec::new();
             let mut existing_field_rows = Vec::new();
             let mut existing_field_user_ids = Vec::new();
             let mut existing_field_values = Vec::new();
@@ -2352,6 +2404,25 @@ impl Collection {
 
             for (i, &user_id) in ids.iter().enumerate() {
                 if let Some(row) = self.reverse_id_map.get(&user_id).copied() {
+                    let encoded_start = i * encoded_row_width;
+                    let encoded_end = encoded_start + encoded_row_width;
+                    if encoded_end > seg.encoded_data.len() {
+                        return Err(LynseError::Storage(
+                            "WAL segment encoded vector payload is shorter than expected"
+                                .to_string(),
+                        ));
+                    }
+                    let decoded_start = i * seg.dim;
+                    let decoded_end = decoded_start + seg.dim;
+                    if decoded_end > seg.data.len() {
+                        return Err(LynseError::Storage(
+                            "WAL segment vector payload is shorter than expected".to_string(),
+                        ));
+                    }
+                    existing_vector_rows.push(row as u64);
+                    existing_encoded_vectors
+                        .extend_from_slice(&seg.encoded_data[encoded_start..encoded_end]);
+                    existing_decoded_vectors.extend_from_slice(&seg.data[decoded_start..decoded_end]);
                     if let Some(field) = seg.fields.get(i) {
                         existing_field_rows.push(row as u64);
                         existing_field_user_ids.push(user_id);
@@ -2395,9 +2466,32 @@ impl Collection {
                 }
                 recovered_any = true;
             }
+            if !existing_vector_rows.is_empty() {
+                let encoded;
+                let encoded_vectors = if seg.dtype == self.vector_dtype {
+                    existing_encoded_vectors.as_slice()
+                } else {
+                    encoded = encode_f32_slice_as_le_bytes(
+                        &existing_decoded_vectors,
+                        self.vector_dtype,
+                    );
+                    encoded.as_slice()
+                };
+                self.vector_store.overwrite_encoded_rows(
+                    &existing_vector_rows,
+                    encoded_vectors,
+                    self.vector_dtype,
+                )?;
+                recovered_any = true;
+            }
             if !existing_field_user_ids.is_empty() {
+                let field_keys = if self.fields_use_stable_ids {
+                    &existing_field_user_ids
+                } else {
+                    &existing_field_rows
+                };
                 self.field_store
-                    .replace_fields_at_ids(&existing_field_rows, &existing_field_values)?;
+                    .replace_fields_at_ids(field_keys, &existing_field_values)?;
                 self.text_index.upsert_documents(
                     &existing_field_user_ids,
                     &existing_field_values,
@@ -2475,11 +2569,10 @@ impl Collection {
             .collect()
     }
 
-    /// Load id_map from id_map.bin. Partial trailing bytes are ignored.
-    fn load_id_map_file(path: &Path) -> Vec<u64> {
-        let id_map_path = path.join("id_map.bin");
+    /// Load an ID map. Partial trailing bytes are ignored.
+    fn load_id_map_path(id_map_path: &Path) -> Vec<u64> {
         if id_map_path.exists() {
-            std::fs::read(&id_map_path)
+            std::fs::read(id_map_path)
                 .ok()
                 .map(|bytes| {
                     bytes
@@ -2502,9 +2595,9 @@ impl Collection {
             .collect()
     }
 
-    fn write_id_map(path: &Path, ids: &[u64]) -> Result<()> {
+    fn write_id_map_path(path: &Path, ids: &[u64]) -> Result<()> {
         let id_bytes: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
-        std::fs::write(path.join("id_map.bin"), &id_bytes)?;
+        std::fs::write(path, &id_bytes)?;
         Ok(())
     }
 
@@ -2819,29 +2912,28 @@ impl Collection {
     /// rows beyond it are truncated so WAL replay can safely re-apply them.
     /// If id_map is missing, we backfill sequential IDs for legacy data.
     fn initialize_id_map_for_open(&mut self) -> Result<bool> {
-        let id_map_path = self.path.join("id_map.bin");
+        let id_map_path = self.vector_store.id_map_path();
         let id_map_exists = id_map_path.exists();
         let (n_vecs, _) = self.vector_store.get_shape()?;
-        let mut id_map = Self::load_id_map_file(&self.path);
+        let mut id_map = Self::load_id_map_path(&id_map_path);
         let mut repaired = false;
 
         if id_map_exists {
             let n_vecs = n_vecs as usize;
+            let durable_rows = id_map.len().min(n_vecs);
+            self.vector_store.truncate_to_vectors(durable_rows)?;
             if id_map.len() < n_vecs {
-                self.vector_store.truncate_to_vectors(id_map.len())?;
                 repaired = true;
             } else if id_map.len() > n_vecs {
                 id_map.truncate(n_vecs);
-                Self::write_id_map(&self.path, &id_map)?;
+                Self::write_id_map_path(&id_map_path, &id_map)?;
                 repaired = true;
             }
         } else {
             while id_map.len() < n_vecs as usize {
                 id_map.push(id_map.len() as u64);
             }
-            if !id_map.is_empty() {
-                Self::write_id_map(&self.path, &id_map)?;
-            }
+            Self::write_id_map_path(&id_map_path, &id_map)?;
         }
 
         self.reverse_id_map = Self::build_reverse_id_map(&id_map);
@@ -2851,11 +2943,11 @@ impl Collection {
     }
 
     fn initialize_id_map_for_read_only(&mut self) -> Result<()> {
-        let id_map_path = self.path.join("id_map.bin");
+        let id_map_path = self.vector_store.id_map_path();
         let id_map_exists = id_map_path.exists();
         let (n_vecs, _) = self.vector_store.get_shape()?;
         let n_vecs = n_vecs as usize;
-        let mut id_map = Self::load_id_map_file(&self.path);
+        let mut id_map = Self::load_id_map_path(&id_map_path);
 
         if id_map_exists {
             if id_map.len() < n_vecs {
@@ -2905,15 +2997,14 @@ impl Collection {
         Ok((start..end).collect())
     }
 
-    /// Append new user IDs to id_map.bin (sequential write, no rewrite).
-    fn append_id_map(path: &Path, ids: &[u64]) -> Result<()> {
+    /// Append new stable IDs to the current generation's map.
+    fn append_id_map_path(id_map_path: &Path, ids: &[u64]) -> Result<()> {
         use std::io::Write;
-        let id_map_path = path.join("id_map.bin");
         let bytes: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&id_map_path)?;
+            .open(id_map_path)?;
         f.write_all(&bytes)?;
         Ok(())
     }
@@ -2928,6 +3019,55 @@ impl Collection {
     #[inline]
     fn user_id_to_row(&self, user_id: u64) -> Option<usize> {
         self.reverse_id_map.get(&user_id).copied()
+    }
+
+    fn migrate_fields_to_stable_ids(&mut self) -> Result<()> {
+        if self.fields_use_stable_ids {
+            return Ok(());
+        }
+
+        let row_offsets: Vec<u64> = (0..self.id_map.len() as u64).collect();
+        let fields = self.field_store.retrieve_many(&row_offsets)?;
+        let stable_store = FieldStore::new(&self.path.join("fields_db"), "fields_v2")?;
+        stable_store.rebuild_at_ids(&self.id_map, &fields)?;
+        stable_store.flush()?;
+        Self::atomic_write_file_durable(
+            &self.path.join(STABLE_FIELD_IDS_FILE),
+            b"stable-internal-id-v1\n",
+        )?;
+        self.field_store = stable_store;
+        self.fields_use_stable_ids = true;
+        Ok(())
+    }
+
+    fn field_keys_to_rows(&self, keys: Vec<u64>) -> Vec<u64> {
+        if !self.fields_use_stable_ids {
+            return keys;
+        }
+        keys.into_iter()
+            .filter_map(|id| self.user_id_to_row(id).map(|row| row as u64))
+            .collect()
+    }
+
+    fn field_keys_to_user_ids(&self, keys: Vec<u64>) -> Vec<u64> {
+        if self.fields_use_stable_ids {
+            keys
+        } else {
+            keys.into_iter()
+                .map(|row| self.row_to_user_id(row))
+                .collect()
+        }
+    }
+
+    fn field_lookup_keys(&self, user_ids: &[u64]) -> Vec<u64> {
+        if self.fields_use_stable_ids {
+            user_ids.to_vec()
+        } else {
+            user_ids
+                .iter()
+                .map(|&id| self.user_id_to_row(id).unwrap_or(id as usize) as u64)
+                .collect()
+        }
     }
 
     /// Check if a user ID exists in the collection.
@@ -3346,7 +3486,7 @@ impl Collection {
         }
         self.vector_store
             .write_encoded_le_bytes(encoded_vectors, ids.len(), vector_dtype)?;
-        Self::append_id_map(&self.path, ids)
+        Self::append_id_map_path(&self.vector_store.id_map_path(), ids)
     }
 
     fn append_recovered_items(
@@ -3380,7 +3520,7 @@ impl Collection {
         let row_ids: Vec<u64> = (start_row as u64..start_row as u64 + n_vectors as u64).collect();
 
         self.vector_store.write(vectors)?;
-        self.field_store.batch_store_at_ids(&row_ids, fields)?;
+        self.field_store.batch_store_at_ids(ids, fields)?;
         self.text_index.insert_documents(ids, fields, false)?;
 
         if let Some(ref mut idx) = self.index {
@@ -3398,7 +3538,7 @@ impl Collection {
                 self.next_internal_id = self.next_internal_id.max(user_id.saturating_add(1));
             }
         }
-        Self::append_id_map(&self.path, ids)?;
+        Self::append_id_map_path(&self.vector_store.id_map_path(), ids)?;
         self.write_external_id_map()?;
 
         Ok(())
@@ -3445,7 +3585,7 @@ impl Collection {
 
         self.vector_store
             .write_encoded_le_bytes(encoded_vectors, n_vectors, vector_dtype)?;
-        self.field_store.batch_store_at_ids(&row_ids, fields)?;
+        self.field_store.batch_store_at_ids(ids, fields)?;
         self.text_index.insert_documents(ids, fields, false)?;
 
         if let Some(ref mut idx) = self.index {
@@ -3463,7 +3603,7 @@ impl Collection {
                 self.next_internal_id = self.next_internal_id.max(user_id.saturating_add(1));
             }
         }
-        Self::append_id_map(&self.path, ids)?;
+        Self::append_id_map_path(&self.vector_store.id_map_path(), ids)?;
         self.write_external_id_map()?;
 
         Ok(())
@@ -3527,9 +3667,6 @@ impl Collection {
             Some(fl) => fl.to_vec(),
             None => Vec::new(),
         };
-        self.wal
-            .write_log_encoded_data(encoded_vectors, dim, vector_dtype, ids, &wal_fields)?;
-
         let direct_write = n_vectors >= PENDING_INGEST_FLUSH_ROWS
             || encoded_vectors.len() >= PENDING_INGEST_FLUSH_BYTES;
         let needs_decoded_vectors = self.index.is_some() || !direct_write;
@@ -3553,8 +3690,45 @@ impl Collection {
             None
         };
 
+        if direct_write {
+            self.flush_pending_ingest()?;
+            let (wal_result, vector_result) = rayon::join(
+                || {
+                    self.wal.write_log_encoded_data(
+                        encoded_vectors,
+                        dim,
+                        vector_dtype,
+                        ids,
+                        &wal_fields,
+                    )
+                },
+                || {
+                    self.vector_store.write_encoded_le_bytes(
+                        encoded_vectors,
+                        n_vectors,
+                        vector_dtype,
+                    )
+                },
+            );
+            if let Err(error) = wal_result {
+                if vector_result.is_ok() {
+                    let _ = self.vector_store.truncate_to_vectors(start_row);
+                }
+                return Err(error);
+            }
+            vector_result?;
+        } else {
+            self.wal.write_log_encoded_data(
+                encoded_vectors,
+                dim,
+                vector_dtype,
+                ids,
+                &wal_fields,
+            )?;
+        }
+
         if let Some(field_list) = fields {
-            self.field_store.batch_store_at_ids(&row_ids, field_list)?;
+            self.field_store.batch_store_at_ids(ids, field_list)?;
             self.text_index.insert_documents(ids, field_list, false)?;
         }
 
@@ -3578,8 +3752,7 @@ impl Collection {
         }
 
         if direct_write {
-            self.flush_pending_ingest()?;
-            self.write_ingested_vectors(encoded_vectors, vector_dtype, dim, ids)?;
+            Self::append_id_map_path(&self.vector_store.id_map_path(), ids)?;
         } else {
             let should_flush = {
                 let mut pending = self.pending_ingest.lock();
@@ -3927,7 +4100,7 @@ impl Collection {
             field.id_map.push(id);
             field.reverse_id_map.insert(id, start_row + i);
         }
-        Self::append_id_map(&field.path, ids)?;
+        Self::append_id_map_path(&field.vector_store.id_map_path(), ids)?;
         Ok(())
     }
 
@@ -4018,18 +4191,15 @@ impl Collection {
                 });
                 Self::save_index_metadata(&meta_path, &meta)?;
             } else {
-                let guard = field.vector_store.read_mmap()?;
-                let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
-                let n = fm.len();
+                let n = field.vector_store.get_shape()?.0 as usize;
                 if n == 0 {
                     return Err(LynseError::EmptyDatabase);
                 }
 
-                let all_data = fm.as_f32_cow();
+                let all_data = field.vector_store.read_all_f32()?;
                 let row_ids: Vec<u64> = (0..n as u64).collect();
                 let mut idx = index::create_index_with_options(&index_type, n_clusters)?;
                 idx.build(&all_data, n, dim, Some(&row_ids))?;
-                drop(guard);
 
                 let index_data = idx.serialize()?;
                 let index_path = field.path.join("index");
@@ -4213,11 +4383,8 @@ impl Collection {
             if upper.contains("PQ") {
                 if n > 0 {
                     let n_subspaces = parse_n_subspaces(&upper, dim);
-                    let guard = self.vector_store.read_mmap()?;
-                    let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
-                    let all_data = fm.as_f32_cow();
+                    let all_data = self.vector_store.read_all_f32()?;
                     let pq = PQIndex::build(&all_data, n, dim, n_subspaces);
-                    drop(guard);
                     let pq_path = self.path.join("pq_index.bin");
                     pq.save(&pq_path)
                         .map_err(|e| LynseError::Storage(e.to_string()))?;
@@ -4225,11 +4392,8 @@ impl Collection {
                 }
             } else if upper.contains("RABITQ") {
                 if n > 0 {
-                    let guard = self.vector_store.read_mmap()?;
-                    let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
-                    let all_data = fm.as_f32_cow();
+                    let all_data = self.vector_store.read_all_f32()?;
                     let rq = RaBitQIndex::build(&all_data, n, dim);
-                    drop(guard);
                     let rq_path = self.path.join("rabitq_index.bin");
                     rq.save(&rq_path)
                         .map_err(|e| LynseError::Storage(e.to_string()))?;
@@ -4239,11 +4403,8 @@ impl Collection {
                 if n > 0 {
                     let bits = parse_bits(&upper, POLARVEC_DEFAULT_BITS);
                     let metric = self.resolve_metric();
-                    let guard = self.vector_store.read_mmap()?;
-                    let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
-                    let all_data = fm.as_f32_cow();
+                    let all_data = self.vector_store.read_all_f32()?;
                     let pv = PolarVecIndex::build_for_metric(&all_data, n, dim, bits, metric);
-                    drop(guard);
                     let pv_path = self.path.join("polarvec_index.bin");
                     pv.save(&pv_path)
                         .map_err(|e| LynseError::Storage(e.to_string()))?;
@@ -4253,14 +4414,12 @@ impl Collection {
             n
         } else {
             // Graph/partition ANN indexes need data to build.
-            let guard = self.vector_store.read_mmap()?;
-            let fm = guard.as_ref().ok_or(LynseError::EmptyDatabase)?;
-            let n = fm.len();
+            let n = self.vector_store.get_shape()?.0 as usize;
             if n == 0 {
                 return Err(LynseError::EmptyDatabase);
             }
 
-            let all_data = fm.as_f32_cow();
+            let all_data = self.vector_store.read_all_f32()?;
             let ids: Vec<u64> = (0..n as u64).collect();
 
             let mut idx = index::create_index_with_options(index_type, n_clusters)?;
@@ -4371,7 +4530,9 @@ impl Collection {
         }
 
         let subset_indices = if let Some(filter) = where_expr {
-            Some(Arc::new(self.field_store.query(filter)?))
+            Some(Arc::new(
+                self.field_keys_to_rows(self.field_store.query(filter)?),
+            ))
         } else {
             None
         };
@@ -4445,58 +4606,32 @@ impl Collection {
         } else if let Some(ref pq) = self.pq_index {
             // PQ (Product Quantization) two-pass search
             let metric = collection_metric;
-            let guard = self.vector_store.read_mmap()?;
-            match guard.as_ref() {
-                None => (vec![], vec![]),
-                Some(fm) => {
-                    let all_data = fm.as_f32_cow();
-                    let (indices, dists) =
-                        pq.search(query, search_k, &all_data, metric, PQ_OVERSAMPLE);
-                    let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
-                    (ids, dists)
-                }
-            }
+            let all_data = self.vector_store.read_all_f32()?;
+            let (indices, dists) = pq.search(query, search_k, &all_data, metric, PQ_OVERSAMPLE);
+            (indices.into_iter().map(|i| i as u64).collect(), dists)
         } else if let Some(ref rq) = self.rabitq_index {
             // RaBitQ binary two-pass search
             let metric = collection_metric;
-            let guard = self.vector_store.read_mmap()?;
-            match guard.as_ref() {
-                None => (vec![], vec![]),
-                Some(fm) => {
-                    let all_data = fm.as_f32_cow();
-                    let (indices, dists) =
-                        rq.search(query, search_k, &all_data, metric, RABITQ_OVERSAMPLE);
-                    let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
-                    (ids, dists)
-                }
-            }
+            let all_data = self.vector_store.read_all_f32()?;
+            let (indices, dists) = rq.search(query, search_k, &all_data, metric, RABITQ_OVERSAMPLE);
+            (indices.into_iter().map(|i| i as u64).collect(), dists)
         } else if let Some(ref pv) = self.polarvec_index {
             // PolarVec multi-bit LUT two-pass search
             let metric = collection_metric;
-            let guard = self.vector_store.read_mmap()?;
-            match guard.as_ref() {
-                None => (vec![], vec![]),
-                Some(fm) => {
-                    let all_data = fm.as_f32_cow();
-                    let (indices, dists) =
-                        pv.search(query, search_k, &all_data, metric, POLARVEC_OVERSAMPLE);
-                    let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
-                    (ids, dists)
-                }
-            }
+            let all_data = self.vector_store.read_all_f32()?;
+            let (indices, dists) =
+                pv.search(query, search_k, &all_data, metric, POLARVEC_OVERSAMPLE);
+            (indices.into_iter().map(|i| i as u64).collect(), dists)
         } else {
             // Unfiltered: zero-copy mmap + fused parallel topk (~5ms for 1M×128)
             let metric = collection_metric;
-            let guard = self.vector_store.read_mmap()?;
-            match guard.as_ref() {
-                None => (vec![], vec![]),
-                Some(fm) => {
-                    let use_sq8 = self.resolve_use_sq8();
-                    let (indices, dists) = fm.search(query, search_k, metric, use_sq8, approx_cfg);
-                    let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
-                    (ids, dists)
-                }
-            }
+            self.vector_store.search(
+                query,
+                search_k,
+                metric,
+                self.resolve_use_sq8(),
+                approx_cfg,
+            )?
         };
 
         let (pending_ids, pending_dists) = self.pending_search(
@@ -4571,10 +4706,10 @@ impl Collection {
         }
 
         let allowed_ids = if let Some(filter) = where_expr {
-            let rows = self.field_store.query(filter)?;
+            let keys = self.field_store.query(filter)?;
             Some(
-                rows.iter()
-                    .map(|&row| self.row_to_user_id(row))
+                self.field_keys_to_user_ids(keys)
+                    .into_iter()
                     .collect::<HashSet<u64>>(),
             )
         } else {
@@ -4610,14 +4745,9 @@ impl Collection {
             } else {
                 None
             };
-            let guard = field.vector_store.read_mmap()?;
-            match guard.as_ref() {
-                None => (Vec::new(), Vec::new()),
-                Some(fm) => {
-                    let (rows, dists) = fm.search(query, search_k, metric, use_sq8, approx_cfg);
-                    (rows.into_iter().map(|row| row as u64).collect(), dists)
-                }
-            }
+            field
+                .vector_store
+                .search(query, search_k, metric, use_sq8, approx_cfg)?
         };
 
         let tombstones = self.tombstone.read();
@@ -4674,12 +4804,8 @@ impl Collection {
         }
 
         let allowed_ids = if let Some(filter) = where_expr {
-            let rows = self.field_store.query(filter)?;
-            Some(
-                rows.iter()
-                    .map(|&row| self.row_to_user_id(row))
-                    .collect::<HashSet<u64>>(),
-            )
+            let keys = self.field_store.query(filter)?;
+            Some(self.field_keys_to_user_ids(keys).into_iter().collect())
         } else {
             None
         };
@@ -4715,7 +4841,7 @@ impl Collection {
 
         let subset_indices = if let Some(expr) = where_expr {
             let filter_started = Instant::now();
-            let ids = self.field_store.query(expr)?;
+            let ids = self.field_keys_to_rows(self.field_store.query(expr)?);
             filter_us = elapsed_micros_u64(filter_started);
             filter_matches = Some(ids.len());
             Some(Arc::new(ids))
@@ -4797,7 +4923,9 @@ impl Collection {
         let candidate_limit = candidate_limit.max(k).max(1);
         let mut fused: HashMap<u64, f32> = HashMap::new();
         let subset_indices = if let Some(filter) = where_expr {
-            Some(Arc::new(self.field_store.query(filter)?))
+            Some(Arc::new(
+                self.field_keys_to_rows(self.field_store.query(filter)?),
+            ))
         } else {
             None
         };
@@ -4902,12 +5030,8 @@ impl Collection {
         limit: usize,
     ) -> Result<(Vec<(u64, f32)>, &'static str)> {
         let allowed_ids = if let Some(expr) = where_expr {
-            let rows = self.field_store.query(expr)?;
-            Some(
-                rows.iter()
-                    .map(|&row| self.row_to_user_id(row))
-                    .collect::<HashSet<u64>>(),
-            )
+            let keys = self.field_store.query(expr)?;
+            Some(self.field_keys_to_user_ids(keys).into_iter().collect())
         } else {
             None
         };
@@ -4943,11 +5067,15 @@ impl Collection {
         limit: usize,
     ) -> Result<Vec<(u64, f32)>> {
         if let Some(allowed) = allowed_ids {
-            let row_ids: Vec<u64> = allowed
-                .iter()
-                .filter_map(|&user_id| self.user_id_to_row(user_id).map(|row| row as u64))
-                .collect();
-            self.bm25_text_scores_scan_rows(query_text, text_fields, &row_ids, limit)
+            let field_keys: Vec<u64> = if self.fields_use_stable_ids {
+                allowed.iter().copied().collect()
+            } else {
+                allowed
+                    .iter()
+                    .filter_map(|&id| self.user_id_to_row(id).map(|row| row as u64))
+                    .collect()
+            };
+            self.bm25_text_scores_scan_rows(query_text, text_fields, &field_keys, limit)
         } else {
             self.bm25_text_scores_scan(query_text, text_fields, None, limit)
         }
@@ -4960,14 +5088,16 @@ impl Collection {
         where_expr: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(u64, f32)>> {
-        let row_ids: Vec<u64> = if let Some(expr) = where_expr {
+        let field_keys: Vec<u64> = if let Some(expr) = where_expr {
             self.field_store.query(expr)?
+        } else if self.fields_use_stable_ids {
+            self.id_map.clone()
         } else {
             let (n, _) = self.shape()?;
             (0..n).collect()
         };
 
-        self.bm25_text_scores_scan_rows(query_text, text_fields, &row_ids, limit)
+        self.bm25_text_scores_scan_rows(query_text, text_fields, &field_keys, limit)
     }
 
     fn bm25_text_scores_scan_rows(
@@ -4985,8 +5115,12 @@ impl Collection {
 
         let mut docs: Vec<(u64, Vec<String>)> = Vec::new();
         let fields_list = self.field_store.retrieve_many(row_ids)?;
-        for (row_id, fields) in row_ids.iter().copied().zip(fields_list.into_iter()) {
-            let user_id = self.row_to_user_id(row_id);
+        for (field_key, fields) in row_ids.iter().copied().zip(fields_list.into_iter()) {
+            let user_id = if self.fields_use_stable_ids {
+                field_key
+            } else {
+                self.row_to_user_id(field_key)
+            };
             if self.tombstone.read().contains(&user_id) {
                 continue;
             }
@@ -5088,7 +5222,9 @@ impl Collection {
 
         // Pre-compute filter once (shared across all queries)
         let subset_indices = if let Some(filter) = where_expr {
-            Some(Arc::new(self.field_store.query(filter)?))
+            Some(Arc::new(
+                self.field_keys_to_rows(self.field_store.query(filter)?),
+            ))
         } else {
             None
         };
@@ -5101,48 +5237,40 @@ impl Collection {
             && !self.resolve_use_sq8()
         {
             let metric = self.resolve_metric();
-            let guard = self.vector_store.read_mmap()?;
-            if let Some(fm) = guard.as_ref() {
-                if fm.dtype() == VectorDtype::F16 {
-                    let tombstone_count = self.tombstone.read().len();
-                    let search_k = if tombstone_count == 0 {
-                        k
-                    } else {
-                        k.saturating_add(tombstone_count)
-                    };
-                    let all_data = fm.as_f32_cow();
-                    let (batch_rows, batch_dists) =
-                        crate::storage::flat_mmap::batch_exact_flat_search_f32(
-                            queries,
-                            n_queries,
-                            &all_data,
-                            dim,
-                            search_k,
-                            fm.len(),
-                            metric,
-                        );
-                    let results = batch_rows
-                        .into_iter()
-                        .zip(batch_dists)
-                        .map(|(rows, dists)| {
-                            let result_ids: Vec<u64> = rows
-                                .iter()
-                                .map(|&row| self.row_to_user_id(row as u64))
-                                .collect();
-                            let (result_ids, result_dists) =
-                                self.filter_tombstoned_limit(result_ids, dists, k);
-                            SearchResult {
-                                ids: result_ids,
-                                distances: result_dists,
-                                fields: Vec::new(),
-                                index_mode: self.index_mode.clone().unwrap_or("FLAT-IP".into()),
-                                dimension: dim,
-                                k,
-                            }
-                        })
-                        .collect();
-                    return Ok(results);
-                }
+            if self.vector_dtype == VectorDtype::F16 {
+                let tombstone_count = self.tombstone.read().len();
+                let search_k = if tombstone_count == 0 {
+                    k
+                } else {
+                    k.saturating_add(tombstone_count)
+                };
+                let all_data = self.vector_store.read_all_f32()?;
+                let n_rows = self.vector_store.get_shape()?.0 as usize;
+                let (batch_rows, batch_dists) =
+                    crate::storage::flat_mmap::batch_exact_flat_search_f32(
+                        queries, n_queries, &all_data, dim, search_k, n_rows, metric,
+                    );
+                let results = batch_rows
+                    .into_iter()
+                    .zip(batch_dists)
+                    .map(|(rows, dists)| {
+                        let result_ids: Vec<u64> = rows
+                            .iter()
+                            .map(|&row| self.row_to_user_id(row as u64))
+                            .collect();
+                        let (result_ids, result_dists) =
+                            self.filter_tombstoned_limit(result_ids, dists, k);
+                        SearchResult {
+                            ids: result_ids,
+                            distances: result_dists,
+                            fields: Vec::new(),
+                            index_mode: self.index_mode.clone().unwrap_or("FLAT-IP".into()),
+                            dimension: dim,
+                            k,
+                        }
+                    })
+                    .collect();
+                return Ok(results);
             }
         }
 
@@ -5212,17 +5340,13 @@ impl Collection {
                     self.brute_force_search_filtered(query, search_k, &search_params)?
                 } else {
                     let metric = self.resolve_metric();
-                    let guard = self.vector_store.read_mmap()?;
-                    match guard.as_ref() {
-                        None => (vec![], vec![]),
-                        Some(fm) => {
-                            let use_sq8 = self.resolve_use_sq8();
-                            let (indices, dists) =
-                                fm.search(query, search_k, metric, use_sq8, None);
-                            let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
-                            (ids, dists)
-                        }
-                    }
+                    self.vector_store.search(
+                        query,
+                        search_k,
+                        metric,
+                        self.resolve_use_sq8(),
+                        None,
+                    )?
                 };
 
                 let result_ids: Vec<u64> = result_ids
@@ -5267,20 +5391,17 @@ impl Collection {
     ) -> Result<(Vec<u64>, Vec<f32>)> {
         let metric = self.resolve_metric();
 
-        let guard = self.vector_store.read_mmap()?;
-        let fm = match guard.as_ref() {
-            None => return Ok((Vec::new(), Vec::new())),
-            Some(fm) => fm,
-        };
-
         let subset = match &params.subset_indices {
             Some(s) => s.as_slice(),
             None => {
                 // No filter — use unfiltered path
-                let use_sq8 = self.resolve_use_sq8();
-                let (indices, dists) = fm.search(query, k, metric, use_sq8, None);
-                let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
-                return Ok((ids, dists));
+                return self.vector_store.search(
+                    query,
+                    k,
+                    metric,
+                    self.resolve_use_sq8(),
+                    None,
+                );
             }
         };
 
@@ -5288,9 +5409,7 @@ impl Collection {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        let (indices, dists) = fm.search_filtered(query, k, metric, subset);
-        let ids: Vec<u64> = indices.iter().map(|&i| i as u64).collect();
-        Ok((ids, dists))
+        self.vector_store.search_filtered(query, k, metric, subset)
     }
 
     // ─── Filtered search strategies for benchmarking ────────────────────────
@@ -5537,7 +5656,7 @@ impl Collection {
 
         // Get matching IDs once (shared by all strategies)
         let t0 = std::time::Instant::now();
-        let subset = self.field_store.query(where_expr)?;
+        let subset = self.field_keys_to_rows(self.field_store.query(where_expr)?);
         let field_query_us = t0.elapsed().as_micros() as f64;
         let n_matches = subset.len();
 
@@ -5604,6 +5723,57 @@ impl Collection {
         Ok(results)
     }
 
+    fn update_existing_items_in_place(
+        &mut self,
+        ids: &[u64],
+        vectors: &[f32],
+        fields: Option<&[HashMap<String, serde_json::Value>]>,
+    ) -> Result<()> {
+        let rows: Vec<u64> = ids
+            .iter()
+            .map(|id| {
+                self.reverse_id_map
+                    .get(id)
+                    .copied()
+                    .map(|row| row as u64)
+                    .ok_or_else(|| {
+                        LynseError::Storage(format!("existing ID {id} has no vector row"))
+                    })
+            })
+            .collect::<Result<_>>()?;
+        let encoded = encode_f32_slice_as_le_bytes(vectors, self.vector_dtype);
+        self.vector_store
+            .apply_journaled_encoded_rows(&rows, &encoded, self.vector_dtype)?;
+
+        if let Some(field_values) = fields {
+            let field_rows: Vec<u64> = if self.fields_use_stable_ids {
+                ids.to_vec()
+            } else {
+                rows.clone()
+            };
+            self.field_store
+                .replace_fields_at_ids(&field_rows, field_values)?;
+            self.text_index.upsert_documents(ids, field_values, true)?;
+        }
+
+        let tombstone_changed = {
+            let mut tombstone = self.tombstone.write();
+            ids.iter()
+                .fold(false, |changed, id| tombstone.remove(id) || changed)
+        };
+        if tombstone_changed {
+            let path = self.path.join("tombstone.bin");
+            let tombstone = self.tombstone.read();
+            Self::save_tombstone_to_disk(&path, &tombstone)?;
+        }
+
+        if let Some(mode) = self.index_mode.clone() {
+            self.build_index(&mode)?;
+        }
+        self.vector_store.finish_pending_updates()?;
+        Ok(())
+    }
+
     /// Upsert vectors by user ID.
     ///
     /// Existing IDs are updated in place by rewriting the vector file with the
@@ -5641,6 +5811,15 @@ impl Collection {
             }
         }
         Self::validate_unique_ids(ids)?;
+
+        // Existing-only updates do not change row order or the stable ID map.
+        // Use a journaled positional write instead of rebuilding every segment.
+        if ids
+            .iter()
+            .all(|user_id| self.reverse_id_map.contains_key(user_id))
+        {
+            return self.update_existing_items_in_place(ids, vectors, fields);
+        }
 
         let (mut all_vectors, n_total) = {
             let guard = self.vector_store.read_mmap()?;
@@ -5683,14 +5862,18 @@ impl Collection {
                 };
 
                 if let Some(field_list) = fields {
-                    field_rows.push(row as u64);
+                    field_rows.push(if self.fields_use_stable_ids {
+                        user_id
+                    } else {
+                        row as u64
+                    });
                     field_values.push(field_list[i].clone());
                 }
             }
         }
 
-        self.vector_store.replace_data(&all_vectors)?;
-        Self::write_id_map(&self.path, &new_id_map)?;
+        self.vector_store
+            .replace_data_with_id_map(&all_vectors, &new_id_map)?;
         self.id_map = new_id_map;
         self.reverse_id_map = new_reverse_id_map;
 
@@ -5873,25 +6056,13 @@ impl Collection {
         n: usize,
     ) -> Result<(Vec<f32>, Vec<u64>, Vec<HashMap<String, serde_json::Value>>)> {
         self.flush_pending_ingest()?;
-        let dim = self.meta.dimension;
-        let guard = self.vector_store.read_mmap()?;
-        let (data, user_ids) = match guard.as_ref() {
-            None => (Vec::new(), Vec::new()),
-            Some(fm) => {
-                let total = fm.len();
-                let take = n.min(total);
-                let all_data = fm.as_f32_cow();
-                let data = all_data[..take * dim].to_vec();
-                let user_ids: Vec<u64> = (0..take as u64)
-                    .map(|row| self.row_to_user_id(row))
-                    .collect();
-                (data, user_ids)
-            }
-        };
-        drop(guard);
+        let total = self.vector_store.get_shape()?.0 as usize;
+        let rows: Vec<u64> = (0..n.min(total) as u64).collect();
+        let data = self.vector_store.read_rows(&rows)?;
+        let user_ids: Vec<u64> = rows.iter().map(|&row| self.row_to_user_id(row)).collect();
 
-        let row_offsets: Vec<u64> = (0..user_ids.len() as u64).collect();
-        let fields = self.field_store.retrieve_many(&row_offsets)?;
+        let field_keys = self.field_lookup_keys(&user_ids);
+        let fields = self.field_store.retrieve_many(&field_keys)?;
         Ok((data, user_ids, fields))
     }
 
@@ -5901,37 +6072,24 @@ impl Collection {
         n: usize,
     ) -> Result<(Vec<f32>, Vec<u64>, Vec<HashMap<String, serde_json::Value>>)> {
         self.flush_pending_ingest()?;
-        let dim = self.meta.dimension;
-        let guard = self.vector_store.read_mmap()?;
-        let (data, user_ids, row_start) = match guard.as_ref() {
-            None => (Vec::new(), Vec::new(), 0usize),
-            Some(fm) => {
-                let total = fm.len();
-                let take = n.min(total);
-                let start = total - take;
-                let all_data = fm.as_f32_cow();
-                let data = all_data[start * dim..].to_vec();
-                let user_ids: Vec<u64> = (start as u64..total as u64)
-                    .map(|row| self.row_to_user_id(row))
-                    .collect();
-                (data, user_ids, start)
-            }
-        };
-        drop(guard);
+        let total = self.vector_store.get_shape()?.0 as usize;
+        let start = total.saturating_sub(n.min(total));
+        let rows: Vec<u64> = (start as u64..total as u64).collect();
+        let data = self.vector_store.read_rows(&rows)?;
+        let user_ids: Vec<u64> = rows.iter().map(|&row| self.row_to_user_id(row)).collect();
 
-        let n_actual = user_ids.len();
-        let row_offsets: Vec<u64> =
-            (row_start as u64..row_start as u64 + n_actual as u64).collect();
-        let fields = self.field_store.retrieve_many(&row_offsets)?;
+        let field_keys = self.field_lookup_keys(&user_ids);
+        let fields = self.field_store.retrieve_many(&field_keys)?;
         Ok((data, user_ids, fields))
     }
 
     /// Query field metadata with a SQL-like filter. Returns matching user IDs.
     pub fn query_fields(&self, where_expr: &str) -> Result<Vec<u64>> {
-        let row_ids = self.field_store.query(where_expr)?;
-        Ok(row_ids
-            .iter()
-            .map(|&row| self.row_to_user_id(row))
+        let field_keys = self.field_store.query(where_expr)?;
+        Ok(self
+            .field_keys_to_user_ids(field_keys)
+            .into_iter()
+            .filter(|id| self.reverse_id_map.contains_key(id))
             .collect())
     }
 
@@ -5941,21 +6099,25 @@ impl Collection {
         &self,
         where_expr: &str,
     ) -> Result<(Vec<u64>, Vec<HashMap<String, serde_json::Value>>)> {
-        let (row_ids, fields) = self.field_store.query_with_fields(where_expr)?;
-        let user_ids = row_ids
-            .iter()
-            .map(|&row| self.row_to_user_id(row))
-            .collect();
-        Ok((user_ids, fields))
+        let (field_keys, fields) = self.field_store.query_with_fields(where_expr)?;
+        let mut user_ids = Vec::new();
+        let mut live_fields = Vec::new();
+        for (id, field) in self
+            .field_keys_to_user_ids(field_keys)
+            .into_iter()
+            .zip(fields)
+        {
+            if self.reverse_id_map.contains_key(&id) {
+                user_ids.push(id);
+                live_fields.push(field);
+            }
+        }
+        Ok((user_ids, live_fields))
     }
 
     /// Retrieve field metadata for specific user IDs.
     pub fn retrieve_fields(&self, ids: &[u64]) -> Result<Vec<HashMap<String, serde_json::Value>>> {
-        let row_offsets: Vec<u64> = ids
-            .iter()
-            .map(|&uid| self.user_id_to_row(uid).unwrap_or(uid as usize) as u64)
-            .collect();
-        self.field_store.retrieve_many(&row_offsets)
+        self.field_store.retrieve_many(&self.field_lookup_keys(ids))
     }
 
     /// List all field names in the collection.
@@ -5974,8 +6136,8 @@ impl Collection {
         &self,
         ids: &[u64],
     ) -> Result<(Vec<f32>, Vec<HashMap<String, serde_json::Value>>)> {
-        let (result_data, row_offsets) = self.read_vectors_by_ids_only_with_rows(ids)?;
-        let fields = self.field_store.retrieve_many(&row_offsets)?;
+        let (result_data, _) = self.read_vectors_by_ids_only_with_rows(ids)?;
+        let fields = self.field_store.retrieve_many(&self.field_lookup_keys(ids))?;
         Ok((result_data, fields))
     }
 
@@ -5995,44 +6157,17 @@ impl Collection {
                 Some(pending.snapshot())
             }
         };
-        let guard = self.vector_store.read_mmap()?;
-
-        let mut result_data: Vec<f32> = vec![0.0f32; ids.len() * dim];
         let row_offsets: Vec<u64> = ids
             .iter()
             .map(|&uid| self.user_id_to_row(uid).unwrap_or(uid as usize) as u64)
             .collect();
-
-        if let Some(fm) = guard.as_ref() {
-            let all_data = fm.as_f32_cow();
-            let n_total = fm.len();
-
+        let persisted_rows = self.vector_store.get_shape()?.0;
+        let mut result_data = self.vector_store.read_rows(&row_offsets)?;
+        if let Some(snapshot) = pending_snapshot.as_ref() {
             for (out_pos, &row) in row_offsets.iter().enumerate() {
-                let row = row as usize;
-                if row < n_total {
-                    let src_start = row * dim;
-                    let src_end = src_start + dim;
-                    if src_end <= all_data.len() {
-                        let dst = &mut result_data[out_pos * dim..(out_pos + 1) * dim];
-                        dst.copy_from_slice(&all_data[src_start..src_end]);
-                    }
-                } else if let Some(snapshot) = pending_snapshot.as_ref() {
-                    if let Some(pending_pos) = snapshot
-                        .row_offsets
-                        .iter()
-                        .position(|&pending_row| pending_row == row as u64)
-                    {
-                        let src_start = pending_pos * dim;
-                        let src_end = src_start + dim;
-                        if src_end <= snapshot.vectors.len() {
-                            let dst = &mut result_data[out_pos * dim..(out_pos + 1) * dim];
-                            dst.copy_from_slice(&snapshot.vectors[src_start..src_end]);
-                        }
-                    }
+                if row < persisted_rows {
+                    continue;
                 }
-            }
-        } else if let Some(snapshot) = pending_snapshot.as_ref() {
-            for (out_pos, &row) in row_offsets.iter().enumerate() {
                 if let Some(pending_pos) = snapshot
                     .row_offsets
                     .iter()
@@ -6047,7 +6182,6 @@ impl Collection {
                 }
             }
         }
-        drop(guard);
 
         Ok((result_data, row_offsets))
     }
@@ -6080,14 +6214,8 @@ impl Collection {
         let metric = self.resolve_metric();
         let ascending = metric.is_ascending();
 
-        let guard = self.vector_store.read_mmap()?;
-        let fm = match guard.as_ref() {
-            None => return Ok((Vec::new(), Vec::new())),
-            Some(fm) => fm,
-        };
-
-        let all_data = fm.as_f32_cow();
-        let n_vectors = fm.len();
+        let all_data = self.vector_store.read_all_f32()?;
+        let n_vectors = self.vector_store.get_shape()?.0 as usize;
         let tombstone = self.tombstone.read();
 
         let mut result: Vec<(u64, f32)> = Vec::new();
@@ -6112,7 +6240,6 @@ impl Collection {
             }
         }
         drop(tombstone);
-        drop(guard);
 
         if result.len() > max_results {
             if ascending {
@@ -6144,9 +6271,8 @@ impl Collection {
     /// Compact the collection by physically removing all tombstoned vectors.
     ///
     /// Process:
-    /// 1. Collect live (non-tombstoned) vectors and their user IDs.
-    /// 2. Atomically rewrite `vectors.bin` with only live vectors.
-    /// 3. Rebuild `id_map.bin` and in-memory maps.
+    /// 1. Rewrite only segments containing tombstoned rows.
+    /// 2. Atomically publish the new segments and ID map through the manifest.
     /// 4. Clear the tombstone set.
     /// 5. Rebuild the index (if one exists) on the compacted data.
     ///
@@ -6154,8 +6280,6 @@ impl Collection {
     pub fn compact(&mut self) -> Result<usize> {
         self.ensure_writable()?;
         self.flush_pending_ingest()?;
-        let dim = self.meta.dimension;
-
         let tombstoned_user_ids: HashSet<u64> = self.tombstone.read().clone();
         if tombstoned_user_ids.is_empty() {
             return Ok(0);
@@ -6167,35 +6291,15 @@ impl Collection {
             .filter_map(|&uid| self.user_id_to_row(uid))
             .collect();
 
-        // Read all vectors
-        let (all_vectors, n_total) = {
-            let guard = self.vector_store.read_mmap()?;
-            match guard.as_ref() {
-                None => return Ok(0),
-                Some(fm) => (fm.as_f32_cow().into_owned(), fm.len()),
-            }
-        };
-
         let n_removed = tombstoned_rows.len();
-
-        // Collect live vectors and their user IDs
-        let mut live_vectors: Vec<f32> = Vec::with_capacity((n_total - n_removed) * dim);
-        let mut live_user_ids: Vec<u64> = Vec::new();
-        let mut live_old_rows: Vec<u64> = Vec::new();
-
-        for row in 0..n_total {
-            if tombstoned_rows.contains(&row) {
-                continue;
-            }
-            let start = row * dim;
-            live_vectors.extend_from_slice(&all_vectors[start..start + dim]);
-            live_user_ids.push(self.row_to_user_id(row as u64));
-            live_old_rows.push(row as u64);
-        }
-        let live_fields = self.field_store.retrieve_many(&live_old_rows)?;
-
-        // Atomically rewrite vectors.bin
-        self.vector_store.replace_data(&live_vectors)?;
+        let live_user_ids: Vec<u64> = self
+            .id_map
+            .iter()
+            .enumerate()
+            .filter_map(|(row, &id)| (!tombstoned_rows.contains(&row)).then_some(id))
+            .collect();
+        self.vector_store
+            .compact_rows(&tombstoned_rows, &live_user_ids)?;
 
         // Rebuild in-memory id_map and persist
         self.reverse_id_map = live_user_ids
@@ -6204,12 +6308,6 @@ impl Collection {
             .map(|(i, &uid)| (uid, i))
             .collect();
         self.id_map = live_user_ids.clone();
-
-        let id_bytes: Vec<u8> = live_user_ids
-            .iter()
-            .flat_map(|id| id.to_le_bytes())
-            .collect();
-        std::fs::write(self.path.join("id_map.bin"), &id_bytes)?;
 
         let live_user_id_set: HashSet<u64> = live_user_ids.iter().copied().collect();
         self.internal_to_external_id
@@ -6226,43 +6324,28 @@ impl Collection {
         }
         self.write_external_id_map()?;
 
-        let new_field_rows: Vec<u64> = (0..live_fields.len() as u64).collect();
-        self.field_store
-            .rebuild_at_ids(&new_field_rows, &live_fields)?;
-
         let mut field_indexes_to_rebuild = Vec::new();
         for field in self.named_vector_fields.values_mut() {
-            let field_dim = field.config.dimension;
-            let (field_vectors, field_n_total) = {
-                let guard = field.vector_store.read_mmap()?;
-                match guard.as_ref() {
-                    None => (Vec::new(), 0),
-                    Some(fm) => (fm.as_f32_cow().into_owned(), fm.len()),
-                }
-            };
-
-            if field_n_total == 0 {
+            if field.id_map.is_empty() {
                 continue;
             }
-
-            let mut live_field_vectors = Vec::new();
-            let mut live_field_ids = Vec::new();
-            for row in 0..field_n_total {
-                let Some(&user_id) = field.id_map.get(row) else {
-                    continue;
-                };
-                if tombstoned_user_ids.contains(&user_id) {
-                    continue;
-                }
-                let start = row * field_dim;
-                live_field_vectors.extend_from_slice(&field_vectors[start..start + field_dim]);
-                live_field_ids.push(user_id);
-            }
-
-            field.vector_store.replace_data(&live_field_vectors)?;
+            let deleted_field_rows: HashSet<usize> = field
+                .id_map
+                .iter()
+                .enumerate()
+                .filter_map(|(row, id)| tombstoned_user_ids.contains(id).then_some(row))
+                .collect();
+            let live_field_ids: Vec<u64> = field
+                .id_map
+                .iter()
+                .copied()
+                .filter(|id| !tombstoned_user_ids.contains(id))
+                .collect();
+            field
+                .vector_store
+                .compact_rows(&deleted_field_rows, &live_field_ids)?;
             field.reverse_id_map = Self::build_reverse_id_map(&live_field_ids);
             field.id_map = live_field_ids.clone();
-            Self::write_id_map(&field.path, &live_field_ids)?;
             if field.index.is_some() {
                 field.index = None;
                 field_indexes_to_rebuild
@@ -6272,6 +6355,8 @@ impl Collection {
 
         self.sparse_vectors.remove_ids(&tombstoned_user_ids)?;
         self.text_index.remove_ids(&tombstoned_user_ids, true)?;
+        self.field_store
+            .delete_map_entries(&tombstoned_user_ids.iter().copied().collect::<Vec<_>>());
 
         // Clear tombstone set and file
         {
@@ -6345,7 +6430,7 @@ impl Collection {
                 }
             };
 
-            let fields = self.field_store.retrieve_many(&row_offsets)?;
+            let fields = self.field_store.retrieve_many(&self.field_lookup_keys(&user_ids))?;
 
             let vectors_path = tmp_path.join(COLLECTION_EXPORT_VECTORS_FILE);
             let vectors_file = std::fs::File::create(&vectors_path)?;
@@ -8238,6 +8323,33 @@ mod tests {
     }
 
     #[test]
+    fn wal_recovery_overwrites_existing_vector_rows() {
+        use std::io::{Seek, Write};
+
+        let tmp = TempDir::new().unwrap();
+        let expected = vec![1.0, 2.0, 3.0, 4.0];
+        {
+            let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+            coll.add_items(&expected, 1, &[42], None).unwrap();
+            coll.flush_pending_ingest().unwrap();
+            assert!(coll.has_uncommitted_data());
+        }
+
+        let mut vectors = std::fs::OpenOptions::new()
+            .write(true)
+            .open(tmp.path().join("col").join("vectors.bin"))
+            .unwrap();
+        vectors.seek(std::io::SeekFrom::Start(0)).unwrap();
+        vectors.write_all(&[0u8; 16]).unwrap();
+        vectors.flush().unwrap();
+        drop(vectors);
+
+        let coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        assert_eq!(coll.read_vectors_by_ids_only(&[42]).unwrap(), expected);
+        assert!(!coll.has_uncommitted_data());
+    }
+
+    #[test]
     fn uncommitted_wal_reopen_preserves_string_external_ids() {
         let tmp = TempDir::new().unwrap();
         {
@@ -8289,6 +8401,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_row_keyed_fields_migrate_to_stable_ids_before_compaction() {
+        let tmp = TempDir::new().unwrap();
+        let collection_path = tmp.path().join("col");
+        {
+            let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+            coll.add_items(&[1.0; 8], 2, &[10, 20], None).unwrap();
+            coll.checkpoint().unwrap();
+        }
+
+        std::fs::remove_file(collection_path.join(STABLE_FIELD_IDS_FILE)).unwrap();
+        let legacy = FieldStore::new(&collection_path.join("fields_db"), "fields").unwrap();
+        legacy
+            .rebuild_at_ids(
+                &[0, 1],
+                &[
+                    HashMap::from([("tag".to_string(), serde_json::json!("first"))]),
+                    HashMap::from([("tag".to_string(), serde_json::json!("second"))]),
+                ],
+            )
+            .unwrap();
+        drop(legacy);
+
+        let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        assert!(collection_path.join(STABLE_FIELD_IDS_FILE).exists());
+        assert_eq!(coll.query_fields("\"tag\" = 'second'").unwrap(), vec![20]);
+        coll.delete_items(&[10]).unwrap();
+        assert_eq!(coll.compact().unwrap(), 1);
+        assert_eq!(coll.retrieve_fields(&[20]).unwrap()[0]["tag"], "second");
+    }
+
+    #[test]
     fn update_existing_id_rewrites_vector_without_growing_shape() {
         let tmp = TempDir::new().unwrap();
         let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
@@ -8301,6 +8444,35 @@ mod tests {
         assert_eq!(coll.shape().unwrap(), (1, 4));
         let (vectors, _) = coll.read_vectors_by_ids(&[7]).unwrap();
         assert_eq!(vectors, vec![0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn writable_open_replays_pending_positional_update_journal() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+            coll.add_items(&[1.0, 0.0, 0.0, 0.0], 1, &[7], None)
+                .unwrap();
+            coll.commit().unwrap();
+            let replacement = encode_f32_slice_as_le_bytes(
+                &[0.0, 1.0, 0.0, 0.0],
+                VectorDtype::F32,
+            );
+            coll.vector_store
+                .write_update_journal(&[0], &replacement)
+                .unwrap();
+        }
+
+        let read_only_error = match Collection::open_read_only(tmp.path(), "col", 4, 100) {
+            Ok(_) => panic!("read-only open should reject a pending positional update"),
+            Err(error) => error,
+        };
+        assert!(read_only_error.to_string().contains("pending vector updates"));
+
+        let coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        let (vectors, _) = coll.read_vectors_by_ids(&[7]).unwrap();
+        assert_eq!(vectors, vec![0.0, 1.0, 0.0, 0.0]);
+        assert!(!coll.vector_store.has_pending_updates());
     }
 
     #[test]

@@ -1822,6 +1822,7 @@ dependencies = [
  "arrow",
  "base64",
  "bincode",
+ "crc32fast",
  "crossbeam",
  "env_logger",
  "half",

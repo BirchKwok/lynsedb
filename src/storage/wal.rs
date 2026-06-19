@@ -25,7 +25,9 @@ use std::time::Instant;
 /// File header: version(u64) + chunk_size(u64) + flush_interval_ms(u64) + count_rows(u64)
 const HEADER_SIZE: usize = 32; // 4 * 8 bytes
 const WAL_VERSION_JSON_FIELDS: u64 = 3;
-const WAL_VERSION: u64 = 4;
+const WAL_VERSION_BINARY_FIELDS: u64 = 4;
+const WAL_VERSION: u64 = 5;
+const CHECKSUM_SIZE: usize = 4;
 
 /// Segment header: data_size(u64) + record_count(u64) + status(u8) + data_dim(u64)
 const SEGMENT_HEADER_SIZE: usize = 25; // 8 + 8 + 1 + 8
@@ -554,10 +556,13 @@ impl WALStorage {
                 continue;
             }
             let version = u64::from_le_bytes(file_data[0..8].try_into().unwrap());
-            if version != WAL_VERSION && version != WAL_VERSION_JSON_FIELDS {
+            if version != WAL_VERSION
+                && version != WAL_VERSION_BINARY_FIELDS
+                && version != WAL_VERSION_JSON_FIELDS
+            {
                 return Err(LynseError::Storage(format!(
-                    "unsupported WAL version {}; expected {} or {}",
-                    version, WAL_VERSION_JSON_FIELDS, WAL_VERSION
+                    "unsupported WAL version {}; expected {}, {}, or {}",
+                    version, WAL_VERSION_JSON_FIELDS, WAL_VERSION_BINARY_FIELDS, WAL_VERSION
                 )));
             }
 
@@ -592,6 +597,29 @@ impl WALStorage {
                     // Incomplete segment
                     break;
                 }
+                let payload_start = pos;
+                let payload_end = pos + data_size;
+                let data_end = if version == WAL_VERSION {
+                    if data_size < CHECKSUM_SIZE {
+                        return Err(LynseError::Storage(
+                            "WAL segment is too short to contain a checksum".to_string(),
+                        ));
+                    }
+                    let checksum_offset = payload_end - CHECKSUM_SIZE;
+                    let expected = u32::from_le_bytes(
+                        file_data[checksum_offset..payload_end].try_into().unwrap(),
+                    );
+                    let actual = crc32fast::hash(&file_data[payload_start..checksum_offset]);
+                    if actual != expected {
+                        return Err(LynseError::Storage(format!(
+                            "WAL segment checksum mismatch in {}",
+                            wal_path.display()
+                        )));
+                    }
+                    checksum_offset
+                } else {
+                    payload_end
+                };
 
                 let dtype = {
                     if pos >= file_data.len() {
@@ -670,7 +698,7 @@ impl WALStorage {
                     u64::from_le_bytes(file_data[pos..pos + 8].try_into().unwrap()) as usize;
                 pos += 8;
 
-                if pos + ids_size > file_data.len() {
+                if pos + ids_size > data_end {
                     break;
                 }
                 let ids_bytes = &file_data[pos..pos + ids_size];
@@ -680,6 +708,14 @@ impl WALStorage {
                     .chunks_exact(8)
                     .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
                     .collect();
+
+                if pos != data_end {
+                    return Err(LynseError::Storage(format!(
+                        "WAL segment payload length mismatch in {}",
+                        wal_path.display()
+                    )));
+                }
+                pos = payload_end;
 
                 let n_vectors = if data_dim > 0 {
                     n_floats / data_dim
@@ -827,7 +863,8 @@ impl WALStorage {
         let fields_bytes = serialize_wal_fields(&fields)?;
         let ids_bytes: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
 
-        let total_size = 1 + 8 + data_bytes.len() + 8 + fields_bytes.len() + 8 + ids_bytes.len();
+        let payload_size = 1 + 8 + data_bytes.len() + 8 + fields_bytes.len() + 8 + ids_bytes.len();
+        let total_size = payload_size + CHECKSUM_SIZE;
         let record_count = ids.len();
 
         // Write segment header
@@ -838,24 +875,37 @@ impl WALStorage {
         header.extend_from_slice(&(dim as u64).to_le_bytes()); // data_dim
         self.write_to_buffer(inner, &header);
 
-        // Write vector dtype for WAL v3+.
+        let mut checksum = crc32fast::Hasher::new();
+
+        // Write vector dtype.
         let dtype_code = match dtype {
             VectorDtype::F32 => 1u8,
             VectorDtype::F16 => 2u8,
         };
+        checksum.update(&[dtype_code]);
         self.write_to_buffer(inner, &[dtype_code]);
 
         // Write vector data: length + bytes
-        self.write_to_buffer(inner, &(data_bytes.len() as u64).to_le_bytes());
+        let data_len = (data_bytes.len() as u64).to_le_bytes();
+        checksum.update(&data_len);
+        checksum.update(&data_bytes);
+        self.write_to_buffer(inner, &data_len);
         self.write_to_buffer(inner, &data_bytes);
 
         // Write fields: length + bytes
-        self.write_to_buffer(inner, &(fields_bytes.len() as u64).to_le_bytes());
+        let fields_len = (fields_bytes.len() as u64).to_le_bytes();
+        checksum.update(&fields_len);
+        checksum.update(&fields_bytes);
+        self.write_to_buffer(inner, &fields_len);
         self.write_to_buffer(inner, &fields_bytes);
 
         // Write user IDs: length + bytes
-        self.write_to_buffer(inner, &(ids_bytes.len() as u64).to_le_bytes());
+        let ids_len = (ids_bytes.len() as u64).to_le_bytes();
+        checksum.update(&ids_len);
+        checksum.update(&ids_bytes);
+        self.write_to_buffer(inner, &ids_len);
         self.write_to_buffer(inner, &ids_bytes);
+        self.write_to_buffer(inner, &checksum.finalize().to_le_bytes());
 
         // Flush write buffer
         self.flush_write_buffer(inner)?;
@@ -987,6 +1037,27 @@ mod tests {
         // Cleanup
         wal.cleanup().unwrap();
         assert!(!wal.has_uncommitted_data());
+    }
+
+    #[test]
+    fn test_wal_checksum_rejects_complete_but_corrupted_frame() {
+        let tmp = TempDir::new().unwrap();
+        let wal = WALStorage::new("test_col", 100_000, tmp.path(), 5000).unwrap();
+        wal.write_log_data(&[1.0, 2.0, 3.0, 4.0], 4, &[7], &[])
+            .unwrap();
+        wal.flush().unwrap();
+
+        let path = wal.log_dir().join("test_col.000000.wal");
+        let mut bytes = fs::read(&path).unwrap();
+        let vector_payload_offset = HEADER_SIZE + SEGMENT_HEADER_SIZE + 1 + 8;
+        bytes[vector_payload_offset] ^= 0x01;
+        fs::write(path, bytes).unwrap();
+
+        let error = match wal.get_segments() {
+            Ok(_) => panic!("corrupted WAL frame should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("checksum mismatch"));
     }
 
     #[test]
