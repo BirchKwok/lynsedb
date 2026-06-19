@@ -467,6 +467,8 @@ impl CollectionExportManifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CollectionExportRecord {
     id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_id: Option<ExternalId>,
     #[serde(default)]
     field: HashMap<String, serde_json::Value>,
 }
@@ -6209,6 +6211,21 @@ impl Collection {
             .collect();
         std::fs::write(self.path.join("id_map.bin"), &id_bytes)?;
 
+        let live_user_id_set: HashSet<u64> = live_user_ids.iter().copied().collect();
+        self.internal_to_external_id
+            .retain(|internal_id, _| live_user_id_set.contains(internal_id));
+        self.external_to_internal_id
+            .retain(|_, internal_id| live_user_id_set.contains(internal_id));
+        for &internal_id in &live_user_ids {
+            if !self.internal_to_external_id.contains_key(&internal_id) {
+                let external_id = ExternalId::Int(internal_id);
+                self.internal_to_external_id
+                    .insert(internal_id, external_id.clone());
+                self.external_to_internal_id.insert(external_id, internal_id);
+            }
+        }
+        self.write_external_id_map()?;
+
         let new_field_rows: Vec<u64> = (0..live_fields.len() as u64).collect();
         self.field_store
             .rebuild_at_ids(&new_field_rows, &live_fields)?;
@@ -6365,6 +6382,7 @@ impl Collection {
             for (id, field) in user_ids.iter().zip(fields.iter()) {
                 let record = CollectionExportRecord {
                     id: *id,
+                    external_id: Some(self.external_id_for_internal_id(*id)),
                     field: field.clone(),
                 };
                 serde_json::to_writer(&mut metadata_writer, &record)
@@ -6439,6 +6457,7 @@ impl Collection {
         let mut vectors = Vec::with_capacity(manifest.dimension * 1024);
         let mut ids = Vec::with_capacity(1024);
         let mut fields = Vec::with_capacity(1024);
+        let mut external_entries: Vec<(u64, ExternalId)> = Vec::with_capacity(manifest.count);
         let mut row_count = 0usize;
 
         for line in metadata_reader.lines() {
@@ -6459,6 +6478,12 @@ impl Collection {
                 }
             }
             ids.push(record.id);
+            external_entries.push((
+                record.id,
+                record
+                    .external_id
+                    .unwrap_or(ExternalId::Int(record.id)),
+            ));
             fields.push(record.field);
             row_count += 1;
 
@@ -6487,6 +6512,28 @@ impl Collection {
                 "export vectors file contains more bytes than metadata rows describe".to_string(),
             ));
         }
+
+        let mut external_to_internal = HashMap::with_capacity(external_entries.len());
+        let mut internal_to_external = HashMap::with_capacity(external_entries.len());
+        for (internal_id, external_id) in external_entries {
+            external_id.validate()?;
+            if !self.reverse_id_map.contains_key(&internal_id) {
+                return Err(LynseError::Storage(format!(
+                    "export metadata references missing internal id {}",
+                    internal_id
+                )));
+            }
+            if internal_to_external.insert(internal_id, external_id.clone()).is_some()
+                || external_to_internal.insert(external_id, internal_id).is_some()
+            {
+                return Err(LynseError::InvalidArgument(
+                    "export metadata contains duplicate external IDs".to_string(),
+                ));
+            }
+        }
+        self.internal_to_external_id = internal_to_external;
+        self.external_to_internal_id = external_to_internal;
+        self.write_external_id_map()?;
 
         self.checkpoint()
     }

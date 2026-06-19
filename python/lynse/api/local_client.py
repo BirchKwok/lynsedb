@@ -607,9 +607,13 @@ class LocalCollection:
 
     def close(self):
         """Flush and close the collection handle from an API perspective."""
+        if self._rust_coll is None:
+            self.COMMIT_FLAG = True
+            return {'status': 'success'}
         if not self._mesosphere_list.empty():
             self._flush_buffer()
         self._rust_coll.close()
+        self._rust_coll = None
         self.COMMIT_FLAG = True
         return {'status': 'success'}
 
