@@ -455,6 +455,8 @@ def test_resultview_public_api_smoke():
     assert rv.to_dict()["ids"] == [1, 2]
     assert len(rv.to_list()) == 2
     assert '"id"' in rv.to_json()
+
+    pytest.importorskip("pandas")
     assert rv.to_pandas() is not None
 
     pytest.importorskip("polars")
