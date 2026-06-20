@@ -82,6 +82,13 @@ fn write_atomic_durable(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    let tmp_path = path.with_extension("tmp");
+    std::fs::write(&tmp_path, data)?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
 fn write_all_at(file: &File, mut data: &[u8], mut offset: u64) -> std::io::Result<()> {
     while !data.is_empty() {
         #[cfg(unix)]
@@ -254,16 +261,28 @@ impl VectorStore {
     }
 
     pub fn persist_metadata(&self) -> Result<()> {
+        self.persist_metadata_with(write_atomic_durable)
+    }
+
+    /// Persist compatibility metadata without forcing it to stable storage.
+    ///
+    /// This is used by the lightweight commit path; explicit checkpoints still
+    /// use `persist_metadata()` and provide the fsync durability barrier.
+    pub fn persist_metadata_fast(&self) -> Result<()> {
+        self.persist_metadata_with(write_atomic)
+    }
+
+    fn persist_metadata_with(&self, writer: fn(&Path, &[u8]) -> Result<()>) -> Result<()> {
         let total = self.total_vectors.load(Ordering::Relaxed);
         let info = serde_json::json!({ "total_shape": [total, self.dimension] });
-        write_atomic_durable(
+        writer(
             &self.collection_path.join("info.json"),
             serde_json::to_string(&info)
                 .map_err(|e| LynseError::Serialization(e.to_string()))?
                 .as_bytes(),
         )?;
         if let Some(fp) = self.fingerprint() {
-            write_atomic_durable(&self.collection_path.join("fingerprint"), fp.as_bytes())?;
+            writer(&self.collection_path.join("fingerprint"), fp.as_bytes())?;
         }
         Ok(())
     }

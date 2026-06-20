@@ -78,8 +78,6 @@ pub struct Collection {
     vector_dtype: VectorDtype,
     vector_store: VectorStore,
     field_store: FieldStore,
-    /// True when FieldStore records are keyed by stable internal IDs instead of rows.
-    fields_use_stable_ids: bool,
     wal: WALStorage,
     pending_ingest: Mutex<PendingIngestBuffer>,
     index: Option<Box<dyn VectorIndex>>,
@@ -1604,6 +1602,7 @@ impl Collection {
         requested_dtype: Option<VectorDtype>,
     ) -> Result<Self> {
         let collection_path = path.join(name);
+        let is_new_collection = !collection_path.exists();
         if mode == OpenMode::ReadWrite {
             std::fs::create_dir_all(&collection_path)?;
         } else if !collection_path.exists() {
@@ -1645,13 +1644,19 @@ impl Collection {
         let vector_store = VectorStore::new(&collection_path, dimension, chunk_size, vector_dtype)?;
 
         let field_db_path = collection_path.join("fields_db");
-        let fields_use_stable_ids = collection_path.join(STABLE_FIELD_IDS_FILE).exists();
-        let field_table = if fields_use_stable_ids {
-            "fields_v2"
-        } else {
-            "fields"
-        };
-        let field_store = FieldStore::new(&field_db_path, field_table)?;
+        let stable_field_ids_path = collection_path.join(STABLE_FIELD_IDS_FILE);
+        if mode == OpenMode::ReadWrite && is_new_collection {
+            Self::atomic_write_file(
+                &stable_field_ids_path,
+                b"stable-internal-id-v1\n",
+            )?;
+        }
+        if !stable_field_ids_path.exists() {
+            return Err(LynseError::Storage(
+                "legacy row-keyed field storage is no longer supported".to_string(),
+            ));
+        }
+        let field_store = FieldStore::new(&field_db_path, "fields_v2")?;
 
         // Initialize WAL
         let wal = WALStorage::new(name, chunk_size, &collection_path, 5000)?;
@@ -1687,7 +1692,6 @@ impl Collection {
             vector_dtype,
             vector_store,
             field_store,
-            fields_use_stable_ids,
             wal,
             pending_ingest: Mutex::new(PendingIngestBuffer::default()),
             index,
@@ -1718,8 +1722,6 @@ impl Collection {
             // process crashed after appending vectors but before appending id_map,
             // id_map is the authoritative set of fully applied rows.
             let id_map_repaired = coll.initialize_id_map_for_open()?;
-
-            coll.migrate_fields_to_stable_ids()?;
 
             // Load external IDs before WAL replay because public IDs are
             // persisted before the WAL in the record add path.
@@ -2158,26 +2160,6 @@ impl Collection {
         Ok(())
     }
 
-    fn atomic_write_file_durable(path: &Path, data: &[u8]) -> Result<()> {
-        use std::io::Write;
-
-        let tmp_path = path.with_extension("tmp");
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp_path)?;
-        file.write_all(data)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp_path, path)?;
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-        Ok(())
-    }
-
     fn sync_path_recursively(path: &Path) -> Result<()> {
         if !path.exists() {
             return Ok(());
@@ -2255,9 +2237,16 @@ impl Collection {
         Ok(())
     }
 
+    fn persist_vector_store_metadata_fast(&self) -> Result<()> {
+        self.vector_store.persist_metadata_fast()?;
+        for field in self.named_vector_fields.values() {
+            field.vector_store.persist_metadata_fast()?;
+        }
+        Ok(())
+    }
+
     fn rebuild_text_index(&mut self, persist: bool) -> Result<()> {
-        let field_keys = self.field_lookup_keys(&self.id_map);
-        let fields = self.field_store.retrieve_many(&field_keys)?;
+        let fields = self.field_store.retrieve_many(&self.id_map)?;
         let user_ids = self.id_map.clone();
         self.text_index.rebuild(&user_ids, &fields, persist)
     }
@@ -2388,7 +2377,6 @@ impl Collection {
             let mut existing_vector_rows = Vec::new();
             let mut existing_encoded_vectors = Vec::new();
             let mut existing_decoded_vectors = Vec::new();
-            let mut existing_field_rows = Vec::new();
             let mut existing_field_user_ids = Vec::new();
             let mut existing_field_values = Vec::new();
             let encoded_row_width = seg
@@ -2418,7 +2406,6 @@ impl Collection {
                         .extend_from_slice(&seg.encoded_data[encoded_start..encoded_end]);
                     existing_decoded_vectors.extend_from_slice(&seg.data[decoded_start..decoded_end]);
                     if let Some(field) = seg.fields.get(i) {
-                        existing_field_rows.push(row as u64);
                         existing_field_user_ids.push(user_id);
                         existing_field_values.push(field.clone());
                     }
@@ -2479,13 +2466,8 @@ impl Collection {
                 recovered_any = true;
             }
             if !existing_field_user_ids.is_empty() {
-                let field_keys = if self.fields_use_stable_ids {
-                    &existing_field_user_ids
-                } else {
-                    &existing_field_rows
-                };
                 self.field_store
-                    .replace_fields_at_ids(field_keys, &existing_field_values)?;
+                    .replace_fields_at_ids(&existing_field_user_ids, &existing_field_values)?;
                 self.text_index.upsert_documents(
                     &existing_field_user_ids,
                     &existing_field_values,
@@ -3015,53 +2997,10 @@ impl Collection {
         self.reverse_id_map.get(&user_id).copied()
     }
 
-    fn migrate_fields_to_stable_ids(&mut self) -> Result<()> {
-        if self.fields_use_stable_ids {
-            return Ok(());
-        }
-
-        let row_offsets: Vec<u64> = (0..self.id_map.len() as u64).collect();
-        let fields = self.field_store.retrieve_many(&row_offsets)?;
-        let stable_store = FieldStore::new(&self.path.join("fields_db"), "fields_v2")?;
-        stable_store.rebuild_at_ids(&self.id_map, &fields)?;
-        stable_store.flush()?;
-        Self::atomic_write_file_durable(
-            &self.path.join(STABLE_FIELD_IDS_FILE),
-            b"stable-internal-id-v1\n",
-        )?;
-        self.field_store = stable_store;
-        self.fields_use_stable_ids = true;
-        Ok(())
-    }
-
     fn field_keys_to_rows(&self, keys: Vec<u64>) -> Vec<u64> {
-        if !self.fields_use_stable_ids {
-            return keys;
-        }
         keys.into_iter()
             .filter_map(|id| self.user_id_to_row(id).map(|row| row as u64))
             .collect()
-    }
-
-    fn field_keys_to_user_ids(&self, keys: Vec<u64>) -> Vec<u64> {
-        if self.fields_use_stable_ids {
-            keys
-        } else {
-            keys.into_iter()
-                .map(|row| self.row_to_user_id(row))
-                .collect()
-        }
-    }
-
-    fn field_lookup_keys(&self, user_ids: &[u64]) -> Vec<u64> {
-        if self.fields_use_stable_ids {
-            user_ids.to_vec()
-        } else {
-            user_ids
-                .iter()
-                .map(|&id| self.user_id_to_row(id).unwrap_or(id as usize) as u64)
-                .collect()
-        }
     }
 
     /// Check if a user ID exists in the collection.
@@ -4297,7 +4236,7 @@ impl Collection {
         self.ensure_writable()?;
         self.text_index.write_to_disk_if_present()?;
         self.flush_pending_ingest()?;
-        self.persist_vector_store_metadata()?;
+        self.persist_vector_store_metadata_fast()?;
         self.write_external_id_map()?;
         self.wal.cleanup()
     }
@@ -4719,11 +4658,7 @@ impl Collection {
 
         let allowed_ids = if let Some(filter) = where_expr {
             let keys = self.field_store.query(filter)?;
-            Some(
-                self.field_keys_to_user_ids(keys)
-                    .into_iter()
-                    .collect::<HashSet<u64>>(),
-            )
+            Some(keys.into_iter().collect::<HashSet<u64>>())
         } else {
             None
         };
@@ -4817,7 +4752,7 @@ impl Collection {
 
         let allowed_ids = if let Some(filter) = where_expr {
             let keys = self.field_store.query(filter)?;
-            Some(self.field_keys_to_user_ids(keys).into_iter().collect())
+            Some(keys.into_iter().collect())
         } else {
             None
         };
@@ -5043,7 +4978,7 @@ impl Collection {
     ) -> Result<(Vec<(u64, f32)>, &'static str)> {
         let allowed_ids = if let Some(expr) = where_expr {
             let keys = self.field_store.query(expr)?;
-            Some(self.field_keys_to_user_ids(keys).into_iter().collect())
+            Some(keys.into_iter().collect())
         } else {
             None
         };
@@ -5079,14 +5014,7 @@ impl Collection {
         limit: usize,
     ) -> Result<Vec<(u64, f32)>> {
         if let Some(allowed) = allowed_ids {
-            let field_keys: Vec<u64> = if self.fields_use_stable_ids {
-                allowed.iter().copied().collect()
-            } else {
-                allowed
-                    .iter()
-                    .filter_map(|&id| self.user_id_to_row(id).map(|row| row as u64))
-                    .collect()
-            };
+            let field_keys: Vec<u64> = allowed.iter().copied().collect();
             self.bm25_text_scores_scan_rows(query_text, text_fields, &field_keys, limit)
         } else {
             self.bm25_text_scores_scan(query_text, text_fields, None, limit)
@@ -5102,11 +5030,8 @@ impl Collection {
     ) -> Result<Vec<(u64, f32)>> {
         let field_keys: Vec<u64> = if let Some(expr) = where_expr {
             self.field_store.query(expr)?
-        } else if self.fields_use_stable_ids {
-            self.id_map.clone()
         } else {
-            let (n, _) = self.shape()?;
-            (0..n).collect()
+            self.id_map.clone()
         };
 
         self.bm25_text_scores_scan_rows(query_text, text_fields, &field_keys, limit)
@@ -5127,12 +5052,7 @@ impl Collection {
 
         let mut docs: Vec<(u64, Vec<String>)> = Vec::new();
         let fields_list = self.field_store.retrieve_many(row_ids)?;
-        for (field_key, fields) in row_ids.iter().copied().zip(fields_list.into_iter()) {
-            let user_id = if self.fields_use_stable_ids {
-                field_key
-            } else {
-                self.row_to_user_id(field_key)
-            };
+        for (user_id, fields) in row_ids.iter().copied().zip(fields_list.into_iter()) {
             if self.tombstone.read().contains(&user_id) {
                 continue;
             }
@@ -5758,13 +5678,8 @@ impl Collection {
             .apply_journaled_encoded_rows(&rows, &encoded, self.vector_dtype)?;
 
         if let Some(field_values) = fields {
-            let field_rows: Vec<u64> = if self.fields_use_stable_ids {
-                ids.to_vec()
-            } else {
-                rows.clone()
-            };
             self.field_store
-                .replace_fields_at_ids(&field_rows, field_values)?;
+                .replace_fields_at_ids(ids, field_values)?;
             self.text_index.upsert_documents(ids, field_values, true)?;
         }
 
@@ -5857,28 +5772,22 @@ impl Collection {
             for (i, &user_id) in ids.iter().enumerate() {
                 let src_start = i * dim;
                 let src_end = src_start + dim;
-                let row = if let Some(row) = new_reverse_id_map.get(&user_id).copied() {
+                if let Some(row) = new_reverse_id_map.get(&user_id).copied() {
                     let dst_start = row * dim;
                     let dst_end = dst_start + dim;
                     all_vectors[dst_start..dst_end].copy_from_slice(&vectors[src_start..src_end]);
                     if tombstone.remove(&user_id) {
                         tombstone_changed = true;
                     }
-                    row
                 } else {
                     let row = new_id_map.len();
                     all_vectors.extend_from_slice(&vectors[src_start..src_end]);
                     new_id_map.push(user_id);
                     new_reverse_id_map.insert(user_id, row);
-                    row
-                };
+                }
 
                 if let Some(field_list) = fields {
-                    field_rows.push(if self.fields_use_stable_ids {
-                        user_id
-                    } else {
-                        row as u64
-                    });
+                    field_rows.push(user_id);
                     field_values.push(field_list[i].clone());
                 }
             }
@@ -6073,8 +5982,7 @@ impl Collection {
         let data = self.vector_store.read_rows(&rows)?;
         let user_ids: Vec<u64> = rows.iter().map(|&row| self.row_to_user_id(row)).collect();
 
-        let field_keys = self.field_lookup_keys(&user_ids);
-        let fields = self.field_store.retrieve_many(&field_keys)?;
+        let fields = self.field_store.retrieve_many(&user_ids)?;
         Ok((data, user_ids, fields))
     }
 
@@ -6090,16 +5998,14 @@ impl Collection {
         let data = self.vector_store.read_rows(&rows)?;
         let user_ids: Vec<u64> = rows.iter().map(|&row| self.row_to_user_id(row)).collect();
 
-        let field_keys = self.field_lookup_keys(&user_ids);
-        let fields = self.field_store.retrieve_many(&field_keys)?;
+        let fields = self.field_store.retrieve_many(&user_ids)?;
         Ok((data, user_ids, fields))
     }
 
     /// Query field metadata with a SQL-like filter. Returns matching user IDs.
     pub fn query_fields(&self, where_expr: &str) -> Result<Vec<u64>> {
         let field_keys = self.field_store.query(where_expr)?;
-        Ok(self
-            .field_keys_to_user_ids(field_keys)
+        Ok(field_keys
             .into_iter()
             .filter(|id| self.reverse_id_map.contains_key(id))
             .collect())
@@ -6114,11 +6020,7 @@ impl Collection {
         let (field_keys, fields) = self.field_store.query_with_fields(where_expr)?;
         let mut user_ids = Vec::new();
         let mut live_fields = Vec::new();
-        for (id, field) in self
-            .field_keys_to_user_ids(field_keys)
-            .into_iter()
-            .zip(fields)
-        {
+        for (id, field) in field_keys.into_iter().zip(fields) {
             if self.reverse_id_map.contains_key(&id) {
                 user_ids.push(id);
                 live_fields.push(field);
@@ -6129,7 +6031,7 @@ impl Collection {
 
     /// Retrieve field metadata for specific user IDs.
     pub fn retrieve_fields(&self, ids: &[u64]) -> Result<Vec<HashMap<String, serde_json::Value>>> {
-        self.field_store.retrieve_many(&self.field_lookup_keys(ids))
+        self.field_store.retrieve_many(ids)
     }
 
     /// List all field names in the collection.
@@ -6149,7 +6051,7 @@ impl Collection {
         ids: &[u64],
     ) -> Result<(Vec<f32>, Vec<HashMap<String, serde_json::Value>>)> {
         let (result_data, _) = self.read_vectors_by_ids_only_with_rows(ids)?;
-        let fields = self.field_store.retrieve_many(&self.field_lookup_keys(ids))?;
+        let fields = self.field_store.retrieve_many(ids)?;
         Ok((result_data, fields))
     }
 
@@ -6442,7 +6344,7 @@ impl Collection {
                 }
             };
 
-            let fields = self.field_store.retrieve_many(&self.field_lookup_keys(&user_ids))?;
+            let fields = self.field_store.retrieve_many(&user_ids)?;
 
             let vectors_path = tmp_path.join(COLLECTION_EXPORT_VECTORS_FILE);
             let vectors_file = std::fs::File::create(&vectors_path)?;
@@ -8413,7 +8315,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_row_keyed_fields_migrate_to_stable_ids_before_compaction() {
+    fn legacy_row_keyed_fields_are_rejected() {
         let tmp = TempDir::new().unwrap();
         let collection_path = tmp.path().join("col");
         {
@@ -8423,24 +8325,14 @@ mod tests {
         }
 
         std::fs::remove_file(collection_path.join(STABLE_FIELD_IDS_FILE)).unwrap();
-        let legacy = FieldStore::new(&collection_path.join("fields_db"), "fields").unwrap();
-        legacy
-            .rebuild_at_ids(
-                &[0, 1],
-                &[
-                    HashMap::from([("tag".to_string(), serde_json::json!("first"))]),
-                    HashMap::from([("tag".to_string(), serde_json::json!("second"))]),
-                ],
-            )
-            .unwrap();
-        drop(legacy);
 
-        let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
-        assert!(collection_path.join(STABLE_FIELD_IDS_FILE).exists());
-        assert_eq!(coll.query_fields("\"tag\" = 'second'").unwrap(), vec![20]);
-        coll.delete_items(&[10]).unwrap();
-        assert_eq!(coll.compact().unwrap(), 1);
-        assert_eq!(coll.retrieve_fields(&[20]).unwrap()[0]["tag"], "second");
+        let error = match Collection::open(tmp.path(), "col", 4, 100) {
+            Ok(_) => panic!("legacy row-keyed field storage should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("legacy row-keyed field storage is no longer supported"));
     }
 
     #[test]
