@@ -1,0 +1,2350 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+        <meta name="author" content="Birch Kwok">
+      
+      
+        <link rel="canonical" href="https://birchkwok.github.io/LynseDB/0.6.0/comparisons/vector_database_benchmarks/">
+      
+      
+        <link rel="prev" href="../chromadb_lancedb/">
+      
+      
+        <link rel="next" href="../../production_roadmap/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../img/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Vector database benchmarks - LynseDB</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#vector-database-benchmarks" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="LynseDB" class="md-header__button md-logo" aria-label="LynseDB" data-md-component="logo">
+      
+  <img src="../../img/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            LynseDB
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Vector database benchmarks
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9zM20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12zm-9.15 3.96h2.3L12 9z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/BirchKwok/LynseDB" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    birchkwok/LynseDB
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../quickstart/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Quickstart
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../tutorials/learning_path/" class="md-tabs__link">
+          
+  
+  
+  Tutorials
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../../releases/" class="md-tabs__link">
+          
+  
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../client/" class="md-tabs__link">
+          
+  
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/cluster-deployment/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+  
+
+<nav class="md-nav md-nav--primary md-nav--lifted md-nav--integrated" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="LynseDB" class="md-nav__button md-logo" aria-label="LynseDB" data-md-component="logo">
+      
+  <img src="../../img/logo.png" alt="logo">
+
+    </a>
+    LynseDB
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/BirchKwok/LynseDB" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    birchkwok/LynseDB
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorials
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Tutorials
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/learning_path/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Learning path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/core_concepts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core concepts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/connect_and_deploy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect and deploy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/databases_collections/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Databases and collections
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/add_vectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add vectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/search_and_filter/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Search and filter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/metadata_filter_cookbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metadata filter cookbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/indexing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Indexing guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/named_sparse_hybrid/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Named, sparse, and hybrid search
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/rag_workflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build a RAG workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/performance_tuning/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance tuning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backup and maintenance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Release Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../result_view/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ResultView
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+          
+          
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4_3" id="__nav_4_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Comparisons
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Comparisons
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../chromadb_lancedb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LynseDB vs ChromaDB and LanceDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vector database benchmarks
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vector database benchmarks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#run-details" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run Details
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#float32-usearch-follow-up" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Float32 + USEARCH Follow-Up
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1m-row-scale-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1M Row Scale Check
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#persisted-vector-metadatatext-index-ingest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Persisted Vector + Metadata/Text-Index Ingest
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#vector-search" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Vector Search
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#recall" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recall
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#filtered-vector-search" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Filtered Vector Search
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#hybrid-search" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hybrid Search
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#resources" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resources
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#startup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Startup
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lynsedb-http" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LynseDB HTTP
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../production_roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../client/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python client
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_2" id="__nav_5_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HTTP API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    HTTP API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../http_api/serve_api/app/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Server overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../http_api/serve_api/database_ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Database endpoints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../http_api/serve_api/collection_ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Collection endpoints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../http_api/client_api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python HTTP client
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/cluster-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cluster deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="../.." class="md-path__link">
+        
+  <span class="md-ellipsis">
+    Home
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="../../releases/" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Concepts
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="../chromadb_lancedb/" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Comparisons
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="vector-database-benchmarks">Vector Database Benchmarks<a class="headerlink" href="#vector-database-benchmarks" title="Permanent link">&para;</a></h1>
+<p>This page records a local run of the cross-engine benchmark suite in
+<code>benchmarks/chroma_lancedb_qdrant_lynsedb</code>.</p>
+<p>Benchmark results are environment-sensitive. Treat these numbers as one
+reproducible reference run, not as universal performance guarantees. RSS
+deltas, startup latency, and short resource-run ingest throughput are especially
+sensitive to allocator state, import order, and OS cache behavior.</p>
+<h2 id="run-details">Run Details<a class="headerlink" href="#run-details" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Date</td>
+<td>2026-06-16</td>
+</tr>
+<tr>
+<td>Command</td>
+<td><code>python benchmarks/chroma_lancedb_qdrant_lynsedb/bench.py all --engines lynsedb,lancedb --n 100000 --queries 100 --dim 128 --k 10 --batch-size 1000 --warmup 5 --jsonl benchmarks/chroma_lancedb_qdrant_lynsedb/results-2026-06-16-optimized-final.jsonl</code></td>
+</tr>
+<tr>
+<td>Dataset</td>
+<td>100,000 vectors, 128 dimensions, 100 queries, top-k 10</td>
+</tr>
+<tr>
+<td>Python</td>
+<td>3.12.2</td>
+</tr>
+<tr>
+<td>Platform</td>
+<td>macOS 26.5.1, arm64</td>
+</tr>
+<tr>
+<td>LynseDB</td>
+<td>0.5.0</td>
+</tr>
+<tr>
+<td>ChromaDB</td>
+<td>Not rerun in this LynseDB/LanceDB validation</td>
+</tr>
+<tr>
+<td>LanceDB</td>
+<td>0.33.0</td>
+</tr>
+<tr>
+<td>Raw results</td>
+<td><code>benchmarks/chroma_lancedb_qdrant_lynsedb/results-2026-06-16-optimized-final.jsonl</code></td>
+</tr>
+</tbody>
+</table>
+<p>The suite uses normalized synthetic vectors and exact NumPy inner-product
+ground truth for recall checks. LynseDB uses <code>FLAT-IP</code>, <code>float16</code> dense-vector
+storage, compact persisted text indexes, and the embedded benchmark adapter's
+fast commit path. LanceDB stores normalized vectors. Both embedded engines
+are ingested through their batch insert APIs.</p>
+<h2 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h2>
+<p>In this optimized 100k-row run, LynseDB is faster than LanceDB on persisted
+batch ingest, vector search, filtered search, hybrid search, resource-run
+ingest, and startup, while using less disk. LynseDB's <code>float16</code> vector storage
+keeps the footprint smaller; against the benchmark's original <code>float32</code> NumPy
+ground truth this run measured 0.999 recall@10 on unfiltered vector search and
+1.000 filtered recall@10.</p>
+<h2 id="float32-usearch-follow-up">Float32 + USEARCH Follow-Up<a class="headerlink" href="#float32-usearch-follow-up" title="Permanent link">&para;</a></h2>
+<p>A follow-up run on 2026-06-16 compares LynseDB in <code>float32</code> mode with LanceDB
+and USEARCH:</p>
+<p><code>python benchmarks/chroma_lancedb_qdrant_lynsedb/bench.py &lt;command&gt; --engines lynsedb-f32,lancedb,usearch --n 100000 --queries 100 --dim 128 --k 10 --batch-size 1000 --warmup 5 --jsonl benchmarks/chroma_lancedb_qdrant_lynsedb/results-2026-06-16-f32-usearch.jsonl</code></p>
+<p>LynseDB <code>float32</code> uses the same <code>FLAT-IP</code> index and exact recall target as the
+main embedded run. USEARCH 2.25.3 is included as a vector-only HNSW index with
+<code>metric="ip"</code>, <code>dtype="f32"</code>, and <code>USEARCH_EXPANSION_SEARCH=128</code> default. It
+does not implement metadata filters or text/vector hybrid search in this suite,
+so those rows are skipped instead of emulated in Python.</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th style="text-align: right;">LynseDB-f32</th>
+<th style="text-align: right;">LanceDB</th>
+<th style="text-align: right;">USEARCH</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Batch ingest vectors/s</td>
+<td style="text-align: right;">88,542</td>
+<td style="text-align: right;">70,577</td>
+<td style="text-align: right;">10,351</td>
+</tr>
+<tr>
+<td>Ingest time</td>
+<td style="text-align: right;">1.13 s</td>
+<td style="text-align: right;">1.42 s</td>
+<td style="text-align: right;">9.66 s</td>
+</tr>
+<tr>
+<td>Disk after ingest MB</td>
+<td style="text-align: right;">66.75</td>
+<td style="text-align: right;">55.75</td>
+<td style="text-align: right;">63.03</td>
+</tr>
+<tr>
+<td>Vector search mean ms</td>
+<td style="text-align: right;">0.671</td>
+<td style="text-align: right;">12.620</td>
+<td style="text-align: right;">0.571</td>
+</tr>
+<tr>
+<td>Vector search QPS</td>
+<td style="text-align: right;">1,491</td>
+<td style="text-align: right;">79</td>
+<td style="text-align: right;">1,751</td>
+</tr>
+<tr>
+<td>Vector search recall@10</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">0.6020</td>
+</tr>
+<tr>
+<td>Recall run mean ms</td>
+<td style="text-align: right;">0.606</td>
+<td style="text-align: right;">12.385</td>
+<td style="text-align: right;">0.510</td>
+</tr>
+<tr>
+<td>Recall run QPS</td>
+<td style="text-align: right;">1,650</td>
+<td style="text-align: right;">81</td>
+<td style="text-align: right;">1,961</td>
+</tr>
+<tr>
+<td>Recall run recall@10</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">0.5850</td>
+</tr>
+<tr>
+<td>Filtered search mean ms</td>
+<td style="text-align: right;">0.118</td>
+<td style="text-align: right;">14.442</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+<tr>
+<td>Filtered search QPS</td>
+<td style="text-align: right;">8,474</td>
+<td style="text-align: right;">69</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+<tr>
+<td>Filtered recall@10</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+<tr>
+<td>Hybrid search mean ms</td>
+<td style="text-align: right;">4.634</td>
+<td style="text-align: right;">13.103</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+<tr>
+<td>Hybrid search QPS</td>
+<td style="text-align: right;">216</td>
+<td style="text-align: right;">76</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+<tr>
+<td>Hybrid topic hit rate</td>
+<td style="text-align: right;">0.6040</td>
+<td style="text-align: right;">0.6020</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+<tr>
+<td>Resource-run vectors/s</td>
+<td style="text-align: right;">92,086</td>
+<td style="text-align: right;">86,914</td>
+<td style="text-align: right;">14,762</td>
+</tr>
+<tr>
+<td>Startup mean ms</td>
+<td style="text-align: right;">6.782</td>
+<td style="text-align: right;">160.300</td>
+<td style="text-align: right;">2.068</td>
+</tr>
+</tbody>
+</table>
+<p>In this <code>float32</code> validation, LynseDB remains ahead of LanceDB on persisted
+ingest, exact vector search, filtered search, hybrid search, and the separate
+resource-run ingest check. USEARCH's HNSW search is slightly faster than
+LynseDB's exact flat search on this run, but at much lower recall and without
+database-level metadata or hybrid retrieval features.</p>
+<h2 id="1m-row-scale-check">1M Row Scale Check<a class="headerlink" href="#1m-row-scale-check" title="Permanent link">&para;</a></h2>
+<p>A larger single-machine check was also run on 2026-06-16 with 1,000,000 vectors,
+128 dimensions, 100 queries, top-k 10, and batch insert APIs:</p>
+<p><code>python benchmarks/chroma_lancedb_qdrant_lynsedb/bench.py ... --n 1000000 --dim 128 --queries 100 --k 10 --jsonl benchmarks/chroma_lancedb_qdrant_lynsedb/results-2026-06-16-1m.jsonl</code></p>
+<p>ChromaDB is not included in this 1M summary because the recorded run failed
+under the selected batch-size settings. LanceDB completed the scale check, so
+the table compares LynseDB and LanceDB directly.</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th style="text-align: right;">LynseDB</th>
+<th style="text-align: right;">LanceDB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Batch ingest vectors/s</td>
+<td style="text-align: right;">87,760</td>
+<td style="text-align: right;">94,007</td>
+</tr>
+<tr>
+<td>Ingest time</td>
+<td style="text-align: right;">11.39 s</td>
+<td style="text-align: right;">10.64 s</td>
+</tr>
+<tr>
+<td>Disk after ingest MB</td>
+<td style="text-align: right;">405.68</td>
+<td style="text-align: right;">541.83</td>
+</tr>
+<tr>
+<td>Vector search mean ms</td>
+<td style="text-align: right;">15.547</td>
+<td style="text-align: right;">113.123</td>
+</tr>
+<tr>
+<td>Vector search QPS</td>
+<td style="text-align: right;">64.32</td>
+<td style="text-align: right;">8.84</td>
+</tr>
+<tr>
+<td>Vector search recall@10</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">1.0000</td>
+</tr>
+<tr>
+<td>Recall run mean ms</td>
+<td style="text-align: right;">13.518</td>
+<td style="text-align: right;">120.522</td>
+</tr>
+<tr>
+<td>Recall run QPS</td>
+<td style="text-align: right;">73.97</td>
+<td style="text-align: right;">8.30</td>
+</tr>
+<tr>
+<td>Filtered search mean ms</td>
+<td style="text-align: right;">2.139</td>
+<td style="text-align: right;">122.961</td>
+</tr>
+<tr>
+<td>Filtered search QPS</td>
+<td style="text-align: right;">467.42</td>
+<td style="text-align: right;">8.13</td>
+</tr>
+<tr>
+<td>Filtered recall@10</td>
+<td style="text-align: right;">0.9990</td>
+<td style="text-align: right;">1.0000</td>
+</tr>
+</tbody>
+</table>
+<p>This run shows LynseDB comfortably handling 1 million 128-dimensional vectors on
+a single machine: ingest completes in about 11.4 seconds, persisted storage is
+about 406 MB, exact vector search stays around 15.5 ms mean latency, and
+metadata-filtered search stays around 2.1 ms mean latency.</p>
+<h2 id="persisted-vector-metadatatext-index-ingest">Persisted Vector + Metadata/Text-Index Ingest<a class="headerlink" href="#persisted-vector-metadatatext-index-ingest" title="Permanent link">&para;</a></h2>
+<p>This ingest metric includes committed vector writes, metadata persistence, and
+the text index needed by the hybrid-search benchmark. It is not a pure
+vector-only append microbenchmark.</p>
+<table>
+<thead>
+<tr>
+<th>Engine</th>
+<th style="text-align: right;">Vectors/s</th>
+<th style="text-align: right;">Disk MB</th>
+<th style="text-align: right;">RSS delta MB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>lynsedb</td>
+<td style="text-align: right;">96,940</td>
+<td style="text-align: right;">42.34</td>
+<td style="text-align: right;">390.67</td>
+</tr>
+<tr>
+<td>lancedb</td>
+<td style="text-align: right;">88,788</td>
+<td style="text-align: right;">55.74</td>
+<td style="text-align: right;">211.30</td>
+</tr>
+</tbody>
+</table>
+<h2 id="vector-search">Vector Search<a class="headerlink" href="#vector-search" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Engine</th>
+<th style="text-align: right;">Mean ms</th>
+<th style="text-align: right;">P50 ms</th>
+<th style="text-align: right;">P95 ms</th>
+<th style="text-align: right;">QPS</th>
+<th style="text-align: right;">Recall@10</th>
+<th style="text-align: right;">Disk MB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>lynsedb</td>
+<td style="text-align: right;">1.811</td>
+<td style="text-align: right;">1.782</td>
+<td style="text-align: right;">2.138</td>
+<td style="text-align: right;">552</td>
+<td style="text-align: right;">0.9990</td>
+<td style="text-align: right;">42.34</td>
+</tr>
+<tr>
+<td>lancedb</td>
+<td style="text-align: right;">11.449</td>
+<td style="text-align: right;">11.293</td>
+<td style="text-align: right;">12.908</td>
+<td style="text-align: right;">87</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">55.76</td>
+</tr>
+</tbody>
+</table>
+<h2 id="recall">Recall<a class="headerlink" href="#recall" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Engine</th>
+<th style="text-align: right;">Mean ms</th>
+<th style="text-align: right;">P50 ms</th>
+<th style="text-align: right;">P95 ms</th>
+<th style="text-align: right;">QPS</th>
+<th style="text-align: right;">Recall@10</th>
+<th style="text-align: right;">Disk MB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>lynsedb</td>
+<td style="text-align: right;">1.856</td>
+<td style="text-align: right;">1.789</td>
+<td style="text-align: right;">2.044</td>
+<td style="text-align: right;">539</td>
+<td style="text-align: right;">0.9990</td>
+<td style="text-align: right;">42.34</td>
+</tr>
+<tr>
+<td>lancedb</td>
+<td style="text-align: right;">14.475</td>
+<td style="text-align: right;">14.385</td>
+<td style="text-align: right;">16.969</td>
+<td style="text-align: right;">69</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">55.75</td>
+</tr>
+</tbody>
+</table>
+<h2 id="filtered-vector-search">Filtered Vector Search<a class="headerlink" href="#filtered-vector-search" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Engine</th>
+<th style="text-align: right;">Mean ms</th>
+<th style="text-align: right;">P50 ms</th>
+<th style="text-align: right;">P95 ms</th>
+<th style="text-align: right;">QPS</th>
+<th style="text-align: right;">Filtered recall@10</th>
+<th style="text-align: right;">Disk MB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>lynsedb</td>
+<td style="text-align: right;">0.204</td>
+<td style="text-align: right;">0.211</td>
+<td style="text-align: right;">0.272</td>
+<td style="text-align: right;">4,898</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">42.34</td>
+</tr>
+<tr>
+<td>lancedb</td>
+<td style="text-align: right;">18.373</td>
+<td style="text-align: right;">18.131</td>
+<td style="text-align: right;">21.630</td>
+<td style="text-align: right;">54</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">55.75</td>
+</tr>
+</tbody>
+</table>
+<h2 id="hybrid-search">Hybrid Search<a class="headerlink" href="#hybrid-search" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Engine</th>
+<th style="text-align: right;">Mean ms</th>
+<th style="text-align: right;">P50 ms</th>
+<th style="text-align: right;">P95 ms</th>
+<th style="text-align: right;">QPS</th>
+<th>Topic hit rate / note</th>
+<th style="text-align: right;">Disk MB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>lynsedb</td>
+<td style="text-align: right;">5.820</td>
+<td style="text-align: right;">4.094</td>
+<td style="text-align: right;">16.494</td>
+<td style="text-align: right;">172</td>
+<td>0.6040</td>
+<td style="text-align: right;">42.34</td>
+</tr>
+<tr>
+<td>lancedb</td>
+<td style="text-align: right;">18.545</td>
+<td style="text-align: right;">18.531</td>
+<td style="text-align: right;">21.542</td>
+<td style="text-align: right;">54</td>
+<td>0.6030</td>
+<td style="text-align: right;">55.74</td>
+</tr>
+</tbody>
+</table>
+<p><code>topic_hit_rate</code> is a synthetic sanity check for the benchmark's generated
+topics. It is not a relevance score for a production retrieval workload.</p>
+<h2 id="resources">Resources<a class="headerlink" href="#resources" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Engine</th>
+<th style="text-align: right;">Resource-run vectors/s</th>
+<th style="text-align: right;">Disk MB</th>
+<th style="text-align: right;">RSS delta MB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>lynsedb</td>
+<td style="text-align: right;">96,756</td>
+<td style="text-align: right;">42.34</td>
+<td style="text-align: right;">-0.44</td>
+</tr>
+<tr>
+<td>lancedb</td>
+<td style="text-align: right;">75,190</td>
+<td style="text-align: right;">55.75</td>
+<td style="text-align: right;">11.31</td>
+</tr>
+</tbody>
+</table>
+<p>RSS deltas are measured in-process and can vary with allocator state and import
+order. Negative deltas can occur when a later run reuses allocator state or the
+runtime releases memory during the measurement. Use disk size and repeated runs
+when comparing storage footprint.</p>
+<h2 id="startup">Startup<a class="headerlink" href="#startup" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Engine</th>
+<th style="text-align: right;">Startup mean ms</th>
+<th style="text-align: right;">Startup P50 ms</th>
+<th style="text-align: right;">Startup P95 ms</th>
+<th style="text-align: right;">QPS</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>lynsedb</td>
+<td style="text-align: right;">1.986</td>
+<td style="text-align: right;">1.815</td>
+<td style="text-align: right;">2.713</td>
+<td style="text-align: right;">504</td>
+</tr>
+<tr>
+<td>lancedb</td>
+<td style="text-align: right;">2.106</td>
+<td style="text-align: right;">2.211</td>
+<td style="text-align: right;">2.386</td>
+<td style="text-align: right;">475</td>
+</tr>
+</tbody>
+</table>
+<h2 id="lynsedb-http">LynseDB HTTP<a class="headerlink" href="#lynsedb-http" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Engine</th>
+<th style="text-align: right;">Mean ms</th>
+<th style="text-align: right;">P50 ms</th>
+<th style="text-align: right;">P95 ms</th>
+<th style="text-align: right;">QPS</th>
+<th style="text-align: right;">Recall@10</th>
+<th style="text-align: right;">Disk MB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>lynsedb-http</td>
+<td style="text-align: right;">2.876</td>
+<td style="text-align: right;">2.837</td>
+<td style="text-align: right;">3.354</td>
+<td style="text-align: right;">348</td>
+<td style="text-align: right;">0.9990</td>
+<td style="text-align: right;">44.71</td>
+</tr>
+</tbody>
+</table>
+<p>The HTTP row starts a local LynseDB service, ingests the same dataset remotely,
+and runs the same query workload through the client.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.top", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.path", "toc.integrate", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.select", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,2235 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+        <meta name="author" content="Birch Kwok">
+      
+      
+        <link rel="canonical" href="https://birchkwok.github.io/LynseDB/0.6.0/tutorials/indexing/">
+      
+      
+        <link rel="prev" href="../metadata_filter_cookbook/">
+      
+      
+        <link rel="next" href="../named_sparse_hybrid/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../img/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Indexing guide - LynseDB</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#tutorial-indexing-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="LynseDB" class="md-header__button md-logo" aria-label="LynseDB" data-md-component="logo">
+      
+  <img src="../../img/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            LynseDB
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Indexing guide
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9zM20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12zm-9.15 3.96h2.3L12 9z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/BirchKwok/LynseDB" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    birchkwok/LynseDB
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../quickstart/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Quickstart
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../learning_path/" class="md-tabs__link">
+          
+  
+  
+  Tutorials
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../releases/" class="md-tabs__link">
+          
+  
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../client/" class="md-tabs__link">
+          
+  
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/cluster-deployment/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+  
+
+<nav class="md-nav md-nav--primary md-nav--lifted md-nav--integrated" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="LynseDB" class="md-nav__button md-logo" aria-label="LynseDB" data-md-component="logo">
+      
+  <img src="../../img/logo.png" alt="logo">
+
+    </a>
+    LynseDB
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/BirchKwok/LynseDB" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    birchkwok/LynseDB
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorials
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Tutorials
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../learning_path/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Learning path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../core_concepts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core concepts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../connect_and_deploy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect and deploy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../databases_collections/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Databases and collections
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../add_vectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add vectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../search_and_filter/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Search and filter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metadata_filter_cookbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metadata filter cookbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Indexing guide
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Indexing guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-default-choice" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The default choice
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#metric-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Metric names
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#index-families" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Index families
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#build-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Build lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#build-and-remove-indexes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Build and remove indexes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ivf-and-spann-parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IVF and SPANN parameters
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#hnsw-search-breadth" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        HNSW search breadth
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#approximate-flat-distance-rounding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Approximate flat distance rounding
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#named-vector-indexes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Named vector indexes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#quantized-indexes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quantized indexes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#binary-indexes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Binary indexes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#practical-tuning-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Practical tuning workflow
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supported-index-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported index names
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting-index-choices" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting index choices
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../named_sparse_hybrid/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Named, sparse, and hybrid search
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rag_workflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build a RAG workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance_tuning/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance tuning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backup and maintenance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Release Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../result_view/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ResultView
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_3" id="__nav_4_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Comparisons
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Comparisons
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../comparisons/chromadb_lancedb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LynseDB vs ChromaDB and LanceDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../comparisons/vector_database_benchmarks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vector database benchmarks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../production_roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../client/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python client
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_2" id="__nav_5_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HTTP API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    HTTP API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../http_api/serve_api/app/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Server overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../http_api/serve_api/database_ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Database endpoints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../http_api/serve_api/collection_ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Collection endpoints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../http_api/client_api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python HTTP client
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/cluster-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cluster deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="../.." class="md-path__link">
+        
+  <span class="md-ellipsis">
+    Home
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="../learning_path/" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Tutorials
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="tutorial-indexing-guide">Tutorial: Indexing Guide<a class="headerlink" href="#tutorial-indexing-guide" title="Permanent link">&para;</a></h1>
+<p>Indexes control the tradeoff between recall, latency, memory, disk usage, and
+build time.</p>
+<h2 id="the-default-choice">The default choice<a class="headerlink" href="#the-default-choice" title="Permanent link">&para;</a></h2>
+<p>Start with a flat metric index:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-L2&quot;</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Flat search is exhaustive and simple. It is a good baseline for correctness,
+small collections, and evaluation.</p>
+<p>A practical first decision:</p>
+<table>
+<thead>
+<tr>
+<th>Collection size and goal</th>
+<th>Start with</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>development, tests, evaluation</td>
+<td><code>FLAT-IP</code>, <code>FLAT-L2</code>, or <code>FLAT-COS</code></td>
+</tr>
+<tr>
+<td>low-latency online ANN</td>
+<td><code>HNSW-IP</code>, <code>HNSW-L2</code>, or <code>HNSW-Cos</code></td>
+</tr>
+<tr>
+<td>large collections with explicit probe tuning</td>
+<td><code>IVF-L2</code>, <code>SPANN-L2</code>, <code>IVF-COS</code>, or <code>SPANN-COS</code></td>
+</tr>
+<tr>
+<td>memory pressure from graph indexes</td>
+<td><code>DiskANN-IP</code>, <code>DiskANN-L2</code>, or <code>DiskANN-Cos</code></td>
+</tr>
+<tr>
+<td>lower memory or disk footprint</td>
+<td>SQ8, PQ, RaBitQ, or PolarVec variants</td>
+</tr>
+<tr>
+<td>binary vectors</td>
+<td><code>FLAT-HAMMING-BINARY</code>, <code>FLAT-JACCARD-BINARY</code>, or IVF binary variants</td>
+</tr>
+</tbody>
+</table>
+<h2 id="metric-names">Metric names<a class="headerlink" href="#metric-names" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Index suffix</th>
+<th>Metric</th>
+<th>Best for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>*-IP</code></td>
+<td>Inner product</td>
+<td>normalized embeddings, maximum-score retrieval</td>
+</tr>
+<tr>
+<td><code>-L2</code></td>
+<td>Squared L2 distance</td>
+<td>Euclidean-distance embeddings</td>
+</tr>
+<tr>
+<td><code>-COS</code> or <code>-Cos</code></td>
+<td>Cosine similarity</td>
+<td>embeddings where angular similarity matters</td>
+</tr>
+<tr>
+<td><code>-HAMMING-BINARY</code></td>
+<td>Hamming distance</td>
+<td>binary vectors</td>
+</tr>
+<tr>
+<td><code>-JACCARD-BINARY</code></td>
+<td>Jaccard distance</td>
+<td>binary sets</td>
+</tr>
+</tbody>
+</table>
+<p>Choose the metric that matches how your embedding model was trained.</p>
+<p>Metric guidance:</p>
+<ul>
+<li>use cosine when your embedding model documentation recommends cosine;</li>
+<li>use inner product when embeddings are normalized and maximum score retrieval
+  is desired;</li>
+<li>use L2 when Euclidean distance is meaningful for your model;</li>
+<li>use Hamming or Jaccard only for binary vectors or binary-set style features.</li>
+</ul>
+<h2 id="index-families">Index families<a class="headerlink" href="#index-families" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Example</th>
+<th>Strength</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Flat</td>
+<td><code>FLAT-L2</code></td>
+<td>highest recall and simplest behavior</td>
+<td>Latency grows with collection size.</td>
+</tr>
+<tr>
+<td>HNSW</td>
+<td><code>HNSW-L2</code></td>
+<td>low-latency ANN</td>
+<td>Use <code>nprobe</code> as search breadth (<code>ef_search</code>).</td>
+</tr>
+<tr>
+<td>IVF</td>
+<td><code>IVF-L2</code></td>
+<td>large collections with tunable probes</td>
+<td>Requires <code>n_clusters</code>; use <code>nprobe</code> at search time.</td>
+</tr>
+<tr>
+<td>SPANN</td>
+<td><code>SPANN-L2</code></td>
+<td>partition ANN with boundary replicas</td>
+<td>Requires <code>n_clusters</code>; use <code>nprobe</code> at search time.</td>
+</tr>
+<tr>
+<td>DiskANN</td>
+<td><code>DiskANN-L2</code></td>
+<td>disk-friendly graph ANN</td>
+<td>Useful when memory pressure matters.</td>
+</tr>
+<tr>
+<td>Quantized flat</td>
+<td><code>FLAT-IP-SQ8</code>, <code>FLAT-L2-PQ</code>, <code>FLAT-IP-RABITQ</code></td>
+<td>lower memory footprint</td>
+<td>Some variants use two-pass search to preserve quality.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="build-lifecycle">Build lifecycle<a class="headerlink" href="#build-lifecycle" title="Permanent link">&para;</a></h2>
+<p>Indexes are persisted with the collection. Reopening the collection reloads the
+index metadata and index files where applicable.</p>
+<p>After a large initial load:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">with</span> <span class="n">collection</span><span class="o">.</span><span class="n">insert_session</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    <span class="k">for</span> <span class="n">ids</span><span class="p">,</span> <span class="n">vectors</span><span class="p">,</span> <span class="n">fields</span> <span class="ow">in</span> <span class="n">embedding_batches</span><span class="p">:</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>        <span class="n">session</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">ids</span><span class="o">=</span><span class="n">ids</span><span class="p">,</span> <span class="n">vectors</span><span class="o">=</span><span class="n">vectors</span><span class="p">,</span> <span class="n">fields</span><span class="o">=</span><span class="n">fields</span><span class="p">,</span> <span class="n">batch_size</span><span class="o">=</span><span class="mi">1000</span><span class="p">)</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-L2&quot;</span><span class="p">)</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="n">collection</span><span class="o">.</span><span class="n">checkpoint</span><span class="p">()</span>
+</span></code></pre></div>
+<p>After many incremental writes, rebuild or switch index modes when recall or
+latency has drifted from your target:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-L2&quot;</span><span class="p">)</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">collection</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
+</span></code></pre></div>
+<p>LynseDB can insert into existing graph indexes for supported paths, but a
+controlled rebuild after large changes is still the easiest way to re-baseline
+performance.</p>
+<h2 id="build-and-remove-indexes">Build and remove indexes<a class="headerlink" href="#build-and-remove-indexes" title="Permanent link">&para;</a></h2>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-L2&quot;</span><span class="p">)</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">index_mode</span><span class="p">)</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="n">collection</span><span class="o">.</span><span class="n">remove_index</span><span class="p">()</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="nb">print</span><span class="p">(</span><span class="n">collection</span><span class="o">.</span><span class="n">index_mode</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Removing an index returns the collection to flat search.</p>
+<h2 id="ivf-and-spann-parameters">IVF and SPANN parameters<a class="headerlink" href="#ivf-and-spann-parameters" title="Permanent link">&para;</a></h2>
+<p>IVF and SPANN split vectors into coarse clusters. <code>n_clusters</code> controls how many
+clusters are built.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-L2&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;SPANN-L2&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Rules:</p>
+<ul>
+<li><code>n_clusters</code> is used only for IVF and SPANN indexes.</li>
+<li>For indexes other than IVF/SPANN, <code>n_clusters</code> is allowed and ignored by the Python API.</li>
+<li>For IVF and SPANN indexes, <code>n_clusters</code> must be greater than zero.</li>
+<li>More clusters usually reduce scanned vectors per query but can require higher
+  <code>nprobe</code> for recall.</li>
+</ul>
+<p>Search with:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">query</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">nprobe</span><span class="o">=</span><span class="mi">20</span><span class="p">)</span>
+</span></code></pre></div>
+<p>For IVF and SPANN, <code>nprobe</code> is the number of clusters to scan. Higher values
+improve recall and increase latency.</p>
+<p>Starting values:</p>
+<ul>
+<li><code>n_clusters=64</code> for small experiments;</li>
+<li><code>n_clusters=256</code> or <code>1024</code> for larger collections;</li>
+<li><code>nprobe=10</code> as a default search starting point;</li>
+<li>increase <code>nprobe</code> until recall is acceptable against a flat baseline.</li>
+</ul>
+<h2 id="hnsw-search-breadth">HNSW search breadth<a class="headerlink" href="#hnsw-search-breadth" title="Permanent link">&para;</a></h2>
+<p>For HNSW, <code>nprobe</code> is used as the search beam width:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-L2&quot;</span><span class="p">)</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="n">result</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">query</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">nprobe</span><span class="o">=</span><span class="mi">64</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Higher <code>nprobe</code> generally improves recall and increases latency.
+Flat, PQ, RaBitQ, PolarVec, and named vector-field searches ignore <code>nprobe</code>.</p>
+<p>Start with <code>nprobe=32</code> or <code>64</code> for HNSW evaluation, then tune down for latency
+or up for recall.</p>
+<h2 id="approximate-flat-distance-rounding">Approximate flat distance rounding<a class="headerlink" href="#approximate-flat-distance-rounding" title="Permanent link">&para;</a></h2>
+<p>For flat IP, L2, and cosine paths, <code>approx=True</code> enables metric-specific
+distance rounding controlled by <code>eps</code>.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">query</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">approx</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">eps</span><span class="o">=</span><span class="mf">1e-4</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Hamming and Jaccard binary metrics ignore <code>approx=True</code> and always use the exact
+binary-distance path.</p>
+<p>Use <code>approx=True</code> only after measuring quality on your own evaluation set.</p>
+<h2 id="named-vector-indexes">Named vector indexes<a class="headerlink" href="#named-vector-indexes" title="Permanent link">&para;</a></h2>
+<p>Each named vector field has its own metric, dimension, and index:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">create_vector_field</span><span class="p">(</span><span class="s2">&quot;image&quot;</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span> <span class="n">metric</span><span class="o">=</span><span class="s2">&quot;l2&quot;</span><span class="p">)</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">collection</span><span class="o">.</span><span class="n">add_named_vectors</span><span class="p">(</span><span class="s2">&quot;image&quot;</span><span class="p">,</span> <span class="n">image_vectors</span><span class="p">,</span> <span class="n">ids</span><span class="o">=</span><span class="n">image_ids</span><span class="p">)</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-L2&quot;</span><span class="p">,</span> <span class="n">field_name</span><span class="o">=</span><span class="s2">&quot;image&quot;</span><span class="p">)</span>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="n">result</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">image_query</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">vector_field</span><span class="o">=</span><span class="s2">&quot;image&quot;</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Remove only that field's index:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">remove_index</span><span class="p">(</span><span class="n">field_name</span><span class="o">=</span><span class="s2">&quot;image&quot;</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Rules for named fields:</p>
+<ul>
+<li>create the field before adding named vectors;</li>
+<li>add named vectors only for IDs that already exist in the primary collection;</li>
+<li>choose the field metric at creation time;</li>
+<li>build or remove the named field index with <code>field_name=...</code>;</li>
+<li><code>where</code> filters still use the row metadata fields.</li>
+</ul>
+<h2 id="quantized-indexes">Quantized indexes<a class="headerlink" href="#quantized-indexes" title="Permanent link">&para;</a></h2>
+<p>Quantized indexes reduce memory or disk pressure. They are most useful when
+vector bandwidth or index size is the bottleneck.</p>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Examples</th>
+<th>When to try</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SQ8</td>
+<td><code>FLAT-L2-SQ8</code>, <code>HNSW-L2-SQ8</code>, <code>IVF-COS-SQ8</code></td>
+<td>You want scalar quantization with familiar index families.</td>
+</tr>
+<tr>
+<td>PQ</td>
+<td><code>FLAT-L2-PQ</code>, <code>FLAT-IP-PQ8</code>, <code>FLAT-IP-PQ16</code></td>
+<td>You want product quantization and can evaluate recall tradeoffs.</td>
+</tr>
+<tr>
+<td>RaBitQ</td>
+<td><code>FLAT-IP-RABITQ</code>, <code>FLAT-L2-RABITQ</code></td>
+<td>You want aggressive binary-style compression.</td>
+</tr>
+<tr>
+<td>PolarVec</td>
+<td><code>FLAT-IP-POLARVEC4</code>, <code>FLAT-L2-POLARVEC</code></td>
+<td>You want training-free multi-bit quantization.</td>
+</tr>
+</tbody>
+</table>
+<p>Quantized indexes should be evaluated against a flat baseline. Use the same
+queries, filters, and <code>k</code> values your application uses.</p>
+<h2 id="binary-indexes">Binary indexes<a class="headerlink" href="#binary-indexes" title="Permanent link">&para;</a></h2>
+<p>Binary indexes are for binary vectors or binary-set style representations:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-HAMMING-BINARY&quot;</span><span class="p">)</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-JACCARD-BINARY&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span></code></pre></div>
+<p>For Hamming and Jaccard, lower distance is better. <code>approx</code> and <code>eps</code> do not
+change binary-distance search behavior.</p>
+<h2 id="practical-tuning-workflow">Practical tuning workflow<a class="headerlink" href="#practical-tuning-workflow" title="Permanent link">&para;</a></h2>
+<ol>
+<li>Build <code>FLAT-*</code> first and record quality on an evaluation set.</li>
+<li>Try <code>HNSW-*</code> for low-latency online search.</li>
+<li>Try <code>IVF-*</code> when you need more explicit recall/latency tuning.</li>
+<li>Use quantized variants when memory or disk footprint is the bottleneck.</li>
+<li>Always compare recall against the flat baseline before deploying.</li>
+</ol>
+<p>Evaluation loop:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="k">def</span><span class="w"> </span><span class="nf">evaluate</span><span class="p">(</span><span class="n">index_mode</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">nprobe</span><span class="o">=</span><span class="mi">10</span><span class="p">):</span>
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>    <span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="n">index_mode</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="n">n_clusters</span><span class="p">)</span>
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>    <span class="n">result</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">query</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">nprobe</span><span class="o">=</span><span class="n">nprobe</span><span class="p">)</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>    <span class="k">return</span> <span class="n">result</span><span class="o">.</span><span class="n">ids</span><span class="o">.</span><span class="n">tolist</span><span class="p">()</span>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="n">baseline</span> <span class="o">=</span> <span class="n">evaluate</span><span class="p">(</span><span class="s2">&quot;FLAT-L2&quot;</span><span class="p">)</span>
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="n">hnsw</span> <span class="o">=</span> <span class="n">evaluate</span><span class="p">(</span><span class="s2">&quot;HNSW-L2&quot;</span><span class="p">,</span> <span class="n">nprobe</span><span class="o">=</span><span class="mi">64</span><span class="p">)</span>
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="n">ivf</span> <span class="o">=</span> <span class="n">evaluate</span><span class="p">(</span><span class="s2">&quot;IVF-L2&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">,</span> <span class="n">nprobe</span><span class="o">=</span><span class="mi">20</span><span class="p">)</span>
+</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>
+</span><span id="__span-11-10"><a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a><span class="nb">print</span><span class="p">(</span><span class="n">baseline</span><span class="p">)</span>
+</span><span id="__span-11-11"><a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a><span class="nb">print</span><span class="p">(</span><span class="n">hnsw</span><span class="p">)</span>
+</span><span id="__span-11-12"><a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a><span class="nb">print</span><span class="p">(</span><span class="n">ivf</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Use your own relevance labels when possible. If you do not have labels yet,
+measure overlap with the flat baseline as a first recall proxy.</p>
+<h2 id="supported-index-names">Supported index names<a class="headerlink" href="#supported-index-names" title="Permanent link">&para;</a></h2>
+<p>All index names are case-insensitive. The examples below show the supported
+spellings accepted by <code>build_index()</code>.</p>
+<p>Dense indexes:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-IP&quot;</span><span class="p">)</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-L2&quot;</span><span class="p">)</span>
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-COS&quot;</span><span class="p">)</span>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-COSINE&quot;</span><span class="p">)</span>
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-IP-SQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-L2-SQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-COS-SQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-12-8"><a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-COSINE-SQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-12-9"><a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a>
+</span><span id="__span-12-10"><a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-IP&quot;</span><span class="p">)</span>
+</span><span id="__span-12-11"><a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-L2&quot;</span><span class="p">)</span>
+</span><span id="__span-12-12"><a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-COS&quot;</span><span class="p">)</span>
+</span><span id="__span-12-13"><a id="__codelineno-12-13" name="__codelineno-12-13" href="#__codelineno-12-13"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-COSINE&quot;</span><span class="p">)</span>
+</span><span id="__span-12-14"><a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-IP-SQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-12-15"><a id="__codelineno-12-15" name="__codelineno-12-15" href="#__codelineno-12-15"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-L2-SQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-12-16"><a id="__codelineno-12-16" name="__codelineno-12-16" href="#__codelineno-12-16"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-COS-SQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-12-17"><a id="__codelineno-12-17" name="__codelineno-12-17" href="#__codelineno-12-17"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;HNSW-COSINE-SQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-12-18"><a id="__codelineno-12-18" name="__codelineno-12-18" href="#__codelineno-12-18"></a>
+</span><span id="__span-12-19"><a id="__codelineno-12-19" name="__codelineno-12-19" href="#__codelineno-12-19"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;DiskANN-IP&quot;</span><span class="p">)</span>
+</span><span id="__span-12-20"><a id="__codelineno-12-20" name="__codelineno-12-20" href="#__codelineno-12-20"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;DiskANN-L2&quot;</span><span class="p">)</span>
+</span><span id="__span-12-21"><a id="__codelineno-12-21" name="__codelineno-12-21" href="#__codelineno-12-21"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;DiskANN-COS&quot;</span><span class="p">)</span>
+</span><span id="__span-12-22"><a id="__codelineno-12-22" name="__codelineno-12-22" href="#__codelineno-12-22"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;DiskANN-COSINE&quot;</span><span class="p">)</span>
+</span><span id="__span-12-23"><a id="__codelineno-12-23" name="__codelineno-12-23" href="#__codelineno-12-23"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;DiskANN-IP-SQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-12-24"><a id="__codelineno-12-24" name="__codelineno-12-24" href="#__codelineno-12-24"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;DiskANN-L2-SQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-12-25"><a id="__codelineno-12-25" name="__codelineno-12-25" href="#__codelineno-12-25"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;DiskANN-COS-SQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-12-26"><a id="__codelineno-12-26" name="__codelineno-12-26" href="#__codelineno-12-26"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;DiskANN-COSINE-SQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-12-27"><a id="__codelineno-12-27" name="__codelineno-12-27" href="#__codelineno-12-27"></a>
+</span><span id="__span-12-28"><a id="__codelineno-12-28" name="__codelineno-12-28" href="#__codelineno-12-28"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-IP&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span><span id="__span-12-29"><a id="__codelineno-12-29" name="__codelineno-12-29" href="#__codelineno-12-29"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-L2&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span><span id="__span-12-30"><a id="__codelineno-12-30" name="__codelineno-12-30" href="#__codelineno-12-30"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-COS&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span><span id="__span-12-31"><a id="__codelineno-12-31" name="__codelineno-12-31" href="#__codelineno-12-31"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-COSINE&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span><span id="__span-12-32"><a id="__codelineno-12-32" name="__codelineno-12-32" href="#__codelineno-12-32"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-IP-SQ8&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span><span id="__span-12-33"><a id="__codelineno-12-33" name="__codelineno-12-33" href="#__codelineno-12-33"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-L2-SQ8&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span><span id="__span-12-34"><a id="__codelineno-12-34" name="__codelineno-12-34" href="#__codelineno-12-34"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-COS-SQ8&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span><span id="__span-12-35"><a id="__codelineno-12-35" name="__codelineno-12-35" href="#__codelineno-12-35"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-COSINE-SQ8&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Flat quantized variants:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-IP-PQ&quot;</span><span class="p">)</span>
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-L2-PQ&quot;</span><span class="p">)</span>
+</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-COS-PQ&quot;</span><span class="p">)</span>
+</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-COSINE-PQ&quot;</span><span class="p">)</span>
+</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-IP-PQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-IP-PQ16&quot;</span><span class="p">)</span>
+</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-L2-PQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-13-8"><a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-COS-PQ8&quot;</span><span class="p">)</span>
+</span><span id="__span-13-9"><a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-IP-RABITQ&quot;</span><span class="p">)</span>
+</span><span id="__span-13-10"><a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-L2-RABITQ&quot;</span><span class="p">)</span>
+</span><span id="__span-13-11"><a id="__codelineno-13-11" name="__codelineno-13-11" href="#__codelineno-13-11"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-COS-RABITQ&quot;</span><span class="p">)</span>
+</span><span id="__span-13-12"><a id="__codelineno-13-12" name="__codelineno-13-12" href="#__codelineno-13-12"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-COSINE-RABITQ&quot;</span><span class="p">)</span>
+</span><span id="__span-13-13"><a id="__codelineno-13-13" name="__codelineno-13-13" href="#__codelineno-13-13"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-IP-POLARVEC&quot;</span><span class="p">)</span>
+</span><span id="__span-13-14"><a id="__codelineno-13-14" name="__codelineno-13-14" href="#__codelineno-13-14"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-L2-POLARVEC&quot;</span><span class="p">)</span>
+</span><span id="__span-13-15"><a id="__codelineno-13-15" name="__codelineno-13-15" href="#__codelineno-13-15"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-COS-POLARVEC&quot;</span><span class="p">)</span>
+</span><span id="__span-13-16"><a id="__codelineno-13-16" name="__codelineno-13-16" href="#__codelineno-13-16"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-COSINE-POLARVEC&quot;</span><span class="p">)</span>
+</span><span id="__span-13-17"><a id="__codelineno-13-17" name="__codelineno-13-17" href="#__codelineno-13-17"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-IP-POLARVEC3&quot;</span><span class="p">)</span>
+</span><span id="__span-13-18"><a id="__codelineno-13-18" name="__codelineno-13-18" href="#__codelineno-13-18"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-IP-POLARVEC4&quot;</span><span class="p">)</span>
+</span><span id="__span-13-19"><a id="__codelineno-13-19" name="__codelineno-13-19" href="#__codelineno-13-19"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-IP-POLARVEC8&quot;</span><span class="p">)</span>
+</span></code></pre></div>
+<p>PQ accepts <code>FLAT-{IP,L2,COS,COSINE}-PQ</code> and
+<code>FLAT-{IP,L2,COS,COSINE}-PQ&lt;N&gt;</code>, where <code>&lt;N&gt;</code> is the requested number of
+subspaces. If <code>&lt;N&gt;</code> is omitted, LynseDB chooses an automatic subspace count.</p>
+<p>PolarVec accepts <code>FLAT-{IP,L2,COS,COSINE}-POLARVEC</code> and
+<code>FLAT-{IP,L2,COS,COSINE}-POLARVEC&lt;N&gt;</code>, where <code>&lt;N&gt;</code> is a bit width from 1 to 8.
+If <code>&lt;N&gt;</code> is omitted or invalid, LynseDB uses the default bit width.</p>
+<p>Binary variants:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-HAMMING-BINARY&quot;</span><span class="p">)</span>
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-HAMMING&quot;</span><span class="p">)</span>
+</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-JACCARD-BINARY&quot;</span><span class="p">)</span>
+</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;FLAT-JACCARD&quot;</span><span class="p">)</span>
+</span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-HAMMING-BINARY&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-HAMMING&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-JACCARD-BINARY&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span><span id="__span-14-8"><a id="__codelineno-14-8" name="__codelineno-14-8" href="#__codelineno-14-8"></a><span class="n">collection</span><span class="o">.</span><span class="n">build_index</span><span class="p">(</span><span class="s2">&quot;IVF-JACCARD&quot;</span><span class="p">,</span> <span class="n">n_clusters</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
+</span></code></pre></div>
+<h2 id="troubleshooting-index-choices">Troubleshooting index choices<a class="headerlink" href="#troubleshooting-index-choices" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Try</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Results differ too much from expected neighbors</td>
+<td>Compare against <code>FLAT-*</code>; increase <code>nprobe</code>; rebuild index.</td>
+</tr>
+<tr>
+<td>IVF recall is low</td>
+<td>Increase <code>nprobe</code>, reduce <code>n_clusters</code>, or improve training data coverage.</td>
+</tr>
+<tr>
+<td>HNSW latency is high</td>
+<td>Lower <code>nprobe</code>, try IVF, or use a more selective <code>where</code> filter.</td>
+</tr>
+<tr>
+<td>Memory use is high</td>
+<td>Try DiskANN or quantized variants; reduce unnecessary named vector fields.</td>
+</tr>
+<tr>
+<td>Index build is slow</td>
+<td>Build after bulk ingestion, not after every small batch; monitor <code>/metrics</code> in server mode.</td>
+</tr>
+<tr>
+<td>Binary index scores look inverted</td>
+<td>Remember Hamming/Jaccard are lower-is-better distances.</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.top", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.path", "toc.integrate", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.select", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

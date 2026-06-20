@@ -1,0 +1,2168 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+        <meta name="author" content="Birch Kwok">
+      
+      
+        <link rel="canonical" href="https://birchkwok.github.io/LynseDB/0.6.0/releases/">
+      
+      
+        <link rel="prev" href="../tutorials/troubleshooting/">
+      
+      
+        <link rel="next" href="../result_view/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../img/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Release Notes - LynseDB</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#release-notes" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="LynseDB" class="md-header__button md-logo" aria-label="LynseDB" data-md-component="logo">
+      
+  <img src="../img/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            LynseDB
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Release Notes
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9zM20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12zm-9.15 3.96h2.3L12 9z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/BirchKwok/LynseDB" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    birchkwok/LynseDB
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../quickstart/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Quickstart
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../tutorials/learning_path/" class="md-tabs__link">
+          
+  
+  
+  Tutorials
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="./" class="md-tabs__link">
+          
+  
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../client/" class="md-tabs__link">
+          
+  
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../deployment/cluster-deployment/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+  
+
+<nav class="md-nav md-nav--primary md-nav--lifted md-nav--integrated" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="LynseDB" class="md-nav__button md-logo" aria-label="LynseDB" data-md-component="logo">
+      
+  <img src="../img/logo.png" alt="logo">
+
+    </a>
+    LynseDB
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/BirchKwok/LynseDB" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    birchkwok/LynseDB
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorials
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Tutorials
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/learning_path/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Learning path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/core_concepts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core concepts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/connect_and_deploy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect and deploy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/databases_collections/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Databases and collections
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/add_vectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add vectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/search_and_filter/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Search and filter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/metadata_filter_cookbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metadata filter cookbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/indexing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Indexing guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/named_sparse_hybrid/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Named, sparse, and hybrid search
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/rag_workflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build a RAG workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/performance_tuning/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance tuning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backup and maintenance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Release Notes
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Release Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#v060" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.6.0
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v050" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.5.0
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v040" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.4.0
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v030" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.3.0
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v020" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.2.0
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v016" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.1.6
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v015" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.1.5
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v014" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.1.4
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v013" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.1.3
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v012" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.1.2
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v011" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.1.1
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v010" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.1.0
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#migration-guide" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migration Guide
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Migration Guide">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#from-v050-to-v060" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From v0.5.0 to v0.6.0
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#from-v040-to-v050" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From v0.4.0 to v0.5.0
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#from-v030-to-v040" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From v0.3.0 to v0.4.0
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#from-v020-to-v030" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From v0.2.0 to v0.3.0
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#from-v01x-to-v020" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From v0.1.x to v0.2.0
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#within-v01x" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Within v0.1.x
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#support" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Support
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../result_view/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ResultView
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+          
+          
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_3" id="__nav_4_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Comparisons
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Comparisons
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../comparisons/chromadb_lancedb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LynseDB vs ChromaDB and LanceDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../comparisons/vector_database_benchmarks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vector database benchmarks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../production_roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../client/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python client
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_2" id="__nav_5_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HTTP API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    HTTP API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../http_api/serve_api/app/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Server overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../http_api/serve_api/database_ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Database endpoints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../http_api/serve_api/collection_ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Collection endpoints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../http_api/client_api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python HTTP client
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deployment/cluster-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cluster deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href=".." class="md-path__link">
+        
+  <span class="md-ellipsis">
+    Home
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="./" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Concepts
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="release-notes">Release Notes<a class="headerlink" href="#release-notes" title="Permanent link">&para;</a></h1>
+<p>This page documents the major features and improvements in each version of LynseDB. Only versions with the <code>v</code> prefix are official releases.</p>
+<h2 id="v060">v0.6.0<a class="headerlink" href="#v060" title="Permanent link">&para;</a></h2>
+<p><strong>Upcoming Release - Storage Integrity and Performance Foundations</strong></p>
+<p><strong>Key Features:</strong>
+- Added CRC32 checksums to new WAL segments so complete-but-corrupted records are
+  rejected during recovery instead of being replayed silently.
+- Advanced the WAL format to version 5 while retaining read support for version
+  3 (JSON fields) and version 4 (binary fields) WAL files.</p>
+<p><strong>Improvements:</strong>
+- Refactored the engine, vector store, and field store paths in preparation for
+  higher-throughput writes and more efficient storage operations.
+- Expanded flat-search and upsert benchmarks, including a dedicated upsert
+  benchmark for tracking write-path performance.</p>
+<p><strong>Testing:</strong>
+- Added WAL corruption coverage to verify checksum mismatches are detected.</p>
+<p><strong>Compatibility Notes:</strong>
+- Existing version 3 and version 4 WAL files remain readable. New writes use the
+  version 5 checksummed format.
+- v0.6.0 is not yet released; this section describes the changes currently on
+  the main branch and may evolve before the tag is created.</p>
+<hr />
+<h2 id="v050">v0.5.0<a class="headerlink" href="#v050" title="Permanent link">&para;</a></h2>
+<p><strong>Developer Experience and Document-First Retrieval</strong></p>
+<p><strong>Key Features:</strong>
+- Added collection context-manager support so <code>with collection:</code> commits writes
+  automatically on successful exit.
+- Added lazy default index creation for new collections. <code>require_collection()</code>
+  now defaults to <code>default_index="FLAT-IP"</code> and builds that index after the
+  first primary vector write; pass <code>default_index=None</code> to keep manual index
+  control.
+- Made the default document embedding adapter configurable through environment
+  variables and added the <code>lynsedb[embeddings]</code> optional dependency for explicit
+  FastEmbed installation.</p>
+<p><strong>Documentation:</strong>
+- Updated README, quickstart, and Python client reference around document-first
+  <code>add(documents=...)</code> and <code>search(document=...)</code> usage.
+- Added a <code>LynseDB vs ChromaDB</code> comparison and migration guide.</p>
+<p><strong>Cluster and Storage:</strong>
+- Added <code>ClusterReadCoordinator</code> and cluster RPC control operations, including
+  versioned metadata get/compare-and-swap support for coordinated state updates.
+- Improved bulk ID return handling and internal ID routing for distributed
+  writes.
+- Added binary record handling for add and upsert operations, float16-encoded
+  vector transport, and binary metadata persistence.
+- Added the SPANN index with inner-product, L2, and cosine metric variants.</p>
+<p><strong>Improvements:</strong>
+- Improved local client shutdown behavior and public API edge-case handling.
+- Clarified commit and checkpoint behavior in the documentation.
+- Strengthened release automation with tag/version validation, release-note
+  preparation, legacy package detection, and distribution uploads.</p>
+<p><strong>Testing:</strong>
+- Expanded public API coverage for collection lifecycle and close behavior.
+- Added cluster coordination, metadata RPC, binary record, and SPANN coverage.</p>
+<p><strong>Compatibility Notes:</strong>
+- The backend-only <code>SearchResult</code> compatibility alias was removed; use the
+  public <code>ResultView</code> API rather than importing internal backend symbols.
+- New collections now default to a lazily built <code>FLAT-IP</code> index. Pass
+  <code>default_index=None</code> to retain manual index management.
+- FastEmbed is optional; install <code>lynsedb[embeddings]</code> when using the built-in
+  document embedding adapter.</p>
+<hr />
+<h2 id="v040">v0.4.0<a class="headerlink" href="#v040" title="Permanent link">&para;</a></h2>
+<p><strong>Major Release - Cluster Coordination, Transport, and API Consistency</strong></p>
+<p><strong>Key Features:</strong>
+- 🌐 <strong>Lightweight Cluster Mode</strong>: Added a coordinator role for sharding remote HTTP deployments across multiple shard groups. The coordinator owns collection metadata, routes IDs with stable hash buckets, fans out searches, merges results, and can mirror writes to active replicas.
+- 🔁 <strong>Shard Failover Foundations</strong>: Added coordinator state tracking, health checks, replica states, primary promotion behavior, and <code>/cluster_info</code> diagnostics for cluster operations.
+- ⚡ <strong>Internal Cluster RPC</strong>: Added a private length-prefixed TCP RPC path between coordinator and shard nodes for hot shard operations including ping, search, batch search, binary add, upsert, delete, and restore, with HTTP fallback when RPC is unavailable.
+- 📦 <strong>Compact Binary Transport Improvements</strong>: Extended binary client/server paths for high-throughput writes and searches, including float16 wire encoding support for remote calls.
+- 🧭 <strong>Consistent Python API Signatures</strong>: Aligned local and HTTP collection method signatures, removed public <code>**kwargs</code> surfaces, and made parameter behavior explicit across local and remote clients.
+- 🔧 <strong>IVFIndex Refactor</strong>: Moved IVF training and assignment to a shared KMeans implementation used by both in-memory IVF and mmap-backed IVF storage.
+- 🧪 <strong>Index Parameter Handling</strong>: <code>n_clusters</code> is now accepted by the Python API for all index modes but is only sent to or used by IVF indexes. Non-IVF indexes ignore it for easier generic tuning code.
+- 🌐 <strong>Local/HTTP Parity for <code>wire_dtype</code></strong>: Local collection methods now accept <code>wire_dtype</code> for API compatibility while continuing to use the direct numpy float32 path locally.
+- 📚 <strong>Cluster Deployment Documentation</strong>: Added a full cluster deployment and maintenance guide covering local clusters, production layout, coordinator state, health checks, promotion, recovery, backup, and upgrade notes.</p>
+<p><strong>Improvements:</strong>
+- Refined Python binding structure around records, embeddings, reranking, result views, sessions, and HTTP client behavior.
+- Added server CLI support for coordinator mode, cluster config/state paths, shard API keys, and cluster health tuning.
+- Expanded index documentation with canonical names, aliases, metric variants, binary metric variants, IVF tuning guidance, and troubleshooting notes.
+- Updated quickstart, client reference, HTTP API docs, tutorials, performance tuning, and operations documentation to reflect the current API surface.
+- Added transport benchmarking utilities for measuring client/server and cluster paths.
+- Improved CI release workflow with tag resolution and version checking steps.</p>
+<p><strong>Testing:</strong>
+- Added standard cluster tests covering state initialization, ID routing, replica state changes, binary item preparation, and coordinator behavior.
+- Added explicit API parameter tests to keep local and HTTP collection signatures aligned and verify <code>n_clusters</code> and <code>wire_dtype</code> behavior.
+- Expanded collection, search, metadata index, Docker API, and server CLI coverage for the v0.4.0 API surface.</p>
+<p><strong>Compatibility Notes:</strong>
+- No required data migration is expected from v0.3.0 for single-node local or HTTP deployments.
+- Existing single-node <code>VectorDBClient</code> usage continues to work. Cluster mode is opt-in via <code>lynse serve --role coordinator</code>.
+- Applications that passed extra unsupported keyword arguments to public Python methods should switch to the documented explicit parameters.</p>
+<hr />
+<h2 id="v030">v0.3.0<a class="headerlink" href="#v030" title="Permanent link">&para;</a></h2>
+<p><strong>Major Release - Float16 Support and Advanced Indexing</strong></p>
+<p><strong>Key Features:</strong>
+- ✨ <strong>Float16 Vector Storage</strong>: Added native <code>float16</code>/<code>f16</code> storage in <code>FlatMmap</code> and <code>VectorStore</code>, reducing dense vector storage size by roughly half for collections that can tolerate half-precision storage.
+- 📊 <strong>Metric-Aware PolarVec</strong>: Enhanced PolarVec auxiliary storage with metric-aware data so quantized search can better match the active distance metric.
+- 📚 <strong>Documentation Refresh</strong>: Reworked README positioning, quickstart material, tutorials, deployment docs, production roadmap, and API references for the Rust-backed API introduced in v0.2.x.
+- 🧰 <strong>Documentation Release Workflow</strong>: Improved docs CI with explicit version input, concurrency control, and existing docs-branch fetching for versioned documentation publishing.</p>
+<p><strong>Improvements:</strong>
+- Updated package versions to <code>0.3.0</code> across Cargo, Python package metadata, and runtime <code>__version__</code>.
+- Clarified embedded mode versus HTTP service mode in the user-facing documentation.
+- Expanded tutorials for adding vectors, searching and filtering, indexing, named/sparse/hybrid retrieval, operations, and production tuning.
+- Removed outdated README badges and aligned docs with the current supported platform policy.</p>
+<p><strong>Compatibility Notes:</strong>
+- Existing <code>float32</code> collections remain the default and require no migration.
+- New half-precision collections should be created explicitly with <code>dtypes="float16"</code>.
+- Consider rebuilding PolarVec indexes after upgrading if you want the metric-aware auxiliary data generated by this release.</p>
+<hr />
+<h2 id="v020">v0.2.0<a class="headerlink" href="#v020" title="Permanent link">&para;</a></h2>
+<p><strong>Major Release - Rust Architecture and Advanced Features</strong></p>
+<p><strong>Key Features:</strong>
+- 🏗️ <strong>Rust-First Architecture</strong>: Rebuilt LynseDB around a Rust storage/search backend exposed through PyO3, with a simplified Python API for embedded and remote usage.
+- 🧭 <strong>Unified <code>VectorDBClient</code> Entry Point</strong>: Introduced one high-level client that selects local embedded mode for filesystem paths and HTTP mode for remote URLs.
+- 🚀 <strong>Optimized Rust HNSW Path</strong>: Added a Rust core with optimized HNSW search and removed the Python fallback execution paths.
+- 📦 <strong>Mmap-Backed Storage</strong>: Added memory-mapped vector storage, custom binary storage protocols, append-friendly vector files, and WAL-backed durability.
+- 🗂️ <strong>Index Families</strong>: Added Flat, HNSW, IVF, DiskANN, PQ, RaBitQ, and PolarVec index families, including IVF_FLAT storage and two-pass quantized search paths.
+- 🔎 <strong>Approximate Search</strong>: Added configurable approximate search with <code>approx</code> and <code>eps</code> for supported flat metrics.
+- 🧮 <strong>Metadata, Text, and Hybrid Retrieval</strong>: Enhanced SQL-like filtering, numeric equality and <code>IN</code> filters, inverted text indexing, BM25, sparse vector search, and hybrid retrieval.
+- 🧩 <strong>Named Vector Fields</strong>: Added support for multiple vector fields per record, enabling multimodal records and field-specific indexes.
+- 🛠️ <strong>Operations Surface</strong>: Added snapshots, restore, export/import, compaction, HTTP health/readiness/metrics/OpenAPI surfaces, API-key auth, Docker, systemd, and Kubernetes examples.
+- 🪵 <strong>Observability Hooks</strong>: Added slow query alerts and audit logging capabilities.
+- 🧪 <strong>ResultView API</strong>: Added structured result objects with NumPy arrays and conversion helpers for downstream processing.</p>
+<p><strong>Improvements:</strong>
+- Improved context management and resource cleanup in <code>VectorDBClient</code>, database managers, vector storage, and field storage.
+- Added in-memory field indexes and apex ID mapping for faster metadata-filtered query paths.
+- Optimized filtered search with a dual strategy that can choose between prefiltering and vector-first execution.
+- Updated dependencies, internalized assertion helpers, and reorganized the package layout under the Rust-backed <code>python/lynse</code> tree.
+- Dropped native Windows support. Windows users should run LynseDB through WSL 2 or Docker.
+- Added benchmark scripts for flat search, filtered search, IVF/KMeans, approximate search, and client query paths.</p>
+<p><strong>Testing:</strong>
+- Added comprehensive tests for the Rust backend, collection operations, database operations, metadata indexes, search, result views, Docker API behavior, and server CLI behavior.
+- Updated CI to run on version tags and refreshed Python versions used by workflows.</p>
+<p><strong>Compatibility Notes:</strong>
+- This is the largest compatibility boundary in the project history. Data and code built for the pure Python v0.1.x implementation should be validated before production migration.
+- Native Windows installs are no longer supported from this release forward.
+- HNSW remains available, but storage layout, server behavior, and many implementation details changed substantially.</p>
+<hr />
+<h2 id="v016">v0.1.6<a class="headerlink" href="#v016" title="Permanent link">&para;</a></h2>
+<p><strong>Final Stability Release - Pure Python</strong></p>
+<p><strong>Key Features:</strong>
+- 🐛 <strong>Trie Query Fix</strong>: Fixed <code>AttributeError: 'Trie' object has no attribute '_search_single'</code> in the pure Python metadata/indexing path.
+- 📦 <strong>Final v0.1.x Package Version</strong>: Marked the final pure Python release before the Rust-backed v0.2.0 architecture.</p>
+<p><strong>Improvements:</strong>
+- Kept the lightweight pure Python client/server-optional behavior stable for users not ready to move to v0.2.x.
+- Preserved the existing Python 3.9+ install and Docker-oriented documentation flow.</p>
+<p><strong>Compatibility Notes:</strong>
+- Recommended maintenance release for users staying on the pure Python v0.1 line.</p>
+<hr />
+<h2 id="v015">v0.1.5<a class="headerlink" href="#v015" title="Permanent link">&para;</a></h2>
+<p><strong>Maintenance Release - Pure Python</strong></p>
+<p><strong>Key Features:</strong>
+- 🔧 <strong>Workflow Improvements</strong>: Iterated on documentation and release workflows, including versioned docs publishing experiments with <code>mike</code>.
+- 🧱 <strong>Chunk Size Guardrails</strong>: Added range limits around chunk sizing to reduce invalid storage configuration behavior.
+- 📝 <strong>API Naming Cleanup</strong>: Renamed a function parameter for clearer API usage.</p>
+<p><strong>Improvements:</strong>
+- Updated documentation content and site publishing configuration.
+- Continued cleanup of CI workflows around docs and package release automation.</p>
+<hr />
+<h2 id="v014">v0.1.4<a class="headerlink" href="#v014" title="Permanent link">&para;</a></h2>
+<p><strong>Performance Release - Pure Python</strong></p>
+<p><strong>Key Features:</strong>
+- 🛡️ <strong>Safer MMAP Reading</strong>: Continued hardening of memory-mapped file reading to avoid unstable reads and improve cross-platform behavior.</p>
+<p><strong>Improvements:</strong>
+- Follow-up refinements to the safer mmap strategy introduced in v0.1.3.</p>
+<hr />
+<h2 id="v013">v0.1.3<a class="headerlink" href="#v013" title="Permanent link">&para;</a></h2>
+<p><strong>Bug Fix Release - Pure Python</strong></p>
+<p><strong>Key Features:</strong>
+- 🛡️ <strong>Enhanced MMAP Reading</strong>: Replaced the original <code>.npy</code> mmap reading path with a safer strategy for vector file access.
+- 📄 <strong>Documentation CI Setup</strong>: Added and refined docs publishing workflow pieces, MkDocs configuration, and site assets.
+- 📦 <strong>Version File</strong>: Added a <code>VERSION</code> file and release workflow support around versioned package/docs builds.</p>
+<p><strong>Improvements:</strong>
+- Updated dependencies in <code>requirements.txt</code>.
+- Performed code style cleanup and removed unnecessary code.
+- Iterated heavily on release and documentation workflows to support future tagged releases.</p>
+<hr />
+<h2 id="v012">v0.1.2<a class="headerlink" href="#v012" title="Permanent link">&para;</a></h2>
+<p><strong>Compatibility Release - Pure Python</strong></p>
+<p><strong>Key Features:</strong>
+- 🐛 <strong>Warning Fixes</strong>: Fixed a Python <code>DeprecationWarning</code> caused by an invalid escape sequence.
+- 🪟 <strong>Windows MMAP Follow-Up</strong>: Continued testing and fixes around mmap-related Windows failures.</p>
+<p><strong>Improvements:</strong>
+- Removed unnecessary code after the mmap compatibility pass.</p>
+<hr />
+<h2 id="v011">v0.1.1<a class="headerlink" href="#v011" title="Permanent link">&para;</a></h2>
+<p><strong>Stability Release - Pure Python</strong></p>
+<p><strong>Key Features:</strong>
+- 🔒 <strong>Resource Management</strong>: Used context managers to prevent errors caused by unclosed mmap files.
+- ⚙️ <strong>Safer File Deletion</strong>: Added logic to wait for handle release when file deletion hits <code>PermissionError</code>.
+- 🔄 <strong>Thread Safety</strong>: Added thread locks to reduce race conditions in the pure Python storage path.
+- 🪟 <strong>Windows Validation</strong>: Tested core functionality under Windows and fixed Windows-specific mmap/file-handle behavior.</p>
+<p><strong>Improvements:</strong>
+- Cleaned up unnecessary code.
+- Improved tests and CI workflow coverage for early pure Python behavior.</p>
+<hr />
+<h2 id="v010">v0.1.0<a class="headerlink" href="#v010" title="Permanent link">&para;</a></h2>
+<p><strong>Major Release - Pure Python Vector Database Foundation</strong></p>
+<p><strong>Key Features:</strong>
+- 🐍 <strong>Pure Python Core</strong>: Established LynseDB as a lightweight vector database implemented in Python with local embedded usage and optional HTTP deployment.
+- 🧭 <strong>Unified Client Entry Point</strong>: Added <code>VectorDBClient</code>, which routes to the local native API for filesystem paths and to the HTTP client for remote URLs.
+- 🗄️ <strong>Storage Layer</strong>: Added file-backed vector storage, memory-mapped access, ID tracking, and persistence primitives.
+- 🔍 <strong>Metadata Filtering</strong>: Added FieldExpression-style metadata filtering and field indexing for filtered vector search.
+- 📐 <strong>Index and Distance Options</strong>: Included flat, scalar-quantized, binary, and IVF-oriented index code paths with L2, inner-product, cosine, Hamming, and Jaccard-style search support.
+- 🧵 <strong>Single-Process Native API</strong>: Documented the native Python API as best suited for single-process use, with HTTP mode recommended for process-safe deployments.</p>
+<p><strong>Improvements:</strong>
+- Built the initial Python-first API around simple database, collection, insert, and search workflows.
+- Added early tests, Docker usage notes, and MkDocs documentation.
+- Clarified early project limitations: backward compatibility was not yet guaranteed and million-scale or smaller workloads were recommended.</p>
+<hr />
+<h2 id="migration-guide">Migration Guide<a class="headerlink" href="#migration-guide" title="Permanent link">&para;</a></h2>
+<h3 id="from-v050-to-v060">From v0.5.0 to v0.6.0<a class="headerlink" href="#from-v050-to-v060" title="Permanent link">&para;</a></h3>
+<ul>
+<li>No data migration is currently expected. WAL versions 3 and 4 remain readable,
+  while newly created WAL segments use the version 5 checksummed format.</li>
+<li>Treat these notes as provisional until v0.6.0 is tagged.</li>
+</ul>
+<h3 id="from-v040-to-v050">From v0.4.0 to v0.5.0<a class="headerlink" href="#from-v040-to-v050" title="Permanent link">&para;</a></h3>
+<ul>
+<li>New collections build a <code>FLAT-IP</code> index lazily after their first primary vector
+  write. Pass <code>default_index=None</code> if your application builds indexes manually.</li>
+<li>Install <code>lynsedb[embeddings]</code> to use the default document embedding adapter;
+  direct vector workflows do not need this optional dependency.</li>
+<li>Replace imports of the internal backend <code>SearchResult</code> alias with the public
+  <code>ResultView</code> API.</li>
+<li>Existing single-node data does not require a storage migration. Cluster users
+  should upgrade coordinator and shard nodes together because v0.5.0 extends
+  cluster RPC and metadata coordination behavior.</li>
+</ul>
+<h3 id="from-v030-to-v040">From v0.3.0 to v0.4.0<a class="headerlink" href="#from-v030-to-v040" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Single-node local and HTTP deployments do not require a storage migration.</li>
+<li>Cluster mode is new and opt-in. Start ordinary LynseDB HTTP servers as shards, then run a coordinator with <code>lynse serve --role coordinator --cluster-config ... --cluster-state ...</code>.</li>
+<li>Keep the coordinator <code>cluster_state.json</code> on persistent storage and back it up together with all shard data directories.</li>
+<li>If shard nodes use <code>--api-key</code>, pass the same secret to the coordinator with <code>--shard-api-key</code>.</li>
+<li><code>wire_dtype</code> is now accepted by local and HTTP write/search methods for signature parity. Local calls still use direct numpy arrays; remote calls can use compact wire encodings.</li>
+<li><code>n_clusters</code> remains meaningful only for IVF indexes. Passing it to non-IVF indexes is allowed and ignored by the Python API.</li>
+<li>Public Python methods now use explicit signatures. Replace any calls that depended on arbitrary <code>**kwargs</code> forwarding with documented parameters.</li>
+<li>The IVFIndex refactor is internal; existing IVF index names and search behavior remain compatible.</li>
+</ul>
+<h3 id="from-v020-to-v030">From v0.2.0 to v0.3.0<a class="headerlink" href="#from-v020-to-v030" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Float16 vectors are now available; specify <code>dtypes="float16"</code> when creating collections</li>
+<li>PolarVec index is improved; consider rebuilding indices for better performance</li>
+<li>All existing APIs remain compatible</li>
+</ul>
+<h3 id="from-v01x-to-v020">From v0.1.x to v0.2.0<a class="headerlink" href="#from-v01x-to-v020" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Major architectural change</strong>: v0.2.0 migrates from the pure Python implementation to the Rust-backed storage and search engine.</li>
+<li>Validate existing v0.1.x data on a staging copy before upgrading production deployments.</li>
+<li>Review client code that uses low-level pure Python modules; the recommended entry point is now <code>lynse.VectorDBClient</code>.</li>
+<li>HNSW remains available, but storage layout, persistence behavior, and server behavior changed substantially.</li>
+<li>Native Windows installs are no longer supported. Use WSL 2 or Docker on Windows.</li>
+<li>Rebuild indexes after migration so they are created by the Rust-backed index implementations.</li>
+</ul>
+<h3 id="within-v01x">Within v0.1.x<a class="headerlink" href="#within-v01x" title="Permanent link">&para;</a></h3>
+<ul>
+<li>v0.1.1 through v0.1.6 are pure Python maintenance releases.</li>
+<li>Upgrade within the v0.1 line for safer mmap handling, Windows file-handle fixes, chunk-size guardrails, workflow updates, and the Trie query fix.</li>
+<li>No intentional major API migration is documented within the v0.1.x line, but early releases did not guarantee strict backward compatibility.</li>
+</ul>
+<h2 id="support">Support<a class="headerlink" href="#support" title="Permanent link">&para;</a></h2>
+<ul>
+<li>For issues or questions about a specific version, please check the <a href="../tutorials/troubleshooting/">Troubleshooting Guide</a></li>
+<li>For API documentation, see the <a href="../client/">Python Client Reference</a> and <a href="../http_api/serve_api/app/">HTTP API Documentation</a></li>
+<li>For upcoming features, see the <a href="../production_roadmap/">Production Roadmap</a></li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.top", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.path", "toc.integrate", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.select", "content.code.annotate"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
