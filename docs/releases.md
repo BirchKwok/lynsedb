@@ -2,22 +2,60 @@
 
 This page documents the major features and improvements in each version of LynseDB. Only versions with the `v` prefix are official releases.
 
-## Unreleased
+## v0.7.0
 
-**Distance Metrics and Domain Search**
+**Major Release - Domain-Aware Search and Distance Performance**
 
-- Added Jensen–Shannon distance for probability distributions and Chebyshev
-  distance for maximum-deviation matching, with exact Flat and HNSW indexes.
-- Added exact Flat Canberra and Bray–Curtis distances for spectra,
-  compositional features, and abundance profiles.
-- Added AVX2 and NEON kernels for Chebyshev, Canberra, and Bray–Curtis while
-  keeping all four distance paths allocation-free per candidate.
-- Optimized Jensen–Shannon with SIMD logarithms and a lazy eight-byte-per-row
-  Flat cache, reducing the hot loop from two logarithms per dimension to one.
-  Dual-row evaluation, squared-distance ranking, and a stable small-distance
-  fallback further reduce scan cost without weakening near-neighbor precision.
-- Kept Canberra and Bray–Curtis out of ANN indexes pending metric-specific
-  recall validation; unsupported combinations fail explicitly.
+**Key Features:**
+
+- 📐 **Domain-Aware Distance Suite**: Added Manhattan/L1, Haversine,
+  Pearson correlation, Hellinger, Wasserstein-1D, Jensen–Shannon, Chebyshev,
+  Canberra, Bray–Curtis, Tanimoto, and Sørensen-Dice distances for numeric
+  features, coordinates, distributions, abundance profiles, and binary
+  fingerprints.
+- 🧭 **Flat and HNSW Domain Indexes**: Added exact Flat support for the
+  complete metric suite and HNSW support for L1, Haversine, correlation,
+  Hellinger, Wasserstein-1D, Jensen–Shannon, and Chebyshev.
+- 🧬 **Packed Binary Search**: Added Tanimoto and Sørensen-Dice Flat
+  indexes and a lazy one-bit-per-dimension representation for binary Flat
+  search, reducing hot-path memory bandwidth.
+- 📚 **Distance Metric Guide**: Added selection guidance, input contracts,
+  index compatibility, examples, and performance notes for embedding and
+  domain-specific metrics.
+
+**Improvements:**
+
+- Added AVX2 and NEON kernels for L1, Chebyshev, Canberra, and Bray–Curtis,
+  with allocation-free candidate evaluation.
+- Optimized Jensen–Shannon Flat search with SIMD logarithms, a lazy
+  eight-byte-per-row cache, dual-row evaluation, squared-distance ranking, and
+  a stable fallback for very small distances.
+- Extended metric parsing and result metadata across the Rust backend and
+  local, HTTP, named-vector, cluster, batch-search, and range-search paths.
+- Added selectable index modes to the flat-search benchmark for reproducible
+  comparison of numeric, geospatial, distribution, and binary metrics.
+- Split VectorStore metadata persistence into fast atomic commit writes and
+  durable checkpoint writes, preserving the explicit checkpoint fsync barrier.
+
+**Testing:**
+
+- Added reference-value and input-validation coverage for the new metrics.
+- Added index alias, capability, HNSW serialization, packed-bit equivalence,
+  named-vector, cluster, batch-search, range-search, and Python result-view
+  coverage.
+
+**Compatibility Notes:**
+
+- Existing collections require no data migration. Build a new metric-specific
+  index to use the added distance modes.
+- Canberra and Bray–Curtis are Flat-only pending metric-specific ANN recall
+  validation. Unsupported index and metric combinations now fail explicitly
+  instead of silently substituting another metric.
+- Domain metrics enforce their documented input contracts, including
+  two-dimensional longitude/latitude vectors for Haversine and non-negative
+  values for probability and abundance metrics.
+
+---
 
 ## v0.6.0
 
