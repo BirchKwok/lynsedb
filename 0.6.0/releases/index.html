@@ -1839,12 +1839,10 @@
 <h1 id="release-notes">Release Notes<a class="headerlink" href="#release-notes" title="Permanent link">&para;</a></h1>
 <p>This page documents the major features and improvements in each version of LynseDB. Only versions with the <code>v</code> prefix are official releases.</p>
 <h2 id="v060">v0.6.0<a class="headerlink" href="#v060" title="Permanent link">&para;</a></h2>
-<p><strong>Upcoming Release - Storage Integrity and Performance Foundations</strong></p>
+<p><strong>Major Release - Storage Integrity and Performance Foundations</strong></p>
 <p><strong>Key Features:</strong>
-- Added CRC32 checksums to new WAL segments so complete-but-corrupted records are
-  rejected during recovery instead of being replayed silently.
-- Advanced the WAL format to version 5 while retaining read support for version
-  3 (JSON fields) and version 4 (binary fields) WAL files.</p>
+- 🛡️ <strong>WAL Checksum Validation</strong>: Added CRC32 checksums to new WAL segments so complete-but-corrupted records are rejected during recovery instead of being replayed silently.
+- 🗃️ <strong>WAL Format Version 5</strong>: Advanced the WAL format while retaining read support for version 3 (JSON fields) and version 4 (binary fields) WAL files.</p>
 <p><strong>Improvements:</strong>
 - Refactored the engine, vector store, and field store paths in preparation for
   higher-throughput writes and more efficient storage operations.
@@ -1859,32 +1857,20 @@
   the main branch and may evolve before the tag is created.</p>
 <hr />
 <h2 id="v050">v0.5.0<a class="headerlink" href="#v050" title="Permanent link">&para;</a></h2>
-<p><strong>Developer Experience and Document-First Retrieval</strong></p>
+<p><strong>Major Release - Document-First Retrieval, Cluster Coordination, and SPANN Indexing</strong></p>
 <p><strong>Key Features:</strong>
-- Added collection context-manager support so <code>with collection:</code> commits writes
-  automatically on successful exit.
-- Added lazy default index creation for new collections. <code>require_collection()</code>
-  now defaults to <code>default_index="FLAT-IP"</code> and builds that index after the
-  first primary vector write; pass <code>default_index=None</code> to keep manual index
-  control.
-- Made the default document embedding adapter configurable through environment
-  variables and added the <code>lynsedb[embeddings]</code> optional dependency for explicit
-  FastEmbed installation.</p>
-<p><strong>Documentation:</strong>
-- Updated README, quickstart, and Python client reference around document-first
-  <code>add(documents=...)</code> and <code>search(document=...)</code> usage.
-- Added a <code>LynseDB vs ChromaDB</code> comparison and migration guide.</p>
-<p><strong>Cluster and Storage:</strong>
-- Added <code>ClusterReadCoordinator</code> and cluster RPC control operations, including
-  versioned metadata get/compare-and-swap support for coordinated state updates.
-- Improved bulk ID return handling and internal ID routing for distributed
-  writes.
-- Added binary record handling for add and upsert operations, float16-encoded
-  vector transport, and binary metadata persistence.
-- Added the SPANN index with inner-product, L2, and cosine metric variants.</p>
+- 📄 <strong>Document-First Retrieval</strong>: Added <code>add(documents=...)</code> and <code>search(document=...)</code> workflows with a configurable default embedding adapter and the optional <code>lynsedb[embeddings]</code> dependency for FastEmbed.
+- 🧭 <strong>Lazy Default Indexing</strong>: New collections now default to <code>default_index="FLAT-IP"</code>, built after the first primary vector write. Pass <code>default_index=None</code> to retain manual index control.
+- 🔄 <strong>Collection Context Management</strong>: Added collection context-manager support so <code>with collection:</code> commits writes automatically on successful exit.
+- 🌐 <strong>Cluster Read Coordination</strong>: Added <code>ClusterReadCoordinator</code> and cluster RPC control operations, including versioned metadata get/compare-and-swap support for coordinated state updates.
+- 🧭 <strong>Distributed ID Routing</strong>: Improved bulk ID return handling and internal ID routing for distributed writes.
+- 📦 <strong>Binary Storage and Transport</strong>: Added binary record handling for add and upsert operations, float16-encoded vector transport, and binary metadata persistence.
+- 🔎 <strong>SPANN Index</strong>: Added SPANN indexing with inner-product, L2, and cosine metric variants.</p>
 <p><strong>Improvements:</strong>
 - Improved local client shutdown behavior and public API edge-case handling.
 - Clarified commit and checkpoint behavior in the documentation.
+- Updated README, quickstart, and Python client reference for document-first retrieval.
+- Added a <code>LynseDB vs ChromaDB</code> comparison and migration guide.
 - Strengthened release automation with tag/version validation, release-note
   preparation, legacy package detection, and distribution uploads.</p>
 <p><strong>Testing:</strong>
