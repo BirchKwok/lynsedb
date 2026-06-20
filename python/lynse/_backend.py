@@ -460,6 +460,10 @@ class Collection:
                 - 'FLAT-CORRELATION' or 'HNSW-CORRELATION': Pearson distance.
                 - 'FLAT-HELLINGER' or 'HNSW-HELLINGER': Distribution distance.
                 - 'FLAT-WASSERSTEIN' or 'HNSW-WASSERSTEIN': Ordered-bin distance.
+                - 'FLAT-JENSEN-SHANNON' or 'HNSW-JENSEN-SHANNON': Probability distance.
+                - 'FLAT-CHEBYSHEV' or 'HNSW-CHEBYSHEV': Maximum component deviation.
+                - 'FLAT-CANBERRA': Exact Canberra distance.
+                - 'FLAT-BRAY-CURTIS': Exact Bray-Curtis distance.
 
                 **Flat + PQ (Product Quantization, two-pass ADC search):**
 

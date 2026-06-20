@@ -53,6 +53,14 @@ def _parse_index_mode(index_mode: Optional[str]) -> Tuple[str, str]:
         metric = "Hellinger"
     elif "WASSERSTEIN" in full or "EMD" in full:
         metric = "Wasserstein-1D"
+    elif "JENSEN" in full or full == "JS":
+        metric = "Jensen-Shannon"
+    elif "CHEBYSHEV" in full or "CHEBYCHEV" in full or "LINF" in full:
+        metric = "Chebyshev"
+    elif "CANBERRA" in full:
+        metric = "Canberra"
+    elif "BRAY" in full:
+        metric = "Bray-Curtis"
     elif "L1" in full or "MANHATTAN" in full or "CITYBLOCK" in full:
         metric = "L1"
     elif "L2" in full:

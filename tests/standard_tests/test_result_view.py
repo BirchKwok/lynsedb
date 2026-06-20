@@ -283,6 +283,10 @@ class TestParseIndexMode:
             "FLAT-PEARSON": "Correlation",
             "FLAT-HELLINGER": "Hellinger",
             "FLAT-WASSERSTEIN": "Wasserstein-1D",
+            "HNSW-JENSEN-SHANNON": "Jensen-Shannon",
+            "FLAT-CHEBYSHEV": "Chebyshev",
+            "FLAT-CANBERRA": "Canberra",
+            "FLAT-BRAY-CURTIS": "Bray-Curtis",
             "FLAT-TANIMOTO-BINARY": "Tanimoto",
             "FLAT-DICE-BINARY": "Dice",
         }

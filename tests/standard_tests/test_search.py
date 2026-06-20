@@ -180,6 +180,10 @@ class TestSearch:
             "FLAT-CORRELATION",
             "FLAT-HELLINGER",
             "FLAT-WASSERSTEIN",
+            "FLAT-JENSEN-SHANNON",
+            "FLAT-CHEBYSHEV",
+            "FLAT-CANBERRA",
+            "FLAT-BRAY-CURTIS",
             "FLAT-TANIMOTO-BINARY",
             "FLAT-DICE-BINARY",
         ],
@@ -245,6 +249,8 @@ class TestSearch:
             "HNSW-CORRELATION",
             "HNSW-HELLINGER",
             "HNSW-WASSERSTEIN",
+            "HNSW-JENSEN-SHANNON",
+            "HNSW-CHEBYSHEV",
         ],
     )
     def test_domain_hnsw_metrics_find_exact_self(self, db, index_mode):
@@ -275,6 +281,19 @@ class TestSearch:
         coll.commit()
         with pytest.raises(Exception, match="unsupported index/metric combination"):
             coll.build_index("FLAT-HELLINGER-SQ8")
+
+    @pytest.mark.parametrize("index_mode", ["HNSW-CANBERRA", "HNSW-BRAY-CURTIS"])
+    def test_exact_only_metrics_reject_hnsw(self, db, index_mode):
+        coll = db.require_collection(
+            f"unsupported_{index_mode.lower().replace('-', '_')}",
+            dim=4,
+            drop_if_exists=True,
+            default_index=None,
+        )
+        coll.add(ids=[1], vectors=[[0.1, 0.2, 0.3, 0.4]])
+        coll.commit()
+        with pytest.raises(Exception, match="unsupported index/metric combination"):
+            coll.build_index(index_mode)
 
     def test_search_hnsw_index(self, populated_collection, query_vec):
         populated_collection.build_index("HNSW-IP")

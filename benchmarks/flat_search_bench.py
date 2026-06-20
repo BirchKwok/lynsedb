@@ -51,6 +51,10 @@ def bench(args):
         token in args.index_mode.upper()
         for token in ("HAMMING", "JACCARD", "TANIMOTO", "DICE")
     )
+    jensen_shannon_metric = any(
+        token in args.index_mode.upper()
+        for token in ("JENSEN-SHANNON", "JENSENSHANNON", "-JS")
+    )
     query = (
         rng.integers(0, 2, size=args.dim).astype(np.float32)
         if binary_metric
@@ -114,7 +118,7 @@ def bench(args):
         "estimated_hot_scan_bytes": (
             args.rows * ((args.dim + 63) // 64) * 8
             if binary_metric
-            else args.rows * args.dim * 4
+            else args.rows * args.dim * 4 + (args.rows * 8 if jensen_shannon_metric else 0)
         ),
         "compatibility_file_created": (collection_dir / "vectors.compat.bin").exists(),
         "platform": platform.platform(),

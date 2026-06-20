@@ -113,7 +113,8 @@ Parameter behavior is the same for local and HTTP Python clients:
 - `approx` and `eps` apply only to supported flat IP, L2, and cosine paths.
   Hamming, Jaccard/Tanimoto, Dice, and domain metric paths ignore them.
 - Domain metrics include L1, Haversine, correlation, Hellinger,
-  Wasserstein-1D, Tanimoto, and Dice. See
+  Wasserstein-1D, Jensen–Shannon, Chebyshev, Canberra, Bray–Curtis, Tanimoto,
+  and Dice. See
   [Domain-aware distance metrics](tutorials/distance_metrics.md) for aliases,
   input contracts, and index compatibility.
 

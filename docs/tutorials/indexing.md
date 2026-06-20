@@ -38,6 +38,10 @@ A practical first decision:
 | `-CORRELATION` | Pearson correlation distance | aligned profiles and time buckets |
 | `-HELLINGER` | Hellinger distance | non-negative distributions |
 | `-WASSERSTEIN` | Wasserstein-1D distance | equal-width ordered histograms |
+| `-JENSEN-SHANNON` | Jensen–Shannon distance | probability and topic distributions |
+| `-CHEBYSHEV` | Chebyshev/L∞ distance | maximum-deviation constraints |
+| `-CANBERRA` | Canberra distance | spectra and sparse abundance data |
+| `-BRAY-CURTIS` | Bray–Curtis distance | abundance and compositional profiles |
 | `-HAMMING-BINARY` | Hamming distance | binary vectors |
 | `-JACCARD-BINARY` | Jaccard distance | binary sets |
 | `-TANIMOTO-BINARY` | Binary Tanimoto/Jaccard distance | molecular fingerprints |
@@ -309,13 +313,22 @@ collection.build_index("FLAT-HAVERSINE")
 collection.build_index("FLAT-CORRELATION")
 collection.build_index("FLAT-HELLINGER")
 collection.build_index("FLAT-WASSERSTEIN")
+collection.build_index("FLAT-JENSEN-SHANNON")
+collection.build_index("FLAT-CHEBYSHEV")
+collection.build_index("FLAT-CANBERRA")
+collection.build_index("FLAT-BRAY-CURTIS")
 
 collection.build_index("HNSW-L1")
 collection.build_index("HNSW-HAVERSINE")
 collection.build_index("HNSW-CORRELATION")
 collection.build_index("HNSW-HELLINGER")
 collection.build_index("HNSW-WASSERSTEIN")
+collection.build_index("HNSW-JENSEN-SHANNON")
+collection.build_index("HNSW-CHEBYSHEV")
 ```
+
+Canberra and Bray–Curtis are intentionally Flat-only until metric-specific ANN
+recall has been validated.
 
 Flat quantized variants:
 

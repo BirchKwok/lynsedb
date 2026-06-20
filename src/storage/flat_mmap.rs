@@ -103,6 +103,9 @@ pub struct FlatMmap {
     approx_ip_order: RwLock<Option<ApproxIpOrder>>,
     /// Raw-f32 row norms for exact-algebra L2/Cosine approximate mode.
     approx_norms: RwLock<Option<ApproxNorms>>,
+    /// Two f32 values per row: inverse probability mass and `sum(p*ln(p))`.
+    /// Lazily built for the one-log Jensen-Shannon exact scan.
+    jensen_shannon: RwLock<Option<JensenShannonData>>,
 }
 
 struct ApproxIpOrder {
@@ -123,6 +126,20 @@ struct ApproxNorms {
 struct BinaryData {
     words_per_vector: usize,
     data: Vec<u64>,
+}
+
+struct JensenShannonData {
+    rows: Vec<(f32, f32)>,
+}
+
+impl JensenShannonData {
+    fn from_f32_parallel(values: &[f32], dim: usize) -> Self {
+        let rows = values
+            .par_chunks(dim)
+            .map(simd::probability_row_stats_f32)
+            .collect();
+        Self { rows }
+    }
 }
 
 impl BinaryData {
@@ -199,6 +216,7 @@ impl FlatMmap {
             binary: RwLock::new(None),
             approx_ip_order: RwLock::new(approx_ip_order),
             approx_norms: RwLock::new(approx_norms),
+            jensen_shannon: RwLock::new(None),
         })
     }
 
@@ -303,6 +321,7 @@ impl FlatMmap {
         // Invalidate SQ8 cache (data changed)
         *self.sq8.write() = None;
         *self.binary.write() = None;
+        *self.jensen_shannon.write() = None;
         let next_order = update_approx_ip_order_after_append(
             old_order,
             data,
@@ -361,6 +380,28 @@ impl FlatMmap {
                 }
             });
         }
+    }
+
+    fn ensure_jensen_shannon(&self) {
+        if self
+            .jensen_shannon
+            .read()
+            .as_ref()
+            .is_some_and(|data| data.rows.len() == self.n_vectors)
+        {
+            return;
+        }
+        let mut guard = self.jensen_shannon.write();
+        if guard
+            .as_ref()
+            .is_some_and(|data| data.rows.len() == self.n_vectors)
+        {
+            return;
+        }
+        *guard = Some(JensenShannonData::from_f32_parallel(
+            self.as_slice(),
+            self.dim,
+        ));
     }
 
     /// Ensure row-sum order is available for raw-f32 approximate IP search.
@@ -468,6 +509,23 @@ impl FlatMmap {
             &candidates_cow
         };
 
+        if metric == DistanceMetric::JensenShannon {
+            self.ensure_jensen_shannon();
+            if let Some(data) = self.jensen_shannon.read().as_ref() {
+                if let Some(result) = jensen_shannon_cached_search_filtered(
+                    query,
+                    candidates,
+                    data,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                ) {
+                    return result;
+                }
+            }
+        }
+
         // Threshold: direct access for few matches, parallel scan for many
         const DIRECT_ACCESS_LIMIT: usize = 50_000;
 
@@ -545,6 +603,42 @@ impl FlatMmap {
                     n,
                     subset_indices,
                     simd::wasserstein_1d_f32,
+                ),
+                DistanceMetric::JensenShannon => direct_access_topk::<true>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    simd::jensen_shannon_distance_f32,
+                ),
+                DistanceMetric::Chebyshev => direct_access_topk::<true>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    simd::chebyshev_f32,
+                ),
+                DistanceMetric::Canberra => direct_access_topk::<true>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    simd::canberra_f32,
+                ),
+                DistanceMetric::BrayCurtis => direct_access_topk::<true>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    simd::bray_curtis_f32,
                 ),
                 _ => direct_access_topk::<true>(
                     query,
@@ -648,6 +742,46 @@ impl FlatMmap {
                 &bitset,
                 max_id,
                 simd::wasserstein_1d_f32,
+            ),
+            DistanceMetric::JensenShannon => fused_topk_parallel_filtered::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                simd::jensen_shannon_distance_f32,
+            ),
+            DistanceMetric::Chebyshev => fused_topk_parallel_filtered::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                simd::chebyshev_f32,
+            ),
+            DistanceMetric::Canberra => fused_topk_parallel_filtered::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                simd::canberra_f32,
+            ),
+            DistanceMetric::BrayCurtis => fused_topk_parallel_filtered::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                simd::bray_curtis_f32,
             ),
             _ => fused_topk_parallel_filtered::<true>(
                 query,
@@ -763,8 +897,265 @@ impl FlatMmap {
 
         // Full f32 scan
         let candidates = self.as_slice();
+        if metric == DistanceMetric::JensenShannon {
+            self.ensure_jensen_shannon();
+            if let Some(data) = self.jensen_shannon.read().as_ref() {
+                if let Some(result) =
+                    jensen_shannon_cached_search(query, candidates, data, dim, k, n)
+                {
+                    return result;
+                }
+            }
+        }
         exact_flat_search(query, candidates, dim, k, n, metric)
     }
+}
+
+fn prepare_jensen_shannon_query(query: &[f32]) -> Option<(Vec<f32>, f32, bool)> {
+    let (inv_mass, entropy) = simd::probability_row_stats_f32(query);
+    if inv_mass.is_nan() || !entropy.is_finite() || (inv_mass != 0.0 && !inv_mass.is_finite()) {
+        return None;
+    }
+    if inv_mass == 0.0 {
+        return Some((vec![0.0; query.len()], 0.0, true));
+    }
+    let normalized = query.iter().map(|&value| value * inv_mass).collect();
+    Some((normalized, entropy, false))
+}
+
+#[inline(always)]
+fn jensen_shannon_zero_query_distance(inv_mass: f32, entropy: f32) -> f32 {
+    if inv_mass.is_nan() || !entropy.is_finite() {
+        f32::INFINITY
+    } else if inv_mass == 0.0 {
+        0.0
+    } else {
+        std::f32::consts::LN_2.sqrt()
+    }
+}
+
+fn jensen_shannon_cached_search(
+    query: &[f32],
+    candidates: &[f32],
+    data: &JensenShannonData,
+    dim: usize,
+    k: usize,
+    n: usize,
+) -> Option<(Vec<u32>, Vec<f32>)> {
+    let (normalized, query_entropy, query_zero) = prepare_jensen_shannon_query(query)?;
+    let base_ptr = candidates.as_ptr() as usize;
+    if query_zero {
+        return Some(fused_topk_parallel::<true>(
+            &normalized,
+            candidates,
+            dim,
+            k,
+            n,
+            |_, candidate| {
+                let row = (candidate.as_ptr() as usize - base_ptr) / (dim * size_of::<f32>());
+                let (inv_mass, entropy) = data.rows[row];
+                jensen_shannon_zero_query_distance(inv_mass, entropy)
+            },
+        ));
+    }
+    Some(jensen_shannon_cached_parallel(
+        &normalized,
+        candidates,
+        data,
+        query_entropy,
+        dim,
+        k,
+        n,
+    ))
+}
+
+#[inline(never)]
+fn jensen_shannon_cached_parallel(
+    normalized_query: &[f32],
+    candidates: &[f32],
+    data: &JensenShannonData,
+    query_entropy: f32,
+    dim: usize,
+    k: usize,
+    n: usize,
+) -> (Vec<u32>, Vec<f32>) {
+    if n < 4096 {
+        let base_ptr = candidates.as_ptr() as usize;
+        return fused_topk_seq::<true>(
+            normalized_query,
+            candidates,
+            dim,
+            k,
+            0,
+            &|query, candidate| {
+                let row = (candidate.as_ptr() as usize - base_ptr) / (dim * size_of::<f32>());
+                let (inv_mass, entropy) = data.rows[row];
+                simd::jensen_shannon_precomputed_f32(
+                    query,
+                    candidate,
+                    query_entropy,
+                    inv_mass,
+                    entropy,
+                )
+            },
+        );
+    }
+
+    let n_threads = rayon::current_num_threads();
+    let chunk_vecs = (n / n_threads).max(512);
+    let chunk_floats = chunk_vecs * dim;
+    let chunk_results: Vec<Vec<TopKEntry>> = candidates
+        .par_chunks(chunk_floats)
+        .enumerate()
+        .map(|(chunk_idx, cand_chunk)| {
+            let n_in_chunk = cand_chunk.len() / dim;
+            let base_idx = chunk_idx * chunk_vecs;
+            let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
+            let mut threshold = f32::INFINITY;
+            let mut filled = false;
+
+            let pairs = n_in_chunk / 2;
+            for i in 0..pairs {
+                let local0 = i * 2;
+                if local0 + PREFETCH_AHEAD_VECTORS < n_in_chunk {
+                    unsafe {
+                        prefetch_read_data(
+                            cand_chunk
+                                .as_ptr()
+                                .add((local0 + PREFETCH_AHEAD_VECTORS) * dim)
+                                .cast(),
+                        );
+                    }
+                }
+                let start0 = local0 * dim;
+                let candidate0 = unsafe { cand_chunk.get_unchecked(start0..start0 + dim) };
+                let candidate1 =
+                    unsafe { cand_chunk.get_unchecked(start0 + dim..start0 + 2 * dim) };
+                let global0 = base_idx + local0;
+                let divergences = simd::jensen_shannon_precomputed_batch2_divergence_f32(
+                    normalized_query,
+                    candidate0,
+                    candidate1,
+                    query_entropy,
+                    data.rows[global0],
+                    data.rows[global0 + 1],
+                );
+                for (offset, divergence) in divergences.into_iter().enumerate() {
+                    if !filled || passes_threshold::<true>(divergence, threshold) {
+                        topk_insert::<true>(
+                            &mut top,
+                            k,
+                            TopKEntry {
+                                dist: divergence,
+                                idx: (global0 + offset) as u32,
+                            },
+                            &mut threshold,
+                            &mut filled,
+                        );
+                    }
+                }
+            }
+
+            if n_in_chunk % 2 == 1 {
+                let local = n_in_chunk - 1;
+                let global = base_idx + local;
+                let start = local * dim;
+                let candidate = unsafe { cand_chunk.get_unchecked(start..start + dim) };
+                let (inv_mass, entropy) = data.rows[global];
+                let distance = simd::jensen_shannon_precomputed_f32(
+                    normalized_query,
+                    candidate,
+                    query_entropy,
+                    inv_mass,
+                    entropy,
+                );
+                let divergence = distance * distance;
+                if !filled || passes_threshold::<true>(divergence, threshold) {
+                    topk_insert::<true>(
+                        &mut top,
+                        k,
+                        TopKEntry {
+                            dist: divergence,
+                            idx: global as u32,
+                        },
+                        &mut threshold,
+                        &mut filled,
+                    );
+                }
+            }
+
+            if !filled && !top.is_empty() {
+                top.sort_unstable_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal));
+            }
+            top
+        })
+        .collect();
+
+    let (ids, mut divergences) = merge_topk_results::<true>(&chunk_results, k);
+    divergences
+        .iter_mut()
+        .for_each(|value| *value = value.sqrt());
+    (ids, divergences)
+}
+
+fn jensen_shannon_cached_search_filtered(
+    query: &[f32],
+    candidates: &[f32],
+    data: &JensenShannonData,
+    dim: usize,
+    k: usize,
+    n: usize,
+    subset_indices: &[u64],
+) -> Option<(Vec<u32>, Vec<f32>)> {
+    let (normalized, query_entropy, query_zero) = prepare_jensen_shannon_query(query)?;
+    let base_ptr = candidates.as_ptr() as usize;
+    let distance = |normalized_query: &[f32], candidate: &[f32]| {
+        let row = (candidate.as_ptr() as usize - base_ptr) / (dim * size_of::<f32>());
+        let (inv_mass, entropy) = data.rows[row];
+        if query_zero {
+            jensen_shannon_zero_query_distance(inv_mass, entropy)
+        } else {
+            simd::jensen_shannon_precomputed_f32(
+                normalized_query,
+                candidate,
+                query_entropy,
+                inv_mass,
+                entropy,
+            )
+        }
+    };
+
+    const DIRECT_ACCESS_LIMIT: usize = 50_000;
+    if subset_indices.len() <= DIRECT_ACCESS_LIMIT {
+        return Some(direct_access_topk::<true>(
+            &normalized,
+            candidates,
+            dim,
+            k,
+            n,
+            subset_indices,
+            distance,
+        ));
+    }
+
+    let max_id = subset_indices.iter().copied().max().unwrap_or(0) as usize;
+    let mut bitset = vec![0u64; (max_id / 64) + 1];
+    for &id in subset_indices {
+        let idx = id as usize;
+        if idx < n {
+            bitset[idx / 64] |= 1u64 << (idx % 64);
+        }
+    }
+    Some(fused_topk_parallel_filtered::<true>(
+        &normalized,
+        candidates,
+        dim,
+        k,
+        n,
+        &bitset,
+        max_id,
+        distance,
+    ))
 }
 
 fn exact_flat_search(
@@ -802,6 +1193,23 @@ fn exact_flat_search(
         }
         DistanceMetric::Wasserstein => {
             fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::wasserstein_1d_f32)
+        }
+        DistanceMetric::JensenShannon => fused_topk_parallel::<true>(
+            query,
+            candidates,
+            dim,
+            k,
+            n,
+            simd::jensen_shannon_distance_f32,
+        ),
+        DistanceMetric::Chebyshev => {
+            fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::chebyshev_f32)
+        }
+        DistanceMetric::Canberra => {
+            fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::canberra_f32)
+        }
+        DistanceMetric::BrayCurtis => {
+            fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::bray_curtis_f32)
         }
         _ => fused_topk_parallel::<true>(query, candidates, dim, k, n, |a, b| {
             distance::compute_distance_f32(a, b, metric)
@@ -5573,6 +5981,38 @@ mod tests {
 
         let slice = store.as_slice();
         assert_eq!(slice, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn jensen_shannon_cache_preserves_exact_and_filtered_results_after_append() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        let dim = 4;
+        let mut store = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
+        store
+            .write(&[
+                1.0, 2.0, 3.0, 4.0, // row 0
+                4.0, 3.0, 2.0, 1.0, // row 1
+                0.0, 0.0, 0.0, 0.0, // row 2
+            ])
+            .unwrap();
+
+        let query = [1.0, 2.0, 3.0, 4.0];
+        let (ids, distances) = store.search(&query, 1, DistanceMetric::JensenShannon, false, None);
+        assert_eq!(ids, vec![0]);
+        assert!(distances[0] <= 3e-5, "{}", distances[0]);
+
+        let (filtered_ids, filtered_distances) =
+            store.search_filtered(&query, 1, DistanceMetric::JensenShannon, &[0, 1]);
+        assert_eq!(filtered_ids, vec![0]);
+        assert!(filtered_distances[0] <= 3e-5);
+
+        let appended = [0.5, 1.5, 2.5, 3.5];
+        store.write(&appended).unwrap();
+        let (ids, distances) =
+            store.search(&appended, 1, DistanceMetric::JensenShannon, false, None);
+        assert_eq!(ids, vec![3]);
+        assert!(distances[0] <= 3e-5);
     }
 
     #[test]

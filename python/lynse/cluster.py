@@ -188,6 +188,13 @@ def _is_ascending_index(index_mode: str | None) -> bool:
             "HELLINGER",
             "WASSERSTEIN",
             "EMD",
+            "JENSEN",
+            "JS",
+            "CHEBYSHEV",
+            "CHEBYCHEV",
+            "LINF",
+            "CANBERRA",
+            "BRAY",
         )
     )
 

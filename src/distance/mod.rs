@@ -29,6 +29,10 @@ pub enum DistanceMetric {
     Wasserstein,
     Dice,
     Tanimoto,
+    JensenShannon,
+    Chebyshev,
+    Canberra,
+    BrayCurtis,
 }
 
 impl DistanceMetric {
@@ -48,6 +52,12 @@ impl DistanceMetric {
             }
             "dice" | "sorensen" | "sorensen_dice" | "sorensen-dice" => Some(Self::Dice),
             "tanimoto" => Some(Self::Tanimoto),
+            "jensen_shannon" | "jensen-shannon" | "jensenshannon" | "js" => {
+                Some(Self::JensenShannon)
+            }
+            "chebyshev" | "chebychev" | "linf" | "l_inf" | "l-infinity" => Some(Self::Chebyshev),
+            "canberra" => Some(Self::Canberra),
+            "bray_curtis" | "bray-curtis" | "braycurtis" => Some(Self::BrayCurtis),
             _ => None,
         }
     }
@@ -59,7 +69,15 @@ impl DistanceMetric {
         let tokens: Vec<&str> = upper.split('-').collect();
         let has = |value: &str| tokens.contains(&value);
 
-        if has("TANIMOTO") {
+        if has("JENSENSHANNON") || has("JS") || (has("JENSEN") && has("SHANNON")) {
+            Some(Self::JensenShannon)
+        } else if has("CHEBYSHEV") || has("CHEBYCHEV") || has("LINF") {
+            Some(Self::Chebyshev)
+        } else if has("CANBERRA") {
+            Some(Self::Canberra)
+        } else if has("BRAYCURTIS") || (has("BRAY") && has("CURTIS")) {
+            Some(Self::BrayCurtis)
+        } else if has("TANIMOTO") {
             Some(Self::Tanimoto)
         } else if has("JACCARD") {
             Some(Self::Jaccard)
@@ -111,6 +129,10 @@ impl DistanceMetric {
             Self::Wasserstein => "wasserstein",
             Self::Dice => "dice",
             Self::Tanimoto => "tanimoto",
+            Self::JensenShannon => "jensen_shannon",
+            Self::Chebyshev => "chebyshev",
+            Self::Canberra => "canberra",
+            Self::BrayCurtis => "bray_curtis",
         }
     }
 
@@ -128,6 +150,10 @@ impl DistanceMetric {
             Self::Wasserstein => "FLAT-WASSERSTEIN",
             Self::Dice => "FLAT-DICE-BINARY",
             Self::Tanimoto => "FLAT-TANIMOTO-BINARY",
+            Self::JensenShannon => "FLAT-JENSEN-SHANNON",
+            Self::Chebyshev => "FLAT-CHEBYSHEV",
+            Self::Canberra => "FLAT-CANBERRA",
+            Self::BrayCurtis => "FLAT-BRAY-CURTIS",
         }
     }
 
@@ -170,6 +196,10 @@ pub fn compute_distance_f32(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32
         DistanceMetric::Wasserstein => simd::wasserstein_1d_f32(a, b),
         DistanceMetric::Dice => simd::dice_distance_f32(a, b),
         DistanceMetric::Tanimoto => simd::jaccard_f32(a, b),
+        DistanceMetric::JensenShannon => simd::jensen_shannon_distance_f32(a, b),
+        DistanceMetric::Chebyshev => simd::chebyshev_f32(a, b),
+        DistanceMetric::Canberra => simd::canberra_f32(a, b),
+        DistanceMetric::BrayCurtis => simd::bray_curtis_f32(a, b),
     }
 }
 
@@ -190,6 +220,10 @@ pub fn compute_distance_f16(query: &[f32], candidate_bits: &[u16], metric: Dista
         DistanceMetric::Wasserstein => simd::wasserstein_1d_f16(query, candidate_bits),
         DistanceMetric::Dice => simd::dice_distance_f16(query, candidate_bits),
         DistanceMetric::Tanimoto => simd::jaccard_f16(query, candidate_bits),
+        DistanceMetric::JensenShannon => simd::jensen_shannon_distance_f16(query, candidate_bits),
+        DistanceMetric::Chebyshev => simd::chebyshev_f16(query, candidate_bits),
+        DistanceMetric::Canberra => simd::canberra_f16(query, candidate_bits),
+        DistanceMetric::BrayCurtis => simd::bray_curtis_f16(query, candidate_bits),
     }
 }
 
@@ -625,6 +659,22 @@ mod tests {
         assert_eq!(
             DistanceMetric::from_str("emd"),
             Some(DistanceMetric::Wasserstein)
+        );
+        assert_eq!(
+            DistanceMetric::from_str("js"),
+            Some(DistanceMetric::JensenShannon)
+        );
+        assert_eq!(
+            DistanceMetric::from_str("linf"),
+            Some(DistanceMetric::Chebyshev)
+        );
+        assert_eq!(
+            DistanceMetric::from_str("bray-curtis"),
+            Some(DistanceMetric::BrayCurtis)
+        );
+        assert_eq!(
+            DistanceMetric::from_index_mode("FLAT-CANBERRA"),
+            Some(DistanceMetric::Canberra)
         );
         assert_eq!(
             DistanceMetric::from_index_mode("FLAT-TANIMOTO-BINARY"),

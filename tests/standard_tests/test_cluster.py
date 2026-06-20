@@ -67,6 +67,10 @@ def test_domain_metric_cluster_merge_order_is_ascending():
         "FLAT-CORRELATION",
         "FLAT-HELLINGER",
         "FLAT-WASSERSTEIN",
+        "HNSW-JENSEN-SHANNON",
+        "FLAT-CHEBYSHEV",
+        "FLAT-CANBERRA",
+        "FLAT-BRAY-CURTIS",
         "FLAT-TANIMOTO-BINARY",
         "FLAT-DICE-BINARY",
     ):

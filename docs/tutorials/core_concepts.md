@@ -149,6 +149,10 @@ The metric describes how similarity is measured:
 | Correlation | `-CORRELATION` | `1 - Pearson r` for aligned profiles. | ascending distance |
 | Hellinger | `-HELLINGER` | Distance between non-negative distributions. | ascending distance |
 | Wasserstein-1D | `-WASSERSTEIN` | Earth-mover distance over equal-width ordered bins. | ascending distance |
+| Jensen–Shannon | `-JENSEN-SHANNON` | Symmetric distance between non-negative distributions. | ascending distance |
+| Chebyshev | `-CHEBYSHEV` | Largest absolute component difference. | ascending distance |
+| Canberra | `-CANBERRA` | Sum of normalized component differences. | ascending distance |
+| Bray–Curtis | `-BRAY-CURTIS` | Normalized total absolute difference. | ascending distance |
 | Hamming | `-HAMMING-BINARY` | Smaller binary distance is better. | ascending distance |
 | Jaccard | `-JACCARD-BINARY` | Smaller set distance is better. | ascending distance |
 | Tanimoto | `-TANIMOTO-BINARY` | Binary Jaccard distance using chemistry terminology. | ascending distance |

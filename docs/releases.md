@@ -2,6 +2,23 @@
 
 This page documents the major features and improvements in each version of LynseDB. Only versions with the `v` prefix are official releases.
 
+## Unreleased
+
+**Distance Metrics and Domain Search**
+
+- Added Jensen–Shannon distance for probability distributions and Chebyshev
+  distance for maximum-deviation matching, with exact Flat and HNSW indexes.
+- Added exact Flat Canberra and Bray–Curtis distances for spectra,
+  compositional features, and abundance profiles.
+- Added AVX2 and NEON kernels for Chebyshev, Canberra, and Bray–Curtis while
+  keeping all four distance paths allocation-free per candidate.
+- Optimized Jensen–Shannon with SIMD logarithms and a lazy eight-byte-per-row
+  Flat cache, reducing the hot loop from two logarithms per dimension to one.
+  Dual-row evaluation, squared-distance ranking, and a stable small-distance
+  fallback further reduce scan cost without weakening near-neighbor precision.
+- Kept Canberra and Bray–Curtis out of ANN indexes pending metric-specific
+  recall validation; unsupported combinations fail explicitly.
+
 ## v0.6.0
 
 **Major Release - Storage Integrity and Performance Foundations**

@@ -77,6 +77,10 @@ class TestComputeDistance:
             ("wasserstein", [1, 0, 0], [0, 0, 1], 2.0),
             ("dice", [1, 1, 0], [1, 0, 1], 0.5),
             ("tanimoto", [1, 1, 0], [1, 0, 1], 2.0 / 3.0),
+            ("jensen_shannon", [1, 0], [0, 1], np.sqrt(np.log(2.0))),
+            ("chebyshev", [1, 2, 3], [4, 0, 3], 3.0),
+            ("canberra", [1, 0, 3], [2, 0, 1], 5.0 / 6.0),
+            ("bray_curtis", [1, 2], [2, 4], 1.0 / 3.0),
         ],
     )
     def test_domain_metrics(self, metric, a, b, expected):

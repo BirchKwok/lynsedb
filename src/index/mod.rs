@@ -360,6 +360,16 @@ fn resolve_domain_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, 
     if binary_suffix {
         return None;
     }
+    // Canberra and Bray-Curtis are exposed as exact metrics until their ANN
+    // recall characteristics have been validated independently.
+    if index_type == IndexType::HNSW
+        && matches!(
+            metric,
+            DistanceMetric::Canberra | DistanceMetric::BrayCurtis
+        )
+    {
+        return None;
+    }
     let accepted = matches!(
         suffix,
         "L1" | "MANHATTAN"
@@ -374,6 +384,15 @@ fn resolve_domain_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, 
             | "WASSERSTEIN-1D"
             | "WASSERSTEIN1D"
             | "EMD"
+            | "JENSEN-SHANNON"
+            | "JENSENSHANNON"
+            | "JS"
+            | "CHEBYSHEV"
+            | "CHEBYCHEV"
+            | "LINF"
+            | "CANBERRA"
+            | "BRAY-CURTIS"
+            | "BRAYCURTIS"
     );
     accepted.then_some((index_type, metric, QuantizerType::None))
 }
@@ -500,6 +519,13 @@ mod tests {
         );
         assert!(resolve_index_type("HNSW-TANIMOTO-BINARY").is_none());
         assert!(resolve_index_type("FLAT-HELLINGER-SQ8").is_none());
+        assert!(resolve_index_type("HNSW-JENSEN-SHANNON").is_some());
+        assert!(resolve_index_type("HNSW-CHEBYSHEV").is_some());
+        assert!(resolve_index_type("FLAT-CANBERRA").is_some());
+        assert!(resolve_index_type("FLAT-BRAY-CURTIS").is_some());
+        assert!(resolve_index_type("HNSW-CANBERRA").is_none());
+        assert!(resolve_index_type("HNSW-BRAY-CURTIS").is_none());
+        assert!(resolve_index_type("FLAT-CHEBYSHEV-SQ8").is_none());
     }
 
     #[test]

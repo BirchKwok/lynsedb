@@ -34,15 +34,16 @@ remote client API.
 | Data | Metrics | Example workloads |
 | --- | --- | --- |
 | Embeddings | inner product, squared L2, cosine | RAG, semantic and multimodal retrieval |
-| Numeric features | Manhattan/L1 | anomaly matching, sensor and tabular features |
+| Numeric features | Manhattan/L1, Chebyshev, Canberra | anomaly matching, tolerances, sensor and tabular features |
 | Coordinates | Haversine in meters | nearby POI, fleet and device search |
 | Binary fingerprints | Hamming, Jaccard/Tanimoto, Sørensen-Dice | molecular fingerprints, deduplication, genomic sketches |
 | Aligned profiles | Pearson correlation distance | sensor curves, behavior profiles, gene expression |
-| Distributions | Hellinger, Wasserstein-1D | model drift, topics, forecasts and histograms |
+| Distributions and abundance | Hellinger, Jensen–Shannon, Wasserstein-1D, Bray–Curtis | model drift, topics, forecasts, histograms and ecology |
 
-Exact Flat search supports the complete suite. HNSW supports the numeric domain
-metrics, while binary Flat search uses a one-bit-per-dimension hot
-representation for low memory bandwidth. Read
+Exact Flat search supports the complete suite. HNSW supports L1, Haversine,
+correlation, Hellinger, Wasserstein-1D, Jensen–Shannon, and Chebyshev, while
+binary Flat search uses a one-bit-per-dimension hot representation for low
+memory bandwidth. Read
 [Domain-aware distance metrics](tutorials/distance_metrics.md) for input
 contracts and index compatibility.
 
