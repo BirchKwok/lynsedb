@@ -133,7 +133,7 @@ This page documents the major features and improvements in each version of Lynse
 
 - ✨ **Float16 Vector Storage**: Added native `float16`/`f16` storage in `FlatMmap` and `VectorStore`, reducing dense vector storage size by roughly half for collections that can tolerate half-precision storage.
 - 📊 **Metric-Aware PolarVec**: Enhanced PolarVec auxiliary storage with metric-aware data so quantized search can better match the active distance metric.
-- 📚 **Documentation Refresh**: Reworked README positioning, quickstart material, tutorials, deployment docs, production roadmap, and API references for the Rust-backed API introduced in v0.2.x.
+- 📚 **Documentation Refresh**: Reworked README positioning, quickstart material, tutorials, deployment docs, and API references for the Rust-backed API introduced in v0.2.x.
 - 🧰 **Documentation Release Workflow**: Improved docs CI with explicit version input, concurrency control, and existing docs-branch fetching for versioned documentation publishing.
 
 **Improvements:**
@@ -364,4 +364,3 @@ This page documents the major features and improvements in each version of Lynse
 
 - For issues or questions about a specific version, please check the [Troubleshooting Guide](tutorials/troubleshooting.md)
 - For API documentation, see the [Python Client Reference](client.md) and [HTTP API Documentation](http_api/serve_api/app.md)
-- For upcoming features, see the [Production Roadmap](production_roadmap.md)
