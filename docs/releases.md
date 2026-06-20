@@ -2,9 +2,23 @@
 
 This page documents the major features and improvements in each version of LynseDB. Only versions with the `v` prefix are official releases.
 
-- Document-first `add(documents=...)` and `search(document=...)` now accept an
-  `embed_func` batch callable, allowing applications to use their own embedding
-  model while retaining the built-in adapter as the default.
+## v0.7.1
+
+**Patch Release - Custom Document Embeddings**
+
+**Key Features:**
+
+- 🧩 **Custom Embedding Functions**: Document-first `add(documents=...)` and
+  `search(document=...)` now accept an `embed_func` batch callable, allowing
+  applications to use their own embedding model while retaining the built-in
+  adapter as the default.
+
+**Compatibility Notes:**
+
+- Existing document-first workflows remain unchanged when `embed_func` is not
+  provided.
+
+---
 
 ## v0.7.0
 

@@ -17,7 +17,7 @@ sensitive to allocator state, import order, and OS cache behavior.
 | Dataset | 100,000 vectors, 128 dimensions, 100 queries, top-k 10 |
 | Python | 3.12.2 |
 | Platform | macOS 26.5.1, arm64 |
-| LynseDB | 0.7.0 |
+| LynseDB | 0.7.1 |
 | ChromaDB | 1.5.9 |
 | LanceDB | 0.33.0 |
 | USEARCH | 2.25.3 |
