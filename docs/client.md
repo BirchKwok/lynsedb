@@ -63,7 +63,7 @@ Remote-only database helpers:
 | --- | --- |
 | `insert_session()` | Context manager that commits on success and discards pending buffered writes on exception. |
 | `with collection:` | Collection context manager that calls `commit()` on successful exit. |
-| `add(ids, *, vectors=None, documents=None, fields=None, batch_size=1000, wire_dtype="float32")` | Add one or more records. Provide vectors directly, or provide documents without vectors to trigger lazy default embedding. IDs may be strings or non-negative integers. |
+| `add(ids, *, vectors=None, documents=None, embed_func=None, fields=None, batch_size=1000, wire_dtype="float32")` | Add one or more records. Provide vectors directly, or provide documents with an optional custom batch embedding function. IDs may be strings or non-negative integers. |
 | `upsert(ids, *, vectors, fields=None, batch_size=1000, wire_dtype="float32")` | Insert or update one or more records by public ID. |
 | `commit()` | Fast logical commit: make writes visible and clear WAL without forcing recursive fsync. |
 | `flush()` | Flush pending buffers and bytes without clearing WAL. Advanced storage operation. |
@@ -92,7 +92,7 @@ WAL state.
 
 | Method | Description |
 | --- | --- |
-| `search(vector=None, k=10, *, document=None, where=None, return_fields=False, vector_field="default", reranker=None, rerank_k=None, rerank_with_fields=False, nprobe=10, approx=False, eps=1e-4, wire_dtype="float32")` | Dense vector search, or semantic document search when `document` is provided instead of `vector`. |
+| `search(vector=None, k=10, *, document=None, embed_func=None, where=None, return_fields=False, vector_field="default", reranker=None, rerank_k=None, rerank_with_fields=False, nprobe=10, approx=False, eps=1e-4, wire_dtype="float32")` | Dense vector search, or semantic document search with an optional custom batch embedding function. |
 | `batch_search(vectors, k=10, *, where=None, return_fields=False, nprobe=10, reranker=None, rerank_k=None, rerank_with_fields=False)` | Search multiple query vectors. |
 | `search_range(vector, threshold, max_results=1000)` | Return all matches within a metric-specific threshold. |
 | `search_profile(vector, k=10, *, where=None, nprobe=10)` | Search with explain/profile metadata. |
@@ -131,6 +131,21 @@ repeatable environments:
 ```shell
 pip install "lynsedb[embeddings]"
 ```
+
+Pass the same batch callable to both operations to use your own model. It must
+accept a `list[str]` and return one vector per input document:
+
+```python
+def embed_func(documents):
+    return my_model.encode(documents)
+
+collection.add(ids=["a", "b"], documents=["alpha", "beta"], embed_func=embed_func)
+result = collection.search(document="alpha", embed_func=embed_func, k=5)
+```
+
+The output is converted to a contiguous `float32` matrix and validated against
+the number of input documents. The custom function runs client-side in both
+embedded and HTTP modes.
 
 Configuration environment variables:
 

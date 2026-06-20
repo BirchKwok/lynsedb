@@ -40,3 +40,25 @@ def test_embed_documents_rejects_unknown_adapter():
 
     with pytest.raises(ValueError, match="unsupported text embedding adapter"):
         _embedding.embed_documents(["alpha"], adapter="unknown")
+
+
+def test_embed_documents_uses_custom_function_without_loading_default_model(monkeypatch):
+    from lynse.api import _embedding
+
+    monkeypatch.setattr(
+        _embedding, "_get_text_model", lambda **kwargs: pytest.fail("default model loaded")
+    )
+    vectors = _embedding.embed_documents(
+        ["alpha", "beta"],
+        embed_func=lambda docs: [[len(text), 1] for text in docs],
+    )
+
+    assert vectors.dtype == np.float32
+    np.testing.assert_array_equal(vectors, [[5, 1], [4, 1]])
+
+
+def test_embed_documents_validates_custom_function_output_count():
+    from lynse.api import _embedding
+
+    with pytest.raises(ValueError, match="output count"):
+        _embedding.embed_documents(["alpha", "beta"], embed_func=lambda docs: [[1, 2]])

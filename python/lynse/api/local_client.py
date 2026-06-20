@@ -366,6 +366,7 @@ class LocalCollection:
             *,
             vectors=None,
             documents=None,
+            embed_func: Optional[Callable[[List[str]], Any]] = None,
             fields=None,
             batch_size: int = 1000,
             wire_dtype: str = "float32",
@@ -387,7 +388,7 @@ class LocalCollection:
             if vectors is None:
                 if docs is None:
                     raise ValueError("add() requires vectors or documents")
-                vec_array = embed_documents(docs)
+                vec_array = embed_documents(docs, embed_func=embed_func) if embed_func is not None else embed_documents(docs)
                 n_records = vec_array.shape[0]
                 if n_records != len(docs):
                     raise ValueError("embedding output count must match documents length")
@@ -433,7 +434,7 @@ class LocalCollection:
         if vectors is None:
             if docs is None:
                 raise ValueError("add() requires vectors or documents")
-            vec_array = embed_documents(docs)
+            vec_array = embed_documents(docs, embed_func=embed_func) if embed_func is not None else embed_documents(docs)
             if vec_array.shape[0] != n_records:
                 raise ValueError("embedding output count must match ids length")
         else:
@@ -853,6 +854,7 @@ class LocalCollection:
     def search(
             self, vector: Union[list, np.ndarray, None] = None, k: int = 10, *,
             document: Union[str, None] = None,
+            embed_func: Optional[Callable[[List[str]], Any]] = None,
             where: Union[str, None] = None,
             return_fields: bool = False,
             vector_field: str = "default",
@@ -901,7 +903,7 @@ class LocalCollection:
         if (vector is None) == (document is None):
             raise ValueError("search() requires exactly one of vector or document")
         if document is not None:
-            vec = embed_documents([document])[0]
+            vec = (embed_documents([document], embed_func=embed_func) if embed_func is not None else embed_documents([document]))[0]
         else:
             vec = np.ascontiguousarray(vector, dtype=np.float32).ravel()
         result = self._rust_coll.search(

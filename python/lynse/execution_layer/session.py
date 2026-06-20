@@ -35,7 +35,7 @@ class DataInsertionSession:
 
     def _commit(self):
         self._compact_pending_adds()
-        for ids, vectors, documents, fields, batch_size, wire_dtype in self._pending_batches:
+        for ids, vectors, documents, fields, batch_size, wire_dtype, embed_func in self._pending_batches:
             self.db.add(
                 ids,
                 vectors=vectors,
@@ -43,6 +43,7 @@ class DataInsertionSession:
                 fields=fields,
                 batch_size=batch_size,
                 wire_dtype=wire_dtype,
+                embed_func=embed_func,
             )
         self._pending_adds.clear()
         self._pending_batches.clear()
@@ -63,13 +64,13 @@ class DataInsertionSession:
             wire_dtype = current["wire_dtype"]
             if current["mode"] == "vectors":
                 vectors = np.ascontiguousarray(current["vectors"], dtype=np.float32)
-                batch = (ids, vectors, None, fields, batch_size, wire_dtype)
+                batch = (ids, vectors, None, fields, batch_size, wire_dtype, current["embed_func"])
             else:
-                batch = (ids, None, current["documents"], fields, batch_size, wire_dtype)
+                batch = (ids, None, current["documents"], fields, batch_size, wire_dtype, current["embed_func"])
             current = None
             return batch
 
-        for external_ids, vectors, documents, fields, batch_size, wire_dtype in self._pending_adds:
+        for external_ids, vectors, documents, fields, batch_size, wire_dtype, embed_func in self._pending_adds:
             if not isinstance(batch_size, int) or batch_size <= 0:
                 raise ValueError("batch_size must be a positive integer")
             n_records = len(external_ids)
@@ -98,6 +99,7 @@ class DataInsertionSession:
                     "mode": mode,
                     "batch_size": batch_size,
                     "wire_dtype": wire_dtype,
+                    "embed_func": embed_func,
                     "ids": [],
                     "vectors": [],
                     "documents": [],
@@ -108,6 +110,7 @@ class DataInsertionSession:
                 current["mode"] != mode
                 or current["batch_size"] != batch_size
                 or current["wire_dtype"] != wire_dtype
+                or current["embed_func"] is not embed_func
             ):
                 batch = flush_current()
                 if batch is not None:
@@ -116,6 +119,7 @@ class DataInsertionSession:
                     "mode": mode,
                     "batch_size": batch_size,
                     "wire_dtype": wire_dtype,
+                    "embed_func": embed_func,
                     "ids": [],
                     "vectors": [],
                     "documents": [],
@@ -133,6 +137,7 @@ class DataInsertionSession:
                             "mode": mode,
                             "batch_size": batch_size,
                             "wire_dtype": wire_dtype,
+                            "embed_func": embed_func,
                             "ids": [],
                             "vectors": [],
                             "documents": [],
@@ -152,6 +157,7 @@ class DataInsertionSession:
                             "mode": mode,
                             "batch_size": batch_size,
                             "wire_dtype": wire_dtype,
+                            "embed_func": embed_func,
                             "ids": [],
                             "vectors": [],
                             "documents": [],
@@ -192,7 +198,7 @@ class DataInsertionSession:
         return False
 
     def add(self, ids: Any, *, vectors=None, documents=None, fields=None, batch_size: int = 50000,
-            wire_dtype: str = "float32"):
+            wire_dtype: str = "float32", embed_func=None):
         """Buffer records and write them when the session exits successfully."""
         external_ids, single_id = normalize_external_ids(ids)
         self._pending_adds.append((
@@ -202,6 +208,7 @@ class DataInsertionSession:
             fields,
             batch_size,
             wire_dtype,
+            embed_func,
         ))
         if len(self._pending_adds) >= self._compact_threshold:
             self._compact_pending_adds()

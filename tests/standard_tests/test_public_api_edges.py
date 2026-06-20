@@ -169,6 +169,20 @@ def test_search_document_path_uses_embedding(monkeypatch, collection):
     assert result.ids.tolist() == [1]
 
 
+def test_document_add_and_search_accept_custom_embed_func(collection):
+    calls = []
+
+    def embed_func(documents):
+        calls.append(documents)
+        return [[1.0] + [0.0] * (DIM - 1) for _ in documents]
+
+    collection.add(ids="custom", documents="haystack", embed_func=embed_func)
+    result = collection.search(document="needle", embed_func=embed_func, k=1)
+
+    assert result.ids.tolist() == ["custom"]
+    assert calls == [["haystack"], ["needle"]]
+
+
 def test_named_vector_operations_reject_missing_ids(populated_collection):
     populated_collection.create_vector_field("image", 3, metric="l2")
 

@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Callable, Iterable, Optional
 
 import numpy as np
 
@@ -29,14 +29,28 @@ _TEXT_MODELS: dict[tuple[str, str, str], object] = {}
 def embed_documents(
     documents: Iterable[str],
     *,
+    embed_func: Optional[Callable[[list[str]], Any]] = None,
     adapter: str = DEFAULT_TEXT_EMBEDDING_ADAPTER,
     model_name: str = DEFAULT_TEXT_EMBEDDING_MODEL,
     cache_dir: str | os.PathLike[str] | None = None,
 ) -> np.ndarray:
-    """Embed documents with LynseDB's lazy local default model."""
+    """Embed documents with a user callable or LynseDB's lazy default model."""
     docs = list(documents)
     if not docs:
         raise ValueError("documents cannot be empty")
+    if embed_func is not None:
+        if not callable(embed_func):
+            raise TypeError("embed_func must be callable")
+        vectors = np.asarray(embed_func(docs), dtype=np.float32)
+        if vectors.ndim == 1 and len(docs) == 1:
+            vectors = vectors.reshape(1, -1)
+        if vectors.ndim != 2:
+            raise ValueError("embed_func must return a 2D array-like value")
+        if vectors.shape[0] != len(docs):
+            raise ValueError("embedding output count must match documents length")
+        if vectors.shape[1] == 0:
+            raise ValueError("embed_func must return non-empty vectors")
+        return np.ascontiguousarray(vectors, dtype=np.float32)
     model = _get_text_model(adapter=adapter, model_name=model_name, cache_dir=cache_dir)
     vectors = list(model.embed(docs))
     return np.ascontiguousarray(vectors, dtype=np.float32)

@@ -32,35 +32,80 @@ or when migrating an embedded retrieval prototype into a self-hosted deployment.
 | Storage posture | Rust storage/search core with mmap storage, WAL, snapshots, restore, export/import, and multiple index families. | Chroma storage/query stack. | Columnar Lance storage, compact local files. | Compact persisted vector index. |
 | Operational posture | Strong self-hosted and embedded path, with optional cluster coordination. | Strong managed-service path. | Strong analytics/table-oriented vector workflow. | Strong low-level library posture. |
 
-## Benchmark Snapshot
+## Feature Comparison
 
-The local 100,000-row benchmark in
-[`vector_database_benchmarks.md`](vector_database_benchmarks.md) uses
-128-dimensional normalized vectors, 100 queries, and batch insert APIs for the
-embedded engines. ChromaDB, LanceDB, and LynseDB numbers below come from the
-same 2026-06-15 100k run. USEARCH is shown from the 2026-06-16 float32
-follow-up run, where it was configured as a vector-only HNSW index.
+This table compares native, documented product capabilities rather than features
+that can be assembled in application code. `Partial` means the product supports
+the general workflow but not the same built-in scope or deployment path. The
+comparison reflects the versions and benchmark adapters recorded below; product
+capabilities change, so validate requirements against the version you plan to
+deploy.
 
-| Metric | LynseDB | ChromaDB | LanceDB | USEARCH |
+| Capability | LynseDB | ChromaDB | LanceDB | USEARCH |
+| --- | :---: | :---: | :---: | :---: |
+| One Python client for embedded, self-hosted HTTP, and self-hosted sharded-cluster deployments | **Yes** | Partial | Partial | No |
+| Dense vector search and metadata filtering | Yes | Yes | Yes | Vector search only |
+| BM25/full-text plus dense hybrid retrieval | Yes | Partial | Yes | No |
+| Native sparse-vector search | **Yes** | No | Partial | Sparse vector types only; no database retrieval layer |
+| Named vector fields for multiple embeddings on one record | **Yes** | No | Yes | Multiple indexes must be managed by the application |
+| External rerank hook in the collection search workflow | **Yes** | No | Yes | No |
+| Range search in the collection API | **Yes** | No | Yes | No database collection API |
+| Native geospatial distance with Haversine results in meters | **Yes** | No | No | Haversine metric, but no database field/filter layer |
+| Native binary-fingerprint similarity: Hamming, Jaccard/Tanimoto, and Dice | **Yes** | No | Partial | Hamming/Jaccard metrics |
+| Native distribution/profile distances: Hellinger, Jensen-Shannon, Wasserstein-1D, Bray-Curtis, and correlation | **Yes** | No | No | No |
+| Automatic packed-binary flat scan representation | **Yes** | No | No | No |
+| WAL, snapshots/restore, and export/import in the self-hosted product | **Yes** | Partial | Partial | Save/load index only |
+| Built-in API keys, health/readiness, metrics, and OpenAPI for self-hosting | **Yes** | Partial | Partial | No |
+| Coordinator fan-out, stable hash sharding, replica mirroring, and primary promotion | **Yes** | No self-hosted equivalent | No lightweight self-hosted equivalent | No |
+
+The bold LynseDB entries are the main differentiators in this comparison. The
+strongest distinction is not any single checkbox: LynseDB exposes specialized
+similarity metrics, full retrieval primitives, operational APIs, and an
+incremental embedded-to-cluster path through one collection/client model.
+
+## Updated Benchmark Snapshot
+
+The latest comparable float32 run in
+[`vector_database_benchmarks.md`](vector_database_benchmarks.md) was recorded on
+2026-06-20. It uses 100,000 normalized 128-dimensional vectors, 100 queries,
+top-k 10, and batch insert APIs. LynseDB and LanceDB target exact search;
+USEARCH is configured as a vector-only HNSW index with
+`expansion_search=128`. ChromaDB is included as a persistent local HNSW
+collection; its approximate recall should be read alongside its latency.
+
+| Metric | LynseDB float32 | ChromaDB | LanceDB | USEARCH |
 | --- | ---: | ---: | ---: | ---: |
-| Batch ingest vectors/s | 53,544 | 2,373 | 85,236 | 10,351 |
-| Disk after ingest MB | 87.47 | 162.41 | 55.74 | 63.03 |
-| Vector search mean ms | 0.614 | 0.985 | 12.186 | 0.571 |
-| Vector search recall@10 | 1.0000 | 0.5210 | 1.0000 | 0.6020 |
-| Filtered search mean ms | 0.114 | 36.194 | 18.082 | n/a |
-| Filtered recall@10 | 1.0000 | 0.9970 | 1.0000 | n/a |
-| Startup mean ms | 1.892 | 11.511 | 2.092 | 2.068 |
+| Batch ingest vectors/s | **73,399** | 2,108 | 68,123 | 10,578 |
+| Disk after ingest MB | 69.13 | 162.42 | **55.76** | 63.03 |
+| Vector search mean ms | 0.661 | 1.233 | 14.581 | **0.555** |
+| Vector search recall@10 | **1.0000** | 0.5180 | **1.0000** | 0.6000 |
+| Filtered search mean ms | **0.178** | 37.354 | 16.692 | n/a |
+| Filtered recall@10 | **1.0000** | 0.9990 | **1.0000** | n/a |
+| Hybrid search mean ms | **4.809** | n/a | 17.810 | n/a |
+| Startup mean ms | 2.087 | 13.995 | 2.251 | **0.036** |
 
-The most important result is that LynseDB combines database features with
-low-latency exact retrieval. In this benchmark profile it leads filtered search
-latency by a wide margin, starts quickly, preserves exact or near-exact recall,
-and still offers document search, metadata filters, hybrid retrieval, an HTTP
-service, and a self-hosted cluster path. USEARCH posts slightly faster raw
-vector-search latency in the float32 follow-up, but with lower recall and no
-metadata-filtered or hybrid retrieval path in this suite. LanceDB leads the
-original 100k disk footprint and batch ingest, and ChromaDB remains convenient
-for Chroma-specific ecosystems, but LynseDB is the stronger default when the
-application needs both speed and a complete retrieval/database layer.
+On this workload, LynseDB combines exact recall with substantially lower vector,
+filtered, and hybrid-search latency than LanceDB. USEARCH has the lowest raw
+vector-search latency and fastest startup, but its approximate result reaches
+0.600 recall@10 and its adapter has no database-level filtered or hybrid search.
+ChromaDB also trades recall for approximate-search latency in this run. LanceDB
+uses the least disk in this float32 comparison.
+
+The same benchmark suite also includes a 1,000,000-row exact-search scale check:
+
+| Metric | LynseDB | LanceDB |
+| --- | ---: | ---: |
+| Batch ingest vectors/s | 49,954 | **85,057** |
+| Disk after ingest MB | 694.32 | **547.69** |
+| Vector search mean ms | **6.013** | 109.009 |
+| Vector search recall@10 | **1.0000** | **1.0000** |
+| Filtered search mean ms | **2.160** | 148.455 |
+| Filtered recall@10 | **1.0000** | **1.0000** |
+
+At 1 million rows, LanceDB ingests faster and uses less persisted space, while
+LynseDB records about 18x lower mean exact-vector latency and 69x lower mean
+filtered-search latency. These are results from one reproducible machine and
+dataset, not universal performance guarantees.
 
 ## When LynseDB Fits Better
 
