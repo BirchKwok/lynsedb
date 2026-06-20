@@ -10,10 +10,6 @@ This page documents the major features and improvements in each version of Lynse
 
 - 🛡️ **WAL Checksum Validation**: Added CRC32 checksums to new WAL segments so complete-but-corrupted records are rejected during recovery instead of being replayed silently.
 - 🗃️ **WAL Format Version 5**: Advanced the WAL format while retaining read support for version 3 (JSON fields) and version 4 (binary fields) WAL files.
-- 📐 **Domain-Aware Distance Suite**: Added Manhattan/L1, Haversine-in-meters,
-  Pearson correlation, Hellinger, Wasserstein-1D, Tanimoto, and Sørensen-Dice
-  distances. Numeric domain metrics support exact Flat and HNSW indexes;
-  binary Flat search uses a lazy one-bit-per-dimension hot representation.
 
 **Improvements:**
 
@@ -21,15 +17,10 @@ This page documents the major features and improvements in each version of Lynse
   higher-throughput writes and more efficient storage operations.
 - Expanded flat-search and upsert benchmarks, including a dedicated upsert
   benchmark for tracking write-path performance.
-- Extended the flat-search benchmark with selectable index modes so numeric,
-  geospatial, distribution, and binary kernels can be measured reproducibly.
 
 **Testing:**
 
 - Added WAL corruption coverage to verify checksum mismatches are detected.
-- Added distance reference tests, index alias and capability tests, HNSW
-  serialization coverage, packed-bit equivalence tests, and Python API search
-  scenarios for the new metric families.
 
 **Compatibility Notes:**
 
