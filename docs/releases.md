@@ -2,7 +2,34 @@
 
 This page documents the major features and improvements in each version of LynseDB. Only versions with the `v` prefix are official releases.
 
-## Unreleased
+## v0.6.0
+
+**Upcoming Release - Storage Integrity and Performance Foundations**
+
+**Key Features:**
+- Added CRC32 checksums to new WAL segments so complete-but-corrupted records are
+  rejected during recovery instead of being replayed silently.
+- Advanced the WAL format to version 5 while retaining read support for version
+  3 (JSON fields) and version 4 (binary fields) WAL files.
+
+**Improvements:**
+- Refactored the engine, vector store, and field store paths in preparation for
+  higher-throughput writes and more efficient storage operations.
+- Expanded flat-search and upsert benchmarks, including a dedicated upsert
+  benchmark for tracking write-path performance.
+
+**Testing:**
+- Added WAL corruption coverage to verify checksum mismatches are detected.
+
+**Compatibility Notes:**
+- Existing version 3 and version 4 WAL files remain readable. New writes use the
+  version 5 checksummed format.
+- v0.6.0 is not yet released; this section describes the changes currently on
+  the main branch and may evolve before the tag is created.
+
+---
+
+## v0.5.0
 
 **Developer Experience and Document-First Retrieval**
 
@@ -22,7 +49,36 @@ This page documents the major features and improvements in each version of Lynse
   `add(documents=...)` and `search(document=...)` usage.
 - Added a `LynseDB vs ChromaDB` comparison and migration guide.
 
-## v0.5.0
+**Cluster and Storage:**
+- Added `ClusterReadCoordinator` and cluster RPC control operations, including
+  versioned metadata get/compare-and-swap support for coordinated state updates.
+- Improved bulk ID return handling and internal ID routing for distributed
+  writes.
+- Added binary record handling for add and upsert operations, float16-encoded
+  vector transport, and binary metadata persistence.
+- Added the SPANN index with inner-product, L2, and cosine metric variants.
+
+**Improvements:**
+- Improved local client shutdown behavior and public API edge-case handling.
+- Clarified commit and checkpoint behavior in the documentation.
+- Strengthened release automation with tag/version validation, release-note
+  preparation, legacy package detection, and distribution uploads.
+
+**Testing:**
+- Expanded public API coverage for collection lifecycle and close behavior.
+- Added cluster coordination, metadata RPC, binary record, and SPANN coverage.
+
+**Compatibility Notes:**
+- The backend-only `SearchResult` compatibility alias was removed; use the
+  public `ResultView` API rather than importing internal backend symbols.
+- New collections now default to a lazily built `FLAT-IP` index. Pass
+  `default_index=None` to retain manual index management.
+- FastEmbed is optional; install `lynsedb[embeddings]` when using the built-in
+  document embedding adapter.
+
+---
+
+## v0.4.0
 
 **Major Release - Cluster Coordination, Transport, and API Consistency**
 
@@ -48,7 +104,7 @@ This page documents the major features and improvements in each version of Lynse
 **Testing:**
 - Added standard cluster tests covering state initialization, ID routing, replica state changes, binary item preparation, and coordinator behavior.
 - Added explicit API parameter tests to keep local and HTTP collection signatures aligned and verify `n_clusters` and `wire_dtype` behavior.
-- Expanded collection, search, metadata index, Docker API, and server CLI coverage for the v0.5.0 API surface.
+- Expanded collection, search, metadata index, Docker API, and server CLI coverage for the v0.4.0 API surface.
 
 **Compatibility Notes:**
 - No required data migration is expected from v0.3.0 for single-node local or HTTP deployments.
@@ -226,7 +282,23 @@ This page documents the major features and improvements in each version of Lynse
 
 ## Migration Guide
 
-### From v0.3.0 to v0.5.0
+### From v0.5.0 to v0.6.0
+- No data migration is currently expected. WAL versions 3 and 4 remain readable,
+  while newly created WAL segments use the version 5 checksummed format.
+- Treat these notes as provisional until v0.6.0 is tagged.
+
+### From v0.4.0 to v0.5.0
+- New collections build a `FLAT-IP` index lazily after their first primary vector
+  write. Pass `default_index=None` if your application builds indexes manually.
+- Install `lynsedb[embeddings]` to use the default document embedding adapter;
+  direct vector workflows do not need this optional dependency.
+- Replace imports of the internal backend `SearchResult` alias with the public
+  `ResultView` API.
+- Existing single-node data does not require a storage migration. Cluster users
+  should upgrade coordinator and shard nodes together because v0.5.0 extends
+  cluster RPC and metadata coordination behavior.
+
+### From v0.3.0 to v0.4.0
 - Single-node local and HTTP deployments do not require a storage migration.
 - Cluster mode is new and opt-in. Start ordinary LynseDB HTTP servers as shards, then run a coordinator with `lynse serve --role coordinator --cluster-config ... --cluster-state ...`.
 - Keep the coordinator `cluster_state.json` on persistent storage and back it up together with all shard data directories.
