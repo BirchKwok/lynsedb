@@ -4,13 +4,11 @@ This page documents the major features and improvements in each version of Lynse
 
 ## v0.6.0
 
-**Upcoming Release - Storage Integrity and Performance Foundations**
+**Major Release - Storage Integrity and Performance Foundations**
 
 **Key Features:**
-- Added CRC32 checksums to new WAL segments so complete-but-corrupted records are
-  rejected during recovery instead of being replayed silently.
-- Advanced the WAL format to version 5 while retaining read support for version
-  3 (JSON fields) and version 4 (binary fields) WAL files.
+- 🛡️ **WAL Checksum Validation**: Added CRC32 checksums to new WAL segments so complete-but-corrupted records are rejected during recovery instead of being replayed silently.
+- 🗃️ **WAL Format Version 5**: Advanced the WAL format while retaining read support for version 3 (JSON fields) and version 4 (binary fields) WAL files.
 
 **Improvements:**
 - Refactored the engine, vector store, and field store paths in preparation for
@@ -31,36 +29,22 @@ This page documents the major features and improvements in each version of Lynse
 
 ## v0.5.0
 
-**Developer Experience and Document-First Retrieval**
+**Major Release - Document-First Retrieval, Cluster Coordination, and SPANN Indexing**
 
 **Key Features:**
-- Added collection context-manager support so `with collection:` commits writes
-  automatically on successful exit.
-- Added lazy default index creation for new collections. `require_collection()`
-  now defaults to `default_index="FLAT-IP"` and builds that index after the
-  first primary vector write; pass `default_index=None` to keep manual index
-  control.
-- Made the default document embedding adapter configurable through environment
-  variables and added the `lynsedb[embeddings]` optional dependency for explicit
-  FastEmbed installation.
-
-**Documentation:**
-- Updated README, quickstart, and Python client reference around document-first
-  `add(documents=...)` and `search(document=...)` usage.
-- Added a `LynseDB vs ChromaDB` comparison and migration guide.
-
-**Cluster and Storage:**
-- Added `ClusterReadCoordinator` and cluster RPC control operations, including
-  versioned metadata get/compare-and-swap support for coordinated state updates.
-- Improved bulk ID return handling and internal ID routing for distributed
-  writes.
-- Added binary record handling for add and upsert operations, float16-encoded
-  vector transport, and binary metadata persistence.
-- Added the SPANN index with inner-product, L2, and cosine metric variants.
+- 📄 **Document-First Retrieval**: Added `add(documents=...)` and `search(document=...)` workflows with a configurable default embedding adapter and the optional `lynsedb[embeddings]` dependency for FastEmbed.
+- 🧭 **Lazy Default Indexing**: New collections now default to `default_index="FLAT-IP"`, built after the first primary vector write. Pass `default_index=None` to retain manual index control.
+- 🔄 **Collection Context Management**: Added collection context-manager support so `with collection:` commits writes automatically on successful exit.
+- 🌐 **Cluster Read Coordination**: Added `ClusterReadCoordinator` and cluster RPC control operations, including versioned metadata get/compare-and-swap support for coordinated state updates.
+- 🧭 **Distributed ID Routing**: Improved bulk ID return handling and internal ID routing for distributed writes.
+- 📦 **Binary Storage and Transport**: Added binary record handling for add and upsert operations, float16-encoded vector transport, and binary metadata persistence.
+- 🔎 **SPANN Index**: Added SPANN indexing with inner-product, L2, and cosine metric variants.
 
 **Improvements:**
 - Improved local client shutdown behavior and public API edge-case handling.
 - Clarified commit and checkpoint behavior in the documentation.
+- Updated README, quickstart, and Python client reference for document-first retrieval.
+- Added a `LynseDB vs ChromaDB` comparison and migration guide.
 - Strengthened release automation with tag/version validation, release-note
   preparation, legacy package detection, and distribution uploads.
 
