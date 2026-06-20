@@ -22,8 +22,7 @@ This page documents the major features and improvements in each version of Lynse
 **Compatibility Notes:**
 - Existing version 3 and version 4 WAL files remain readable. New writes use the
   version 5 checksummed format.
-- v0.6.0 is not yet released; this section describes the changes currently on
-  the main branch and may evolve before the tag is created.
+
 
 ---
 
