@@ -58,6 +58,7 @@ extra:
     provider: mike
 
 markdown_extensions:
+  - sane_lists
   - toc:
       permalink: true
       permalink_class: headerlink

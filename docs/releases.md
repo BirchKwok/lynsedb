@@ -7,19 +7,23 @@ This page documents the major features and improvements in each version of Lynse
 **Major Release - Storage Integrity and Performance Foundations**
 
 **Key Features:**
+
 - 🛡️ **WAL Checksum Validation**: Added CRC32 checksums to new WAL segments so complete-but-corrupted records are rejected during recovery instead of being replayed silently.
 - 🗃️ **WAL Format Version 5**: Advanced the WAL format while retaining read support for version 3 (JSON fields) and version 4 (binary fields) WAL files.
 
 **Improvements:**
+
 - Refactored the engine, vector store, and field store paths in preparation for
   higher-throughput writes and more efficient storage operations.
 - Expanded flat-search and upsert benchmarks, including a dedicated upsert
   benchmark for tracking write-path performance.
 
 **Testing:**
+
 - Added WAL corruption coverage to verify checksum mismatches are detected.
 
 **Compatibility Notes:**
+
 - Existing version 3 and version 4 WAL files remain readable. New writes use the
   version 5 checksummed format.
 
@@ -31,6 +35,7 @@ This page documents the major features and improvements in each version of Lynse
 **Major Release - Document-First Retrieval, Cluster Coordination, and SPANN Indexing**
 
 **Key Features:**
+
 - 📄 **Document-First Retrieval**: Added `add(documents=...)` and `search(document=...)` workflows with a configurable default embedding adapter and the optional `lynsedb[embeddings]` dependency for FastEmbed.
 - 🧭 **Lazy Default Indexing**: New collections now default to `default_index="FLAT-IP"`, built after the first primary vector write. Pass `default_index=None` to retain manual index control.
 - 🔄 **Collection Context Management**: Added collection context-manager support so `with collection:` commits writes automatically on successful exit.
@@ -40,6 +45,7 @@ This page documents the major features and improvements in each version of Lynse
 - 🔎 **SPANN Index**: Added SPANN indexing with inner-product, L2, and cosine metric variants.
 
 **Improvements:**
+
 - Improved local client shutdown behavior and public API edge-case handling.
 - Clarified commit and checkpoint behavior in the documentation.
 - Updated README, quickstart, and Python client reference for document-first retrieval.
@@ -48,10 +54,12 @@ This page documents the major features and improvements in each version of Lynse
   preparation, legacy package detection, and distribution uploads.
 
 **Testing:**
+
 - Expanded public API coverage for collection lifecycle and close behavior.
 - Added cluster coordination, metadata RPC, binary record, and SPANN coverage.
 
 **Compatibility Notes:**
+
 - The backend-only `SearchResult` compatibility alias was removed; use the
   public `ResultView` API rather than importing internal backend symbols.
 - New collections now default to a lazily built `FLAT-IP` index. Pass
@@ -66,6 +74,7 @@ This page documents the major features and improvements in each version of Lynse
 **Major Release - Cluster Coordination, Transport, and API Consistency**
 
 **Key Features:**
+
 - 🌐 **Lightweight Cluster Mode**: Added a coordinator role for sharding remote HTTP deployments across multiple shard groups. The coordinator owns collection metadata, routes IDs with stable hash buckets, fans out searches, merges results, and can mirror writes to active replicas.
 - 🔁 **Shard Failover Foundations**: Added coordinator state tracking, health checks, replica states, primary promotion behavior, and `/cluster_info` diagnostics for cluster operations.
 - ⚡ **Internal Cluster RPC**: Added a private length-prefixed TCP RPC path between coordinator and shard nodes for hot shard operations including ping, search, batch search, binary add, upsert, delete, and restore, with HTTP fallback when RPC is unavailable.
@@ -77,6 +86,7 @@ This page documents the major features and improvements in each version of Lynse
 - 📚 **Cluster Deployment Documentation**: Added a full cluster deployment and maintenance guide covering local clusters, production layout, coordinator state, health checks, promotion, recovery, backup, and upgrade notes.
 
 **Improvements:**
+
 - Refined Python binding structure around records, embeddings, reranking, result views, sessions, and HTTP client behavior.
 - Added server CLI support for coordinator mode, cluster config/state paths, shard API keys, and cluster health tuning.
 - Expanded index documentation with canonical names, aliases, metric variants, binary metric variants, IVF tuning guidance, and troubleshooting notes.
@@ -85,11 +95,13 @@ This page documents the major features and improvements in each version of Lynse
 - Improved CI release workflow with tag resolution and version checking steps.
 
 **Testing:**
+
 - Added standard cluster tests covering state initialization, ID routing, replica state changes, binary item preparation, and coordinator behavior.
 - Added explicit API parameter tests to keep local and HTTP collection signatures aligned and verify `n_clusters` and `wire_dtype` behavior.
 - Expanded collection, search, metadata index, Docker API, and server CLI coverage for the v0.4.0 API surface.
 
 **Compatibility Notes:**
+
 - No required data migration is expected from v0.3.0 for single-node local or HTTP deployments.
 - Existing single-node `VectorDBClient` usage continues to work. Cluster mode is opt-in via `lynse serve --role coordinator`.
 - Applications that passed extra unsupported keyword arguments to public Python methods should switch to the documented explicit parameters.
@@ -101,18 +113,21 @@ This page documents the major features and improvements in each version of Lynse
 **Major Release - Float16 Support and Advanced Indexing**
 
 **Key Features:**
+
 - ✨ **Float16 Vector Storage**: Added native `float16`/`f16` storage in `FlatMmap` and `VectorStore`, reducing dense vector storage size by roughly half for collections that can tolerate half-precision storage.
 - 📊 **Metric-Aware PolarVec**: Enhanced PolarVec auxiliary storage with metric-aware data so quantized search can better match the active distance metric.
 - 📚 **Documentation Refresh**: Reworked README positioning, quickstart material, tutorials, deployment docs, production roadmap, and API references for the Rust-backed API introduced in v0.2.x.
 - 🧰 **Documentation Release Workflow**: Improved docs CI with explicit version input, concurrency control, and existing docs-branch fetching for versioned documentation publishing.
 
 **Improvements:**
+
 - Updated package versions to `0.3.0` across Cargo, Python package metadata, and runtime `__version__`.
 - Clarified embedded mode versus HTTP service mode in the user-facing documentation.
 - Expanded tutorials for adding vectors, searching and filtering, indexing, named/sparse/hybrid retrieval, operations, and production tuning.
 - Removed outdated README badges and aligned docs with the current supported platform policy.
 
 **Compatibility Notes:**
+
 - Existing `float32` collections remain the default and require no migration.
 - New half-precision collections should be created explicitly with `dtypes="float16"`.
 - Consider rebuilding PolarVec indexes after upgrading if you want the metric-aware auxiliary data generated by this release.
@@ -124,6 +139,7 @@ This page documents the major features and improvements in each version of Lynse
 **Major Release - Rust Architecture and Advanced Features**
 
 **Key Features:**
+
 - 🏗️ **Rust-First Architecture**: Rebuilt LynseDB around a Rust storage/search backend exposed through PyO3, with a simplified Python API for embedded and remote usage.
 - 🧭 **Unified `VectorDBClient` Entry Point**: Introduced one high-level client that selects local embedded mode for filesystem paths and HTTP mode for remote URLs.
 - 🚀 **Optimized Rust HNSW Path**: Added a Rust core with optimized HNSW search and removed the Python fallback execution paths.
@@ -137,6 +153,7 @@ This page documents the major features and improvements in each version of Lynse
 - 🧪 **ResultView API**: Added structured result objects with NumPy arrays and conversion helpers for downstream processing.
 
 **Improvements:**
+
 - Improved context management and resource cleanup in `VectorDBClient`, database managers, vector storage, and field storage.
 - Added in-memory field indexes and apex ID mapping for faster metadata-filtered query paths.
 - Optimized filtered search with a dual strategy that can choose between prefiltering and vector-first execution.
@@ -145,10 +162,12 @@ This page documents the major features and improvements in each version of Lynse
 - Added benchmark scripts for flat search, filtered search, IVF/KMeans, approximate search, and client query paths.
 
 **Testing:**
+
 - Added comprehensive tests for the Rust backend, collection operations, database operations, metadata indexes, search, result views, Docker API behavior, and server CLI behavior.
 - Updated CI to run on version tags and refreshed Python versions used by workflows.
 
 **Compatibility Notes:**
+
 - This is the largest compatibility boundary in the project history. Data and code built for the pure Python v0.1.x implementation should be validated before production migration.
 - Native Windows installs are no longer supported from this release forward.
 - HNSW remains available, but storage layout, server behavior, and many implementation details changed substantially.
@@ -160,14 +179,17 @@ This page documents the major features and improvements in each version of Lynse
 **Final Stability Release - Pure Python**
 
 **Key Features:**
+
 - 🐛 **Trie Query Fix**: Fixed `AttributeError: 'Trie' object has no attribute '_search_single'` in the pure Python metadata/indexing path.
 - 📦 **Final v0.1.x Package Version**: Marked the final pure Python release before the Rust-backed v0.2.0 architecture.
 
 **Improvements:**
+
 - Kept the lightweight pure Python client/server-optional behavior stable for users not ready to move to v0.2.x.
 - Preserved the existing Python 3.9+ install and Docker-oriented documentation flow.
 
 **Compatibility Notes:**
+
 - Recommended maintenance release for users staying on the pure Python v0.1 line.
 
 ---
@@ -177,11 +199,13 @@ This page documents the major features and improvements in each version of Lynse
 **Maintenance Release - Pure Python**
 
 **Key Features:**
+
 - 🔧 **Workflow Improvements**: Iterated on documentation and release workflows, including versioned docs publishing experiments with `mike`.
 - 🧱 **Chunk Size Guardrails**: Added range limits around chunk sizing to reduce invalid storage configuration behavior.
 - 📝 **API Naming Cleanup**: Renamed a function parameter for clearer API usage.
 
 **Improvements:**
+
 - Updated documentation content and site publishing configuration.
 - Continued cleanup of CI workflows around docs and package release automation.
 
@@ -192,9 +216,11 @@ This page documents the major features and improvements in each version of Lynse
 **Performance Release - Pure Python**
 
 **Key Features:**
+
 - 🛡️ **Safer MMAP Reading**: Continued hardening of memory-mapped file reading to avoid unstable reads and improve cross-platform behavior.
 
 **Improvements:**
+
 - Follow-up refinements to the safer mmap strategy introduced in v0.1.3.
 
 ---
@@ -204,11 +230,13 @@ This page documents the major features and improvements in each version of Lynse
 **Bug Fix Release - Pure Python**
 
 **Key Features:**
+
 - 🛡️ **Enhanced MMAP Reading**: Replaced the original `.npy` mmap reading path with a safer strategy for vector file access.
 - 📄 **Documentation CI Setup**: Added and refined docs publishing workflow pieces, MkDocs configuration, and site assets.
 - 📦 **Version File**: Added a `VERSION` file and release workflow support around versioned package/docs builds.
 
 **Improvements:**
+
 - Updated dependencies in `requirements.txt`.
 - Performed code style cleanup and removed unnecessary code.
 - Iterated heavily on release and documentation workflows to support future tagged releases.
@@ -220,10 +248,12 @@ This page documents the major features and improvements in each version of Lynse
 **Compatibility Release - Pure Python**
 
 **Key Features:**
+
 - 🐛 **Warning Fixes**: Fixed a Python `DeprecationWarning` caused by an invalid escape sequence.
 - 🪟 **Windows MMAP Follow-Up**: Continued testing and fixes around mmap-related Windows failures.
 
 **Improvements:**
+
 - Removed unnecessary code after the mmap compatibility pass.
 
 ---
@@ -233,12 +263,14 @@ This page documents the major features and improvements in each version of Lynse
 **Stability Release - Pure Python**
 
 **Key Features:**
+
 - 🔒 **Resource Management**: Used context managers to prevent errors caused by unclosed mmap files.
 - ⚙️ **Safer File Deletion**: Added logic to wait for handle release when file deletion hits `PermissionError`.
 - 🔄 **Thread Safety**: Added thread locks to reduce race conditions in the pure Python storage path.
 - 🪟 **Windows Validation**: Tested core functionality under Windows and fixed Windows-specific mmap/file-handle behavior.
 
 **Improvements:**
+
 - Cleaned up unnecessary code.
 - Improved tests and CI workflow coverage for early pure Python behavior.
 
@@ -249,6 +281,7 @@ This page documents the major features and improvements in each version of Lynse
 **Major Release - Pure Python Vector Database Foundation**
 
 **Key Features:**
+
 - 🐍 **Pure Python Core**: Established LynseDB as a lightweight vector database implemented in Python with local embedded usage and optional HTTP deployment.
 - 🧭 **Unified Client Entry Point**: Added `VectorDBClient`, which routes to the local native API for filesystem paths and to the HTTP client for remote URLs.
 - 🗄️ **Storage Layer**: Added file-backed vector storage, memory-mapped access, ID tracking, and persistence primitives.
@@ -257,6 +290,7 @@ This page documents the major features and improvements in each version of Lynse
 - 🧵 **Single-Process Native API**: Documented the native Python API as best suited for single-process use, with HTTP mode recommended for process-safe deployments.
 
 **Improvements:**
+
 - Built the initial Python-first API around simple database, collection, insert, and search workflows.
 - Added early tests, Docker usage notes, and MkDocs documentation.
 - Clarified early project limitations: backward compatibility was not yet guaranteed and million-scale or smaller workloads were recommended.
