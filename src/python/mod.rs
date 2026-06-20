@@ -1710,8 +1710,8 @@ impl PyCollection {
 
     /// Range search: return all non-deleted vectors within a distance threshold.
     ///
-    /// For L2 metric: returns IDs where distance ≤ threshold (ascending).
-    /// For IP/Cosine: returns IDs where score ≥ threshold (descending).
+    /// For ascending distance metrics: returns IDs where distance ≤ threshold.
+    /// For descending inner-product scores: returns IDs where score ≥ threshold.
     ///
     /// Returns (ids: Vec<u64>, distances: Vec<f32>) capped at max_results.
     #[pyo3(signature = (vector, threshold, max_results=1000))]
@@ -2093,6 +2093,11 @@ fn py_compute_distance(
             "Vector dimensions must match",
         ));
     }
+    if !metric.accepts_dimension(a_slice.len()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "haversine requires two values in [longitude_degrees, latitude_degrees] order",
+        ));
+    }
     Ok(crate::distance::compute_distance_f32(
         a_slice, b_slice, metric,
     ))
@@ -2115,6 +2120,16 @@ fn py_top_k_search<'py>(
     let q = query.as_slice()?;
     let c_array = candidates.as_array();
     let dim = c_array.ncols();
+    if q.len() != dim {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Query dimension must match candidate dimension",
+        ));
+    }
+    if !metric.accepts_dimension(dim) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "haversine requires two values in [longitude_degrees, latitude_degrees] order",
+        ));
+    }
 
     // Zero-copy: get contiguous f32 slice directly from numpy memory
     let flat: &[f32] = c_array

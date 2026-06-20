@@ -320,10 +320,8 @@ fn normalize_uri(uri: &str) -> String {
 }
 
 pub fn is_ascending_index(index_mode: Option<&str>) -> bool {
-    let upper = index_mode.unwrap_or("FLAT-IP").to_ascii_uppercase();
-    ["L2", "COS", "HAMMING", "JACCARD"]
-        .iter()
-        .any(|token| upper.contains(token))
+    crate::distance::DistanceMetric::from_index_mode(index_mode.unwrap_or("FLAT-IP"))
+        .is_some_and(|metric| metric.is_ascending())
 }
 
 pub fn merge_search_blocks(
@@ -691,6 +689,22 @@ mod tests {
         );
         assert_eq!(merged.ids, vec![2, 3]);
         assert_eq!(merged.distances, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn domain_index_order_is_ascending() {
+        for mode in [
+            "FLAT-L1",
+            "HNSW-HAVERSINE",
+            "FLAT-CORRELATION",
+            "FLAT-HELLINGER",
+            "FLAT-WASSERSTEIN",
+            "FLAT-TANIMOTO-BINARY",
+            "FLAT-DICE-BINARY",
+        ] {
+            assert!(is_ascending_index(Some(mode)), "{mode}");
+        }
+        assert!(!is_ascending_index(Some("FLAT-IP")));
     }
 
     #[test]

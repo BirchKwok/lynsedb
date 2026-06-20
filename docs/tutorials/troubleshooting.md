@@ -294,8 +294,9 @@ named vector-field searches may ignore it.
 
 ### Binary index scores seem reversed
 
-Hamming and Jaccard are lower-is-better distances. Inner product and cosine are
-higher-is-better scores.
+Hamming and Jaccard are lower-is-better distances. Cosine also returns a
+lower-is-better `1 - similarity` distance; only inner product is a
+higher-is-better score.
 
 ## Named and sparse vectors
 

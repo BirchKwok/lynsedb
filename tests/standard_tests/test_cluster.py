@@ -60,6 +60,19 @@ def test_spann_cluster_merge_order_uses_metric_tokens():
     assert not _is_ascending_index("SPANN")
 
 
+def test_domain_metric_cluster_merge_order_is_ascending():
+    for mode in (
+        "FLAT-L1",
+        "HNSW-HAVERSINE",
+        "FLAT-CORRELATION",
+        "FLAT-HELLINGER",
+        "FLAT-WASSERSTEIN",
+        "FLAT-TANIMOTO-BINARY",
+        "FLAT-DICE-BINARY",
+    ):
+        assert _is_ascending_index(mode), mode
+
+
 def _single_seed_config():
     return {
         "bucket_count": 16,

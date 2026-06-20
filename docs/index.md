@@ -25,6 +25,27 @@ retrieval workloads.
 - Dense, sparse, text, and hybrid retrieval.
 - Recall-first search with explicit index and search knobs.
 
+## Search more than embeddings
+
+LynseDB provides native distance paths for domain data as well as embedding
+vectors. They use the same IDs, metadata filters, persistence, and local or
+remote client API.
+
+| Data | Metrics | Example workloads |
+| --- | --- | --- |
+| Embeddings | inner product, squared L2, cosine | RAG, semantic and multimodal retrieval |
+| Numeric features | Manhattan/L1 | anomaly matching, sensor and tabular features |
+| Coordinates | Haversine in meters | nearby POI, fleet and device search |
+| Binary fingerprints | Hamming, Jaccard/Tanimoto, Sørensen-Dice | molecular fingerprints, deduplication, genomic sketches |
+| Aligned profiles | Pearson correlation distance | sensor curves, behavior profiles, gene expression |
+| Distributions | Hellinger, Wasserstein-1D | model drift, topics, forecasts and histograms |
+
+Exact Flat search supports the complete suite. HNSW supports the numeric domain
+metrics, while binary Flat search uses a one-bit-per-dimension hot
+representation for low memory bandwidth. Read
+[Domain-aware distance metrics](tutorials/distance_metrics.md) for input
+contracts and index compatibility.
+
 ## Execution modes
 
 | Mode | How to start | Best for | Notes |
@@ -94,6 +115,8 @@ print(result.to_list())
 - Use [Indexing guide](tutorials/indexing.md) and
   [Performance tuning](tutorials/performance_tuning.md) to choose between flat,
   HNSW, IVF, SPANN, DiskANN, and quantized indexes with explicit metric suffixes.
+- Use [Domain-aware distance metrics](tutorials/distance_metrics.md) for
+  coordinates, binary fingerprints, aligned profiles, and distributions.
 - Use [Build a RAG workflow](tutorials/rag_workflow.md) for an end-to-end
   retrieval example.
 

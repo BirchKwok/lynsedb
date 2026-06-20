@@ -276,6 +276,19 @@ class TestParseIndexMode:
         idx, metric = _parse_index_mode("DiskANN-Cos")
         assert "DISKANN" in idx.upper() or "DiskANN" in idx
 
+    def test_domain_metric_names(self):
+        expected = {
+            "FLAT-L1": "L1",
+            "HNSW-HAVERSINE": "Haversine",
+            "FLAT-PEARSON": "Correlation",
+            "FLAT-HELLINGER": "Hellinger",
+            "FLAT-WASSERSTEIN": "Wasserstein-1D",
+            "FLAT-TANIMOTO-BINARY": "Tanimoto",
+            "FLAT-DICE-BINARY": "Dice",
+        }
+        for mode, metric in expected.items():
+            assert _parse_index_mode(mode)[1] == metric
+
     def test_none_input(self):
         idx, metric = _parse_index_mode(None)
         assert idx is not None or metric is not None or True

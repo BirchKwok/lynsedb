@@ -19,6 +19,10 @@ document QA, recommendation features, and internal AI tools where you want
 strong retrieval primitives without operating a heavyweight database stack on
 day one.
 
+LynseDB also searches more than embeddings: native distance paths cover
+geospatial coordinates, packed binary fingerprints, aligned numeric profiles,
+and probability distributions through the same collection API.
+
 ```python
 import lynse
 
@@ -35,6 +39,9 @@ client = lynse.VectorDBClient("http://127.0.0.1:7637")    # server or cluster
 - **AI-native retrieval**: dense vectors, metadata filters, BM25, hybrid search,
   sparse vectors, named vector fields, external reranking, and result views are
   exposed from one collection API.
+- **Domain-aware similarity**: use Haversine for coordinates, packed
+  Tanimoto/Dice/Hamming for fingerprints, correlation for aligned profiles,
+  and Hellinger or Wasserstein-1D for distributions.
 - **Small operational footprint**: a single Python process can own the data
   directory during development; production can run as an HTTP service with API
   keys, health checks, readiness checks, metrics, OpenAPI, Docker, systemd, and
@@ -280,6 +287,29 @@ before using cluster mode in production.
 - `ResultView` objects with NumPy arrays plus list, JSON, and dataframe
   conversion helpers.
 
+## Search More Than Embeddings
+
+Vector search is useful anywhere records can be compared numerically, not only
+after an embedding model:
+
+| Data | Native metrics | Example workloads |
+| --- | --- | --- |
+| Embeddings | inner product, squared L2, cosine | RAG, semantic and multimodal retrieval |
+| Numeric features | Manhattan/L1 | anomaly matching, sensor and tabular features |
+| Coordinates | Haversine in meters | nearby POI, fleet and device search |
+| Binary fingerprints | Hamming, Jaccard/Tanimoto, Sørensen-Dice | molecular fingerprints, deduplication, genomic sketches |
+| Aligned profiles | Pearson correlation distance | sensor curves, behavior profiles, gene expression |
+| Distributions | Hellinger, Wasserstein-1D | model drift, topics, forecasts and histograms |
+
+The exact Flat path supports every metric above. HNSW supports L1, Haversine,
+correlation, Hellinger, and Wasserstein-1D. Binary Flat search lazily packs each
+dimension to one bit, reducing the hot scan representation by 32x versus
+`float32` for word-aligned dimensions without replacing the durable source
+vectors.
+
+See [Domain-aware distance metrics](docs/tutorials/distance_metrics.md) for
+input contracts and the index compatibility matrix.
+
 ## Indexing
 
 New collections build a `FLAT-IP` index automatically after the first primary
@@ -332,6 +362,7 @@ Deployment examples:
 - [Databases and collections](docs/tutorials/databases_collections.md)
 - [Add vectors](docs/tutorials/add_vectors.md)
 - [Search and filter](docs/tutorials/search_and_filter.md)
+- [Domain-aware distance metrics](docs/tutorials/distance_metrics.md)
 - [Metadata filter cookbook](docs/tutorials/metadata_filter_cookbook.md)
 - [Indexing guide](docs/tutorials/indexing.md)
 - [Named, sparse, and hybrid search](docs/tutorials/named_sparse_hybrid.md)

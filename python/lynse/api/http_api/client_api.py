@@ -1524,6 +1524,16 @@ class Collection:
                 - 'FLAT-COS-SQ8': Flat index with cosine similarity and SQ8 quantizer.
                 - 'FLAT-JACCARD-BINARY': Flat index with Jaccard distance (binary vectors).
                 - 'FLAT-HAMMING-BINARY': Flat index with Hamming distance (binary vectors).
+                - 'FLAT-TANIMOTO-BINARY': Packed binary Tanimoto distance.
+                - 'FLAT-DICE-BINARY': Packed binary Sørensen-Dice distance.
+
+                **Domain-aware Flat / HNSW:**
+
+                - 'FLAT-L1' or 'HNSW-L1': Manhattan distance.
+                - 'FLAT-HAVERSINE' or 'HNSW-HAVERSINE': GeoJSON coordinates, meters.
+                - 'FLAT-CORRELATION' or 'HNSW-CORRELATION': Pearson distance.
+                - 'FLAT-HELLINGER' or 'HNSW-HELLINGER': Distribution distance.
+                - 'FLAT-WASSERSTEIN' or 'HNSW-WASSERSTEIN': Ordered-bin distance.
 
                 **Flat + PQ (Product Quantization, two-pass ADC search):**
 
@@ -1844,7 +1854,7 @@ class Collection:
                 - **Flat / PQ / RaBitQ / PolarVec**: ignored.
                 - Named vector fields: ignored.
             approx (bool): Metric-specific flat approximation for IP, L2,
-                and Cosine. Ignored for Hamming/Jaccard.
+                and Cosine. Ignored for domain and binary metrics.
             eps (float): Distance rounding tolerance when ``approx=True``
                 for supported metrics (default 1e-4). Ignored when
                 ``approx=False`` or the metric does not support approximation.
@@ -2645,8 +2655,9 @@ class Collection:
         """
         Range search: return all non-deleted vectors within a distance threshold.
 
-        For L2 metric: returns IDs where distance <= threshold.
-        For IP / Cosine: returns IDs where score >= threshold.
+        For IP: returns IDs where score >= threshold.
+        For cosine and other lower-is-better metrics: returns IDs where
+        distance <= threshold.
 
         Parameters:
             vector (np.ndarray): Query vector of shape (dim,).

@@ -24,6 +24,7 @@ A practical first decision:
 | memory pressure from graph indexes | `DiskANN-IP`, `DiskANN-L2`, or `DiskANN-Cos` |
 | lower memory or disk footprint | SQ8, PQ, RaBitQ, or PolarVec variants |
 | binary vectors | `FLAT-HAMMING-BINARY`, `FLAT-JACCARD-BINARY`, or IVF binary variants |
+| coordinates, profiles, or distributions | start with the matching domain `FLAT-*` metric |
 
 ## Metric names
 
@@ -32,8 +33,15 @@ A practical first decision:
 | `*-IP` | Inner product | normalized embeddings, maximum-score retrieval |
 | `-L2` | Squared L2 distance | Euclidean-distance embeddings |
 | `-COS` or `-Cos` | Cosine similarity | embeddings where angular similarity matters |
+| `-L1` | Manhattan distance | robust numeric and sensor features |
+| `-HAVERSINE` | Haversine distance in meters | GeoJSON-order coordinates |
+| `-CORRELATION` | Pearson correlation distance | aligned profiles and time buckets |
+| `-HELLINGER` | Hellinger distance | non-negative distributions |
+| `-WASSERSTEIN` | Wasserstein-1D distance | equal-width ordered histograms |
 | `-HAMMING-BINARY` | Hamming distance | binary vectors |
 | `-JACCARD-BINARY` | Jaccard distance | binary sets |
+| `-TANIMOTO-BINARY` | Binary Tanimoto/Jaccard distance | molecular fingerprints |
+| `-DICE-BINARY` | Sørensen-Dice distance | fingerprints and deduplication |
 
 Choose the metric that matches how your embedding model was trained.
 
@@ -44,6 +52,11 @@ Metric guidance:
   is desired;
 - use L2 when Euclidean distance is meaningful for your model;
 - use Hamming or Jaccard only for binary vectors or binary-set style features.
+
+See [Domain-aware distance metrics](distance_metrics.md) for input validation,
+aliases, result units, and the complete compatibility matrix. New domain
+metrics support Flat and numeric domain metrics also support HNSW; they are not
+silently routed through IVF, SPANN, DiskANN, or quantizers.
 
 ## Index families
 
@@ -207,10 +220,13 @@ Binary indexes are for binary vectors or binary-set style representations:
 ```python
 collection.build_index("FLAT-HAMMING-BINARY")
 collection.build_index("IVF-JACCARD-BINARY", n_clusters=256)
+collection.build_index("FLAT-TANIMOTO-BINARY")
+collection.build_index("FLAT-DICE-BINARY")
 ```
 
-For Hamming and Jaccard, lower distance is better. `approx` and `eps` do not
-change binary-distance search behavior.
+For Hamming, Jaccard/Tanimoto, and Dice, lower distance is better. Flat search
+uses a lazily built one-bit-per-dimension hot representation. `approx` and
+`eps` do not change binary-distance search behavior.
 
 ## Practical tuning workflow
 
@@ -285,6 +301,22 @@ collection.build_index("IVF-COS-SQ8", n_clusters=256)
 collection.build_index("IVF-COSINE-SQ8", n_clusters=256)
 ```
 
+Domain numeric indexes:
+
+```python
+collection.build_index("FLAT-L1")
+collection.build_index("FLAT-HAVERSINE")
+collection.build_index("FLAT-CORRELATION")
+collection.build_index("FLAT-HELLINGER")
+collection.build_index("FLAT-WASSERSTEIN")
+
+collection.build_index("HNSW-L1")
+collection.build_index("HNSW-HAVERSINE")
+collection.build_index("HNSW-CORRELATION")
+collection.build_index("HNSW-HELLINGER")
+collection.build_index("HNSW-WASSERSTEIN")
+```
+
 Flat quantized variants:
 
 ```python
@@ -324,6 +356,10 @@ collection.build_index("FLAT-HAMMING-BINARY")
 collection.build_index("FLAT-HAMMING")
 collection.build_index("FLAT-JACCARD-BINARY")
 collection.build_index("FLAT-JACCARD")
+collection.build_index("FLAT-TANIMOTO-BINARY")
+collection.build_index("FLAT-TANIMOTO")
+collection.build_index("FLAT-DICE-BINARY")
+collection.build_index("FLAT-DICE")
 collection.build_index("IVF-HAMMING-BINARY", n_clusters=256)
 collection.build_index("IVF-HAMMING", n_clusters=256)
 collection.build_index("IVF-JACCARD-BINARY", n_clusters=256)
@@ -339,4 +375,4 @@ collection.build_index("IVF-JACCARD", n_clusters=256)
 | HNSW latency is high | Lower `nprobe`, try IVF, or use a more selective `where` filter. |
 | Memory use is high | Try DiskANN or quantized variants; reduce unnecessary named vector fields. |
 | Index build is slow | Build after bulk ingestion, not after every small batch; monitor `/metrics` in server mode. |
-| Binary index scores look inverted | Remember Hamming/Jaccard are lower-is-better distances. |
+| Binary index scores look inverted | Remember Hamming, Jaccard/Tanimoto, and Dice are lower-is-better distances. |

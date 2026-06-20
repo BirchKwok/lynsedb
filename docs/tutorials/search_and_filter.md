@@ -65,9 +65,10 @@ The meaning of `distances` depends on the index metric:
 | Metric | Result ordering | Range-search threshold |
 | --- | --- | --- |
 | IP | higher score is better | `score >= threshold` |
-| Cosine | higher score is better | `score >= threshold` |
-| L2 | lower squared distance is better | `distance <= threshold` |
-| Hamming/Jaccard | lower distance is better | `distance <= threshold` |
+| Cosine | lower `1 - similarity` distance is better | `distance <= threshold` |
+| L2, L1, Haversine, correlation | lower distance is better | `distance <= threshold` |
+| Hellinger, Wasserstein-1D | lower distribution distance is better | `distance <= threshold` |
+| Hamming, Jaccard/Tanimoto, Dice | lower distance is better | `distance <= threshold` |
 
 ## Document search
 
@@ -191,8 +192,9 @@ print(nearby.ids, nearby.distances)
 
 Threshold meaning depends on the metric:
 
-- L2, Hamming, and Jaccard return rows with distance `<= threshold`;
-- inner product and cosine return rows with score `>= threshold`.
+- L2, cosine, L1, Haversine, correlation, Hellinger, Wasserstein-1D, and
+  binary metrics return rows with distance `<= threshold`;
+- inner product returns rows with score `>= threshold`.
 
 Use `max_results` as a safety cap for broad thresholds.
 

@@ -714,6 +714,12 @@ impl VectorIndex for HNSWIndex {
         dim: usize,
         ids: Option<&[u64]>,
     ) -> Result<()> {
+        if !self.config.distance_metric.accepts_dimension(dim) {
+            return Err(LynseError::InvalidArgument(format!(
+                "metric '{}' requires dimension 2 as [longitude_degrees, latitude_degrees]",
+                self.config.distance_metric.name()
+            )));
+        }
         self.config.dimension = dim;
         self.ids = match ids {
             Some(id_slice) => id_slice.to_vec(),

@@ -168,7 +168,28 @@ def _external_id_key(value: Any) -> str:
 
 def _is_ascending_index(index_mode: str | None) -> bool:
     upper = (index_mode or "FLAT-IP").upper()
-    return any(token in upper for token in ("L2", "COS", "HAMMING", "JACCARD"))
+    return any(
+        token in upper
+        for token in (
+            "L2",
+            "COS",
+            "HAMMING",
+            "JACCARD",
+            "TANIMOTO",
+            "DICE",
+            "SORENSEN",
+            "L1",
+            "MANHATTAN",
+            "CITYBLOCK",
+            "HAVERSINE",
+            "GEO",
+            "CORRELATION",
+            "PEARSON",
+            "HELLINGER",
+            "WASSERSTEIN",
+            "EMD",
+        )
+    )
 
 
 def _shard_artifact_path(base_path: Any, group_name: str) -> str:

@@ -14,6 +14,7 @@
 use crate::distance::simd;
 use crate::distance::{self, DistanceMetric};
 use crate::storage::dtype::{decode_f16_bytes_to_f32, encode_f32_slice_as_le_bytes, VectorDtype};
+use half::f16;
 use memmap2::Mmap;
 use parking_lot::RwLock;
 use rayon::prelude::*;
@@ -94,6 +95,10 @@ pub struct FlatMmap {
     mmap: Option<Mmap>,
     /// Lazily-initialized SQ8 quantized data for bandwidth-efficient search.
     sq8: RwLock<Option<SQ8Data>>,
+    /// Lazily packed one-bit rows for Hamming/Jaccard/Tanimoto/Dice scans.
+    /// This adds only 1 bit per stored dimension and avoids touching the f32
+    /// mmap after the first binary query.
+    binary: RwLock<Option<BinaryData>>,
     /// Lazily-initialized raw-f32 row aggregate order for fast IP approximation.
     approx_ip_order: RwLock<Option<ApproxIpOrder>>,
     /// Raw-f32 row norms for exact-algebra L2/Cosine approximate mode.
@@ -113,6 +118,49 @@ struct ApproxNorms {
     n_vectors: usize,
     norm2: Vec<f32>,
     inv_norm: Vec<f32>,
+}
+
+struct BinaryData {
+    words_per_vector: usize,
+    data: Vec<u64>,
+}
+
+impl BinaryData {
+    fn from_f32_parallel(values: &[f32], dim: usize) -> Self {
+        let n = if dim == 0 { 0 } else { values.len() / dim };
+        let words_per_vector = dim.div_ceil(64);
+        let mut data = vec![0u64; n * words_per_vector];
+        data.par_chunks_mut(words_per_vector)
+            .enumerate()
+            .for_each(|(row, words)| {
+                let source = &values[row * dim..(row + 1) * dim];
+                pack_binary_row_f32(source, words);
+            });
+        Self {
+            words_per_vector,
+            data,
+        }
+    }
+
+    fn from_f16_parallel(values: &[u16], dim: usize) -> Self {
+        let n = if dim == 0 { 0 } else { values.len() / dim };
+        let words_per_vector = dim.div_ceil(64);
+        let mut data = vec![0u64; n * words_per_vector];
+        data.par_chunks_mut(words_per_vector)
+            .enumerate()
+            .for_each(|(row, words)| {
+                let source = &values[row * dim..(row + 1) * dim];
+                for (index, &bits) in source.iter().enumerate() {
+                    if f16::from_bits(bits).to_f32() > 0.5 {
+                        words[index / 64] |= 1u64 << (index % 64);
+                    }
+                }
+            });
+        Self {
+            words_per_vector,
+            data,
+        }
+    }
 }
 
 impl FlatMmap {
@@ -148,6 +196,7 @@ impl FlatMmap {
             n_vectors,
             mmap,
             sq8: RwLock::new(None),
+            binary: RwLock::new(None),
             approx_ip_order: RwLock::new(approx_ip_order),
             approx_norms: RwLock::new(approx_norms),
         })
@@ -253,6 +302,7 @@ impl FlatMmap {
 
         // Invalidate SQ8 cache (data changed)
         *self.sq8.write() = None;
+        *self.binary.write() = None;
         let next_order = update_approx_ip_order_after_append(
             old_order,
             data,
@@ -295,6 +345,21 @@ impl FlatMmap {
         if guard.is_none() {
             let candidates = self.as_f32_cow();
             *guard = Some(SQ8Data::from_f32_parallel(&candidates, self.dim));
+        }
+    }
+
+    fn ensure_binary(&self) {
+        if self.binary.read().is_some() {
+            return;
+        }
+        let mut guard = self.binary.write();
+        if guard.is_none() {
+            *guard = Some(match self.dtype {
+                VectorDtype::F32 => BinaryData::from_f32_parallel(self.as_slice(), self.dim),
+                VectorDtype::F16 => {
+                    BinaryData::from_f16_parallel(self.as_f16_bits_slice(), self.dim)
+                }
+            });
         }
     }
 
@@ -377,6 +442,13 @@ impl FlatMmap {
         }
         let k = k.min(subset_indices.len());
         let dim = self.dim;
+        if metric.is_binary() {
+            self.ensure_binary();
+            let query = pack_binary_query(query);
+            if let Some(binary) = self.binary.read().as_ref() {
+                return packed_binary_search_filtered(&query, binary, k, n, metric, subset_indices);
+            }
+        }
         if self.dtype == VectorDtype::F16 {
             return search_filtered_f16(
                 query,
@@ -428,6 +500,51 @@ impl FlatMmap {
                     n,
                     subset_indices,
                     simd::cosine_distance_f32,
+                ),
+                DistanceMetric::Manhattan => direct_access_topk::<true>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    simd::manhattan_f32,
+                ),
+                DistanceMetric::Haversine => direct_access_topk::<true>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    simd::haversine_meters_f32,
+                ),
+                DistanceMetric::Correlation => direct_access_topk::<true>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    simd::correlation_distance_f32,
+                ),
+                DistanceMetric::Hellinger => direct_access_topk::<true>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    simd::hellinger_distance_f32,
+                ),
+                DistanceMetric::Wasserstein => direct_access_topk::<true>(
+                    query,
+                    candidates,
+                    dim,
+                    k,
+                    n,
+                    subset_indices,
+                    simd::wasserstein_1d_f32,
                 ),
                 _ => direct_access_topk::<true>(
                     query,
@@ -482,6 +599,56 @@ impl FlatMmap {
                 max_id,
                 simd::cosine_distance_f32,
             ),
+            DistanceMetric::Manhattan => fused_topk_parallel_filtered::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                simd::manhattan_f32,
+            ),
+            DistanceMetric::Haversine => fused_topk_parallel_filtered::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                simd::haversine_meters_f32,
+            ),
+            DistanceMetric::Correlation => fused_topk_parallel_filtered::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                simd::correlation_distance_f32,
+            ),
+            DistanceMetric::Hellinger => fused_topk_parallel_filtered::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                simd::hellinger_distance_f32,
+            ),
+            DistanceMetric::Wasserstein => fused_topk_parallel_filtered::<true>(
+                query,
+                candidates,
+                dim,
+                k,
+                n,
+                &bitset,
+                max_id,
+                simd::wasserstein_1d_f32,
+            ),
             _ => fused_topk_parallel_filtered::<true>(
                 query,
                 candidates,
@@ -516,6 +683,14 @@ impl FlatMmap {
         }
         let k = k.min(n);
         let dim = self.dim;
+
+        if metric.is_binary() {
+            self.ensure_binary();
+            let query = pack_binary_query(query);
+            if let Some(binary) = self.binary.read().as_ref() {
+                return packed_binary_search(&query, binary, k, n, metric);
+            }
+        }
 
         // Approximate two-phase search on the original f32 data. This path
         // intentionally does not use SQ8/PQ/RaBitQ quantized representations.
@@ -608,6 +783,26 @@ fn exact_flat_search(
         DistanceMetric::Cosine => {
             fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::cosine_distance_f32)
         }
+        DistanceMetric::Manhattan => {
+            fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::manhattan_f32)
+        }
+        DistanceMetric::Haversine => {
+            fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::haversine_meters_f32)
+        }
+        DistanceMetric::Correlation => fused_topk_parallel::<true>(
+            query,
+            candidates,
+            dim,
+            k,
+            n,
+            simd::correlation_distance_f32,
+        ),
+        DistanceMetric::Hellinger => {
+            fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::hellinger_distance_f32)
+        }
+        DistanceMetric::Wasserstein => {
+            fused_topk_parallel::<true>(query, candidates, dim, k, n, simd::wasserstein_1d_f32)
+        }
         _ => fused_topk_parallel::<true>(query, candidates, dim, k, n, |a, b| {
             distance::compute_distance_f32(a, b, metric)
         }),
@@ -663,6 +858,173 @@ fn exact_flat_search_f16(
             distance::compute_distance_f16(a, b, metric)
         }),
     }
+}
+
+#[inline]
+fn pack_binary_row_f32(source: &[f32], words: &mut [u64]) {
+    for (index, &value) in source.iter().enumerate() {
+        if value > 0.5 {
+            words[index / 64] |= 1u64 << (index % 64);
+        }
+    }
+}
+
+fn pack_binary_query(query: &[f32]) -> Vec<u64> {
+    let mut words = vec![0u64; query.len().div_ceil(64)];
+    pack_binary_row_f32(query, &mut words);
+    words
+}
+
+#[inline(always)]
+fn packed_hamming(a: &[u64], b: &[u64]) -> f32 {
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| (x ^ y).count_ones())
+        .sum::<u32>() as f32
+}
+
+#[inline(always)]
+fn packed_jaccard(a: &[u64], b: &[u64]) -> f32 {
+    let mut intersection = 0u32;
+    let mut union = 0u32;
+    for (&x, &y) in a.iter().zip(b) {
+        intersection += (x & y).count_ones();
+        union += (x | y).count_ones();
+    }
+    if union == 0 {
+        0.0
+    } else {
+        1.0 - intersection as f32 / union as f32
+    }
+}
+
+#[inline(always)]
+fn packed_dice(a: &[u64], b: &[u64]) -> f32 {
+    let mut intersection = 0u32;
+    let mut count = 0u32;
+    for (&x, &y) in a.iter().zip(b) {
+        intersection += (x & y).count_ones();
+        count += x.count_ones() + y.count_ones();
+    }
+    if count == 0 {
+        0.0
+    } else {
+        1.0 - (2 * intersection) as f32 / count as f32
+    }
+}
+
+fn packed_distance_fn(metric: DistanceMetric) -> fn(&[u64], &[u64]) -> f32 {
+    match metric {
+        DistanceMetric::Hamming => packed_hamming,
+        DistanceMetric::Jaccard | DistanceMetric::Tanimoto => packed_jaccard,
+        DistanceMetric::Dice => packed_dice,
+        _ => unreachable!("non-binary metric passed to packed search"),
+    }
+}
+
+fn packed_binary_search(
+    query: &[u64],
+    binary: &BinaryData,
+    k: usize,
+    n: usize,
+    metric: DistanceMetric,
+) -> (Vec<u32>, Vec<f32>) {
+    let words = binary.words_per_vector;
+    let dist_fn = packed_distance_fn(metric);
+    if n < 4096 {
+        let mut top = Vec::with_capacity(k);
+        let mut threshold = f32::INFINITY;
+        let mut filled = false;
+        for (index, row) in binary.data.chunks_exact(words).take(n).enumerate() {
+            let dist = dist_fn(query, row);
+            if !filled || dist < threshold {
+                topk_insert::<true>(
+                    &mut top,
+                    k,
+                    TopKEntry {
+                        dist,
+                        idx: index as u32,
+                    },
+                    &mut threshold,
+                    &mut filled,
+                );
+            }
+        }
+        let ids = top.iter().map(|entry| entry.idx).collect();
+        let distances = top.iter().map(|entry| entry.dist).collect();
+        return (ids, distances);
+    }
+
+    let n_threads = rayon::current_num_threads().max(1);
+    let chunk_rows = (n / n_threads).max(1024);
+    let chunk_words = chunk_rows * words;
+    let chunks: Vec<Vec<TopKEntry>> = binary
+        .data
+        .par_chunks(chunk_words)
+        .enumerate()
+        .map(|(chunk_index, chunk)| {
+            let base = chunk_index * chunk_rows;
+            let mut top = Vec::with_capacity(k);
+            let mut threshold = f32::INFINITY;
+            let mut filled = false;
+            for (local, row) in chunk.chunks_exact(words).enumerate() {
+                let dist = dist_fn(query, row);
+                if !filled || dist < threshold {
+                    topk_insert::<true>(
+                        &mut top,
+                        k,
+                        TopKEntry {
+                            dist,
+                            idx: (base + local) as u32,
+                        },
+                        &mut threshold,
+                        &mut filled,
+                    );
+                }
+            }
+            top
+        })
+        .collect();
+    merge_topk_results::<true>(&chunks, k)
+}
+
+fn packed_binary_search_filtered(
+    query: &[u64],
+    binary: &BinaryData,
+    k: usize,
+    n: usize,
+    metric: DistanceMetric,
+    subset: &[u64],
+) -> (Vec<u32>, Vec<f32>) {
+    let words = binary.words_per_vector;
+    let dist_fn = packed_distance_fn(metric);
+    let mut top = Vec::with_capacity(k);
+    let mut threshold = f32::INFINITY;
+    let mut filled = false;
+    for &row_id in subset {
+        let index = row_id as usize;
+        if index >= n {
+            continue;
+        }
+        let start = index * words;
+        let row = &binary.data[start..start + words];
+        let dist = dist_fn(query, row);
+        if !filled || dist < threshold {
+            topk_insert::<true>(
+                &mut top,
+                k,
+                TopKEntry {
+                    dist,
+                    idx: index as u32,
+                },
+                &mut threshold,
+                &mut filled,
+            );
+        }
+    }
+    let ids = top.iter().map(|entry| entry.idx).collect();
+    let distances = top.iter().map(|entry| entry.dist).collect();
+    (ids, distances)
 }
 
 // ─── Optimized fused parallel search ────────────────────────────────────────
@@ -3648,6 +4010,9 @@ fn approx_coarse_search(
                 block_jaccard(q, c, &blocks)
             })
         }
+        _ => sampled_coarse_topk::<true>(query, candidates, dim, k, n, skip_rows, |q, c| {
+            distance::compute_distance_f32(q, c, metric)
+        }),
     }
 }
 
@@ -5485,5 +5850,43 @@ mod tests {
         assert!(reopened_stale.approx_norms.read().is_none());
         let _ = reopened_stale.search(&query, 5, DistanceMetric::Cosine, false, config);
         assert!(reopened_stale.approx_norms.read().is_some());
+    }
+
+    #[test]
+    fn packed_binary_cache_matches_reference_metrics() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        let dim = 130;
+        let mut rows = vec![0.0f32; dim * 3];
+        for index in [0usize, 1, 64, 129] {
+            rows[index] = 1.0;
+            rows[dim + index] = 1.0;
+        }
+        rows[dim + 5] = 1.0;
+        for index in [2usize, 3, 65] {
+            rows[dim * 2 + index] = 1.0;
+        }
+        let query = rows[..dim].to_vec();
+
+        let mut store = FlatMmap::open(&path, dim, VectorDtype::F32).unwrap();
+        store.write(&rows).unwrap();
+        assert!(store.binary.read().is_none());
+
+        for metric in [
+            DistanceMetric::Hamming,
+            DistanceMetric::Jaccard,
+            DistanceMetric::Tanimoto,
+            DistanceMetric::Dice,
+        ] {
+            let packed = store.search(&query, 3, metric, false, None);
+            let reference = crate::distance::top_k_search(&query, &rows, dim, 3, metric);
+            assert_eq!(packed.0, reference.0, "{metric:?}");
+            for (actual, expected) in packed.1.iter().zip(reference.1) {
+                assert!((actual - expected).abs() < 1e-6, "{metric:?}");
+            }
+        }
+        let packed_bytes = store.binary.read().as_ref().unwrap().data.len() * 8;
+        assert_eq!(packed_bytes, 3 * dim.div_ceil(64) * 8);
+        assert!(packed_bytes < rows.len() * std::mem::size_of::<f32>() / 8);
     }
 }

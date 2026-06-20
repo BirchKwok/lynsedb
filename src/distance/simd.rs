@@ -206,6 +206,164 @@ pub fn jaccard_f32(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// Manhattan (L1/city-block) distance.
+#[inline(always)]
+pub fn manhattan_f32(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { manhattan_avx2(a, b) };
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        return manhattan_neon(a, b);
+    }
+
+    #[allow(unreachable_code)]
+    manhattan_scalar(a, b)
+}
+
+/// Great-circle distance in meters for `[longitude_degrees, latitude_degrees]`.
+/// Uses the IUGG mean Earth radius (6,371,008.8 meters).
+#[inline]
+pub fn haversine_meters_f32(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != 2 || b.len() != 2 {
+        return f32::INFINITY;
+    }
+    const EARTH_MEAN_RADIUS_M: f64 = 6_371_008.8;
+    let lon1 = (a[0] as f64).to_radians();
+    let lat1 = (a[1] as f64).to_radians();
+    let lon2 = (b[0] as f64).to_radians();
+    let lat2 = (b[1] as f64).to_radians();
+    if !lon1.is_finite()
+        || !lat1.is_finite()
+        || !lon2.is_finite()
+        || !lat2.is_finite()
+        || a[1].abs() > 90.0
+        || b[1].abs() > 90.0
+    {
+        return f32::INFINITY;
+    }
+    let dlat = lat2 - lat1;
+    let dlon = lon2 - lon1;
+    let sin_lat = (dlat * 0.5).sin();
+    let sin_lon = (dlon * 0.5).sin();
+    let h = (sin_lat * sin_lat + lat1.cos() * lat2.cos() * sin_lon * sin_lon).clamp(0.0, 1.0);
+    (2.0 * EARTH_MEAN_RADIUS_M * h.sqrt().asin()) as f32
+}
+
+/// Pearson correlation distance (`1 - r`). Constant rows use a finite policy:
+/// two identical rows have distance 0; otherwise their distance is 1.
+#[inline]
+pub fn correlation_distance_f32(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    if a.is_empty() {
+        return 0.0;
+    }
+    let n = a.len() as f64;
+    let mut sum_a = 0.0f64;
+    let mut sum_b = 0.0f64;
+    let mut sum_aa = 0.0f64;
+    let mut sum_bb = 0.0f64;
+    let mut sum_ab = 0.0f64;
+    for (&av, &bv) in a.iter().zip(b) {
+        let av = av as f64;
+        let bv = bv as f64;
+        sum_a += av;
+        sum_b += bv;
+        sum_aa += av * av;
+        sum_bb += bv * bv;
+        sum_ab += av * bv;
+    }
+    let var_a = (sum_aa - sum_a * sum_a / n).max(0.0);
+    let var_b = (sum_bb - sum_b * sum_b / n).max(0.0);
+    let denom = (var_a * var_b).sqrt();
+    if denom <= f64::EPSILON {
+        return if a == b { 0.0 } else { 1.0 };
+    }
+    let covariance = sum_ab - sum_a * sum_b / n;
+    (1.0 - (covariance / denom).clamp(-1.0, 1.0)) as f32
+}
+
+/// Hellinger distance between non-negative vectors. Inputs are normalized to
+/// probability mass internally, so counts and probabilities are both accepted.
+#[inline]
+pub fn hellinger_distance_f32(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut sum_a = 0.0f64;
+    let mut sum_b = 0.0f64;
+    let mut coefficient_raw = 0.0f64;
+    for (&av, &bv) in a.iter().zip(b) {
+        if !av.is_finite() || !bv.is_finite() || av < 0.0 || bv < 0.0 {
+            return f32::INFINITY;
+        }
+        sum_a += av as f64;
+        sum_b += bv as f64;
+        coefficient_raw += ((av as f64) * (bv as f64)).sqrt();
+    }
+    if sum_a == 0.0 || sum_b == 0.0 {
+        return if sum_a == sum_b { 0.0 } else { 1.0 };
+    }
+    let coefficient = coefficient_raw / (sum_a * sum_b).sqrt();
+    (1.0 - coefficient.clamp(0.0, 1.0)).sqrt() as f32
+}
+
+/// Wasserstein-1 distance for equal-width ordered bins. Inputs are normalized
+/// to probability mass; the result is expressed in bin-width units.
+#[inline]
+pub fn wasserstein_1d_f32(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut sum_a = 0.0f64;
+    let mut sum_b = 0.0f64;
+    for (&av, &bv) in a.iter().zip(b) {
+        if !av.is_finite() || !bv.is_finite() || av < 0.0 || bv < 0.0 {
+            return f32::INFINITY;
+        }
+        sum_a += av as f64;
+        sum_b += bv as f64;
+    }
+    if sum_a == 0.0 || sum_b == 0.0 {
+        return if sum_a == sum_b { 0.0 } else { f32::INFINITY };
+    }
+    let inv_a = 1.0 / sum_a;
+    let inv_b = 1.0 / sum_b;
+    let mut cdf_delta = 0.0f64;
+    let mut distance = 0.0f64;
+    // The final CDF delta is always zero, so only the first n-1 intervals
+    // contribute for unit-spaced bins.
+    for i in 0..a.len().saturating_sub(1) {
+        cdf_delta += a[i] as f64 * inv_a - b[i] as f64 * inv_b;
+        distance += cdf_delta.abs();
+    }
+    distance as f32
+}
+
+/// Sørensen-Dice distance for float rows thresholded at 0.5.
+#[inline]
+pub fn dice_distance_f32(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut intersection = 0u32;
+    let mut count_a = 0u32;
+    let mut count_b = 0u32;
+    for (&av, &bv) in a.iter().zip(b) {
+        let abit = av > 0.5;
+        let bbit = bv > 0.5;
+        count_a += abit as u32;
+        count_b += bbit as u32;
+        intersection += (abit && bbit) as u32;
+    }
+    let total = count_a + count_b;
+    if total == 0 {
+        0.0
+    } else {
+        1.0 - (2 * intersection) as f32 / total as f32
+    }
+}
+
 /// Hamming distance for packed u8 binary vectors.
 #[inline]
 pub fn hamming_u8(a: &[u8], b: &[u8]) -> u32 {
@@ -299,7 +457,136 @@ pub fn jaccard_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
     }
 }
 
+#[inline]
+pub fn manhattan_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
+    debug_assert_eq!(query.len(), candidate_bits.len());
+    query
+        .iter()
+        .zip(candidate_bits)
+        .map(|(&q, &c)| (q - f16::from_bits(c).to_f32()).abs())
+        .sum()
+}
+
+#[inline]
+pub fn haversine_meters_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
+    if candidate_bits.len() != 2 {
+        return f32::INFINITY;
+    }
+    let candidate = [
+        f16::from_bits(candidate_bits[0]).to_f32(),
+        f16::from_bits(candidate_bits[1]).to_f32(),
+    ];
+    haversine_meters_f32(query, &candidate)
+}
+
+#[inline]
+pub fn correlation_distance_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
+    debug_assert_eq!(query.len(), candidate_bits.len());
+    if query.is_empty() {
+        return 0.0;
+    }
+    let n = query.len() as f64;
+    let mut sum_a = 0.0f64;
+    let mut sum_b = 0.0f64;
+    let mut sum_aa = 0.0f64;
+    let mut sum_bb = 0.0f64;
+    let mut sum_ab = 0.0f64;
+    let mut identical = true;
+    for (&av, &bits) in query.iter().zip(candidate_bits) {
+        let bv32 = f16::from_bits(bits).to_f32();
+        identical &= av == bv32;
+        let av = av as f64;
+        let bv = bv32 as f64;
+        sum_a += av;
+        sum_b += bv;
+        sum_aa += av * av;
+        sum_bb += bv * bv;
+        sum_ab += av * bv;
+    }
+    let var_a = (sum_aa - sum_a * sum_a / n).max(0.0);
+    let var_b = (sum_bb - sum_b * sum_b / n).max(0.0);
+    let denom = (var_a * var_b).sqrt();
+    if denom <= f64::EPSILON {
+        return if identical { 0.0 } else { 1.0 };
+    }
+    (1.0 - ((sum_ab - sum_a * sum_b / n) / denom).clamp(-1.0, 1.0)) as f32
+}
+
+#[inline]
+pub fn hellinger_distance_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
+    debug_assert_eq!(query.len(), candidate_bits.len());
+    let mut sum_a = 0.0f64;
+    let mut sum_b = 0.0f64;
+    let mut coefficient_raw = 0.0f64;
+    for (&av, &bits) in query.iter().zip(candidate_bits) {
+        let bv = f16::from_bits(bits).to_f32();
+        if !av.is_finite() || !bv.is_finite() || av < 0.0 || bv < 0.0 {
+            return f32::INFINITY;
+        }
+        sum_a += av as f64;
+        sum_b += bv as f64;
+        coefficient_raw += ((av as f64) * (bv as f64)).sqrt();
+    }
+    if sum_a == 0.0 || sum_b == 0.0 {
+        return if sum_a == sum_b { 0.0 } else { 1.0 };
+    }
+    let coefficient = coefficient_raw / (sum_a * sum_b).sqrt();
+    (1.0 - coefficient.clamp(0.0, 1.0)).sqrt() as f32
+}
+
+#[inline]
+pub fn wasserstein_1d_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
+    debug_assert_eq!(query.len(), candidate_bits.len());
+    let mut sum_a = 0.0f64;
+    let mut sum_b = 0.0f64;
+    for (&av, &bits) in query.iter().zip(candidate_bits) {
+        let bv = f16::from_bits(bits).to_f32();
+        if !av.is_finite() || !bv.is_finite() || av < 0.0 || bv < 0.0 {
+            return f32::INFINITY;
+        }
+        sum_a += av as f64;
+        sum_b += bv as f64;
+    }
+    if sum_a == 0.0 || sum_b == 0.0 {
+        return if sum_a == sum_b { 0.0 } else { f32::INFINITY };
+    }
+    let mut cdf_delta = 0.0f64;
+    let mut distance = 0.0f64;
+    for i in 0..query.len().saturating_sub(1) {
+        let bv = f16::from_bits(candidate_bits[i]).to_f32();
+        cdf_delta += query[i] as f64 / sum_a - bv as f64 / sum_b;
+        distance += cdf_delta.abs();
+    }
+    distance as f32
+}
+
+#[inline]
+pub fn dice_distance_f16(query: &[f32], candidate_bits: &[u16]) -> f32 {
+    debug_assert_eq!(query.len(), candidate_bits.len());
+    let mut intersection = 0u32;
+    let mut count_a = 0u32;
+    let mut count_b = 0u32;
+    for (&q, &bits) in query.iter().zip(candidate_bits) {
+        let a = q > 0.5;
+        let b = f16::from_bits(bits).to_f32() > 0.5;
+        count_a += a as u32;
+        count_b += b as u32;
+        intersection += (a && b) as u32;
+    }
+    let total = count_a + count_b;
+    if total == 0 {
+        0.0
+    } else {
+        1.0 - (2 * intersection) as f32 / total as f32
+    }
+}
+
 // ─── Scalar fallbacks ────────────────────────────────────────────────────────
+
+#[inline]
+fn manhattan_scalar(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(&x, &y)| (x - y).abs()).sum()
+}
 
 #[inline]
 fn inner_product_scalar(a: &[f32], b: &[f32]) -> f32 {
@@ -1213,6 +1500,55 @@ fn cosine_distance_neon(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn manhattan_avx2(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+
+    let chunks = a.len() / 8;
+    let mut lanes = [0.0f32; 8];
+    unsafe {
+        let mut acc = _mm256_setzero_ps();
+        let sign_mask = _mm256_set1_ps(-0.0);
+        for i in 0..chunks {
+            let offset = i * 8;
+            let va = _mm256_loadu_ps(a.as_ptr().add(offset));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(offset));
+            let diff = _mm256_sub_ps(va, vb);
+            acc = _mm256_add_ps(acc, _mm256_andnot_ps(sign_mask, diff));
+        }
+        _mm256_storeu_ps(lanes.as_mut_ptr(), acc);
+    }
+    let mut sum: f32 = lanes.into_iter().sum();
+    for i in chunks * 8..a.len() {
+        sum += (a[i] - b[i]).abs();
+    }
+    sum
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn manhattan_neon(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+
+    let chunks = a.len() / 4;
+    let mut sum;
+    unsafe {
+        let mut acc = vdupq_n_f32(0.0);
+        for i in 0..chunks {
+            let offset = i * 4;
+            let va = vld1q_f32(a.as_ptr().add(offset));
+            let vb = vld1q_f32(b.as_ptr().add(offset));
+            acc = vaddq_f32(acc, vabdq_f32(va, vb));
+        }
+        sum = vaddvq_f32(acc);
+    }
+    for i in chunks * 4..a.len() {
+        sum += (a[i] - b[i]).abs();
+    }
+    sum
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1268,6 +1604,27 @@ mod tests {
         let b = vec![0.0f32, 1.0];
         let result = cosine_distance_f32(&a, &b);
         assert!((result - 1.0).abs() < 1e-5); // orthogonal → distance 1
+    }
+
+    #[test]
+    fn test_domain_distances() {
+        assert!((manhattan_f32(&[1.0, 2.0], &[4.0, 0.0]) - 5.0).abs() < 1e-6);
+        assert!(correlation_distance_f32(&[1.0, 2.0, 3.0], &[2.0, 4.0, 6.0]) < 1e-6);
+        assert!((correlation_distance_f32(&[1.0, 2.0, 3.0], &[3.0, 2.0, 1.0]) - 2.0).abs() < 1e-6);
+        assert!(hellinger_distance_f32(&[1.0, 0.0], &[1.0, 0.0]) < 1e-6);
+        assert!((hellinger_distance_f32(&[1.0, 0.0], &[0.0, 1.0]) - 1.0).abs() < 1e-6);
+        assert!((wasserstein_1d_f32(&[1.0, 0.0, 0.0], &[0.0, 0.0, 1.0]) - 2.0).abs() < 1e-6);
+        assert!((dice_distance_f32(&[1.0, 1.0, 0.0], &[1.0, 0.0, 1.0]) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_haversine_uses_geojson_order_and_meters() {
+        // Shanghai to Beijing is about 1,068 km on a mean-radius sphere.
+        let shanghai = [121.4737, 31.2304];
+        let beijing = [116.4074, 39.9042];
+        let meters = haversine_meters_f32(&shanghai, &beijing);
+        assert!((meters - 1_067_000.0).abs() < 10_000.0, "{meters}");
+        assert_eq!(haversine_meters_f32(&shanghai, &shanghai), 0.0);
     }
 
     #[test]

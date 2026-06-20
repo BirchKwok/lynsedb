@@ -173,6 +173,109 @@ class TestSearch:
         result = populated_collection.search(query_vec, k=5)
         assert len(result.ids) == 5
 
+    @pytest.mark.parametrize(
+        "index_mode",
+        [
+            "FLAT-L1",
+            "FLAT-CORRELATION",
+            "FLAT-HELLINGER",
+            "FLAT-WASSERSTEIN",
+            "FLAT-TANIMOTO-BINARY",
+            "FLAT-DICE-BINARY",
+        ],
+    )
+    def test_domain_flat_metrics_find_exact_self(self, db, index_mode):
+        binary = "BINARY" in index_mode
+        rng = np.random.default_rng(20260620)
+        vectors = (
+            rng.integers(0, 2, size=(32, 16)).astype(np.float32)
+            if binary
+            else rng.random((32, 16), dtype=np.float32) + 0.01
+        )
+        coll = db.require_collection(
+            f"domain_{index_mode.lower().replace('-', '_')}",
+            dim=16,
+            drop_if_exists=True,
+            default_index=None,
+        )
+        coll.add(ids=list(range(32)), vectors=vectors)
+        coll.commit()
+        coll.build_index(index_mode)
+
+        result = coll.search(vectors[7], k=1)
+
+        assert result.ids.tolist() == [7]
+        assert result.distances[0] == pytest.approx(0.0, abs=1e-5)
+
+    def test_haversine_flat_search_and_dimension_contract(self, db):
+        coordinates = np.array(
+            [
+                [121.4737, 31.2304],  # Shanghai
+                [116.4074, 39.9042],  # Beijing
+                [121.4998, 31.2397],  # nearby Shanghai
+            ],
+            dtype=np.float32,
+        )
+        coll = db.require_collection(
+            "geo_points", dim=2, drop_if_exists=True, default_index=None
+        )
+        coll.add(ids=["shanghai", "beijing", "nearby"], vectors=coordinates)
+        coll.commit()
+        coll.build_index("FLAT-HAVERSINE")
+        result = coll.search(coordinates[0], k=3)
+        assert result.ids.tolist() == ["shanghai", "nearby", "beijing"]
+        assert result.distances[2] == pytest.approx(1_067_000, abs=10_000)
+
+        coll.build_index("HNSW-HAVERSINE")
+        hnsw = coll.search(coordinates[0], k=1, nprobe=32)
+        assert hnsw.ids.tolist() == ["shanghai"]
+
+        wrong_dim = db.require_collection(
+            "bad_geo", dim=3, drop_if_exists=True, default_index=None
+        )
+        wrong_dim.add(ids=[1], vectors=[[1.0, 2.0, 3.0]])
+        wrong_dim.commit()
+        with pytest.raises(Exception, match="requires dimension 2"):
+            wrong_dim.build_index("FLAT-HAVERSINE")
+
+    @pytest.mark.parametrize(
+        "index_mode",
+        [
+            "HNSW-L1",
+            "HNSW-CORRELATION",
+            "HNSW-HELLINGER",
+            "HNSW-WASSERSTEIN",
+        ],
+    )
+    def test_domain_hnsw_metrics_find_exact_self(self, db, index_mode):
+        rng = np.random.default_rng(20260620)
+        vectors = rng.random((64, 16), dtype=np.float32)
+        coll = db.require_collection(
+            f"domain_{index_mode.lower().replace('-', '_')}",
+            dim=16,
+            drop_if_exists=True,
+            default_index=None,
+        )
+        coll.add(ids=list(range(64)), vectors=vectors)
+        coll.commit()
+        coll.build_index(index_mode)
+        result = coll.search(vectors[11], k=5, nprobe=64)
+        assert len(result.ids) == 5
+        assert np.all(np.isfinite(result.distances))
+        assert "HNSW" in result.index_type.upper()
+
+    def test_domain_metrics_reject_unsupported_quantized_combinations(self, db):
+        coll = db.require_collection(
+            "unsupported_domain_quantizer",
+            dim=4,
+            drop_if_exists=True,
+            default_index=None,
+        )
+        coll.add(ids=[1], vectors=[[0.1, 0.2, 0.3, 0.4]])
+        coll.commit()
+        with pytest.raises(Exception, match="unsupported index/metric combination"):
+            coll.build_index("FLAT-HELLINGER-SQ8")
+
     def test_search_hnsw_index(self, populated_collection, query_vec):
         populated_collection.build_index("HNSW-IP")
         result = populated_collection.search(query_vec, k=5)

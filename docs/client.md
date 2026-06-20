@@ -111,7 +111,11 @@ Parameter behavior is the same for local and HTTP Python clients:
 - `nprobe` controls IVF/SPANN partitions and HNSW search breadth. Flat, PQ,
   RaBitQ, PolarVec, and named vector-field searches ignore it.
 - `approx` and `eps` apply only to supported flat IP, L2, and cosine paths.
-  Hamming/Jaccard metrics and non-approximate paths ignore them.
+  Hamming, Jaccard/Tanimoto, Dice, and domain metric paths ignore them.
+- Domain metrics include L1, Haversine, correlation, Hellinger,
+  Wasserstein-1D, Tanimoto, and Dice. See
+  [Domain-aware distance metrics](tutorials/distance_metrics.md) for aliases,
+  input contracts, and index compatibility.
 
 `where` accepts standard SQL-style metadata filters, for example
 `"lang = 'en' AND rank <= 10"`, `"tags CONTAINS 'vector'"`, and

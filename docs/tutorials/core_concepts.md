@@ -143,13 +143,24 @@ The metric describes how similarity is measured:
 | --- | --- | --- | --- |
 | Inner product | `-IP` | Larger score is better. | descending score |
 | Squared L2 | `-L2` | Smaller distance is better. | ascending distance |
-| Cosine | `-COS` or `-Cos` | Larger similarity is better. | descending score |
+| Cosine distance | `-COS` or `-Cos` | `1 - cosine_similarity`; smaller is better. | ascending distance |
+| Manhattan | `-L1` | Sum of absolute component differences. | ascending distance |
+| Haversine | `-HAVERSINE` | Great-circle distance in meters for `[longitude, latitude]`. | ascending distance |
+| Correlation | `-CORRELATION` | `1 - Pearson r` for aligned profiles. | ascending distance |
+| Hellinger | `-HELLINGER` | Distance between non-negative distributions. | ascending distance |
+| Wasserstein-1D | `-WASSERSTEIN` | Earth-mover distance over equal-width ordered bins. | ascending distance |
 | Hamming | `-HAMMING-BINARY` | Smaller binary distance is better. | ascending distance |
 | Jaccard | `-JACCARD-BINARY` | Smaller set distance is better. | ascending distance |
+| Tanimoto | `-TANIMOTO-BINARY` | Binary Jaccard distance using chemistry terminology. | ascending distance |
+| Sørensen-Dice | `-DICE-BINARY` | Binary Dice distance. | ascending distance |
 
 Choose the metric that matches your embedding model. Many modern embedding
 models are evaluated with cosine similarity or inner product after
 normalization.
+
+Read [Domain-aware distance metrics](distance_metrics.md) before using
+coordinate, profile, distribution, or fingerprint metrics; each has an explicit
+input contract and index compatibility matrix.
 
 ## Indexes
 

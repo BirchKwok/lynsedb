@@ -68,6 +68,37 @@ class TestComputeDistance:
         d = compute_distance(a, b, "IP")
         assert abs(d) < 1e-5
 
+    @pytest.mark.parametrize(
+        ("metric", "a", "b", "expected"),
+        [
+            ("manhattan", [1, 2, 3], [3, 0, 4], 5.0),
+            ("pearson", [1, 2, 3], [2, 4, 6], 0.0),
+            ("hellinger", [1, 0], [0, 1], 1.0),
+            ("wasserstein", [1, 0, 0], [0, 0, 1], 2.0),
+            ("dice", [1, 1, 0], [1, 0, 1], 0.5),
+            ("tanimoto", [1, 1, 0], [1, 0, 1], 2.0 / 3.0),
+        ],
+    )
+    def test_domain_metrics(self, metric, a, b, expected):
+        actual = compute_distance(
+            np.asarray(a, dtype=np.float32),
+            np.asarray(b, dtype=np.float32),
+            metric,
+        )
+        assert actual == pytest.approx(expected, abs=1e-5)
+
+    def test_haversine_returns_meters_in_geojson_coordinate_order(self):
+        shanghai = np.array([121.4737, 31.2304], dtype=np.float32)
+        beijing = np.array([116.4074, 39.9042], dtype=np.float32)
+        assert compute_distance(shanghai, beijing, "haversine") == pytest.approx(
+            1_067_000, abs=10_000
+        )
+
+    def test_haversine_rejects_non_coordinate_dimension(self):
+        values = np.ones(3, dtype=np.float32)
+        with pytest.raises(ValueError, match="haversine requires two values"):
+            compute_distance(values, values, "haversine")
+
 
 class TestTopKSearch:
     def test_returns_k_results(self, query, unit_vectors):

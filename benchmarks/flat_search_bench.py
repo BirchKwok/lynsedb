@@ -22,6 +22,7 @@ def parse_args():
     parser.add_argument("--rows", type=int, default=1_000_000)
     parser.add_argument("--dim", type=int, default=128)
     parser.add_argument("--k", type=int, default=10)
+    parser.add_argument("--index-mode", default="FLAT-IP")
     parser.add_argument("--batch-size", type=int, default=100_000)
     parser.add_argument("--warmups", type=int, default=20)
     parser.add_argument("--trials", type=int, default=30)
@@ -46,7 +47,15 @@ def bench(args):
         shutil.rmtree(test_dir)
 
     rng = np.random.default_rng(args.seed)
-    query = rng.random(args.dim, dtype=np.float32)
+    binary_metric = any(
+        token in args.index_mode.upper()
+        for token in ("HAMMING", "JACCARD", "TANIMOTO", "DICE")
+    )
+    query = (
+        rng.integers(0, 2, size=args.dim).astype(np.float32)
+        if binary_metric
+        else rng.random(args.dim, dtype=np.float32)
+    )
 
     mgr = rb.DatabaseManager(str(test_dir))
     mgr.create_database("bench_db")
@@ -57,13 +66,18 @@ def bench(args):
     ingest_started = time.perf_counter()
     for start in range(0, args.rows, args.batch_size):
         end = min(start + args.batch_size, args.rows)
-        vectors = rng.random((end - start, args.dim), dtype=np.float32)
+        vectors = (
+            rng.integers(0, 2, size=(end - start, args.dim)).astype(np.float32)
+            if binary_metric
+            else rng.random((end - start, args.dim), dtype=np.float32)
+        )
         if start == 0:
             vectors[0] = query
         coll.add_items(vectors, list(range(start, end)))
         print(f"  Written {end}/{args.rows}")
 
     coll.commit()
+    coll.build_index(args.index_mode, None)
     ingest_seconds = time.perf_counter() - ingest_started
     print(f"Shape: {coll.shape()}")
 
@@ -90,11 +104,18 @@ def bench(args):
         "rows": args.rows,
         "dimension": args.dim,
         "k": args.k,
+        "index_mode": args.index_mode.upper(),
         "seed": args.seed,
         "warmups": args.warmups,
         "trials": args.trials,
         "rayon_threads": os.environ.get("RAYON_NUM_THREADS", "default"),
         "segment_count": segment_count,
+        "source_vector_bytes": args.rows * args.dim * 4,
+        "estimated_hot_scan_bytes": (
+            args.rows * ((args.dim + 63) // 64) * 8
+            if binary_metric
+            else args.rows * args.dim * 4
+        ),
         "compatibility_file_created": (collection_dir / "vectors.compat.bin").exists(),
         "platform": platform.platform(),
         "python": platform.python_version(),

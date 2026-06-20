@@ -2009,13 +2009,7 @@ impl Collection {
             .map(|m| m.trim())
             .filter(|m| !m.is_empty())
             .map(|m| m.to_uppercase())
-            .unwrap_or_else(|| match metric {
-                DistanceMetric::L2Squared => "FLAT-L2".to_string(),
-                DistanceMetric::Cosine => "FLAT-COS".to_string(),
-                DistanceMetric::InnerProduct => "FLAT-IP".to_string(),
-                DistanceMetric::Hamming => "FLAT-HAMMING".to_string(),
-                DistanceMetric::Jaccard => "FLAT-JACCARD".to_string(),
-            });
+            .unwrap_or_else(|| metric.flat_index_mode().to_string());
         if index::resolve_index_type(&mode).is_none() {
             return Err(LynseError::InvalidArgument(format!(
                 "unknown vector field index mode '{}'",
@@ -3929,6 +3923,12 @@ impl Collection {
 
         let name = Self::validate_vector_field_name(name)?;
         let metric = Self::resolve_named_vector_metric(metric, index_mode)?;
+        if !metric.accepts_dimension(dimension) {
+            return Err(LynseError::InvalidArgument(format!(
+                "metric '{}' requires dimension 2 as [longitude_degrees, latitude_degrees]",
+                metric.name()
+            )));
+        }
         let index_mode = Self::normalize_field_index_mode(index_mode, metric)?;
         let vector_dtype = match dtypes {
             Some(dtype) => VectorDtype::parse(dtype)?,
@@ -4175,6 +4175,12 @@ impl Collection {
                     ))
                 })?;
             let dim = field.config.dimension;
+            if !metric.accepts_dimension(dim) {
+                return Err(LynseError::InvalidArgument(format!(
+                    "metric '{}' requires dimension 2 as [longitude_degrees, latitude_degrees]",
+                    metric.name()
+                )));
+            }
             let n_vectors = field.vector_store.get_shape()?.0 as usize;
             field.index = None;
 
@@ -4251,15 +4257,10 @@ impl Collection {
             if meta_path.exists() {
                 std::fs::remove_dir_all(&meta_path)?;
             }
-            field.config.index_mode = match DistanceMetric::from_str(&field.config.metric)
+            field.config.index_mode = DistanceMetric::from_str(&field.config.metric)
                 .unwrap_or(DistanceMetric::InnerProduct)
-            {
-                DistanceMetric::L2Squared => "FLAT-L2".to_string(),
-                DistanceMetric::Cosine => "FLAT-COS".to_string(),
-                DistanceMetric::Hamming => "FLAT-HAMMING".to_string(),
-                DistanceMetric::Jaccard => "FLAT-JACCARD".to_string(),
-                DistanceMetric::InnerProduct => "FLAT-IP".to_string(),
-            };
+                .flat_index_mode()
+                .to_string();
         }
 
         self.save_named_vector_fields_manifest()?;
@@ -4354,6 +4355,29 @@ impl Collection {
         self.flush_pending_ingest()?;
         let dim = self.meta.dimension;
         let upper = index_type.to_uppercase();
+        let requested_metric = DistanceMetric::from_index_mode(&upper).ok_or_else(|| {
+            LynseError::InvalidArgument(format!("unknown index type '{}'", index_type))
+        })?;
+        let is_domain_metric = !matches!(
+            requested_metric,
+            DistanceMetric::InnerProduct
+                | DistanceMetric::L2Squared
+                | DistanceMetric::Cosine
+                | DistanceMetric::Hamming
+                | DistanceMetric::Jaccard
+        );
+        if is_domain_metric && index::resolve_index_type(&upper).is_none() {
+            return Err(LynseError::InvalidArgument(format!(
+                "unsupported index/metric combination '{}'",
+                index_type
+            )));
+        }
+        if !requested_metric.accepts_dimension(dim) {
+            return Err(LynseError::InvalidArgument(format!(
+                "metric '{}' requires dimension 2 as [longitude_degrees, latitude_degrees]",
+                requested_metric.name()
+            )));
+        }
 
         // Clear any previously built quantizer indices
         self.pq_index = None;
@@ -4468,7 +4492,7 @@ impl Collection {
         // Flat family: no separate index structure needed. Bare "FLAT" is not
         // accepted; callers must provide an explicit metric suffix.
         if upper.starts_with("FLAT-") {
-            Some(Self::metric_from_mode_str(&upper))
+            DistanceMetric::from_index_mode(&upper)
         } else {
             // Legacy compat
             match index_type {
@@ -4483,19 +4507,7 @@ impl Collection {
     /// Extract the distance metric from an index_mode string.
     /// Supports: FLAT-IP, FLAT-L2, FLAT-COS, FLAT-IP-SQ8, IVF-L2-SQ8, etc.
     fn metric_from_mode_str(mode: &str) -> DistanceMetric {
-        let upper = mode.to_uppercase();
-        if upper.contains("JACCARD") {
-            DistanceMetric::Jaccard
-        } else if upper.contains("HAMMING") {
-            DistanceMetric::Hamming
-        } else if upper.contains("L2") {
-            DistanceMetric::L2Squared
-        } else if upper.contains("COS") {
-            DistanceMetric::Cosine
-        } else {
-            // Default: Inner Product ("FLAT-IP", "FLAT-IP-SQ8", "IVF-IP", etc.)
-            DistanceMetric::InnerProduct
-        }
+        DistanceMetric::from_index_mode(mode).unwrap_or(DistanceMetric::InnerProduct)
     }
 
     /// Check if the index_mode string includes SQ8 quantization.
@@ -6188,8 +6200,8 @@ impl Collection {
 
     /// Range search: return all (non-deleted) vectors within a distance threshold.
     ///
-    /// For ascending metrics (L2): returns IDs where distance ≤ threshold.
-    /// For descending metrics (IP/Cosine): returns IDs where score ≥ threshold.
+    /// For ascending distance metrics: returns IDs where distance ≤ threshold.
+    /// For descending inner-product scores: returns IDs where score ≥ threshold.
     /// Results are sorted by distance/score in the natural order for the metric.
     ///
     /// Returns `(ids, distances)` capped at `max_results`.

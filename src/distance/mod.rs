@@ -1,6 +1,7 @@
 //! Distance computation module with SIMD acceleration.
 //!
-//! Supports: Inner Product, L2 Squared, Cosine, Hamming, Jaccard.
+//! Supports embedding, numeric, geospatial, profile, distribution, and packed
+//! binary distances.
 //! Designed for high-dimensional vectors (700-3500 dims) at billion scale.
 //!
 //! Top-k search strategy:
@@ -21,6 +22,13 @@ pub enum DistanceMetric {
     Cosine,
     Hamming,
     Jaccard,
+    Manhattan,
+    Haversine,
+    Correlation,
+    Hellinger,
+    Wasserstein,
+    Dice,
+    Tanimoto,
 }
 
 impl DistanceMetric {
@@ -31,7 +39,52 @@ impl DistanceMetric {
             "cosine" | "cos" | "cosine_distance" => Some(Self::Cosine),
             "hamming" => Some(Self::Hamming),
             "jaccard" => Some(Self::Jaccard),
+            "l1" | "manhattan" | "cityblock" => Some(Self::Manhattan),
+            "haversine" | "haversine_m" | "haversine-m" | "geo" => Some(Self::Haversine),
+            "correlation" | "pearson" => Some(Self::Correlation),
+            "hellinger" => Some(Self::Hellinger),
+            "wasserstein" | "wasserstein1d" | "wasserstein_1d" | "wasserstein-1d" | "emd" => {
+                Some(Self::Wasserstein)
+            }
+            "dice" | "sorensen" | "sorensen_dice" | "sorensen-dice" => Some(Self::Dice),
+            "tanimoto" => Some(Self::Tanimoto),
             _ => None,
+        }
+    }
+
+    /// Parse the metric token embedded in an index mode such as
+    /// `HNSW-CORRELATION` or `FLAT-TANIMOTO-BINARY`.
+    pub fn from_index_mode(mode: &str) -> Option<Self> {
+        let upper = mode.to_ascii_uppercase();
+        let tokens: Vec<&str> = upper.split('-').collect();
+        let has = |value: &str| tokens.contains(&value);
+
+        if has("TANIMOTO") {
+            Some(Self::Tanimoto)
+        } else if has("JACCARD") {
+            Some(Self::Jaccard)
+        } else if has("HAMMING") {
+            Some(Self::Hamming)
+        } else if has("DICE") || has("SORENSEN") {
+            Some(Self::Dice)
+        } else if has("HAVERSINE") || has("GEO") {
+            Some(Self::Haversine)
+        } else if has("CORRELATION") || has("PEARSON") {
+            Some(Self::Correlation)
+        } else if has("HELLINGER") {
+            Some(Self::Hellinger)
+        } else if has("WASSERSTEIN") || has("WASSERSTEIN1D") || has("EMD") {
+            Some(Self::Wasserstein)
+        } else if has("L1") || has("MANHATTAN") || has("CITYBLOCK") {
+            Some(Self::Manhattan)
+        } else if has("L2") || has("L2SQ") {
+            Some(Self::L2Squared)
+        } else if has("COS") || has("COSINE") {
+            Some(Self::Cosine)
+        } else if has("IP") {
+            Some(Self::InnerProduct)
+        } else {
+            None
         }
     }
 
@@ -51,6 +104,46 @@ impl DistanceMetric {
             Self::Cosine => "cosine",
             Self::Hamming => "hamming",
             Self::Jaccard => "jaccard",
+            Self::Manhattan => "l1",
+            Self::Haversine => "haversine",
+            Self::Correlation => "correlation",
+            Self::Hellinger => "hellinger",
+            Self::Wasserstein => "wasserstein",
+            Self::Dice => "dice",
+            Self::Tanimoto => "tanimoto",
+        }
+    }
+
+    pub fn flat_index_mode(&self) -> &'static str {
+        match self {
+            Self::InnerProduct => "FLAT-IP",
+            Self::L2Squared => "FLAT-L2",
+            Self::Cosine => "FLAT-COS",
+            Self::Hamming => "FLAT-HAMMING-BINARY",
+            Self::Jaccard => "FLAT-JACCARD-BINARY",
+            Self::Manhattan => "FLAT-L1",
+            Self::Haversine => "FLAT-HAVERSINE",
+            Self::Correlation => "FLAT-CORRELATION",
+            Self::Hellinger => "FLAT-HELLINGER",
+            Self::Wasserstein => "FLAT-WASSERSTEIN",
+            Self::Dice => "FLAT-DICE-BINARY",
+            Self::Tanimoto => "FLAT-TANIMOTO-BINARY",
+        }
+    }
+
+    /// Metrics evaluated on packed one-bit rows in the flat-search hot path.
+    pub fn is_binary(&self) -> bool {
+        matches!(
+            self,
+            Self::Hamming | Self::Jaccard | Self::Dice | Self::Tanimoto
+        )
+    }
+
+    /// Validate fixed dimensional requirements imposed by a metric.
+    pub fn accepts_dimension(&self, dimension: usize) -> bool {
+        match self {
+            Self::Haversine => dimension == 2,
+            _ => dimension > 0,
         }
     }
 
@@ -70,6 +163,13 @@ pub fn compute_distance_f32(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32
         DistanceMetric::Cosine => simd::cosine_distance_f32(a, b),
         DistanceMetric::Hamming => simd::hamming_f32(a, b),
         DistanceMetric::Jaccard => simd::jaccard_f32(a, b),
+        DistanceMetric::Manhattan => simd::manhattan_f32(a, b),
+        DistanceMetric::Haversine => simd::haversine_meters_f32(a, b),
+        DistanceMetric::Correlation => simd::correlation_distance_f32(a, b),
+        DistanceMetric::Hellinger => simd::hellinger_distance_f32(a, b),
+        DistanceMetric::Wasserstein => simd::wasserstein_1d_f32(a, b),
+        DistanceMetric::Dice => simd::dice_distance_f32(a, b),
+        DistanceMetric::Tanimoto => simd::jaccard_f32(a, b),
     }
 }
 
@@ -83,6 +183,13 @@ pub fn compute_distance_f16(query: &[f32], candidate_bits: &[u16], metric: Dista
         DistanceMetric::Cosine => simd::cosine_distance_f16(query, candidate_bits),
         DistanceMetric::Hamming => simd::hamming_f16(query, candidate_bits),
         DistanceMetric::Jaccard => simd::jaccard_f16(query, candidate_bits),
+        DistanceMetric::Manhattan => simd::manhattan_f16(query, candidate_bits),
+        DistanceMetric::Haversine => simd::haversine_meters_f16(query, candidate_bits),
+        DistanceMetric::Correlation => simd::correlation_distance_f16(query, candidate_bits),
+        DistanceMetric::Hellinger => simd::hellinger_distance_f16(query, candidate_bits),
+        DistanceMetric::Wasserstein => simd::wasserstein_1d_f16(query, candidate_bits),
+        DistanceMetric::Dice => simd::dice_distance_f16(query, candidate_bits),
+        DistanceMetric::Tanimoto => simd::jaccard_f16(query, candidate_bits),
     }
 }
 
@@ -507,8 +614,28 @@ mod tests {
             Some(DistanceMetric::Cosine)
         );
         assert_eq!(DistanceMetric::from_str("unknown"), None);
+        assert_eq!(
+            DistanceMetric::from_str("cityblock"),
+            Some(DistanceMetric::Manhattan)
+        );
+        assert_eq!(
+            DistanceMetric::from_str("pearson"),
+            Some(DistanceMetric::Correlation)
+        );
+        assert_eq!(
+            DistanceMetric::from_str("emd"),
+            Some(DistanceMetric::Wasserstein)
+        );
+        assert_eq!(
+            DistanceMetric::from_index_mode("FLAT-TANIMOTO-BINARY"),
+            Some(DistanceMetric::Tanimoto)
+        );
+        assert_eq!(DistanceMetric::from_index_mode("FLAT-BOGUS"), None);
 
         assert!(DistanceMetric::Cosine.supports_flat_approx());
         assert!(!DistanceMetric::Hamming.supports_flat_approx());
+        assert!(DistanceMetric::Dice.is_binary());
+        assert!(DistanceMetric::Haversine.accepts_dimension(2));
+        assert!(!DistanceMetric::Haversine.accepts_dimension(3));
     }
 }

@@ -318,8 +318,64 @@ pub fn resolve_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, Qua
             QuantizerType::Scalar,
         )),
 
-        _ => None,
+        _ => resolve_domain_index_type(&u),
     }
+}
+
+/// Domain-oriented metrics intentionally start with exact flat search and
+/// HNSW. Partition and quantized indexes need metric-specific recall studies
+/// before they can be advertised safely.
+fn resolve_domain_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, QuantizerType)> {
+    let (family, suffix) = alias.split_once('-')?;
+    let index_type = match family {
+        "FLAT" => IndexType::Flat,
+        "HNSW" => IndexType::HNSW,
+        _ => return None,
+    };
+
+    let metric = DistanceMetric::from_index_mode(alias)?;
+    let binary_suffix = suffix.ends_with("-BINARY");
+    if metric.is_binary() {
+        if index_type != IndexType::Flat {
+            return None;
+        }
+        let accepted = matches!(
+            suffix,
+            "HAMMING"
+                | "HAMMING-BINARY"
+                | "JACCARD"
+                | "JACCARD-BINARY"
+                | "TANIMOTO"
+                | "TANIMOTO-BINARY"
+                | "DICE"
+                | "DICE-BINARY"
+                | "SORENSEN"
+                | "SORENSEN-BINARY"
+                | "SORENSEN-DICE"
+                | "SORENSEN-DICE-BINARY"
+        );
+        return accepted.then_some((index_type, metric, QuantizerType::Binary));
+    }
+
+    if binary_suffix {
+        return None;
+    }
+    let accepted = matches!(
+        suffix,
+        "L1" | "MANHATTAN"
+            | "CITYBLOCK"
+            | "HAVERSINE"
+            | "HAVERSINE-M"
+            | "GEO"
+            | "CORRELATION"
+            | "PEARSON"
+            | "HELLINGER"
+            | "WASSERSTEIN"
+            | "WASSERSTEIN-1D"
+            | "WASSERSTEIN1D"
+            | "EMD"
+    );
+    accepted.then_some((index_type, metric, QuantizerType::None))
 }
 
 /// Create an index from a type alias string.
@@ -414,5 +470,64 @@ mod tests {
             );
             assert!(create_index(alias).is_err());
         }
+    }
+
+    #[test]
+    fn resolves_domain_metrics_with_explicit_capabilities() {
+        assert_eq!(
+            resolve_index_type("flat-manhattan"),
+            Some((
+                IndexType::Flat,
+                DistanceMetric::Manhattan,
+                QuantizerType::None
+            ))
+        );
+        assert_eq!(
+            resolve_index_type("HNSW-PEARSON"),
+            Some((
+                IndexType::HNSW,
+                DistanceMetric::Correlation,
+                QuantizerType::None
+            ))
+        );
+        assert_eq!(
+            resolve_index_type("FLAT-TANIMOTO-BINARY"),
+            Some((
+                IndexType::Flat,
+                DistanceMetric::Tanimoto,
+                QuantizerType::Binary
+            ))
+        );
+        assert!(resolve_index_type("HNSW-TANIMOTO-BINARY").is_none());
+        assert!(resolve_index_type("FLAT-HELLINGER-SQ8").is_none());
+    }
+
+    #[test]
+    fn domain_hnsw_serialization_roundtrip() {
+        let dim = 4;
+        let vectors = vec![
+            1.0, 2.0, 3.0, 4.0, // row 0
+            4.0, 3.0, 2.0, 1.0, // row 1
+            1.0, 3.0, 5.0, 8.0, // row 2, correlated with row 0
+        ];
+        let mut built = create_index("HNSW-CORRELATION").unwrap();
+        built.build(&vectors, 3, dim, Some(&[10, 11, 12])).unwrap();
+        let bytes = built.serialize().unwrap();
+
+        let mut loaded = create_index("HNSW-CORRELATION").unwrap();
+        loaded.deserialize(&bytes).unwrap();
+        let (ids, distances) = loaded
+            .search(
+                &vectors[..dim],
+                1,
+                &SearchParams {
+                    ef_search: Some(32),
+                    ..SearchParams::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(ids, vec![10]);
+        assert!(distances[0].abs() < 1e-6);
     }
 }

@@ -35,12 +35,26 @@ def _parse_index_mode(index_mode: Optional[str]) -> Tuple[str, str]:
     }
     idx_type = idx_type_map.get(idx_type, idx_type)
 
-    # Match Rust's metric_from_mode_str: uses contains() on the full string
+    # Match Rust's DistanceMetric::from_index_mode precedence.
     full = "-".join(parts[1:])  # e.g. "L2SQ-SQ8" or "COS" or "IP"
-    if "JACCARD" in full:
+    if "TANIMOTO" in full:
+        metric = "Tanimoto"
+    elif "JACCARD" in full:
         metric = "Jaccard"
     elif "HAMMING" in full:
         metric = "Hamming"
+    elif "DICE" in full or "SORENSEN" in full:
+        metric = "Dice"
+    elif "HAVERSINE" in full or "GEO" in full:
+        metric = "Haversine"
+    elif "CORRELATION" in full or "PEARSON" in full:
+        metric = "Correlation"
+    elif "HELLINGER" in full:
+        metric = "Hellinger"
+    elif "WASSERSTEIN" in full or "EMD" in full:
+        metric = "Wasserstein-1D"
+    elif "L1" in full or "MANHATTAN" in full or "CITYBLOCK" in full:
+        metric = "L1"
     elif "L2" in full:
         metric = "L2"
     elif "COS" in full:

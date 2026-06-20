@@ -450,6 +450,16 @@ class Collection:
                 - 'Flat-Cos-SQ8': Flat index with cosine similarity and SQ8 quantizer.
                 - 'Flat-Jaccard-Binary': Flat index with Jaccard distance (binary vectors).
                 - 'Flat-Hamming-Binary': Flat index with Hamming distance (binary vectors).
+                - 'FLAT-TANIMOTO-BINARY': Packed binary Tanimoto distance.
+                - 'FLAT-DICE-BINARY': Packed binary Sørensen-Dice distance.
+
+                **Domain-aware Flat / HNSW:**
+
+                - 'FLAT-L1' or 'HNSW-L1': Manhattan distance.
+                - 'FLAT-HAVERSINE' or 'HNSW-HAVERSINE': GeoJSON coordinates, meters.
+                - 'FLAT-CORRELATION' or 'HNSW-CORRELATION': Pearson distance.
+                - 'FLAT-HELLINGER' or 'HNSW-HELLINGER': Distribution distance.
+                - 'FLAT-WASSERSTEIN' or 'HNSW-WASSERSTEIN': Ordered-bin distance.
 
                 **Flat + PQ (Product Quantization, two-pass ADC search):**
 
@@ -591,8 +601,7 @@ class Collection:
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
                 - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).
             approx: if True, use metric-specific flat approximation for IP, L2,
-                and Cosine. Ignored for Hamming/Jaccard, which always use exact
-                binary-distance search.
+                and Cosine. Ignored for domain and binary metrics.
             eps: distance rounding tolerance when ``approx=True`` for supported
                 metrics (default 1e-4).
 

@@ -83,6 +83,7 @@ nav:
     - Databases and collections: tutorials/databases_collections.md
     - Add vectors: tutorials/add_vectors.md
     - Search and filter: tutorials/search_and_filter.md
+    - Domain-aware distance metrics: tutorials/distance_metrics.md
     - Metadata filter cookbook: tutorials/metadata_filter_cookbook.md
     - Indexing guide: tutorials/indexing.md
     - Named, sparse, and hybrid search: tutorials/named_sparse_hybrid.md
