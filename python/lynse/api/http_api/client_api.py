@@ -115,10 +115,10 @@ def raise_error_response(response):
         ExecutionError: If the server returns an error.
     """
     try:
-        rj = response.json()
-        raise ExecutionError(rj)
-    except Exception as e:
-        raise ExecutionError(response.text)
+        detail = response.json()
+    except Exception:
+        detail = response.text
+    raise ExecutionError(detail)
 
 
 
@@ -855,6 +855,8 @@ class Collection:
                 raise ValueError("vectors must be a 1D vector or a 2D matrix")
             vectors = np.ascontiguousarray(vectors, dtype=np.float32)
             n_total, dim = vectors.shape
+            if n_total == 0:
+                raise ValueError("vectors cannot be empty")
             vector_encoding = _normalize_vector_encoding(wire_dtype)
             cluster_mode = self._ensure_cluster_mode()
             if cluster_mode and self._integer_id_routing != "external":

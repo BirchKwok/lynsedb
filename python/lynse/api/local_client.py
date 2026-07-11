@@ -400,6 +400,8 @@ class LocalCollection:
                     raise ValueError("vectors must be a 1D vector or a 2D matrix")
                 vec_array = np.ascontiguousarray(vec_array, dtype=np.float32)
                 n_records = vec_array.shape[0]
+                if n_records == 0:
+                    raise ValueError("vectors cannot be empty")
                 if docs is not None and len(docs) != n_records:
                     raise ValueError(f"documents length ({len(docs)}) must match vectors row count ({n_records})")
 

@@ -90,6 +90,11 @@ def test_add_rejects_missing_vectors_and_documents(collection):
         collection.add(ids=1)
 
 
+def test_add_without_ids_rejects_empty_vector_matrix(collection):
+    with pytest.raises(ValueError, match="vectors cannot be empty"):
+        collection.add(vectors=np.empty((0, DIM), dtype=np.float32))
+
+
 @pytest.mark.parametrize(
     "bad_batch_size",
     [0, -1, 1.5, "2"],

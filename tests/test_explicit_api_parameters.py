@@ -3,6 +3,7 @@ import inspect
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +93,52 @@ class _FakeResponse:
     @staticmethod
     def json():
         return {"status": "success"}
+
+
+class _FakeErrorResponse:
+    def __init__(self, *, payload=None, text="fallback", json_error=None):
+        self._payload = payload
+        self.text = text
+        self._json_error = json_error
+
+    def json(self):
+        if self._json_error is not None:
+            raise self._json_error
+        return self._payload
+
+
+def test_raise_error_response_preserves_json_error_detail():
+    from lynse.api.http_api.client_api import ExecutionError, raise_error_response
+
+    payload = {"error": "dimension mismatch", "expected": 8, "actual": 4}
+    with pytest.raises(ExecutionError) as exc_info:
+        raise_error_response(_FakeErrorResponse(payload=payload, text="generic error"))
+
+    assert exc_info.value.args == (payload,)
+
+
+def test_raise_error_response_falls_back_to_text_for_non_json_response():
+    from lynse.api.http_api.client_api import ExecutionError, raise_error_response
+
+    with pytest.raises(ExecutionError, match="upstream unavailable"):
+        raise_error_response(
+            _FakeErrorResponse(
+                text="upstream unavailable",
+                json_error=ValueError("not JSON"),
+            )
+        )
+
+
+def test_http_add_without_ids_rejects_empty_vector_matrix_before_request():
+    from lynse.api.http_api.client_api import Collection
+
+    coll = Collection("http://server", "db", "items")
+    coll._session = _FakeSession()
+
+    with pytest.raises(ValueError, match="vectors cannot be empty"):
+        coll.add(vectors=np.empty((0, 8), dtype=np.float32))
+
+    assert coll._session.posts == []
 
 
 class _FakeSession:
