@@ -162,17 +162,17 @@ Flat, PQ, RaBitQ, PolarVec, and named vector-field searches ignore `nprobe`.
 Start with `nprobe=32` or `64` for HNSW evaluation, then tune down for latency
 or up for recall.
 
-## Approximate flat distance rounding
+## Approximate flat search
 
-For flat IP, L2, and cosine paths, `approx=True` enables metric-specific
-distance rounding controlled by `eps`.
+For flat IP, L2, cosine, L1, Chebyshev, Canberra, and Bray–Curtis paths,
+`approx=True` enables a metric-specific shortlist followed by exact re-scoring.
+Returned distances are rounded according to `eps` only after global ranking.
 
 ```python
 result = collection.search(query, k=10, approx=True, eps=1e-4)
 ```
 
-Hamming and Jaccard binary metrics ignore `approx=True` and always use the exact
-binary-distance path.
+Other domain and binary metrics keep their exact search paths.
 
 Use `approx=True` only after measuring quality on your own evaluation set.
 

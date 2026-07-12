@@ -1132,8 +1132,8 @@ impl PyCollection {
     ///     k: number of results
     ///     where: optional SQL-like filter string
     ///     nprobe: number of IVF/SPANN probes or HNSW search breadth (default 10)
-    ///     approx: flat-search approximation for IP/L2/Cosine only; ignored for Hamming/Jaccard
-    ///     eps: distance rounding tolerance when approx applies
+    ///     approx: flat-search approximation for supported continuous metrics
+    ///     eps: shortlist work/quality tolerance and final distance precision
     ///
     /// Returns:
     ///     PySearchResult with ids, distances, fields
@@ -1163,8 +1163,7 @@ impl PyCollection {
 
     /// Search a named vector field.
     ///
-    /// approx applies only to IP/L2/Cosine fields; Hamming/Jaccard fields always
-    /// use exact binary-distance search.
+    /// Binary and specialized domain metrics keep their exact search paths.
     #[pyo3(signature = (field_name, vector, k=None, where_expr=None, approx=None, eps=None))]
     fn search_vector_field(
         &self,
@@ -2011,6 +2010,13 @@ impl PyIvfFlatIndex {
             pyo3::exceptions::PyValueError::new_err(format!("Unknown metric: {}", metric))
         })?;
         let arr = data.as_array();
+        if arr.shape()[1] != dim {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "data dimension mismatch: expected {}, got {}",
+                dim,
+                arr.shape()[1]
+            )));
+        }
         let flat = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("numpy array must be contiguous (C-order)")
         })?;
@@ -2069,6 +2075,13 @@ impl PyIvfFlatIndex {
             pyo3::exceptions::PyValueError::new_err(format!("Unknown metric: {}", metric))
         })?;
         let q = query.as_slice()?;
+        if q.len() != self.inner.dim() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "query dimension mismatch: expected {}, got {}",
+                self.inner.dim(),
+                q.len()
+            )));
+        }
         let (ids, dists) = self.inner.search(q, k, nprobe, metric);
         Ok((ids.into_pyarray(py), dists.into_pyarray(py)))
     }

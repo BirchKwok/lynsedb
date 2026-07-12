@@ -3225,9 +3225,17 @@ impl Collection {
 
         let mut pairs: Vec<(u64, f32)> = best.into_iter().collect();
         if ascending {
-            pairs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            pairs.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
         } else {
-            pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            pairs.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
         }
         if pairs.len() > limit {
             pairs.truncate(limit);
@@ -4523,10 +4531,14 @@ impl Collection {
 
         let collection_metric = self.resolve_metric();
         let approx_cfg = if approx && collection_metric.supports_flat_approx() {
-            Some(crate::storage::approx_search::ApproxSearchConfig::new(eps))
+            Some(
+                crate::storage::approx_search::ApproxSearchConfig::new(eps)
+                    .without_output_rounding(),
+            )
         } else {
             None
         };
+        let mut approx_applied_eps = None;
 
         let filtered_index_requires_exact = search_params.subset_indices.is_some()
             && self
@@ -4576,6 +4588,7 @@ impl Collection {
         } else {
             // Unfiltered: zero-copy mmap + fused parallel topk (~5ms for 1M×128)
             let metric = collection_metric;
+            approx_applied_eps = approx_cfg.map(|config| config.eps);
             self.vector_store.search(
                 query,
                 search_k,
@@ -4607,7 +4620,14 @@ impl Collection {
             .iter()
             .map(|&row| self.row_to_user_id(row))
             .collect();
-        let (result_ids, result_dists) = self.filter_tombstoned_limit(result_ids, result_dists, k);
+        let (result_ids, mut result_dists) =
+            self.filter_tombstoned_limit(result_ids, result_dists, k);
+        if let Some(approx_eps) = approx_applied_eps {
+            crate::storage::approx_search::round_distances_to_eps(
+                &mut result_dists,
+                approx_eps,
+            );
+        }
 
         Ok(SearchResult {
             ids: result_ids,
@@ -4670,6 +4690,7 @@ impl Collection {
         } else {
             k
         };
+        let mut approx_applied_eps = None;
 
         let (rows, dists) = if use_field_index {
             let search_params = SearchParams {
@@ -4688,10 +4709,14 @@ impl Collection {
                 .unwrap_or_else(|| Self::metric_from_mode_str(&field.config.index_mode));
             let use_sq8 = field.config.index_mode.to_uppercase().contains("SQ8");
             let approx_cfg = if approx && metric.supports_flat_approx() {
-                Some(crate::storage::approx_search::ApproxSearchConfig::new(eps))
+                Some(
+                    crate::storage::approx_search::ApproxSearchConfig::new(eps)
+                        .without_output_rounding(),
+                )
             } else {
                 None
             };
+            approx_applied_eps = approx_cfg.map(|config| config.eps);
             field
                 .vector_store
                 .search(query, search_k, metric, use_sq8, approx_cfg)?
@@ -4718,6 +4743,9 @@ impl Collection {
             if ids.len() >= k {
                 break;
             }
+        }
+        if let Some(approx_eps) = approx_applied_eps {
+            crate::storage::approx_search::round_distances_to_eps(&mut distances, approx_eps);
         }
 
         Ok(SearchResult {
@@ -6073,8 +6101,14 @@ impl Collection {
         };
         let row_offsets: Vec<u64> = ids
             .iter()
-            .map(|&uid| self.user_id_to_row(uid).unwrap_or(uid as usize) as u64)
-            .collect();
+            .map(|&uid| {
+                self.user_id_to_row(uid)
+                    .map(|row| row as u64)
+                    .ok_or_else(|| {
+                        LynseError::InvalidArgument(format!("vector id {uid} does not exist"))
+                    })
+            })
+            .collect::<Result<_>>()?;
         let persisted_rows = self.vector_store.get_shape()?.0;
         let mut result_data = self.vector_store.read_rows(&row_offsets)?;
         if let Some(snapshot) = pending_snapshot.as_ref() {
@@ -7453,6 +7487,17 @@ mod tests {
     }
 
     #[test]
+    fn reading_a_missing_id_does_not_fall_back_to_its_row_number() {
+        let tmp = TempDir::new().unwrap();
+        let mut coll = Collection::open(tmp.path(), "col", 2, 100).unwrap();
+        coll.add_items(&[1.0, 2.0], 1, &[10], None).unwrap();
+
+        let error = coll.read_vectors_by_ids_only(&[0]).unwrap_err();
+        assert!(error.to_string().contains("vector id 0 does not exist"));
+        assert_eq!(coll.read_vectors_by_ids_only(&[10]).unwrap(), vec![1.0, 2.0]);
+    }
+
+    #[test]
     fn external_ids_are_allocated_and_persisted() {
         let tmp = TempDir::new().unwrap();
         {
@@ -8774,6 +8819,21 @@ mod tests {
             .unwrap();
         assert_eq!(result.ids, vec![true_id]);
         assert_eq!(result.distances, vec![0.0]);
+    }
+
+    #[test]
+    fn approximate_search_merges_pending_rows_using_raw_scores() {
+        let tmp = TempDir::new().unwrap();
+        let mut coll = Collection::open(tmp.path(), "col", 1, 100).unwrap();
+        coll.add_items(&[0.6], 1, &[10], None).unwrap();
+        coll.commit().unwrap();
+
+        coll.add_items(&[0.9], 1, &[20], None).unwrap();
+        assert_eq!(coll.pending_len(), 1);
+
+        let result = coll.search(&[1.0], 1, None, 10, true, 1.0).unwrap();
+        assert_eq!(result.ids, vec![20]);
+        assert_eq!(result.distances, vec![1.0]);
     }
 
     #[test]

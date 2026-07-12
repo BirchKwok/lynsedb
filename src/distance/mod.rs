@@ -175,7 +175,16 @@ impl DistanceMetric {
 
     /// Whether `search(..., approx=True)` has a metric-specific implementation.
     pub fn supports_flat_approx(&self) -> bool {
-        matches!(self, Self::InnerProduct | Self::L2Squared | Self::Cosine)
+        matches!(
+            self,
+            Self::InnerProduct
+                | Self::L2Squared
+                | Self::Cosine
+                | Self::Manhattan
+                | Self::Chebyshev
+                | Self::Canberra
+                | Self::BrayCurtis
+        )
     }
 }
 
@@ -683,6 +692,11 @@ mod tests {
         assert_eq!(DistanceMetric::from_index_mode("FLAT-BOGUS"), None);
 
         assert!(DistanceMetric::Cosine.supports_flat_approx());
+        assert!(DistanceMetric::Manhattan.supports_flat_approx());
+        assert!(DistanceMetric::Chebyshev.supports_flat_approx());
+        assert!(DistanceMetric::Canberra.supports_flat_approx());
+        assert!(DistanceMetric::BrayCurtis.supports_flat_approx());
+        assert!(!DistanceMetric::Hellinger.supports_flat_approx());
         assert!(!DistanceMetric::Hamming.supports_flat_approx());
         assert!(DistanceMetric::Dice.is_binary());
         assert!(DistanceMetric::Haversine.accepts_dimension(2));

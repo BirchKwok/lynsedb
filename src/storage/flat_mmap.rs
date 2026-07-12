@@ -837,30 +837,24 @@ impl FlatMmap {
                 let pool = approx_ip_order_pool_size(k, n, config.eps);
                 self.ensure_approx_ip_order(pool);
                 if let Some(order) = self.approx_ip_order.read().as_ref() {
-                    return approx_ip_order_search(
-                        query,
-                        &candidates,
-                        dim,
-                        k,
-                        n,
-                        config.eps,
-                        order,
-                    );
+                    let mut result =
+                        approx_ip_order_search(query, &candidates, dim, k, n, config.eps, order);
+                    if config.rounds_output() {
+                        super::approx_search::round_distances_to_eps(&mut result.1, config.eps);
+                    }
+                    return result;
                 }
             }
             if matches!(metric, DistanceMetric::L2Squared | DistanceMetric::Cosine) {
                 self.ensure_approx_norms();
                 if let Some(norms) = self.approx_norms.read().as_ref() {
-                    if let Some(result) = approx_norm_cached_search(
-                        query,
-                        &candidates,
-                        norms,
-                        dim,
-                        k,
-                        n,
-                        metric,
-                        config.eps,
-                    ) {
+                    if let Some(result) =
+                        approx_norm_cached_search(query, &candidates, norms, dim, k, n, metric)
+                    {
+                        let mut result = result;
+                        if config.rounds_output() {
+                            super::approx_search::round_distances_to_eps(&mut result.1, config.eps);
+                        }
                         return result;
                     }
                 }
@@ -2533,10 +2527,7 @@ fn approx_global_shortlist_search(
     };
 
     let (ids, dists) = result;
-    let dists = dists
-        .into_iter()
-        .map(|dist| super::approx_search::round_to_eps(dist.max(0.0), eps))
-        .collect();
+    let dists = dists.into_iter().map(|dist| dist.max(0.0)).collect();
     Some((ids, dists))
 }
 
@@ -2883,7 +2874,6 @@ fn approx_norm_cached_search(
     k: usize,
     n: usize,
     metric: DistanceMetric,
-    eps: f32,
 ) -> Option<(Vec<u32>, Vec<f32>)> {
     if !approx_norms_compatible(norms, n) {
         return None;
@@ -2910,12 +2900,11 @@ fn approx_norm_cached_search(
     let dists = dists
         .into_iter()
         .map(|dist| {
-            let dist = if metric == DistanceMetric::L2Squared {
+            if metric == DistanceMetric::L2Squared {
                 dist.max(0.0)
             } else {
                 dist
-            };
-            super::approx_search::round_to_eps(dist, eps)
+            }
         })
         .collect();
     Some((ids, dists))
@@ -3258,6 +3247,14 @@ pub(super) fn approx_hybrid_search(
         DistanceMetric::Cosine => {
             coarse_shortlist_cosine_adaptive(query, candidates, dim, pool, n, eps)
         }
+        DistanceMetric::Manhattan
+        | DistanceMetric::Chebyshev
+        | DistanceMetric::Canberra
+        | DistanceMetric::BrayCurtis => {
+            let (ids, _) =
+                approx_coarse_search(query, candidates, dim, sample_dims, pool, n, metric, None);
+            ids
+        }
         _ => return contiguous_exact_search(query, candidates, dim, k, metric, 0, n),
     };
 
@@ -3294,6 +3291,14 @@ pub(super) fn approx_hybrid_search(
             &subset_ids,
             simd::cosine_distance_f32,
         ),
+        DistanceMetric::Manhattan
+        | DistanceMetric::Chebyshev
+        | DistanceMetric::Canberra
+        | DistanceMetric::BrayCurtis => {
+            direct_access_topk::<true>(query, candidates, dim, k, n, &subset_ids, |left, right| {
+                distance::compute_distance_f32(left, right, metric)
+            })
+        }
         _ => contiguous_exact_search(query, candidates, dim, k, metric, 0, n),
     }
 }
@@ -3654,7 +3659,7 @@ fn approx_ip_order_search(
 
     let take = pool.min(source.len());
     if cached_vectors_cover(take, source_vectors, dim) {
-        return cached_ip_order_topk(query, &source[..take], source_vectors, dim, k, eps);
+        return cached_ip_order_topk(query, &source[..take], source_vectors, dim, k);
     }
 
     let mut subset_ids: Vec<u64> = source
@@ -3672,10 +3677,6 @@ fn approx_ip_order_search(
         &subset_ids,
         simd::inner_product_f32,
     );
-    let dists = dists
-        .into_iter()
-        .map(|dist| super::approx_search::round_to_eps(dist, eps))
-        .collect();
     (ids, dists)
 }
 
@@ -3685,7 +3686,6 @@ fn cached_ip_order_topk(
     vectors: &[f32],
     dim: usize,
     k: usize,
-    eps: f32,
 ) -> (Vec<u32>, Vec<f32>) {
     let mut top: Vec<TopKEntry> = Vec::with_capacity(k);
     let mut threshold = f32::NEG_INFINITY;
@@ -3713,10 +3713,7 @@ fn cached_ip_order_topk(
     }
 
     let ids = top.iter().map(|entry| entry.idx).collect();
-    let dists = top
-        .iter()
-        .map(|entry| super::approx_search::round_to_eps(entry.dist, eps))
-        .collect();
+    let dists = top.iter().map(|entry| entry.dist).collect();
     (ids, dists)
 }
 
@@ -4418,6 +4415,26 @@ fn approx_coarse_search(
                 block_jaccard(q, c, &blocks)
             })
         }
+        DistanceMetric::Manhattan => {
+            sampled_coarse_topk::<true>(query, candidates, dim, k, n, skip_rows, |q, c| {
+                block_manhattan(q, c, &blocks) * scale
+            })
+        }
+        DistanceMetric::Chebyshev => {
+            sampled_coarse_topk::<true>(query, candidates, dim, k, n, skip_rows, |q, c| {
+                block_chebyshev(q, c, &blocks)
+            })
+        }
+        DistanceMetric::Canberra => {
+            sampled_coarse_topk::<true>(query, candidates, dim, k, n, skip_rows, |q, c| {
+                block_canberra(q, c, &blocks) * scale
+            })
+        }
+        DistanceMetric::BrayCurtis => {
+            sampled_coarse_topk::<true>(query, candidates, dim, k, n, skip_rows, |q, c| {
+                block_bray_curtis(q, c, &blocks)
+            })
+        }
         _ => sampled_coarse_topk::<true>(query, candidates, dim, k, n, skip_rows, |q, c| {
             distance::compute_distance_f32(q, c, metric)
         }),
@@ -4639,6 +4656,61 @@ fn block_jaccard(query: &[f32], cand: &[f32], blocks: &[DimBlock]) -> f32 {
         0.0
     } else {
         1.0 - intersection as f32 / union as f32
+    }
+}
+
+#[inline]
+fn block_manhattan(query: &[f32], cand: &[f32], blocks: &[DimBlock]) -> f32 {
+    let mut sum = 0.0f32;
+    for block in blocks {
+        let end = block.start + block.len;
+        sum += simd::manhattan_f32(&query[block.start..end], &cand[block.start..end]);
+    }
+    sum
+}
+
+#[inline]
+fn block_chebyshev(query: &[f32], cand: &[f32], blocks: &[DimBlock]) -> f32 {
+    let mut max_distance = 0.0f32;
+    for block in blocks {
+        let end = block.start + block.len;
+        max_distance = max_distance.max(simd::chebyshev_f32(
+            &query[block.start..end],
+            &cand[block.start..end],
+        ));
+    }
+    max_distance
+}
+
+#[inline]
+fn block_canberra(query: &[f32], cand: &[f32], blocks: &[DimBlock]) -> f32 {
+    let mut sum = 0.0f32;
+    for block in blocks {
+        let end = block.start + block.len;
+        sum += simd::canberra_f32(&query[block.start..end], &cand[block.start..end]);
+    }
+    sum
+}
+
+#[inline]
+fn block_bray_curtis(query: &[f32], cand: &[f32], blocks: &[DimBlock]) -> f32 {
+    let mut numerator = 0.0f32;
+    let mut denominator = 0.0f32;
+    for block in blocks {
+        let end = block.start + block.len;
+        for index in block.start..end {
+            numerator += (query[index] - cand[index]).abs();
+            denominator += (query[index] + cand[index]).abs();
+        }
+    }
+    if denominator == 0.0 {
+        if numerator == 0.0 {
+            0.0
+        } else {
+            f32::INFINITY
+        }
+    } else {
+        numerator / denominator
     }
 }
 

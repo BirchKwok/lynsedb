@@ -220,22 +220,62 @@ impl PQIndex {
                 "Invalid PQ magic bytes",
             ));
         }
-        let _version = read_u32le(&mut r)?;
+        let version = read_u32le(&mut r)?;
+        if version != PQ_VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Unsupported PQ version: {}", version),
+            ));
+        }
         let n_subspaces = read_u32le(&mut r)? as usize;
         let n_clusters = read_u32le(&mut r)? as usize;
         let subspace_size = read_u32le(&mut r)? as usize;
-        let n_vectors = read_u64le(&mut r)? as usize;
+        let n_vectors = usize::try_from(read_u64le(&mut r)?).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "PQ vector count exceeds platform capacity",
+            )
+        })?;
         let dim = read_u32le(&mut r)? as usize;
 
-        let cb_len = n_subspaces * n_clusters * subspace_size;
+        if n_subspaces == 0
+            || !(1..=256).contains(&n_clusters)
+            || subspace_size == 0
+            || n_subspaces.checked_mul(subspace_size) != Some(dim)
+            || n_vectors > u32::MAX as usize
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid PQ index dimensions",
+            ));
+        }
+
+        let cb_len = n_subspaces
+            .checked_mul(n_clusters)
+            .and_then(|value| value.checked_mul(subspace_size))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "PQ codebook size overflows",
+                )
+            })?;
         let mut codebooks = vec![0.0f32; cb_len];
         for v in codebooks.iter_mut() {
             let bytes = read_4bytes(&mut r)?;
             *v = f32::from_le_bytes(bytes);
         }
 
-        let mut codes = vec![0u8; n_vectors * n_subspaces];
+        let code_len = n_vectors.checked_mul(n_subspaces).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "PQ code size overflows")
+        })?;
+        let mut codes = vec![0u8; code_len];
         r.read_exact(&mut codes)?;
+        if codes.iter().any(|&code| code as usize >= n_clusters) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "PQ index contains an out-of-range code",
+            ));
+        }
 
         Ok(PQIndex {
             n_subspaces,
@@ -726,6 +766,33 @@ mod tests {
         assert_eq!(pq2.len(), n);
         assert_eq!(pq2.n_subspaces, pq.n_subspaces);
         assert_eq!(pq2.codes, pq.codes);
+    }
+
+    #[test]
+    fn test_pq_load_rejects_unsupported_version_and_invalid_codes() {
+        let n = 4;
+        let dim = 4;
+        let data = random_data(n, dim, 42);
+        let pq = PQIndex::build(&data, n, dim, 2);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("pq_index.bin");
+        pq.save(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+
+        let mut unsupported = original.clone();
+        unsupported[4..8].copy_from_slice(&(PQ_VERSION + 1).to_le_bytes());
+        std::fs::write(&path, unsupported).unwrap();
+        let version_error = PQIndex::load(&path).err().unwrap();
+        assert_eq!(version_error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(version_error.to_string().contains("Unsupported PQ version"));
+
+        let mut invalid_code = original;
+        let code_offset = 32 + pq.codebooks.len() * std::mem::size_of::<f32>();
+        invalid_code[code_offset] = 255;
+        std::fs::write(&path, invalid_code).unwrap();
+        let code_error = PQIndex::load(&path).err().unwrap();
+        assert_eq!(code_error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(code_error.to_string().contains("out-of-range code"));
     }
 
     #[test]

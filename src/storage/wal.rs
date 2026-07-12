@@ -647,11 +647,16 @@ impl WALStorage {
                     u64::from_le_bytes(file_data[pos..pos + 8].try_into().unwrap()) as usize;
                 pos += 8;
 
-                if pos + vec_data_size > file_data.len() {
-                    break;
+                let vec_end = pos.checked_add(vec_data_size).ok_or_else(|| {
+                    LynseError::Storage("WAL vector payload size overflows".to_string())
+                })?;
+                if vec_end > data_end {
+                    return Err(LynseError::Storage(
+                        "WAL vector payload exceeds segment boundary".to_string(),
+                    ));
                 }
-                let vec_bytes = &file_data[pos..pos + vec_data_size];
-                pos += vec_data_size;
+                let vec_bytes = &file_data[pos..vec_end];
+                pos = vec_end;
 
                 if vec_data_size % dtype.byte_width() != 0 {
                     return Err(LynseError::Storage(format!(
@@ -671,11 +676,16 @@ impl WALStorage {
                     u64::from_le_bytes(file_data[pos..pos + 8].try_into().unwrap()) as usize;
                 pos += 8;
 
-                if pos + fields_size > file_data.len() {
-                    break;
+                let fields_end = pos.checked_add(fields_size).ok_or_else(|| {
+                    LynseError::Storage("WAL fields payload size overflows".to_string())
+                })?;
+                if fields_end > data_end {
+                    return Err(LynseError::Storage(
+                        "WAL fields payload exceeds segment boundary".to_string(),
+                    ));
                 }
-                let fields_bytes = &file_data[pos..pos + fields_size];
-                pos += fields_size;
+                let fields_bytes = &file_data[pos..fields_end];
+                pos = fields_end;
 
                 let fields: Vec<HashMap<String, serde_json::Value>> = if version
                     == WAL_VERSION_JSON_FIELDS
@@ -698,13 +708,23 @@ impl WALStorage {
                     u64::from_le_bytes(file_data[pos..pos + 8].try_into().unwrap()) as usize;
                 pos += 8;
 
-                if pos + ids_size > data_end {
-                    break;
+                if ids_size % std::mem::size_of::<u64>() != 0 {
+                    return Err(LynseError::Storage(format!(
+                        "WAL ID payload size {ids_size} is not aligned to 8 bytes"
+                    )));
                 }
-                let ids_bytes = &file_data[pos..pos + ids_size];
-                pos += ids_size;
+                let ids_end = pos.checked_add(ids_size).ok_or_else(|| {
+                    LynseError::Storage("WAL ID payload size overflows".to_string())
+                })?;
+                if ids_end > data_end {
+                    return Err(LynseError::Storage(
+                        "WAL ID payload exceeds segment boundary".to_string(),
+                    ));
+                }
+                let ids_bytes = &file_data[pos..ids_end];
+                pos = ids_end;
 
-                let ids = ids_bytes
+                let ids: Vec<u64> = ids_bytes
                     .chunks_exact(8)
                     .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
                     .collect();
@@ -717,11 +737,29 @@ impl WALStorage {
                 }
                 pos = payload_end;
 
-                let n_vectors = if data_dim > 0 {
-                    n_floats / data_dim
-                } else {
-                    record_count
-                };
+                if data_dim == 0 || n_floats % data_dim != 0 {
+                    return Err(LynseError::Storage(format!(
+                        "WAL vector value count {n_floats} is incompatible with dimension {data_dim}"
+                    )));
+                }
+                let n_vectors = n_floats / data_dim;
+                if n_vectors != record_count {
+                    return Err(LynseError::Storage(format!(
+                        "WAL record count {record_count} does not match vector count {n_vectors}"
+                    )));
+                }
+                if !ids.is_empty() && ids.len() != record_count {
+                    return Err(LynseError::Storage(format!(
+                        "WAL ID count {} does not match record count {record_count}",
+                        ids.len()
+                    )));
+                }
+                if !fields.is_empty() && fields.len() != record_count {
+                    return Err(LynseError::Storage(format!(
+                        "WAL field count {} does not match record count {record_count}",
+                        fields.len()
+                    )));
+                }
 
                 segments.push(WALSegment {
                     data: float_data,
@@ -1058,6 +1096,27 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn test_wal_rejects_record_count_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let wal = WALStorage::new("test_col", 100_000, tmp.path(), 5000).unwrap();
+        wal.write_log_data(&[1.0, 2.0], 2, &[7], &[]).unwrap();
+        wal.flush().unwrap();
+
+        let path = wal.log_dir().join("test_col.000000.wal");
+        let mut bytes = fs::read(&path).unwrap();
+        let record_count_offset = HEADER_SIZE + 8;
+        bytes[record_count_offset..record_count_offset + 8].copy_from_slice(&2u64.to_le_bytes());
+        fs::write(path, bytes).unwrap();
+
+        let error = match wal.get_segments() {
+            Ok(_) => panic!("mismatched WAL record count should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("record count 2"));
+        assert!(error.to_string().contains("vector count 1"));
     }
 
     #[test]

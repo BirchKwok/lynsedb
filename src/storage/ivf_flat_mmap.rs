@@ -61,11 +61,37 @@ impl IvfFlatMmap {
         n_iters: usize,
         _metric: DistanceMetric,
     ) -> std::io::Result<Self> {
+        if dim == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "IVF dimension must be greater than zero",
+            ));
+        }
+        if data.len() % dim != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "IVF data length must be divisible by dimension",
+            ));
+        }
+        if n_partitions == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "IVF partition count must be greater than zero",
+            ));
+        }
         let n_vectors = data.len() / dim;
-        assert!(
-            n_vectors >= n_partitions,
-            "need at least n_partitions vectors"
-        );
+        if n_vectors < n_partitions {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "IVF requires at least as many vectors as partitions",
+            ));
+        }
+        if n_vectors > u32::MAX as usize {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "IVF vector count exceeds the u32 ID capacity",
+            ));
+        }
 
         // Step 1: shared IVF KMeans clustering. IVF partitioning uses L2
         // Voronoi cells; search still applies the requested metric later.
@@ -141,7 +167,15 @@ impl IvfFlatMmap {
             load_metadata(&meta_path)?;
         let routing_dims = select_routing_dims(&centroids, dim_loaded, n_partitions);
 
-        assert_eq!(dim, dim_loaded, "dimension mismatch");
+        if dim != dim_loaded {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "IVF dimension mismatch: index has {}, requested {}",
+                    dim_loaded, dim
+                ),
+            ));
+        }
 
         Ok(Self {
             flat,
@@ -199,7 +233,7 @@ impl IvfFlatMmap {
             return (vec![], vec![]);
         }
         let k = k.min(self.n_vectors);
-        let nprobe = nprobe.min(self.n_partitions);
+        let nprobe = nprobe.max(1).min(self.n_partitions);
         let ascending = metric.is_ascending();
 
         // Phase 1: Find nprobe nearest centroids
@@ -675,6 +709,43 @@ mod tests {
             "top result should be in cluster 0, got id={}",
             ids[0]
         );
+
+        let (zero_probe_ids, zero_probe_dists) =
+            idx.search(&query, 3, 0, DistanceMetric::InnerProduct);
+        let (one_probe_ids, one_probe_dists) =
+            idx.search(&query, 3, 1, DistanceMetric::InnerProduct);
+        assert_eq!(zero_probe_ids, one_probe_ids);
+        assert_eq!(zero_probe_dists, one_probe_dists);
+    }
+
+    #[test]
+    fn test_ivf_flat_rejects_invalid_build_inputs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let data_path = tmp.path().join("vectors.bin");
+
+        let zero_dim =
+            IvfFlatMmap::build(&data_path, &[1.0, 2.0], 0, 1, 5, DistanceMetric::L2Squared)
+                .err()
+                .unwrap();
+        assert_eq!(zero_dim.kind(), std::io::ErrorKind::InvalidInput);
+
+        let ragged = IvfFlatMmap::build(
+            &data_path,
+            &[1.0, 2.0, 3.0],
+            2,
+            1,
+            5,
+            DistanceMetric::L2Squared,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(ragged.kind(), std::io::ErrorKind::InvalidInput);
+
+        let zero_partitions =
+            IvfFlatMmap::build(&data_path, &[1.0, 2.0], 2, 0, 5, DistanceMetric::L2Squared)
+                .err()
+                .unwrap();
+        assert_eq!(zero_partitions.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -695,6 +766,10 @@ mod tests {
 
         let (ids, _) = idx2.search(&[1.0, 0.0], 1, 2, DistanceMetric::InnerProduct);
         assert_eq!(ids[0], 0); // should find original vector 0
+
+        let error = IvfFlatMmap::open(&data_path, dim + 1).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("dimension mismatch"));
     }
 
     #[test]

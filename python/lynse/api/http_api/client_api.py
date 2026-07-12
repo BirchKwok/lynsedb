@@ -1862,9 +1862,10 @@ class Collection:
                 - **Flat / PQ / RaBitQ / PolarVec**: ignored.
                 - Named vector fields: ignored.
             approx (bool): Metric-specific flat approximation for IP, L2,
-                and Cosine. Ignored for domain and binary metrics.
-            eps (float): Distance rounding tolerance when ``approx=True``
-                for supported metrics (default 1e-4). Ignored when
+                Cosine, L1, Chebyshev, Canberra, and Bray-Curtis. Other domain
+                and binary metrics keep their exact paths.
+            eps (float): Shortlist work/quality tolerance and final distance
+                precision when ``approx=True`` (default 1e-4). Ignored when
                 ``approx=False`` or the metric does not support approximation.
 
         Returns:

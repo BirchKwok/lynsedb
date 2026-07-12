@@ -202,14 +202,15 @@ improve recall and increase latency.
 result = collection.search(query, k=3, nprobe=20)
 ```
 
-Approximate flat distance rounding is available for IP, L2, and cosine metrics:
+Approximate flat search is available for IP, L2, cosine, L1, Chebyshev,
+Canberra, and Bray–Curtis metrics:
 
 ```python
 result = collection.search(query, k=3, approx=True, eps=1e-4)
 ```
 
 Flat, PQ, RaBitQ, PolarVec, and named vector-field searches ignore `nprobe`.
-Hamming and Jaccard metrics ignore `approx` and `eps`.
+Other domain and binary metrics keep their exact search paths.
 
 ## 7. Query metadata and vectors
 

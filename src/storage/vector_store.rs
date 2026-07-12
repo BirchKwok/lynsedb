@@ -17,7 +17,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Write};
 #[cfg(not(any(unix, windows)))]
 use std::io::{Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const VECTOR_MANIFEST_FILE: &str = "vector_manifest.json";
@@ -62,6 +62,21 @@ impl VectorManifest {
             },
         }
     }
+}
+
+fn validate_manifest_path(value: &str, label: &str) -> Result<()> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(LynseError::Storage(format!(
+            "vector manifest {label} must be a safe relative path: {value:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn write_atomic_durable(path: &Path, data: &[u8]) -> Result<()> {
@@ -148,8 +163,9 @@ impl VectorStore {
         std::fs::create_dir_all(collection_path)?;
         let manifest_path = collection_path.join(VECTOR_MANIFEST_FILE);
         let row_width = dimension as u64 * dtype.byte_width() as u64;
+        let manifest_exists = manifest_path.exists();
 
-        let mut manifest = if manifest_path.exists() {
+        let mut manifest = if manifest_exists {
             let bytes = std::fs::read(&manifest_path)?;
             let parsed: VectorManifest = serde_json::from_slice(&bytes)
                 .map_err(|e| LynseError::Serialization(e.to_string()))?;
@@ -166,11 +182,29 @@ impl VectorStore {
             VectorManifest::legacy(if row_width == 0 { 0 } else { bytes / row_width })
         };
 
+        validate_manifest_path(&manifest.id_map_file, "ID-map path")?;
+        let mut segment_files = HashSet::new();
+        for segment in &manifest.segments {
+            validate_manifest_path(&segment.file, "segment path")?;
+            if !segment_files.insert(segment.file.clone()) {
+                return Err(LynseError::Storage(format!(
+                    "vector manifest contains duplicate segment path {:?}",
+                    segment.file
+                )));
+            }
+        }
+
         let mut total_vectors = 0u64;
         for segment in &mut manifest.segments {
-            let len = std::fs::metadata(collection_path.join(&segment.file))
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let segment_path = collection_path.join(&segment.file);
+            let len = std::fs::metadata(&segment_path)
+                .map_err(|error| {
+                    LynseError::Storage(format!(
+                        "vector manifest segment {} is unavailable: {error}",
+                        segment_path.display()
+                    ))
+                })?
+                .len();
             segment.rows = if row_width == 0 { 0 } else { len / row_width };
             total_vectors = total_vectors.saturating_add(segment.rows);
         }
@@ -812,9 +846,12 @@ impl VectorStore {
         let cache = self.mmap_cache.read();
         let mut merged = Vec::with_capacity(k.saturating_mul(manifest.segments.len()));
         let mut base = 0u64;
+        // Segment scores must remain raw until the global merge. Rounding each
+        // segment independently can change which rows survive the global top-k.
+        let segment_approx = approx.map(ApproxSearchConfig::without_output_rounding);
         for (segment, mmap) in manifest.segments.iter().zip(cache.iter()) {
             if let Some(mmap) = mmap {
-                let (rows, distances) = mmap.search(query, k, metric, use_sq8, approx);
+                let (rows, distances) = mmap.search(query, k, metric, use_sq8, segment_approx);
                 merged.extend(
                     rows.into_iter()
                         .zip(distances)
@@ -823,7 +860,11 @@ impl VectorStore {
             }
             base += segment.rows;
         }
-        Ok(self.merge_results(merged, k, metric))
+        let mut result = self.merge_results(merged, k, metric);
+        if let Some(config) = approx.filter(|config| config.rounds_output()) {
+            crate::storage::approx_search::round_distances_to_eps(&mut result.1, config.eps);
+        }
+        Ok(result)
     }
 
     pub fn search_filtered(
@@ -1086,6 +1127,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn manifest_rejects_escaping_and_missing_segment_paths() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let collection_path = tmp.path().join("collection");
+        std::fs::create_dir_all(&collection_path).unwrap();
+        std::fs::write(tmp.path().join("outside.bin"), [0u8; 16]).unwrap();
+
+        let mut manifest = VectorManifest {
+            version: VECTOR_MANIFEST_VERSION,
+            generation: 1,
+            id_map_file: DEFAULT_ID_MAP_FILE.to_string(),
+            segments: vec![SegmentEntry {
+                file: "../outside.bin".to_string(),
+                rows: 1,
+            }],
+        };
+        std::fs::write(
+            collection_path.join(VECTOR_MANIFEST_FILE),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let escaping_error = match VectorStore::new(&collection_path, 4, 100, VectorDtype::F32) {
+            Ok(_) => panic!("escaping segment path should be rejected"),
+            Err(error) => error,
+        };
+        assert!(escaping_error.to_string().contains("safe relative path"));
+
+        manifest.segments[0].file = "vector_segments/missing.bin".to_string();
+        std::fs::write(
+            collection_path.join(VECTOR_MANIFEST_FILE),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let missing_error = match VectorStore::new(&collection_path, 4, 100, VectorDtype::F32) {
+            Ok(_) => panic!("missing manifest segment should be rejected"),
+            Err(error) => error,
+        };
+        assert!(missing_error.to_string().contains("is unavailable"));
+    }
+
+    #[test]
     fn segmented_roundtrip_search_and_filtered_search() {
         let tmp = tempfile::TempDir::new().unwrap();
         let store = VectorStore::new(tmp.path(), 4, 100, VectorDtype::F32).unwrap();
@@ -1104,6 +1185,31 @@ mod tests {
             .search_filtered(&query, 1, DistanceMetric::L2Squared, &[100])
             .unwrap();
         assert_eq!(ids, vec![100]);
+    }
+
+    #[test]
+    fn approximate_segment_merge_ranks_raw_scores() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = VectorStore::new(tmp.path(), 1, 100, VectorDtype::F32).unwrap();
+
+        let mut first_segment = vec![0.1f32; 300];
+        first_segment[0] = 0.6;
+        let mut second_segment = vec![0.1f32; 300];
+        second_segment[0] = 0.9;
+        store.write(&first_segment).unwrap();
+        store.write(&second_segment).unwrap();
+
+        let (ids, distances) = store
+            .search(
+                &[1.0],
+                1,
+                DistanceMetric::InnerProduct,
+                false,
+                Some(ApproxSearchConfig::new(1.0)),
+            )
+            .unwrap();
+        assert_eq!(ids, vec![300]);
+        assert_eq!(distances, vec![1.0]);
     }
 
     #[test]

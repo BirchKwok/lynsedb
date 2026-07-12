@@ -6,10 +6,11 @@
 //! - **Hybrid coarse→fine search**: raw f32 aggregate or partial-dimension
 //!   shortlist followed by exact f32 re-score on the shortlist.
 //!
-//! The approximate path never quantizes vectors. `eps` controls output rounding
-//! while ranking is still performed on raw f32 distances. Approximate flat
-//! search is only implemented for IP, L2, and Cosine; Hamming/Jaccard use the
-//! exact binary-distance path even if a caller passes `approx=True`.
+//! The approximate path never quantizes vectors. `eps` controls the shortlist
+//! work budget and final output rounding, while all merge/ranking stages use raw
+//! f32 distances. Approximate flat
+//! search is implemented for IP, L2, Cosine, L1, Chebyshev, Canberra, and
+//! Bray-Curtis. Binary and specialized domain metrics keep their exact paths.
 
 use crate::distance::{self, simd, DistanceMetric};
 use rayon::prelude::*;
@@ -19,13 +20,26 @@ use std::cmp::Ordering;
 #[derive(Debug, Clone, Copy)]
 pub struct ApproxSearchConfig {
     pub eps: f32,
+    round_output: bool,
 }
 
 impl ApproxSearchConfig {
     pub fn new(eps: f32) -> Self {
         Self {
             eps: normalize_eps(eps),
+            round_output: true,
         }
+    }
+
+    /// Keep raw scores for callers that still need to merge or re-rank results.
+    pub fn without_output_rounding(mut self) -> Self {
+        self.round_output = false;
+        self
+    }
+
+    #[inline]
+    pub fn rounds_output(self) -> bool {
+        self.round_output
     }
 }
 
@@ -110,7 +124,32 @@ pub fn round_to_eps(value: f32, eps: f32) -> f32 {
     if !value.is_finite() || eps <= 0.0 {
         return value;
     }
-    (value / eps).round() * eps
+    let scaled = value / eps;
+    if !scaled.is_finite() {
+        return value;
+    }
+    let rounded = scaled.round() * eps;
+    if rounded.is_finite() {
+        rounded
+    } else {
+        value
+    }
+}
+
+pub fn round_distances_to_eps(distances: &mut [f32], eps: f32) {
+    for distance in distances {
+        *distance = round_to_eps(*distance, eps);
+    }
+}
+
+fn finalize_distances(
+    mut result: (Vec<u32>, Vec<f32>),
+    config: ApproxSearchConfig,
+) -> (Vec<u32>, Vec<f32>) {
+    if config.rounds_output() {
+        round_distances_to_eps(&mut result.1, config.eps);
+    }
+    result
 }
 
 fn exact_distance(query: &[f32], cand: &[f32], metric: DistanceMetric) -> f32 {
@@ -159,21 +198,6 @@ pub(super) fn approx_flat_search_with_bounds(
         return distance::top_k_search(query, candidates, dim, k, metric);
     }
 
-    if matches!(
-        metric,
-        DistanceMetric::InnerProduct | DistanceMetric::L2Squared | DistanceMetric::Cosine
-    ) && dim > APPROX_BOUND_BLOCK_LEN
-        && n > APPROX_INIT_ROWS
-    {
-        let (indices, dists) =
-            super::flat_mmap::approx_hybrid_search(query, candidates, dim, k, n, metric, eps);
-        let dists = dists
-            .into_iter()
-            .map(|dist| round_to_eps(dist, eps))
-            .collect();
-        return (indices, dists);
-    }
-
     if let Some(bounds) = bounds {
         if matches!(
             metric,
@@ -182,19 +206,27 @@ pub(super) fn approx_flat_search_with_bounds(
             && dim > APPROX_BOUND_BLOCK_LEN
             && n > APPROX_INIT_ROWS
         {
-            let (indices, dists) = super::flat_mmap::approx_bounded_search(
-                query, candidates, dim, k, n, metric, bounds,
+            return finalize_distances(
+                super::flat_mmap::approx_bounded_search(
+                    query, candidates, dim, k, n, metric, bounds,
+                ),
+                config,
             );
-            let dists = dists
-                .into_iter()
-                .map(|dist| round_to_eps(dist, eps))
-                .collect();
-            return (indices, dists);
         }
     }
 
+    if metric.supports_flat_approx() && dim > APPROX_BOUND_BLOCK_LEN && n > APPROX_INIT_ROWS {
+        return finalize_distances(
+            super::flat_mmap::approx_hybrid_search(query, candidates, dim, k, n, metric, eps),
+            config,
+        );
+    }
+
     let all_rows = (0..n as u32).collect();
-    refine_shortlist(query, candidates, dim, k, metric, eps, all_rows)
+    finalize_distances(
+        refine_shortlist(query, candidates, dim, k, metric, all_rows),
+        config,
+    )
 }
 
 fn refine_shortlist(
@@ -203,7 +235,6 @@ fn refine_shortlist(
     dim: usize,
     k: usize,
     metric: DistanceMetric,
-    eps: f32,
     shortlist: Vec<u32>,
 ) -> (Vec<u32>, Vec<f32>) {
     let ascending = metric.is_ascending();
@@ -212,7 +243,7 @@ fn refine_shortlist(
         .filter_map(|idx| {
             let start = idx as usize * dim;
             let cand = candidates.get(start..start + dim)?;
-            let dist = round_to_eps(exact_distance(query, cand, metric), eps);
+            let dist = exact_distance(query, cand, metric);
             Some((dist, idx))
         })
         .collect();
@@ -258,6 +289,37 @@ mod tests {
         assert!((round_to_eps(1.234567, 1e-4) - 1.2346).abs() < 1e-6);
         assert!((round_to_eps(1.23454, 1e-4) - 1.2345).abs() < 1e-6);
         assert_eq!(round_to_eps(f32::INFINITY, 1e-4), f32::INFINITY);
+        assert_eq!(round_to_eps(1e31, 1e-8), 1e31);
+    }
+
+    #[test]
+    fn ranking_uses_raw_scores_before_output_rounding() {
+        let query = [1.0f32];
+        let candidates = [0.6f32, 0.9f32];
+
+        let rounded = approx_flat_search(
+            &query,
+            &candidates,
+            1,
+            1,
+            2,
+            DistanceMetric::InnerProduct,
+            ApproxSearchConfig::new(1.0),
+        );
+        assert_eq!(rounded.0, vec![1]);
+        assert_eq!(rounded.1, vec![1.0]);
+
+        let raw = approx_flat_search(
+            &query,
+            &candidates,
+            1,
+            1,
+            2,
+            DistanceMetric::InnerProduct,
+            ApproxSearchConfig::new(1.0).without_output_rounding(),
+        );
+        assert_eq!(raw.0, vec![1]);
+        assert!((raw.1[0] - 0.9).abs() < 1e-6);
     }
 
     #[test]
@@ -376,6 +438,37 @@ mod tests {
                 "metric={:?} recall={recall} ids={ids:?} gt={gt:?}",
                 metric
             );
+        }
+    }
+
+    #[test]
+    fn additive_metrics_use_hybrid_shortlists() {
+        let dim = 32;
+        let n = APPROX_INIT_ROWS + 1;
+        let query = vec![1.0f32; dim];
+        let mut data = Vec::with_capacity(n * dim);
+        for row in 0..n {
+            let offset = row as f32 / n as f32;
+            data.extend(std::iter::repeat(1.0 + offset).take(dim));
+        }
+
+        for metric in [
+            DistanceMetric::Manhattan,
+            DistanceMetric::Chebyshev,
+            DistanceMetric::Canberra,
+            DistanceMetric::BrayCurtis,
+        ] {
+            let (ids, distances) = approx_flat_search(
+                &query,
+                &data,
+                dim,
+                5,
+                n,
+                metric,
+                ApproxSearchConfig::new(1e-4),
+            );
+            assert_eq!(ids, vec![0, 1, 2, 3, 4], "metric={metric:?}");
+            assert!(distances.windows(2).all(|pair| pair[0] <= pair[1]));
         }
     }
 }

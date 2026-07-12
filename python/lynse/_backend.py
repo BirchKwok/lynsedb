@@ -605,9 +605,10 @@ class Collection:
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
                 - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).
             approx: if True, use metric-specific flat approximation for IP, L2,
-                and Cosine. Ignored for domain and binary metrics.
-            eps: distance rounding tolerance when ``approx=True`` for supported
-                metrics (default 1e-4).
+                Cosine, L1, Chebyshev, Canberra, and Bray-Curtis. Other domain
+                and binary metrics keep their exact paths.
+            eps: shortlist work/quality tolerance and final distance precision
+                when ``approx=True`` (default 1e-4).
 
         Returns:
             ResultView with ids, distances.

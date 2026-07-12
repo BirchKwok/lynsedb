@@ -32,7 +32,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 const RABITQ_MAGIC: u32 = 0x5242_5451; // "RBTQ"
-const RABITQ_VERSION: u32 = 1;
+const RABITQ_VERSION: u32 = 2;
 /// Default oversample for two-pass re-ranking.
 /// The binary scan over 1M vectors dominates latency (~2.8ms, fixed cost);
 /// increasing candidates from 640→2000 adds only ~0.5ms re-ranking overhead
@@ -43,7 +43,7 @@ pub const DEFAULT_OVERSAMPLE: usize = 200;
 
 /// RaBitQ index: Randomized Hadamard binary quantization.
 ///
-/// Stores each vector as `padded_dim / 8` bytes of binary codes plus its L2 norm.
+/// Stores each vector as `ceil(padded_dim / 8)` bytes of binary codes plus its L2 norm.
 /// Search uses a per-byte asymmetric lookup table to estimate inner products
 /// without decompressing the binary codes.
 pub struct RaBitQIndex {
@@ -51,7 +51,7 @@ pub struct RaBitQIndex {
     dim: usize,
     /// Padded dimension (= next power of two ≥ dim).
     padded_dim: usize,
-    /// Number of code bytes per vector (= padded_dim / 8).
+    /// Number of code bytes per vector (= ceil(padded_dim / 8)).
     code_bytes: usize,
     /// Random sign vector packed as u64 words: bit=0 → sign=+1, bit=1 → sign=−1.
     /// Length: padded_dim / 64 (rounded up).
@@ -70,7 +70,7 @@ impl RaBitQIndex {
         assert!(dim > 0, "dimension must be positive");
 
         let padded_dim = dim.next_power_of_two();
-        let code_bytes = padded_dim / 8;
+        let code_bytes = padded_dim.div_ceil(8);
         let sign_words_len = (padded_dim + 63) / 64;
 
         // Generate random sign vector from a fixed seed for reproducibility
@@ -253,11 +253,31 @@ impl RaBitQIndex {
                 "Invalid RaBitQ magic bytes",
             ));
         }
-        let _version = read_u32le(&mut r)?;
+        let version = read_u32le(&mut r)?;
+        if !(1..=RABITQ_VERSION).contains(&version) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Unsupported RaBitQ version: {}", version),
+            ));
+        }
         let dim = read_u32le(&mut r)? as usize;
         let padded_dim = read_u32le(&mut r)? as usize;
         let n_vectors = read_u64le(&mut r)? as usize;
-        let code_bytes = padded_dim / 8;
+        if dim == 0 || padded_dim != dim.next_power_of_two() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid RaBitQ dimensions",
+            ));
+        }
+        // v1 used floor division here. It produced zero-byte codes for dimensions
+        // below 8, so those legacy files contain no usable quantized data.
+        if version == 1 && padded_dim < 8 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "RaBitQ v1 index is invalid for dimensions below 8",
+            ));
+        }
+        let code_bytes = padded_dim.div_ceil(8);
 
         let n_sign_words = read_u32le(&mut r)? as usize;
         let mut sign_words = vec![0u64; n_sign_words];
@@ -342,7 +362,7 @@ fn fwht(data: &mut [f32]) {
 /// For a database code byte `c`, this gives: `lut[b * 256 + c]` = partial IP.
 /// Total asymmetric estimate: `2 * Σ_b lut[b][code_b] − total_q`
 fn build_byte_lut(q_rot: &[f32], padded_dim: usize) -> Vec<f32> {
-    let n_bytes = padded_dim / 8;
+    let n_bytes = padded_dim.div_ceil(8);
     let mut lut = vec![0.0f32; n_bytes * 256];
     for b in 0..n_bytes {
         let base = b * 8;
@@ -663,6 +683,22 @@ mod tests {
     }
 
     #[test]
+    fn test_rabitq_dimension_one_keeps_a_code_byte_and_searches() {
+        let data = vec![0.0f32, 10.0, 20.0];
+        let idx = RaBitQIndex::build(&data, 3, 1);
+
+        assert_eq!(idx.padded_dim, 1);
+        assert_eq!(idx.code_bytes, 1);
+        assert_eq!(idx.codes.len(), 3);
+
+        // With a single coarse candidate, this verifies that the binary code
+        // itself selects the exact nearest value instead of relying on rerank.
+        let (ids, distances) = idx.search(&[10.0], 1, &data, DistanceMetric::L2Squared, 1);
+        assert_eq!(ids, vec![1]);
+        assert_eq!(distances, vec![0.0]);
+    }
+
+    #[test]
     fn test_rabitq_save_load() {
         let n = 200;
         let dim = 32;
@@ -678,5 +714,35 @@ mod tests {
         assert_eq!(idx2.dim, dim);
         assert_eq!(idx2.padded_dim, idx.padded_dim);
         assert_eq!(idx2.codes, idx.codes);
+    }
+
+    #[test]
+    fn test_rabitq_dimension_one_save_load_roundtrip() {
+        let data = vec![-1.0f32, 1.0];
+        let idx = RaBitQIndex::build(&data, 2, 1);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("rabitq_index.bin");
+        idx.save(&path).unwrap();
+
+        let loaded = RaBitQIndex::load(&path).unwrap();
+        assert_eq!(loaded.code_bytes, 1);
+        assert_eq!(loaded.codes, idx.codes);
+    }
+
+    #[test]
+    fn test_rabitq_rejects_legacy_zero_byte_low_dim_index() {
+        let data = vec![-1.0f32, 1.0];
+        let idx = RaBitQIndex::build(&data, 2, 1);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("rabitq_index.bin");
+        idx.save(&path).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = RaBitQIndex::load(&path).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("dimensions below 8"));
     }
 }

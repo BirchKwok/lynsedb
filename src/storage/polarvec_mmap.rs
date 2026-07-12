@@ -427,12 +427,40 @@ impl PolarVecIndex {
         let dim = read_u32le(&mut r)? as usize;
         let padded_dim = read_u32le(&mut r)? as usize;
         let bits = read_u32le(&mut r)? as usize;
-        let n_vectors = read_u64le(&mut r)? as usize;
+        let n_vectors = usize::try_from(read_u64le(&mut r)?).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "PolarVec vector count exceeds platform capacity",
+            )
+        })?;
+        let expected_padded_dim = dim.checked_next_power_of_two();
+        if dim == 0
+            || expected_padded_dim != Some(padded_dim)
+            || !(1..=8).contains(&bits)
+            || n_vectors > u32::MAX as usize
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid PolarVec index dimensions",
+            ));
+        }
         let n_levels = 1usize << bits;
         let bytes_per_vec = compute_bytes_per_vec(padded_dim, bits);
         let flags = if version >= 5 { read_u32le(&mut r)? } else { 0 };
+        if flags & !(FLAG_RESIDUAL_SQ | FLAG_INV_V_HAT_NORMS) != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "PolarVec index contains unknown flags",
+            ));
+        }
 
         let n_sign_words = read_u32le(&mut r)? as usize;
+        if n_sign_words != padded_dim.div_ceil(64) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid PolarVec sign-word count",
+            ));
+        }
         let mut sign_words = vec![0u64; n_sign_words];
         for word in sign_words.iter_mut() {
             let bytes = read_8bytes(&mut r)?;
@@ -450,7 +478,13 @@ impl PolarVecIndex {
             *v = f32::from_le_bytes(b);
         }
 
-        let mut codes = vec![0u8; n_vectors * bytes_per_vec];
+        let code_len = n_vectors.checked_mul(bytes_per_vec).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "PolarVec code size overflows",
+            )
+        })?;
+        let mut codes = vec![0u8; code_len];
         r.read_exact(&mut codes)?;
 
         // v1-v4 stored norms even though PolarVec no longer needs them.
@@ -1461,6 +1495,32 @@ mod tests {
         assert_eq!(idx2.bytes_per_vec, idx.bytes_per_vec);
         assert_eq!(idx2.residual_sq, idx.residual_sq);
         assert_eq!(idx2.inv_v_hat_norms, idx.inv_v_hat_norms);
+    }
+
+    #[test]
+    fn test_polarvec_load_rejects_invalid_bits_and_sign_words() {
+        let n = 8;
+        let dim = 4;
+        let data = random_data(n, dim, 42);
+        let idx = PolarVecIndex::build(&data, n, dim, 4);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("polarvec_index.bin");
+        idx.save(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+
+        let mut invalid_bits = original.clone();
+        invalid_bits[16..20].copy_from_slice(&32u32.to_le_bytes());
+        std::fs::write(&path, invalid_bits).unwrap();
+        let bits_error = PolarVecIndex::load(&path).err().unwrap();
+        assert_eq!(bits_error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(bits_error.to_string().contains("dimensions"));
+
+        let mut invalid_sign_words = original;
+        invalid_sign_words[32..36].copy_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&path, invalid_sign_words).unwrap();
+        let signs_error = PolarVecIndex::load(&path).err().unwrap();
+        assert_eq!(signs_error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(signs_error.to_string().contains("sign-word"));
     }
 
     #[test]
