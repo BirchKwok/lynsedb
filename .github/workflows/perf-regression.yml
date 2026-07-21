@@ -12,8 +12,10 @@ permissions:
 jobs:
   compare:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'perf-check'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     env:
+      BENCH_ROUNDS: "3"
       RAYON_NUM_THREADS: "4"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
@@ -33,6 +35,18 @@ jobs:
           python-version: "3.11"
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Record runner profile
+        run: |
+          mkdir -p artifacts
+          {
+            echo "runner_image=ubuntu-24.04"
+            echo "rayon_threads=$RAYON_NUM_THREADS"
+            uname -a
+            lscpu
+            free -h
+            python --version
+            rustc --version
+          } > artifacts/runner-info.txt
       - name: Install base revision
         run: |
           python -m venv base/.venv
@@ -43,29 +57,115 @@ jobs:
           python -m venv head/.venv
           head/.venv/bin/python -m pip install --upgrade pip
           head/.venv/bin/python -m pip install --config-settings=maturin.build-args=--locked ./head
-      - name: Run base benchmarks
+      - name: Run alternating benchmark rounds
         run: |
-          mkdir -p artifacts
-          base/.venv/bin/python base/benchmarks/flat_search_bench.py \
-            --rows 100000 --dim 64 --batch-size 25000 --warmups 5 --trials 10 \
-            --output artifacts/base-flat.json
-          base/.venv/bin/python base/benchmarks/upsert_bench.py \
-            --rows 100000 --dim 64 --ingest-batch-size 25000 --trials 5 \
-            --output artifacts/base-upsert.json
-      - name: Compare candidate benchmarks
+          for round in $(seq 1 "$BENCH_ROUNDS"); do
+            if (( round % 2 == 1 )); then
+              order=(base head)
+            else
+              order=(head base)
+            fi
+            for revision in "${order[@]}"; do
+              "$revision/.venv/bin/python" "$revision/benchmarks/flat_search_bench.py" \
+                --rows 100000 --dim 64 --batch-size 25000 --warmups 5 --trials 10 \
+                --output "artifacts/$revision-flat-$round.json"
+              "$revision/.venv/bin/python" "$revision/benchmarks/upsert_bench.py" \
+                --rows 100000 --dim 64 --ingest-batch-size 25000 --trials 5 \
+                --output "artifacts/$revision-upsert-$round.json"
+            done
+          done
+      - name: Evaluate performance budgets
         id: candidate
         continue-on-error: true
         run: |
-          status=0
-          head/.venv/bin/python head/benchmarks/flat_search_bench.py \
-            --rows 100000 --dim 64 --batch-size 25000 --warmups 5 --trials 10 \
-            --baseline artifacts/base-flat.json --max-regression 0.05 \
-            --output artifacts/head-flat.json || status=1
-          head/.venv/bin/python head/benchmarks/upsert_bench.py \
-            --rows 100000 --dim 64 --ingest-batch-size 25000 --trials 5 \
-            --baseline artifacts/base-upsert.json --max-regression 0.10 \
-            --output artifacts/head-upsert.json || status=1
-          exit "$status"
+          head/.venv/bin/python - <<'PY'
+          import json
+          import os
+          import statistics
+          import sys
+          from pathlib import Path
+
+          root = Path("artifacts")
+          rounds = range(1, int(os.environ["BENCH_ROUNDS"]) + 1)
+
+          def load(revision, benchmark, round_number):
+              path = root / f"{revision}-{benchmark}-{round_number}.json"
+              return json.loads(path.read_text())
+
+          def medians(revision, benchmark, value):
+              return [value(load(revision, benchmark, round_number)) for round_number in rounds]
+
+          cases = [
+              {
+                  "name": "Flat search median",
+                  "unit": "ms",
+                  "base_samples": medians("base", "flat", lambda data: data["median_ms"]),
+                  "head_samples": medians("head", "flat", lambda data: data["median_ms"]),
+                  "relative_budget": 0.05,
+                  "absolute_budget": 0.05,
+              },
+              {
+                  "name": "Flat ingest",
+                  "unit": "s",
+                  "base_samples": medians("base", "flat", lambda data: data["ingest_seconds"]),
+                  "head_samples": medians("head", "flat", lambda data: data["ingest_seconds"]),
+                  "relative_budget": 0.05,
+                  "absolute_budget": 0.10,
+              },
+          ]
+          first_upsert = load("base", "upsert", 1)
+          for size in sorted(first_upsert["updates"], key=int):
+              cases.append(
+                  {
+                      "name": f"Upsert {size} row(s)",
+                      "unit": "ms",
+                      "base_samples": medians(
+                          "base", "upsert", lambda data, size=size: data["updates"][size]["median_ms"]
+                      ),
+                      "head_samples": medians(
+                          "head", "upsert", lambda data, size=size: data["updates"][size]["median_ms"]
+                      ),
+                      "relative_budget": 0.10,
+                      "absolute_budget": 1.0,
+                  }
+              )
+
+          warning = False
+          for case in cases:
+              baseline = statistics.median(case["base_samples"])
+              candidate = statistics.median(case["head_samples"])
+              absolute_change = candidate - baseline
+              relative_change = candidate / baseline - 1.0
+              case.update(
+                  {
+                      "baseline": baseline,
+                      "candidate": candidate,
+                      "absolute_change": absolute_change,
+                      "relative_change": relative_change,
+                      "warning": (
+                          relative_change > case["relative_budget"]
+                          and absolute_change > case["absolute_budget"]
+                      ),
+                  }
+              )
+              warning = warning or case["warning"]
+              print(
+                  f"{case['name']}: {relative_change:+.2%}, "
+                  f"{absolute_change:+.3f} {case['unit']}, warning={case['warning']}"
+              )
+
+          comparison = {
+              "schema_version": 1,
+              "rounds": len(list(rounds)),
+              "alternating_order": True,
+              "warning": warning,
+              "cases": cases,
+          }
+          (root / "comparison.json").write_text(
+              json.dumps(comparison, indent=2, sort_keys=True) + "\n"
+          )
+          sys.exit(1 if warning else 0)
+          PY
       - name: Write performance summary
         if: always()
         env:
@@ -77,38 +177,25 @@ jobs:
           from pathlib import Path
 
           root = Path("artifacts")
-          base_flat = json.loads((root / "base-flat.json").read_text())
-          head_flat = json.loads((root / "head-flat.json").read_text())
-          base_upsert = json.loads((root / "base-upsert.json").read_text())
-          head_upsert = json.loads((root / "head-upsert.json").read_text())
-
-          def change(current, baseline):
-              return current / baseline - 1.0
+          comparison = json.loads((root / "comparison.json").read_text())
 
           lines = [
               "## Performance comparison",
               "",
               f"Candidate comparison step: **{os.environ['CANDIDATE_OUTCOME']}**",
+              f"Rounds: **{comparison['rounds']}**, alternating base/head order",
               "",
-              "| Case | Base | Candidate | Change | Warning budget |",
-              "|---|---:|---:|---:|---:|",
-              (
-                  "| Flat search median | "
-                  f"{base_flat['median_ms']:.3f} ms | {head_flat['median_ms']:.3f} ms | "
-                  f"{change(head_flat['median_ms'], base_flat['median_ms']):+.2%} | +5% |"
-              ),
-              (
-                  "| Flat ingest | "
-                  f"{base_flat['ingest_seconds']:.3f} s | {head_flat['ingest_seconds']:.3f} s | "
-                  f"{change(head_flat['ingest_seconds'], base_flat['ingest_seconds']):+.2%} | +5% |"
-              ),
+              "| Case | Base | Candidate | Relative | Absolute | Budgets | Warning |",
+              "|---|---:|---:|---:|---:|---:|:---:|",
           ]
-          for size in sorted(base_upsert["updates"], key=int):
-              before = base_upsert["updates"][size]["median_ms"]
-              after = head_upsert["updates"][size]["median_ms"]
+          for case in comparison["cases"]:
               lines.append(
-                  f"| Upsert {size} row(s) | {before:.3f} ms | {after:.3f} ms | "
-                  f"{change(after, before):+.2%} | +10% |"
+                  f"| {case['name']} | {case['baseline']:.3f} {case['unit']} | "
+                  f"{case['candidate']:.3f} {case['unit']} | "
+                  f"{case['relative_change']:+.2%} | "
+                  f"{case['absolute_change']:+.3f} {case['unit']} | "
+                  f"{case['relative_budget']:.0%} and {case['absolute_budget']:.2f} "
+                  f"{case['unit']} | {'yes' if case['warning'] else 'no'} |"
               )
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
               summary.write("\n".join(lines) + "\n")
