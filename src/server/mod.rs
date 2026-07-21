@@ -4843,7 +4843,10 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
             web::post().to(remove_vector_field_index),
         )
         .route("/upsert", web::post().to(upsert_records))
-        .route("/upsert_records_binary", web::post().to(upsert_records_binary))
+        .route(
+            "/upsert_records_binary",
+            web::post().to(upsert_records_binary),
+        )
         .route("/bulk_add_binary", web::post().to(bulk_add_binary))
         .route("/search", web::post().to(search))
         .route("/search_profile", web::post().to(search_profile))

@@ -140,8 +140,39 @@ impl PQIndex {
         metric: DistanceMetric,
         oversample: usize,
     ) -> (Vec<u32>, Vec<f32>) {
+        self.search_with(query, k, metric, oversample, |idx| {
+            let base = idx as usize * self.dim;
+            let candidate = &f32_data[base..base + self.dim];
+            crate::distance::compute_distance_f32(query, candidate, metric)
+        })
+    }
+
+    pub fn search_with(
+        &self,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+        oversample: usize,
+        distance_at: impl FnMut(u32) -> f32,
+    ) -> (Vec<u32>, Vec<f32>) {
+        let candidate_indices = self.search_candidates(query, k, metric, oversample);
+        rescore_exact_with(
+            &candidate_indices,
+            k.min(self.n_vectors),
+            metric,
+            distance_at,
+        )
+    }
+
+    pub fn search_candidates(
+        &self,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+        oversample: usize,
+    ) -> Vec<u32> {
         if self.n_vectors == 0 || k == 0 {
-            return (vec![], vec![]);
+            return Vec::new();
         }
         let k = k.min(self.n_vectors);
         let n_candidates = (k * oversample).min(self.n_vectors);
@@ -157,7 +188,7 @@ impl PQIndex {
         );
 
         // ADC scan: find top-N candidate indices
-        let candidate_indices = adc_scan_topn(
+        adc_scan_topn(
             &self.codes,
             self.n_vectors,
             self.n_subspaces,
@@ -165,10 +196,7 @@ impl PQIndex {
             &lut,
             n_candidates,
             metric.is_ascending(),
-        );
-
-        // Pass 2: exact f32 re-score
-        rescore_exact(&candidate_indices, query, f32_data, self.dim, k, metric)
+        )
     }
 
     /// Number of indexed vectors.
@@ -610,21 +638,43 @@ pub fn rescore_exact(
     k: usize,
     metric: DistanceMetric,
 ) -> (Vec<u32>, Vec<f32>) {
+    rescore_exact_with(candidates, k, metric, |idx| {
+        let base = idx as usize * dim;
+        let cand = unsafe { f32_data.get_unchecked(base..base + dim) };
+        match metric {
+            DistanceMetric::InnerProduct => simd::inner_product_f32(query, cand),
+            DistanceMetric::L2Squared => simd::l2_squared_f32(query, cand),
+            DistanceMetric::Cosine => simd::cosine_distance_f32(query, cand),
+            _ => crate::distance::compute_distance_f32(query, cand, metric),
+        }
+    })
+}
+
+pub fn rescore_exact_with(
+    candidates: &[u32],
+    k: usize,
+    metric: DistanceMetric,
+    mut distance_at: impl FnMut(u32) -> f32,
+) -> (Vec<u32>, Vec<f32>) {
+    match try_rescore_exact_with(candidates, k, metric, |idx| {
+        Ok::<f32, std::convert::Infallible>(distance_at(idx))
+    }) {
+        Ok(result) => result,
+        Err(never) => match never {},
+    }
+}
+
+pub fn try_rescore_exact_with<E>(
+    candidates: &[u32],
+    k: usize,
+    metric: DistanceMetric,
+    mut distance_at: impl FnMut(u32) -> std::result::Result<f32, E>,
+) -> std::result::Result<(Vec<u32>, Vec<f32>), E> {
     let ascending = metric.is_ascending();
     let mut exact: Vec<(f32, u32)> = candidates
         .iter()
-        .map(|&idx| {
-            let base = idx as usize * dim;
-            let cand = unsafe { f32_data.get_unchecked(base..base + dim) };
-            let dist = match metric {
-                DistanceMetric::InnerProduct => simd::inner_product_f32(query, cand),
-                DistanceMetric::L2Squared => simd::l2_squared_f32(query, cand),
-                DistanceMetric::Cosine => simd::cosine_distance_f32(query, cand),
-                _ => crate::distance::compute_distance_f32(query, cand, metric),
-            };
-            (dist, idx)
-        })
-        .collect();
+        .map(|&idx| distance_at(idx).map(|distance| (distance, idx)))
+        .collect::<std::result::Result<_, _>>()?;
 
     if ascending {
         exact.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
@@ -635,7 +685,7 @@ pub fn rescore_exact(
 
     let indices = exact.iter().map(|e| e.1).collect();
     let dists = exact.iter().map(|e| e.0).collect();
-    (indices, dists)
+    Ok((indices, dists))
 }
 
 // ─── Distance helpers ─────────────────────────────────────────────────────────

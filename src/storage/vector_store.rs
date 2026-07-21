@@ -4,11 +4,12 @@
 //! changed only when the segment set changes, so normal ingestion remains a
 //! sequential append while compaction can replace selected segments.
 
-use crate::distance::DistanceMetric;
+use crate::distance::{compute_distance_f16, compute_distance_f32, DistanceMetric};
 use crate::error::{LynseError, Result};
 use crate::storage::approx_search::ApproxSearchConfig;
 use crate::storage::dtype::{encode_f32_slice_as_le_bytes, VectorDtype};
 use crate::storage::flat_mmap::FlatMmap;
+use crate::storage::pq_mmap::try_rescore_exact_with;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering as CmpOrdering;
@@ -178,7 +179,9 @@ impl VectorStore {
             parsed
         } else {
             let legacy_path = collection_path.join("vectors.bin");
-            let bytes = std::fs::metadata(&legacy_path).map(|m| m.len()).unwrap_or(0);
+            let bytes = std::fs::metadata(&legacy_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
             VectorManifest::legacy(if row_width == 0 { 0 } else { bytes / row_width })
         };
 
@@ -377,8 +380,7 @@ impl VectorStore {
         let mut manifest = self.manifest.write();
         let row_width = self.row_width();
         let append_to_current = manifest.segments.last().is_some_and(|segment| {
-            segment.rows.saturating_mul(row_width) + bytes.len() as u64
-                <= self.segment_target_bytes
+            segment.rows.saturating_mul(row_width) + bytes.len() as u64 <= self.segment_target_bytes
         });
 
         if manifest.segments.is_empty() || !append_to_current {
@@ -443,6 +445,19 @@ impl VectorStore {
     }
 
     fn ensure_mmaps(&self) -> Result<()> {
+        {
+            let manifest = self.manifest.read();
+            let cache = self.mmap_cache.read();
+            let ready = cache.len() == manifest.segments.len()
+                && cache
+                    .iter()
+                    .zip(manifest.segments.iter())
+                    .all(|(slot, segment)| segment.rows == 0 || slot.is_some());
+            if ready {
+                return Ok(());
+            }
+        }
+
         let manifest = self.manifest.read();
         let mut cache = self.mmap_cache.write();
         if cache.len() != manifest.segments.len() {
@@ -521,6 +536,107 @@ impl VectorStore {
         Ok(data)
     }
 
+    fn exact_distance_cached(
+        &self,
+        manifest: &VectorManifest,
+        cache: &[Option<FlatMmap>],
+        segment_ends: &[u64],
+        query: &[f32],
+        row: u64,
+        metric: DistanceMetric,
+    ) -> Result<f32> {
+        let segment_index = segment_ends.partition_point(|&end| end <= row);
+        let Some(segment) = manifest.segments.get(segment_index) else {
+            return Err(LynseError::InvalidArgument(format!(
+                "vector row {row} is out of bounds"
+            )));
+        };
+        let mmap = cache
+            .get(segment_index)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                LynseError::Storage(format!(
+                    "vector segment {} is not memory mapped",
+                    segment.file
+                ))
+            })?;
+        let base = segment_index
+            .checked_sub(1)
+            .map(|index| segment_ends[index])
+            .unwrap_or(0);
+        let local_row = (row - base) as usize;
+        match self.dtype {
+            VectorDtype::F32 => mmap
+                .row_f32(local_row)
+                .map(|candidate| compute_distance_f32(query, candidate, metric))
+                .ok_or_else(|| {
+                    LynseError::Storage(format!(
+                        "vector row {row} is outside segment {}",
+                        segment.file
+                    ))
+                }),
+            VectorDtype::F16 => mmap
+                .row_f16_bits(local_row)
+                .map(|candidate| compute_distance_f16(query, candidate, metric))
+                .ok_or_else(|| {
+                    LynseError::Storage(format!(
+                        "vector row {row} is outside segment {}",
+                        segment.file
+                    ))
+                }),
+        }
+    }
+
+    pub fn exact_distance(&self, query: &[f32], row: u64, metric: DistanceMetric) -> Result<f32> {
+        if query.len() != self.dimension {
+            return Err(LynseError::DimensionMismatch {
+                expected: self.dimension,
+                got: query.len(),
+            });
+        }
+        self.ensure_mmaps()?;
+        let manifest = self.manifest.read();
+        let cache = self.mmap_cache.read();
+        let segment_ends: Vec<u64> = manifest
+            .segments
+            .iter()
+            .scan(0u64, |end, segment| {
+                *end = end.saturating_add(segment.rows);
+                Some(*end)
+            })
+            .collect();
+        self.exact_distance_cached(&manifest, &cache, &segment_ends, query, row, metric)
+    }
+
+    pub fn rescore_exact_candidates(
+        &self,
+        candidates: &[u32],
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+    ) -> Result<(Vec<u32>, Vec<f32>)> {
+        if query.len() != self.dimension {
+            return Err(LynseError::DimensionMismatch {
+                expected: self.dimension,
+                got: query.len(),
+            });
+        }
+        self.ensure_mmaps()?;
+        let manifest = self.manifest.read();
+        let cache = self.mmap_cache.read();
+        let segment_ends: Vec<u64> = manifest
+            .segments
+            .iter()
+            .scan(0u64, |end, segment| {
+                *end = end.saturating_add(segment.rows);
+                Some(*end)
+            })
+            .collect();
+        try_rescore_exact_with(candidates, k, metric, |row| {
+            self.exact_distance_cached(&manifest, &cache, &segment_ends, query, row as u64, metric)
+        })
+    }
+
     pub fn read_rows(&self, rows: &[u64]) -> Result<Vec<f32>> {
         self.ensure_mmaps()?;
         let manifest = self.manifest.read();
@@ -530,14 +646,31 @@ impl VectorStore {
         for (segment, mmap) in manifest.segments.iter().zip(cache.iter()) {
             let end = base + segment.rows;
             if let Some(mmap) = mmap {
-                let data = mmap.as_f32_cow();
                 for (out, &row) in rows.iter().enumerate() {
                     if row >= base && row < end {
                         let local = (row - base) as usize;
-                        result[out * self.dimension..(out + 1) * self.dimension]
-                            .copy_from_slice(
-                                &data[local * self.dimension..(local + 1) * self.dimension],
-                            );
+                        let output = &mut result[out * self.dimension..(out + 1) * self.dimension];
+                        match self.dtype {
+                            VectorDtype::F32 => {
+                                output.copy_from_slice(mmap.row_f32(local).ok_or_else(|| {
+                                    LynseError::Storage(format!(
+                                        "vector row {row} is outside segment {}",
+                                        segment.file
+                                    ))
+                                })?);
+                            }
+                            VectorDtype::F16 => {
+                                let bits = mmap.row_f16_bits(local).ok_or_else(|| {
+                                    LynseError::Storage(format!(
+                                        "vector row {row} is outside segment {}",
+                                        segment.file
+                                    ))
+                                })?;
+                                for (value, &encoded) in output.iter_mut().zip(bits) {
+                                    *value = half::f16::from_bits(encoded).to_f32();
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -634,8 +767,7 @@ impl VectorStore {
         }
 
         let payload_end = journal.len() - 4;
-        let expected_checksum =
-            u32::from_le_bytes(journal[payload_end..].try_into().unwrap());
+        let expected_checksum = u32::from_le_bytes(journal[payload_end..].try_into().unwrap());
         let actual_checksum = crc32fast::hash(&journal[..payload_end]);
         if actual_checksum != expected_checksum {
             return Err(LynseError::Storage(
@@ -745,10 +877,10 @@ impl VectorStore {
             if group.is_empty() {
                 continue;
             }
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(self.collection_path.join(&manifest.segments[segment_index].file))?;
+            let file = OpenOptions::new().read(true).write(true).open(
+                self.collection_path
+                    .join(&manifest.segments[segment_index].file),
+            )?;
             for &(local_row, input_index) in group {
                 write_all_at(
                     &file,
@@ -826,7 +958,11 @@ impl VectorStore {
     ) -> (Vec<u64>, Vec<f32>) {
         results.sort_unstable_by(|a, b| {
             let order = a.1.partial_cmp(&b.1).unwrap_or(CmpOrdering::Equal);
-            let order = if metric.is_ascending() { order } else { order.reverse() };
+            let order = if metric.is_ascending() {
+                order
+            } else {
+                order.reverse()
+            };
             order.then_with(|| a.0.cmp(&b.0))
         });
         results.truncate(k);
@@ -1002,7 +1138,8 @@ impl VectorStore {
                 let mut compacted = Vec::with_capacity(live_rows * row_width);
                 for row in 0..segment.rows as usize {
                     if !deleted.contains(&row) {
-                        compacted.extend_from_slice(&source[row * row_width..(row + 1) * row_width]);
+                        compacted
+                            .extend_from_slice(&source[row * row_width..(row + 1) * row_width]);
                     }
                 }
                 let file = format!("{SEGMENT_DIR}/seg-{generation:020}-{index:06}.bin");
@@ -1017,7 +1154,10 @@ impl VectorStore {
             base = end;
         }
 
-        let compacted_rows: usize = new_segments.iter().map(|segment| segment.rows as usize).sum();
+        let compacted_rows: usize = new_segments
+            .iter()
+            .map(|segment| segment.rows as usize)
+            .sum();
         if compacted_rows != new_ids.len() {
             return Err(LynseError::Storage(format!(
                 "compacted vector rows ({compacted_rows}) do not match ID-map length ({})",

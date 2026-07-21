@@ -26,6 +26,11 @@ def parse_args():
     parser.add_argument("--update-sizes", default="1,100")
     parser.add_argument("--trials", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--index-mode",
+        default=None,
+        help="Optional index mode to build before measuring updates.",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--max-regression", type=float, default=0.10)
@@ -66,6 +71,8 @@ def bench(args):
         vectors = rng.random((end - start, args.dim), dtype=np.float32)
         collection.add_items(vectors, list(range(start, end)))
     collection.commit()
+    if args.index_mode:
+        collection.build_index(args.index_mode, None)
 
     updates = {}
     for update_size in update_sizes:
@@ -87,28 +94,33 @@ def bench(args):
         "dimension": args.dim,
         "trials": args.trials,
         "seed": args.seed,
+        "index_mode": args.index_mode.upper() if args.index_mode else None,
         "rayon_threads": os.environ.get("RAYON_NUM_THREADS", "default"),
         "platform": platform.platform(),
         "python": platform.python_version(),
         "updates": updates,
     }
-    print(json.dumps(result, indent=2, sort_keys=True))
-
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 
     exit_code = 0
     if args.baseline:
         baseline = json.loads(args.baseline.read_text())
+        regressions = {}
         for update_size, current in updates.items():
             previous = baseline["updates"].get(update_size)
             if previous is None:
                 continue
             change = current["median_ms"] / previous["median_ms"] - 1.0
+            regressions[update_size] = change
             print(f"Update size {update_size} median change: {change:+.2%}")
             if change > args.max_regression:
                 exit_code = 1
+        result["median_regressions"] = regressions
+
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 
     if not args.keep_data:
         shutil.rmtree(test_dir, ignore_errors=True)

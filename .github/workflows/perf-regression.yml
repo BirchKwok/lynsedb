@@ -1,0 +1,122 @@
+name: Performance Regression Warning
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types:
+      - labeled
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'perf-check'
+    runs-on: ubuntu-latest
+    env:
+      RAYON_NUM_THREADS: "4"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - name: Check out base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.repository.default_branch }}
+          path: base
+      - name: Check out candidate revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          path: head
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install base revision
+        run: |
+          python -m venv base/.venv
+          base/.venv/bin/python -m pip install --upgrade pip
+          base/.venv/bin/python -m pip install --config-settings=maturin.build-args=--locked ./base
+      - name: Install candidate revision
+        run: |
+          python -m venv head/.venv
+          head/.venv/bin/python -m pip install --upgrade pip
+          head/.venv/bin/python -m pip install --config-settings=maturin.build-args=--locked ./head
+      - name: Run base benchmarks
+        run: |
+          mkdir -p artifacts
+          base/.venv/bin/python base/benchmarks/flat_search_bench.py \
+            --rows 100000 --dim 64 --batch-size 25000 --warmups 5 --trials 10 \
+            --output artifacts/base-flat.json
+          base/.venv/bin/python base/benchmarks/upsert_bench.py \
+            --rows 100000 --dim 64 --ingest-batch-size 25000 --trials 5 \
+            --output artifacts/base-upsert.json
+      - name: Compare candidate benchmarks
+        id: candidate
+        continue-on-error: true
+        run: |
+          status=0
+          head/.venv/bin/python head/benchmarks/flat_search_bench.py \
+            --rows 100000 --dim 64 --batch-size 25000 --warmups 5 --trials 10 \
+            --baseline artifacts/base-flat.json --max-regression 0.05 \
+            --output artifacts/head-flat.json || status=1
+          head/.venv/bin/python head/benchmarks/upsert_bench.py \
+            --rows 100000 --dim 64 --ingest-batch-size 25000 --trials 5 \
+            --baseline artifacts/base-upsert.json --max-regression 0.10 \
+            --output artifacts/head-upsert.json || status=1
+          exit "$status"
+      - name: Write performance summary
+        if: always()
+        env:
+          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+        run: |
+          head/.venv/bin/python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("artifacts")
+          base_flat = json.loads((root / "base-flat.json").read_text())
+          head_flat = json.loads((root / "head-flat.json").read_text())
+          base_upsert = json.loads((root / "base-upsert.json").read_text())
+          head_upsert = json.loads((root / "head-upsert.json").read_text())
+
+          def change(current, baseline):
+              return current / baseline - 1.0
+
+          lines = [
+              "## Performance comparison",
+              "",
+              f"Candidate comparison step: **{os.environ['CANDIDATE_OUTCOME']}**",
+              "",
+              "| Case | Base | Candidate | Change | Warning budget |",
+              "|---|---:|---:|---:|---:|",
+              (
+                  "| Flat search median | "
+                  f"{base_flat['median_ms']:.3f} ms | {head_flat['median_ms']:.3f} ms | "
+                  f"{change(head_flat['median_ms'], base_flat['median_ms']):+.2%} | +5% |"
+              ),
+              (
+                  "| Flat ingest | "
+                  f"{base_flat['ingest_seconds']:.3f} s | {head_flat['ingest_seconds']:.3f} s | "
+                  f"{change(head_flat['ingest_seconds'], base_flat['ingest_seconds']):+.2%} | +5% |"
+              ),
+          ]
+          for size in sorted(base_upsert["updates"], key=int):
+              before = base_upsert["updates"][size]["median_ms"]
+              after = head_upsert["updates"][size]["median_ms"]
+              lines.append(
+                  f"| Upsert {size} row(s) | {before:.3f} ms | {after:.3f} ms | "
+                  f"{change(after, before):+.2%} | +10% |"
+              )
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines) + "\n")
+          PY
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-comparison
+          path: artifacts/
+          if-no-files-found: error

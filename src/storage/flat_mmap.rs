@@ -275,6 +275,24 @@ impl FlatMmap {
         }
     }
 
+    #[inline]
+    pub fn row_f32(&self, row: usize) -> Option<&[f32]> {
+        if self.dtype != VectorDtype::F32 || row >= self.n_vectors {
+            return None;
+        }
+        let start = row * self.dim;
+        Some(&self.as_slice()[start..start + self.dim])
+    }
+
+    #[inline]
+    pub fn row_f16_bits(&self, row: usize) -> Option<&[u16]> {
+        if self.dtype != VectorDtype::F16 || row >= self.n_vectors {
+            return None;
+        }
+        let start = row * self.dim;
+        Some(&self.as_f16_bits_slice()[start..start + self.dim])
+    }
+
     pub fn as_f32_cow(&self) -> Cow<'_, [f32]> {
         match (self.dtype, &self.mmap) {
             (VectorDtype::F32, _) => Cow::Borrowed(self.as_slice()),

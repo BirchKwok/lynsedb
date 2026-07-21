@@ -43,7 +43,7 @@
 //!   which has near-zero mean (RHT isotropy) → better candidate ranking.
 
 use crate::distance::DistanceMetric;
-use crate::storage::pq_mmap::rescore_exact;
+use crate::storage::pq_mmap::rescore_exact_with;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -275,8 +275,34 @@ impl PolarVecIndex {
         metric: DistanceMetric,
         oversample: usize,
     ) -> (Vec<u32>, Vec<f32>) {
+        self.search_with(query, k, metric, oversample, |idx| {
+            let base = idx as usize * self.dim;
+            let candidate = &f32_data[base..base + self.dim];
+            crate::distance::compute_distance_f32(query, candidate, metric)
+        })
+    }
+
+    pub fn search_with(
+        &self,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+        oversample: usize,
+        distance_at: impl FnMut(u32) -> f32,
+    ) -> (Vec<u32>, Vec<f32>) {
+        let candidates = self.search_candidates(query, k, metric, oversample);
+        rescore_exact_with(&candidates, k.min(self.n_vectors), metric, distance_at)
+    }
+
+    pub fn search_candidates(
+        &self,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+        oversample: usize,
+    ) -> Vec<u32> {
         if self.n_vectors == 0 || k == 0 {
-            return (vec![], vec![]);
+            return Vec::new();
         }
         let k = k.min(self.n_vectors);
         let n_candidates = (k * oversample).min(self.n_vectors);
@@ -326,7 +352,7 @@ impl PolarVecIndex {
             &[][..]
         };
 
-        let candidates: Vec<u32> = scan_topn(
+        scan_topn(
             &self.codes,
             self.n_vectors,
             self.bytes_per_vec,
@@ -341,10 +367,7 @@ impl PolarVecIndex {
         )
         .into_iter()
         .map(|(_, idx)| idx)
-        .collect();
-
-        // Pass 2: exact f32 re-rank
-        rescore_exact(&candidates, query, f32_data, self.dim, k, metric)
+        .collect()
     }
 
     /// Number of indexed vectors.

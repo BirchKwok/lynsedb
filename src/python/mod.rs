@@ -144,7 +144,10 @@ impl PyRemoteHttpClient {
                 ("collection_name", collection_name.to_string()),
                 ("dim", dim.to_string()),
                 ("n_vectors", n_vectors.to_string()),
-                ("vector_encoding", normalize_remote_vector_encoding(vector_encoding)?),
+                (
+                    "vector_encoding",
+                    normalize_remote_vector_encoding(vector_encoding)?,
+                ),
                 ("return_ids", return_ids.to_string()),
             ],
         );
@@ -2510,13 +2513,9 @@ fn percent_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => out.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
             _ => {
                 out.push('%');
                 out.push_str(&format!("{:02X}", byte));
@@ -2526,9 +2525,7 @@ fn percent_encode(value: &str) -> String {
     out
 }
 
-fn query_params_from_pydict(
-    params: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Vec<(String, String)>> {
+fn query_params_from_pydict(params: Option<&Bound<'_, PyDict>>) -> PyResult<Vec<(String, String)>> {
     let Some(params) = params else {
         return Ok(Vec::new());
     };
@@ -2814,7 +2811,9 @@ fn decode_remote_batch_search<'py>(
         list.append(tuple)?;
     }
     if offset != buf.len() {
-        return Err(py_runtime_err("trailing bytes in remote batch search response"));
+        return Err(py_runtime_err(
+            "trailing bytes in remote batch search response",
+        ));
     }
     Ok(list)
 }

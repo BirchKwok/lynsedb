@@ -892,9 +892,7 @@ impl FieldStore {
             let map = self.apex_id_map.read();
             external_ids
                 .iter()
-                .filter_map(|&ext_id| {
-                    map.get(&ext_id).copied().filter(|&id| id != TOMBSTONE)
-                })
+                .filter_map(|&ext_id| map.get(&ext_id).copied().filter(|&id| id != TOMBSTONE))
                 .collect::<Vec<_>>()
         };
 
@@ -1069,9 +1067,7 @@ impl FieldStore {
         // Fast path: apex_id mmap point lookup
         let apex_id = {
             let map = self.apex_id_map.read();
-            map.get(&external_id)
-                .copied()
-                .filter(|&id| id != TOMBSTONE)
+            map.get(&external_id).copied().filter(|&id| id != TOMBSTONE)
         };
         if let Some(apex_id) = apex_id {
             if let Some(row) = table
@@ -1375,9 +1371,7 @@ impl FieldStore {
     fn filter_current_external_ids(&self, ids: Vec<u64>) -> Vec<u64> {
         let map = self.apex_id_map.read();
         ids.into_iter()
-            .filter(|&ext_id| {
-                map.get(&ext_id).is_some_and(|&id| id != TOMBSTONE)
-            })
+            .filter(|&ext_id| map.get(&ext_id).is_some_and(|&id| id != TOMBSTONE))
             .collect()
     }
 
@@ -2309,10 +2303,13 @@ mod tests {
         let store = FieldStore::new(tmp.path(), "fields").unwrap();
         let id = 1_000_000_000_000u64;
         store
-            .batch_store_at_ids(&[id], &[HashMap::from([(
-                "tag".to_string(),
-                serde_json::json!("sparse"),
-            )])])
+            .batch_store_at_ids(
+                &[id],
+                &[HashMap::from([(
+                    "tag".to_string(),
+                    serde_json::json!("sparse"),
+                )])],
+            )
             .unwrap();
 
         assert_eq!(store.apex_id_map.read().len(), 1);
