@@ -110,7 +110,7 @@ jobs:
                   "base_samples": medians("base", "flat", lambda data: data["ingest_seconds"]),
                   "head_samples": medians("head", "flat", lambda data: data["ingest_seconds"]),
                   "relative_budget": 0.05,
-                  "absolute_budget": 0.10,
+                  "absolute_budget": 0.01,
               },
           ]
           first_upsert = load("base", "upsert", 1)
@@ -126,7 +126,7 @@ jobs:
                           "head", "upsert", lambda data, size=size: data["updates"][size]["median_ms"]
                       ),
                       "relative_budget": 0.10,
-                      "absolute_budget": 1.0,
+                      "absolute_budget": 0.10,
                   }
               )
 
