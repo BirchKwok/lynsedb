@@ -374,10 +374,7 @@ mod tests {
             subset_indices: Some(subset),
         };
         let (result_ids, _) = idx.search(&[0.0, 0.0], 2, &params).unwrap();
-        assert!(
-            !result_ids.is_empty(),
-            "expected filtered fallback hits"
-        );
+        assert!(!result_ids.is_empty(), "expected filtered fallback hits");
         assert!(
             result_ids.iter().all(|id| *id == 3 || *id == 4),
             "unfiltered ids leaked: {:?}",

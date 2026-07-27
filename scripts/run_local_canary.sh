@@ -30,6 +30,8 @@ root = Path(tempfile.mkdtemp(prefix="lynse-canary-"))
 try:
     client = lynse.VectorDBClient(uri=str(root))
     db = client.create_database("canary_db", drop_if_exists=True)
+
+    # ── FLAT path: add / filter / delete ──────────────────────────────────────
     coll = db.require_collection(
         "canary_col",
         dim=8,
@@ -53,11 +55,34 @@ try:
     assert len(filtered) > 0, "filtered search returned empty"
     assert all(fields[int(i)]["tag"] == "b" for i in filtered.ids), filtered.ids
 
+    batch = coll.batch_search(vectors[:4], k=3)
+    assert len(batch) == 4, batch
+    assert int(batch[0].ids[0]) == 0, batch[0].ids
+
+    filtered_batch = coll.batch_search(vectors[:2], k=5, where="tag = 'a'")
+    for result in filtered_batch:
+        assert all(fields[int(i)]["tag"] == "a" for i in result.ids), result.ids
+
     coll.delete([0])
     after_delete = coll.search(vector=vectors[0], k=3)
     assert 0 not in [int(i) for i in after_delete.ids], after_delete.ids
 
-    print("canary ok: add/search/filter/delete")
+    # ── HNSW filtered parity with single search ──────────────────────────────
+    hnsw = db.require_collection(
+        "canary_hnsw",
+        dim=8,
+        drop_if_exists=True,
+        default_index="HNSW-IP",
+    )
+    hnsw.add(ids=ids, vectors=vectors, fields=fields)
+    hnsw.commit()
+    hnsw.build_index("HNSW-IP")
+    single = hnsw.search(vector=vectors[0], k=5, where="tag = 'b'")
+    batched = hnsw.batch_search(vectors[:1], k=5, where="tag = 'b'")
+    assert list(single.ids) == list(batched[0].ids), (single.ids, batched[0].ids)
+    assert all(fields[int(i)]["tag"] == "b" for i in single.ids), single.ids
+
+    print("canary ok: add/search/filter/batch/delete + hnsw filtered parity")
 finally:
     shutil.rmtree(root, ignore_errors=True)
 PY

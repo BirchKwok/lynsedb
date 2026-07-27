@@ -695,10 +695,7 @@ mod tests {
     fn merge_search_blocks_with_fields_keeps_true_topk() {
         let mut fields_a = Vec::new();
         for id in [1u64, 2, 3, 4] {
-            fields_a.push(HashMap::from([(
-                "id".to_string(),
-                Value::from(id),
-            )]));
+            fields_a.push(HashMap::from([("id".to_string(), Value::from(id))]));
         }
         let block_a = SearchBlock {
             ids: vec![1, 2, 3, 4],

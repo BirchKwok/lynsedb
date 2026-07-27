@@ -5287,57 +5287,21 @@ impl Collection {
 
         use rayon::prelude::*;
 
+        // Keep batch routing identical to `search_with_precomputed_filter` so
+        // filtered HNSW/DiskANN/PQ paths cannot leak unfiltered ids.
         let results: Vec<Result<SearchResult>> = (0..n_queries)
             .into_par_iter()
             .map(|i| {
                 let start = i * dim;
                 let query = &queries[start..start + dim];
-                let tombstone_count = self.tombstone.read().len();
-                let search_k = if tombstone_count == 0 {
-                    k
-                } else {
-                    k.saturating_add(tombstone_count)
-                };
-
-                let search_params = SearchParams {
-                    k: search_k,
-                    nprobe,
-                    ef_search: None,
-                    subset_indices: subset_indices.clone(),
-                };
-
-                let (result_ids, result_dists) = if let Some(ref idx) = self.index {
-                    idx.search(query, search_k, &search_params)?
-                } else if self.has_auxiliary_quantized_index() {
-                    self.search_auxiliary_quantized(query, search_k, self.resolve_metric())?
-                } else if search_params.subset_indices.is_some() {
-                    self.brute_force_search_filtered(query, search_k, &search_params)?
-                } else {
-                    let metric = self.resolve_metric();
-                    self.vector_store.search(
-                        query,
-                        search_k,
-                        metric,
-                        self.resolve_use_sq8(),
-                        None,
-                    )?
-                };
-
-                let result_ids: Vec<u64> = result_ids
-                    .iter()
-                    .map(|&row| self.row_to_user_id(row))
-                    .collect();
-                let (result_ids, result_dists) =
-                    self.filter_tombstoned_limit(result_ids, result_dists, k);
-
-                Ok(SearchResult {
-                    ids: result_ids,
-                    distances: result_dists,
-                    fields: Vec::new(),
-                    index_mode: self.index_mode.clone().unwrap_or("FLAT-IP".into()),
-                    dimension: dim,
+                self.search_with_precomputed_filter(
+                    query,
                     k,
-                })
+                    subset_indices.clone(),
+                    nprobe,
+                    false,
+                    1e-4,
+                )
             })
             .collect();
 
@@ -9293,6 +9257,92 @@ mod tests {
             .search(&[0.0, 1.0, 0.0, 0.0], 1, None, 10, false, 1e-4)
             .unwrap();
         assert_eq!(result.ids, vec![202]);
+    }
+
+    #[test]
+    fn batch_search_hnsw_where_matches_single_search() {
+        let tmp = TempDir::new().unwrap();
+        let mut coll = Collection::open(tmp.path(), "col", 4, 100).unwrap();
+        let fields = vec![
+            HashMap::from([("group".to_string(), serde_json::json!(0))]),
+            HashMap::from([("group".to_string(), serde_json::json!(1))]),
+            HashMap::from([("group".to_string(), serde_json::json!(0))]),
+            HashMap::from([("group".to_string(), serde_json::json!(1))]),
+        ];
+        coll.add_items(
+            &[
+                1.0, 0.0, 0.0, 0.0, // id 10, group 0
+                0.99, 0.0, 0.0, 0.0, // id 20, group 1 — nearest overall
+                0.0, 1.0, 0.0, 0.0, // id 30, group 0
+                0.5, 0.0, 0.0, 0.0, // id 40, group 1
+            ],
+            4,
+            &[10, 20, 30, 40],
+            Some(&fields),
+        )
+        .unwrap();
+        coll.commit().unwrap();
+        coll.build_index("HNSW-IP").unwrap();
+
+        let query = [1.0f32, 0.0, 0.0, 0.0];
+        let single = coll
+            .search(&query, 2, Some("\"group\" = 0"), 10, false, 1e-4)
+            .unwrap();
+        let batch = coll
+            .batch_search(&query, 1, 2, Some("\"group\" = 0"), 10)
+            .unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(
+            single.ids, batch[0].ids,
+            "single={:?} batch={:?}",
+            single.ids, batch[0].ids
+        );
+        assert!(
+            single.ids.iter().all(|id| *id == 10 || *id == 30),
+            "filter leaked: {:?}",
+            single.ids
+        );
+        assert!(!single.ids.contains(&20), "nearest unfiltered id leaked");
+    }
+
+    #[test]
+    fn batch_search_flat_pq_where_matches_single_search() {
+        let tmp = TempDir::new().unwrap();
+        let mut coll = Collection::open(tmp.path(), "col", 16, 100).unwrap();
+        let n = 64usize;
+        let mut vectors = vec![0.0f32; n * 16];
+        let mut fields = Vec::with_capacity(n);
+        let ids: Vec<u64> = (0..n as u64).collect();
+        for i in 0..n {
+            vectors[i * 16] = if i % 2 == 0 { 1.0 } else { 0.1 };
+            fields.push(HashMap::from([(
+                "group".to_string(),
+                serde_json::json!(i % 2),
+            )]));
+        }
+        // Make an odd-id vector the nearest overall so an unfiltered path would prefer it.
+        vectors[17] = 0.0;
+        vectors[16] = 0.99;
+        coll.add_items(&vectors, n, &ids, Some(&fields)).unwrap();
+        coll.commit().unwrap();
+        coll.build_index("FLAT-IP-PQ").unwrap();
+
+        let mut query = vec![0.0f32; 16];
+        query[0] = 1.0;
+        let single = coll
+            .search(&query, 5, Some("\"group\" = 0"), 10, false, 1e-4)
+            .unwrap();
+        let batch = coll
+            .batch_search(&query, 1, 5, Some("\"group\" = 0"), 10)
+            .unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(single.ids, batch[0].ids);
+        assert!(
+            single.ids.iter().all(|id| id % 2 == 0),
+            "PQ filtered batch leaked odd ids: {:?}",
+            single.ids
+        );
+        assert!(!single.ids.contains(&1), "nearest unfiltered odd id leaked");
     }
 }
 

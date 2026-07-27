@@ -3888,8 +3888,8 @@ fn approx_hybrid_ip_adaptive(
         });
 
     let pool = pool.min(scores.len());
-    if scores.len() > pool {
-        scores.select_nth_unstable_by(pool, |a, b| {
+    if pool > 0 && scores.len() > pool {
+        scores.select_nth_unstable_by(pool - 1, |a, b| {
             b.dist.partial_cmp(&a.dist).unwrap_or(Ordering::Equal)
         });
         scores.truncate(pool);
@@ -6418,5 +6418,38 @@ mod tests {
         let packed_bytes = store.binary.read().as_ref().unwrap().data.len() * 8;
         assert_eq!(packed_bytes, 3 * dim.div_ceil(64) * 8);
         assert!(packed_bytes < rows.len() * std::mem::size_of::<f32>() / 8);
+    }
+
+    #[test]
+    fn approx_hybrid_ip_adaptive_pool_keeps_true_topk() {
+        let dim = 64usize;
+        let n = 2_000usize;
+        let k = 3usize;
+        let true_ids = [100usize, 500, 900];
+
+        let query = vec![1.0f32; dim];
+        let mut data = vec![0.0f32; n * dim];
+        for i in 0..n {
+            for j in 0..32 {
+                data[i * dim + j] = 1.0;
+            }
+        }
+        for (rank, &id) in true_ids.iter().enumerate() {
+            let scale = 3.0 - rank as f32;
+            for j in 0..dim {
+                data[id * dim + j] = scale;
+            }
+        }
+
+        // select_nth_unstable is not stable; a wrong pivot can drop a true top hit.
+        for _ in 0..32 {
+            let (ids, _) = approx_hybrid_ip_adaptive(&query, &data, dim, k, n, 1.0);
+            assert_eq!(
+                ids,
+                vec![100, 500, 900],
+                "approx hybrid pool dropped a true top hit: {:?}",
+                ids
+            );
+        }
     }
 }

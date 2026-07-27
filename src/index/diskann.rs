@@ -4,7 +4,7 @@
 //! Supports billion-scale datasets with good recall-latency tradeoff.
 
 use super::{IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
-use crate::distance::{self, compute_distance_f32, DistanceMetric};
+use crate::distance::{compute_distance_f32, DistanceMetric};
 use crate::error::{LynseError, Result};
 use crate::quantizer::{self, Quantizer, QuantizerType};
 use rand::Rng;
@@ -83,6 +83,17 @@ impl DiskANNIndex {
         )
     }
 
+    /// Rank distance where lower always means more similar (IP is negated).
+    #[inline]
+    fn rank_distance(&self, a_idx: usize, b: &[f32]) -> f32 {
+        let raw = self.distance_single(a_idx, b);
+        if self.config.distance_metric.is_ascending() {
+            raw
+        } else {
+            -raw
+        }
+    }
+
     fn search_graph(
         &self,
         query: &[f32],
@@ -97,7 +108,7 @@ impl DiskANNIndex {
         let mut visited = HashSet::new();
         visited.insert(entry);
 
-        let entry_dist = self.distance_single(entry, query);
+        let entry_dist = self.rank_distance(entry, query);
         let mut candidates: Vec<(f32, usize)> = vec![(entry_dist, entry)];
 
         while !candidates.is_empty() {
@@ -112,7 +123,7 @@ impl DiskANNIndex {
                             }
                         }
                         visited.insert(neighbor);
-                        let n_dist = self.distance_single(neighbor, query);
+                        let n_dist = self.rank_distance(neighbor, query);
                         candidates.push((n_dist, neighbor));
                     }
                 }
@@ -133,6 +144,7 @@ impl DiskANNIndex {
         let dim = self.config.dimension;
         let node_start = node_id * dim;
         let node_vec: Vec<f32> = self.encoded_data[node_start..node_start + dim].to_vec();
+        let ascending = self.config.distance_metric.is_ascending();
 
         let mut distances: Vec<(f32, usize)> = self.graph[node_id]
             .iter()
@@ -143,7 +155,8 @@ impl DiskANNIndex {
                     &self.encoded_data[n_start..n_start + dim],
                     self.config.distance_metric,
                 );
-                (dist, n)
+                let rank = if ascending { dist } else { -dist };
+                (rank, n)
             })
             .collect();
 
@@ -153,6 +166,37 @@ impl DiskANNIndex {
             .take(self.max_degree)
             .map(|(_, n)| n)
             .collect();
+    }
+
+    fn brute_force_candidates(
+        &self,
+        encoded_query: &[f32],
+        k: usize,
+        subset: Option<&HashSet<usize>>,
+    ) -> Result<(Vec<u64>, Vec<f32>)> {
+        let candidate_idxs: Vec<usize> = match subset {
+            Some(sub) => (0..self.ids.len()).filter(|i| sub.contains(i)).collect(),
+            None => (0..self.ids.len()).collect(),
+        };
+        if candidate_idxs.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let mut scored: Vec<(f32, usize)> = candidate_idxs
+            .into_iter()
+            .map(|c| (self.distance_single(c, encoded_query), c))
+            .collect();
+        if self.config.distance_metric.is_ascending() {
+            scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        } else {
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        }
+        scored.truncate(k);
+
+        Ok((
+            scored.iter().map(|(_, idx)| self.ids[*idx]).collect(),
+            scored.iter().map(|(d, _)| *d).collect(),
+        ))
     }
 }
 
@@ -249,26 +293,27 @@ impl VectorIndex for DiskANNIndex {
         });
 
         let ef = (k * 10).max(self.l);
-        let candidates = self.search_graph(&encoded_query, ef, subset.as_ref());
+        let mut candidates = self.search_graph(&encoded_query, ef, subset.as_ref());
+        if let Some(ref sub) = subset {
+            // Entry point may lie outside the filter; never return it.
+            candidates.retain(|c| sub.contains(c));
+        }
 
         if candidates.is_empty() {
-            // Fallback: brute force
-            let (top_idx, top_dist) = distance::top_k_search(
-                &encoded_query,
-                &self.encoded_data,
-                dim,
-                k,
-                self.config.distance_metric,
-            );
-            let result_ids: Vec<u64> = top_idx.iter().map(|&i| self.ids[i as usize]).collect();
-            return Ok((result_ids, top_dist));
+            // Empty graph hits must fall back to the filtered corpus — never an
+            // unfiltered full scan (same class of bug as IVF empty-probe).
+            return self.brute_force_candidates(&encoded_query, k, subset.as_ref());
         }
 
         let mut scored: Vec<(f32, usize)> = candidates
             .iter()
             .map(|&c| (self.distance_single(c, &encoded_query), c))
             .collect();
-        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        if self.config.distance_metric.is_ascending() {
+            scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        } else {
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        }
         scored.truncate(k);
 
         let result_ids: Vec<u64> = scored.iter().map(|(_, idx)| self.ids[*idx]).collect();
@@ -465,4 +510,78 @@ struct DiskANNState {
     alpha: f32,
     max_degree: usize,
     trained: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::quantizer::QuantizerType;
+    use std::sync::Arc;
+
+    #[test]
+    fn diskann_ip_search_returns_max_inner_product() {
+        let mut idx = DiskANNIndex::new(
+            DistanceMetric::InnerProduct,
+            QuantizerType::None,
+            4,
+            16,
+            1.2,
+            8,
+        );
+        let vectors = vec![
+            1.0, 0.0, // id 0, IP=1.0
+            0.9, 0.0, // id 1, IP=0.9
+            0.1, 0.0, // id 2, IP=0.1
+        ];
+        let ids = [10u64, 20, 30];
+        idx.build(&vectors, 3, 2, Some(&ids)).unwrap();
+
+        let params = SearchParams {
+            k: 1,
+            nprobe: 1,
+            ef_search: None,
+            subset_indices: None,
+        };
+        let (result_ids, dists) = idx.search(&[1.0, 0.0], 1, &params).unwrap();
+        assert_eq!(
+            result_ids,
+            vec![10],
+            "ids={:?} dists={:?}",
+            result_ids,
+            dists
+        );
+        assert!(dists[0] > 0.95, "expected high IP, got {}", dists[0]);
+    }
+
+    #[test]
+    fn diskann_filtered_empty_graph_does_not_leak_unfiltered_ids() {
+        let mut idx =
+            DiskANNIndex::new(DistanceMetric::L2Squared, QuantizerType::None, 2, 8, 1.2, 4);
+        let vectors = vec![
+            0.0, 0.0, // id 1
+            0.1, 0.0, // id 2
+            10.0, 10.0, // id 3
+            10.1, 10.0, // id 4
+        ];
+        let ids = [1u64, 2, 3, 4];
+        idx.build(&vectors, 4, 2, Some(&ids)).unwrap();
+
+        // Force the filtered path: keep only the far cluster. Even if the graph
+        // walk from the entry point yields no in-subset candidates, fallback
+        // must stay inside the subset.
+        let subset = Arc::new(vec![3u64, 4u64]);
+        let params = SearchParams {
+            k: 2,
+            nprobe: 1,
+            ef_search: None,
+            subset_indices: Some(subset),
+        };
+        let (result_ids, _) = idx.search(&[0.0, 0.0], 2, &params).unwrap();
+        assert!(!result_ids.is_empty(), "expected filtered fallback hits");
+        assert!(
+            result_ids.iter().all(|id| *id == 3 || *id == 4),
+            "unfiltered ids leaked: {:?}",
+            result_ids
+        );
+    }
 }

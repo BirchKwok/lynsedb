@@ -8,6 +8,7 @@
 #   scripts/run_local_gates.sh              # correctness + perf check (or record if no baseline)
 #   scripts/run_local_gates.sh --record-perf
 #   scripts/run_local_gates.sh --skip-perf
+#   scripts/run_local_gates.sh --skip-extended-perf
 #   scripts/run_local_gates.sh --quick      # focused Rust regression tests only + skip heavy python
 #   scripts/run_local_canary.sh             # separate local canary smoke
 
@@ -18,6 +19,7 @@ cd "$ROOT"
 
 RECORD_PERF=0
 SKIP_PERF=0
+SKIP_EXTENDED_PERF=0
 QUICK=0
 PYTHON="${PYTHON:-python3}"
 
@@ -25,10 +27,11 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --record-perf) RECORD_PERF=1; shift ;;
     --skip-perf) SKIP_PERF=1; shift ;;
+    --skip-extended-perf) SKIP_EXTENDED_PERF=1; shift ;;
     --quick) QUICK=1; shift ;;
     --python) PYTHON="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,12p' "$0"
+      sed -n '2,14p' "$0"
       exit 0
       ;;
     *)
@@ -49,7 +52,12 @@ if [[ "$QUICK" -eq 1 ]]; then
     filtered_search_empty_probe_does_not_leak_unfiltered_ids \
     merge_search_blocks_with_fields_keeps_true_topk \
     blacklisted_in_query_falls_back_to_sql \
-    merge_search_blocks_obeys_metric_order
+    merge_search_blocks_obeys_metric_order \
+    batch_search_hnsw_where_matches_single_search \
+    batch_search_flat_pq_where_matches_single_search \
+    diskann_ip_search_returns_max_inner_product \
+    diskann_filtered_empty_graph_does_not_leak_unfiltered_ids \
+    approx_hybrid_ip_adaptive_pool_keeps_true_topk
   do
     cargo test --locked "$test_name"
   done
@@ -79,10 +87,15 @@ if [[ "$SKIP_PERF" -eq 1 ]]; then
   exit 0
 fi
 
+PERF_ARGS=()
+if [[ "$SKIP_EXTENDED_PERF" -eq 1 ]]; then
+  PERF_ARGS+=(--skip-extended)
+fi
+
 BASELINE="$ROOT/benchmarks/baselines/local-perf-baseline.json"
 if [[ "$RECORD_PERF" -eq 1 || ! -f "$BASELINE" ]]; then
   echo "==> Recording local performance baseline -> $BASELINE"
-  "$PYTHON" "$ROOT/scripts/perf_gate_local.py" record --python "$PYTHON"
+  "$PYTHON" "$ROOT/scripts/perf_gate_local.py" record --python "$PYTHON" "${PERF_ARGS[@]}"
   if [[ ! -f "$BASELINE" ]]; then
     echo "Failed to write baseline" >&2
     exit 1
@@ -96,7 +109,7 @@ if [[ "$RECORD_PERF" -eq 1 || ! -f "$BASELINE" ]]; then
 fi
 
 echo "==> Local performance gate (check vs $BASELINE)"
-"$PYTHON" "$ROOT/scripts/perf_gate_local.py" check --python "$PYTHON"
+"$PYTHON" "$ROOT/scripts/perf_gate_local.py" check --python "$PYTHON" "${PERF_ARGS[@]}"
 
 if [[ "${SKIP_CANARY:-0}" != "1" ]]; then
   echo "==> Local canary"

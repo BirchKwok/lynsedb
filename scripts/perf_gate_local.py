@@ -45,6 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trials", type=int, default=8)
     parser.add_argument("--upsert-trials", type=int, default=3)
     parser.add_argument(
+        "--skip-extended",
+        action="store_true",
+        help="only run flat search + upsert (skip filtered/batch/HNSW/commit)",
+    )
+    parser.add_argument(
         "--relative-budget",
         type=float,
         default=float(os.environ.get("GATE_RELATIVE_BUDGET", "0.10")),
@@ -66,20 +71,46 @@ def parse_args() -> argparse.Namespace:
         default=float(os.environ.get("GATE_UPSERT_ABS_MS", "0.50")),
     )
     parser.add_argument(
+        "--filtered-absolute-budget-ms",
+        type=float,
+        default=float(os.environ.get("GATE_FILTERED_ABS_MS", "0.50")),
+    )
+    parser.add_argument(
+        "--batch-absolute-budget-ms",
+        type=float,
+        default=float(os.environ.get("GATE_BATCH_ABS_MS", "2.00")),
+    )
+    parser.add_argument(
+        "--commit-absolute-budget-ms",
+        type=float,
+        default=float(os.environ.get("GATE_COMMIT_ABS_MS", "5.00")),
+    )
+    parser.add_argument(
+        "--tombstone-absolute-budget-ms",
+        type=float,
+        default=float(os.environ.get("GATE_TOMBSTONE_ABS_MS", "0.50")),
+    )
+    parser.add_argument(
+        "--hnsw-search-absolute-budget-ms",
+        type=float,
+        default=float(os.environ.get("GATE_HNSW_SEARCH_ABS_MS", "1.00")),
+    )
+    parser.add_argument(
+        "--hnsw-build-absolute-budget-ms",
+        type=float,
+        default=float(os.environ.get("GATE_HNSW_BUILD_ABS_MS", "500.0")),
+    )
+    parser.add_argument(
+        "--min-hnsw-recall",
+        type=float,
+        default=float(os.environ.get("GATE_MIN_HNSW_RECALL", "0.90")),
+    )
+    parser.add_argument(
         "--python",
         default=sys.executable,
         help="Python interpreter that already has LynseDB installed",
     )
     return parser.parse_args()
-
-
-def run_json(cmd: list[str]) -> dict:
-    print("+", " ".join(cmd), flush=True)
-    completed = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    if completed.stdout.strip():
-        # Benchmarks already print JSON; prefer the --output file path content.
-        pass
-    return completed
 
 
 def bench_flat(args: argparse.Namespace, output: Path) -> dict:
@@ -122,13 +153,39 @@ def bench_upsert(args: argparse.Namespace, output: Path) -> dict:
     return json.loads(output.read_text())
 
 
+def bench_extended(args: argparse.Namespace, output: Path) -> dict:
+    cmd = [
+        args.python,
+        str(ROOT / "benchmarks" / "gate_extended_bench.py"),
+        "--rows",
+        str(args.rows),
+        "--dim",
+        str(args.dim),
+        "--batch-size",
+        str(args.batch_size),
+        "--warmups",
+        str(args.warmups),
+        "--trials",
+        str(args.trials),
+        "--min-hnsw-recall",
+        str(args.min_hnsw_recall),
+        "--output",
+        str(output),
+    ]
+    subprocess.run(cmd, check=True)
+    return json.loads(output.read_text())
+
+
 def collect(args: argparse.Namespace) -> dict:
     with tempfile.TemporaryDirectory(prefix="lynse-local-gate-") as tmp:
         tmp_path = Path(tmp)
         flat = bench_flat(args, tmp_path / "flat.json")
         upsert = bench_upsert(args, tmp_path / "upsert.json")
-    return {
-        "schema_version": 1,
+        extended = None
+        if not args.skip_extended:
+            extended = bench_extended(args, tmp_path / "extended.json")
+    payload = {
+        "schema_version": 2,
         "profile": {
             "rows": args.rows,
             "dim": args.dim,
@@ -136,6 +193,7 @@ def collect(args: argparse.Namespace) -> dict:
             "warmups": args.warmups,
             "trials": args.trials,
             "upsert_trials": args.upsert_trials,
+            "extended": not args.skip_extended,
             "rayon_threads": os.environ.get("RAYON_NUM_THREADS", "default"),
         },
         "flat": {
@@ -147,6 +205,17 @@ def collect(args: argparse.Namespace) -> dict:
             for size, payload in upsert.get("updates", {}).items()
         },
     }
+    if extended is not None:
+        payload["extended"] = {
+            "filtered_median_ms": extended["filtered_median_ms"],
+            "batch_median_ms": extended["batch_median_ms"],
+            "commit_median_ms": extended["commit_median_ms"],
+            "tombstone_search_median_ms": extended["tombstone_search_median_ms"],
+            "hnsw_build_ms": extended["hnsw_build_ms"],
+            "hnsw_search_median_ms": extended["hnsw_search_median_ms"],
+            "hnsw_recall_at_k": extended["hnsw_recall_at_k"],
+        }
+    return payload
 
 
 def evaluate(baseline: dict, candidate: dict, args: argparse.Namespace) -> list[dict]:
@@ -182,6 +251,66 @@ def evaluate(baseline: dict, candidate: dict, args: argparse.Namespace) -> list[
             }
         )
 
+    ext_base = baseline.get("extended") or {}
+    ext_cand = candidate.get("extended") or {}
+    extended_cases = [
+        (
+            "Filtered search median",
+            "filtered_median_ms",
+            "ms",
+            max(args.relative_budget, 0.15),
+            args.filtered_absolute_budget_ms,
+        ),
+        (
+            "Batch search median",
+            "batch_median_ms",
+            "ms",
+            max(args.relative_budget, 0.15),
+            args.batch_absolute_budget_ms,
+        ),
+        (
+            "Commit median",
+            "commit_median_ms",
+            "ms",
+            max(args.relative_budget, 0.15),
+            args.commit_absolute_budget_ms,
+        ),
+        (
+            "Tombstone search median",
+            "tombstone_search_median_ms",
+            "ms",
+            max(args.relative_budget, 0.15),
+            args.tombstone_absolute_budget_ms,
+        ),
+        (
+            "HNSW search median",
+            "hnsw_search_median_ms",
+            "ms",
+            max(args.relative_budget, 0.15),
+            args.hnsw_search_absolute_budget_ms,
+        ),
+        (
+            "HNSW build",
+            "hnsw_build_ms",
+            "ms",
+            max(args.relative_budget, 0.20),
+            args.hnsw_build_absolute_budget_ms,
+        ),
+    ]
+    for name, key, unit, rel, abs_budget in extended_cases:
+        if key not in ext_base or key not in ext_cand:
+            continue
+        cases.append(
+            {
+                "name": name,
+                "unit": unit,
+                "baseline": ext_base[key],
+                "candidate": ext_cand[key],
+                "relative_budget": rel,
+                "absolute_budget": abs_budget,
+            }
+        )
+
     for case in cases:
         absolute_change = case["candidate"] - case["baseline"]
         relative_change = case["candidate"] / case["baseline"] - 1.0 if case["baseline"] else 0.0
@@ -190,6 +319,23 @@ def evaluate(baseline: dict, candidate: dict, args: argparse.Namespace) -> list[
         case["warning"] = (
             relative_change > case["relative_budget"]
             and absolute_change > case["absolute_budget"]
+        )
+
+    # Quality floor: absolute, not relative-to-baseline.
+    if "hnsw_recall_at_k" in ext_cand:
+        recall = ext_cand["hnsw_recall_at_k"]
+        cases.append(
+            {
+                "name": "HNSW recall@k floor",
+                "unit": "recall",
+                "baseline": args.min_hnsw_recall,
+                "candidate": recall,
+                "relative_budget": 0.0,
+                "absolute_budget": 0.0,
+                "absolute_change": recall - args.min_hnsw_recall,
+                "relative_change": recall - args.min_hnsw_recall,
+                "warning": recall < args.min_hnsw_recall,
+            }
         )
     return cases
 
@@ -233,16 +379,22 @@ def main() -> int:
     print("\n=== Local performance gate ===")
     for case in cases:
         mark = "FAIL" if case["warning"] else "ok"
-        print(
-            f"[{mark}] {case['name']}: {case['relative_change']:+.2%}, "
-            f"{case['absolute_change']:+.3f} {case['unit']} "
-            f"(budgets {case['relative_budget']:.0%} / "
-            f"{case['absolute_budget']:.3f} {case['unit']})"
-        )
+        if case["unit"] == "recall":
+            print(
+                f"[{mark}] {case['name']}: {case['candidate']:.3f} "
+                f"(floor {case['baseline']:.3f})"
+            )
+        else:
+            print(
+                f"[{mark}] {case['name']}: {case['relative_change']:+.2%}, "
+                f"{case['absolute_change']:+.3f} {case['unit']} "
+                f"(budgets {case['relative_budget']:.0%} / "
+                f"{case['absolute_budget']:.3f} {case['unit']})"
+            )
         failed = failed or case["warning"]
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "warning": failed,
         "baseline": str(args.baseline),
         "cases": cases,
