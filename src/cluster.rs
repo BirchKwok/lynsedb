@@ -371,7 +371,7 @@ pub fn merge_search_blocks(
     }
 
     if merged.len() > k {
-        merged.select_nth_unstable_by(k, |left, right| {
+        merged.select_nth_unstable_by(k - 1, |left, right| {
             compare_distance(left.1, right.1, ascending)
         });
         merged.truncate(k);
@@ -689,6 +689,36 @@ mod tests {
         );
         assert_eq!(merged.ids, vec![2, 3]);
         assert_eq!(merged.distances, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn merge_search_blocks_with_fields_keeps_true_topk() {
+        let mut fields_a = Vec::new();
+        for id in [1u64, 2, 3, 4] {
+            fields_a.push(HashMap::from([(
+                "id".to_string(),
+                Value::from(id),
+            )]));
+        }
+        let block_a = SearchBlock {
+            ids: vec![1, 2, 3, 4],
+            distances: vec![0.1, 0.2, 0.3, 0.4],
+            fields: fields_a,
+        };
+        let block_b = SearchBlock {
+            ids: vec![5],
+            distances: vec![0.15],
+            fields: vec![HashMap::from([("id".to_string(), Value::from(5u64))])],
+        };
+
+        // Run several times: select_nth_unstable is not stable, so a wrong
+        // pivot index can intermittently drop the true nearest neighbor.
+        for _ in 0..32 {
+            let merged = merge_search_blocks(&[block_a.clone(), block_b.clone()], 2, true, true);
+            assert_eq!(merged.ids, vec![1, 5], "ids={:?}", merged.ids);
+            assert_eq!(merged.distances, vec![0.1, 0.15]);
+            assert_eq!(merged.fields.len(), 2);
+        }
     }
 
     #[test]

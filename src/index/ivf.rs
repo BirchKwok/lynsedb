@@ -149,19 +149,28 @@ impl VectorIndex for IVFIndex {
             }
         }
 
-        // Apply subset filter
-        if let Some(ref subset) = params.subset_indices {
-            let subset_set: HashSet<u64> = subset.iter().cloned().collect();
-            candidates.retain(|&c| subset_set.contains(&self.ids[c]));
+        // Apply subset filter. Empty probed lists must fall back to the filtered
+        // corpus — never to an unfiltered full scan.
+        let subset_set = params
+            .subset_indices
+            .as_ref()
+            .map(|subset| subset.iter().copied().collect::<HashSet<u64>>());
+        if let Some(ref subset) = subset_set {
+            candidates.retain(|&c| subset.contains(&self.ids[c]));
         }
 
         if candidates.is_empty() {
-            // Fallback: search all
-            candidates = (0..self.ids.len()).collect();
+            candidates = match subset_set.as_ref() {
+                Some(subset) => (0..self.ids.len())
+                    .filter(|&c| subset.contains(&self.ids[c]))
+                    .collect(),
+                None => (0..self.ids.len()).collect(),
+            };
         }
 
-        // Limit candidates
-        candidates.truncate(k * 100);
+        if candidates.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
 
         // Score candidates
         let mut scored: Vec<(f32, usize)> = candidates
@@ -335,4 +344,44 @@ struct IVFState {
     n_centroids: usize,
     nprobe: usize,
     trained: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn filtered_search_empty_probe_does_not_leak_unfiltered_ids() {
+        let mut idx = IVFIndex::new(DistanceMetric::L2Squared, QuantizerType::None, 2, 1);
+        // Two well-separated clusters.
+        let vectors = vec![
+            0.0, 0.0, // id 1
+            0.1, 0.0, // id 2
+            10.0, 10.0, // id 3
+            10.1, 10.0, // id 4
+        ];
+        let ids = [1u64, 2, 3, 4];
+        idx.build(&vectors, 4, 2, Some(&ids)).unwrap();
+
+        // Only keep the far cluster in the filter, but probe the near centroid
+        // of the query so the probed lists become empty after filtering.
+        let subset = Arc::new(vec![3u64, 4u64]);
+        let params = SearchParams {
+            k: 2,
+            nprobe: 1,
+            ef_search: None,
+            subset_indices: Some(subset),
+        };
+        let (result_ids, _) = idx.search(&[0.0, 0.0], 2, &params).unwrap();
+        assert!(
+            !result_ids.is_empty(),
+            "expected filtered fallback hits"
+        );
+        assert!(
+            result_ids.iter().all(|id| *id == 3 || *id == 4),
+            "unfiltered ids leaked: {:?}",
+            result_ids
+        );
+    }
 }

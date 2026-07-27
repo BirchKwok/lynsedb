@@ -1295,7 +1295,8 @@ impl FieldStore {
         if let Some((field, keys)) =
             parse_indexed_in(filter_expr).or_else(|| parse_indexed_or_equalities(filter_expr))
         {
-            return Some(self.query_index_values(&field, &keys));
+            // Blacklisted / unindexed fields must fall back to ApexBase SQL.
+            return self.query_index_values(&field, &keys);
         }
         if let Some(leaves) = parse_indexed_or_leaves(filter_expr) {
             let mut ids: HashSet<u64> = HashSet::new();
@@ -1320,7 +1321,12 @@ impl FieldStore {
             let mut ids = match condition {
                 IndexedCondition::Eq(field, key) => idx.get(field, key)?.clone(),
                 IndexedCondition::Range(field, op, key) => idx.get_range(field, *op, key)?,
-                IndexedCondition::Contains(field, key) => idx.get_contains(field, key),
+                IndexedCondition::Contains(field, key) => {
+                    if idx.blacklisted.contains(field) || !idx.array_index.contains_key(field) {
+                        return None;
+                    }
+                    idx.get_contains(field, key)
+                }
             };
             ids.sort_unstable();
             ids.dedup();
@@ -1355,8 +1361,11 @@ impl FieldStore {
         idx.get(field, key).cloned()
     }
 
-    fn query_index_values(&self, field: &str, keys: &[IndexKey]) -> Vec<u64> {
+    fn query_index_values(&self, field: &str, keys: &[IndexKey]) -> Option<Vec<u64>> {
         let idx = self.field_eq_index.read();
+        if idx.blacklisted.contains(field) || !idx.index.contains_key(field) {
+            return None;
+        }
         let mut ids: HashSet<u64> = HashSet::new();
         for key in keys {
             if let Some(set) = idx.get(field, key) {
@@ -1365,7 +1374,7 @@ impl FieldStore {
         }
         let mut result: Vec<u64> = ids.into_iter().collect();
         result.sort_unstable();
-        self.filter_current_external_ids(result)
+        Some(self.filter_current_external_ids(result))
     }
 
     fn filter_current_external_ids(&self, ids: Vec<u64>) -> Vec<u64> {
@@ -2315,5 +2324,29 @@ mod tests {
         assert_eq!(store.apex_id_map.read().len(), 1);
         assert_eq!(store.query("\"tag\" = 'sparse'").unwrap(), vec![id]);
         assert_eq!(store.retrieve(id).unwrap()["tag"], "sparse");
+    }
+
+    #[test]
+    fn blacklisted_in_query_falls_back_to_sql() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = FieldStore::new(tmp.path(), "fields").unwrap();
+        store
+            .batch_store_at_ids(
+                &[7],
+                &[HashMap::from([(
+                    "uuid".to_string(),
+                    serde_json::json!("value_0"),
+                )])],
+            )
+            .unwrap();
+
+        store.field_eq_index.write().blacklist_field("uuid");
+        assert!(store.field_eq_index.read().blacklisted.contains("uuid"));
+        assert!(store
+            .query_index_values("uuid", &[IndexKey::Str("value_0".into())])
+            .is_none());
+
+        let found = store.query("\"uuid\" IN ('value_0')").unwrap();
+        assert_eq!(found, vec![7]);
     }
 }

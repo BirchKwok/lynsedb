@@ -368,7 +368,7 @@ fn insert_point_concurrent(
                     })
                     .collect();
                 if scored.len() > max_conn {
-                    scored.select_nth_unstable_by(max_conn, |a, b| {
+                    scored.select_nth_unstable_by(max_conn - 1, |a, b| {
                         a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal)
                     });
                     scored.truncate(max_conn);
@@ -687,7 +687,7 @@ impl HNSWIndex {
                         .collect();
                     // Partial sort: only need top max_conn, O(n) average
                     if scored.len() > max_conn {
-                        scored.select_nth_unstable_by(max_conn, |a, b| {
+                        scored.select_nth_unstable_by(max_conn - 1, |a, b| {
                             a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal)
                         });
                         scored.truncate(max_conn);

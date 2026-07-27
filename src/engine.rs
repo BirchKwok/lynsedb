@@ -53,6 +53,40 @@ const TEXT_INDEX_FORMAT_VERSION: u32 = 1;
 const STORAGE_FORMAT_NAME: &str = "lynsedb-collection";
 const DATABASE_SNAPSHOT_FORMAT_NAME: &str = "lynsedb-database";
 const COLLECTION_EXPORT_FORMAT_NAME: &str = "lynsedb-collection-jsonl-binary-export";
+
+/// Validate database / collection names before joining onto a storage root.
+///
+/// Rejects empty names, path separators, `..`, and other characters that could
+/// escape the configured data root via `Path::join`.
+fn validate_resource_name<'a>(kind: &str, name: &'a str) -> Result<&'a str> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(LynseError::InvalidArgument(format!(
+            "{kind} name cannot be empty"
+        )));
+    }
+    if trimmed.len() > 128 {
+        return Err(LynseError::InvalidArgument(format!(
+            "{kind} name cannot exceed 128 characters"
+        )));
+    }
+    if trimmed == "." || trimmed == ".." || trimmed.contains("..") {
+        return Err(LynseError::InvalidArgument(format!(
+            "{kind} name cannot contain relative path components"
+        )));
+    }
+    if trimmed.bytes().any(|b| {
+        b == b'/'
+            || b == b'\\'
+            || b == 0
+            || !(b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    }) {
+        return Err(LynseError::InvalidArgument(format!(
+            "{kind} name may only contain ASCII letters, digits, '.', '_' and '-'"
+        )));
+    }
+    Ok(trimmed)
+}
 const STORAGE_FORMAT_VERSION: u32 = 2;
 const WAL_FORMAT_VERSION: u32 = 4;
 const PENDING_INGEST_FLUSH_ROWS: usize = 10_000;
@@ -1601,6 +1635,7 @@ impl Collection {
         mode: OpenMode,
         requested_dtype: Option<VectorDtype>,
     ) -> Result<Self> {
+        let name = validate_resource_name("collection", name)?;
         let collection_path = path.join(name);
         let is_new_collection = !collection_path.exists();
         if mode == OpenMode::ReadWrite {
@@ -6744,7 +6779,7 @@ fn sort_truncate_scores_desc(scored: &mut Vec<(u64, f32)>, limit: usize) {
         return;
     }
     if scored.len() > limit {
-        scored.select_nth_unstable_by(limit, compare_score_desc_then_id);
+        scored.select_nth_unstable_by(limit - 1, compare_score_desc_then_id);
         scored.truncate(limit);
     }
     scored.sort_by(compare_score_desc_then_id);
@@ -7076,6 +7111,7 @@ impl DatabaseEngine {
         chunk_size: usize,
         vector_dtype: Option<VectorDtype>,
     ) -> Result<Arc<RwLock<Collection>>> {
+        let name = validate_resource_name("collection", name)?;
         let mut collections = self.collections.write();
 
         if let Some(coll) = collections.get(name) {
@@ -7122,6 +7158,7 @@ impl DatabaseEngine {
         vector_dtype: VectorDtype,
     ) -> Result<Arc<RwLock<Collection>>> {
         self.ensure_writable()?;
+        let name = validate_resource_name("collection", name)?;
         let coll_path = self.root_path.join(name);
         if coll_path.exists() {
             return Err(LynseError::CollectionAlreadyExists(name.to_string()));
@@ -7132,6 +7169,7 @@ impl DatabaseEngine {
     /// Drop a collection.
     pub fn drop_collection(&self, name: &str) -> Result<()> {
         self.ensure_writable()?;
+        let name = validate_resource_name("collection", name)?;
         let mut collections = self.collections.write();
         let fallback_path = self.root_path.join(name);
 
@@ -7464,6 +7502,24 @@ impl DatabaseEngine {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn validate_resource_name_rejects_path_escape() {
+        assert!(validate_resource_name("database", "ok_db-1").is_ok());
+        assert!(validate_resource_name("database", "../evil").is_err());
+        assert!(validate_resource_name("collection", "foo/bar").is_err());
+        assert!(validate_resource_name("collection", "..").is_err());
+        assert!(validate_resource_name("database", "").is_err());
+    }
+
+    #[test]
+    fn create_database_rejects_path_traversal_names() {
+        let tmp = TempDir::new().unwrap();
+        let manager = DatabaseManager::new(tmp.path()).unwrap();
+        let err = manager.create_database("../outside").unwrap_err();
+        assert!(err.to_string().contains("database name"));
+        assert!(!tmp.path().join("outside").exists());
+    }
 
     #[test]
     fn duplicate_insert_ids_are_rejected() {
@@ -9328,6 +9384,7 @@ impl DatabaseManager {
     /// Create a new database.
     pub fn create_database(&self, name: &str) -> Result<()> {
         self.ensure_writable()?;
+        let name = validate_resource_name("database", name)?;
         let db_path = self.root_path.join(name);
         std::fs::create_dir_all(&db_path)?;
 
@@ -9349,6 +9406,7 @@ impl DatabaseManager {
     /// Drop a database and all its collections.
     pub fn drop_database(&self, name: &str) -> Result<()> {
         self.ensure_writable()?;
+        let name = validate_resource_name("database", name)?;
         let mut dbs = self.databases.write();
         let existing = dbs.remove(name);
         drop(dbs);
@@ -9392,11 +9450,15 @@ impl DatabaseManager {
 
     /// Check if a database exists.
     pub fn database_exists(&self, name: &str) -> bool {
+        let Ok(name) = validate_resource_name("database", name) else {
+            return false;
+        };
         self.root_path.join(name).join(".fingerprint").exists()
     }
 
     /// Get or open a DatabaseEngine for a specific database.
     pub fn get_or_open_database(&self, name: &str) -> Result<()> {
+        let name = validate_resource_name("database", name)?;
         {
             let dbs = self.databases.read();
             if dbs.contains_key(name) {
