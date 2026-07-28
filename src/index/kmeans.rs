@@ -59,6 +59,26 @@ pub(crate) fn train_l2(
     requested_centroids: usize,
     max_iter: usize,
 ) -> KMeansResult {
+    train_for_metric(
+        data,
+        n_vectors,
+        dim,
+        requested_centroids,
+        max_iter,
+        DistanceMetric::L2Squared,
+    )
+}
+
+/// K-means with assignment under `metric` (centroid update still uses arithmetic mean).
+/// For InnerProduct this matches Faiss-style IP coarse quantizers better than L2 Voronoi.
+pub(crate) fn train_for_metric(
+    data: &[f32],
+    n_vectors: usize,
+    dim: usize,
+    requested_centroids: usize,
+    max_iter: usize,
+    metric: DistanceMetric,
+) -> KMeansResult {
     let n_centroids = requested_centroids.min(n_vectors);
     if n_vectors == 0 || n_centroids == 0 || dim == 0 {
         return KMeansResult {
@@ -69,11 +89,12 @@ pub(crate) fn train_l2(
     }
 
     let data = &data[..n_vectors * dim];
-    let mut centroids = kmeans_pp_init_l2(data, n_vectors, dim, n_centroids);
+    let mut centroids = kmeans_pp_init_metric(data, n_vectors, dim, n_centroids, metric);
     let mut assignments = vec![usize::MAX; n_vectors];
+    let ascending = metric.is_ascending();
 
     for _ in 0..max_iter {
-        let new_assignments = assign_l2(data, &centroids, dim, n_centroids);
+        let new_assignments = assign_metric(data, &centroids, dim, n_centroids, metric);
         let changed = new_assignments
             .iter()
             .zip(&assignments)
@@ -108,7 +129,8 @@ pub(crate) fn train_l2(
         }
     }
 
-    let assignments = assign_l2(data, &centroids, dim, n_centroids);
+    let _ = ascending;
+    let assignments = assign_metric(data, &centroids, dim, n_centroids, metric);
     KMeansResult {
         centroids,
         assignments,
@@ -116,7 +138,13 @@ pub(crate) fn train_l2(
     }
 }
 
-fn kmeans_pp_init_l2(data: &[f32], n_vectors: usize, dim: usize, k: usize) -> Vec<f32> {
+fn kmeans_pp_init_metric(
+    data: &[f32],
+    n_vectors: usize,
+    dim: usize,
+    k: usize,
+    metric: DistanceMetric,
+) -> Vec<f32> {
     let mut rng = FastRng::new(42);
     let sample_n = adaptive_init_sample_size(n_vectors, k);
     let sample_indices = if sample_n >= n_vectors {
@@ -131,26 +159,30 @@ fn kmeans_pp_init_l2(data: &[f32], n_vectors: usize, dim: usize, k: usize) -> Ve
             .copy_from_slice(&data[orig_i * dim..(orig_i + 1) * dim]);
     }
     let sample_n = sample_indices.len();
+    let ascending = metric.is_ascending();
 
     let mut centroids = vec![0.0f32; k * dim];
     let first = (rng.next_f64() * sample_n as f64) as usize % sample_n;
     centroids[..dim].copy_from_slice(&sample_data[first * dim..(first + 1) * dim]);
 
-    let mut min_dists = vec![f32::MAX; sample_n];
+    // Rank distance: lower is always "farther from chosen set" for init sampling.
+    let mut min_ranks = vec![f32::MAX; sample_n];
     for c in 1..k {
         {
             let prev = c - 1;
             let centroid = &centroids[prev * dim..(prev + 1) * dim];
-            min_dists.par_iter_mut().enumerate().for_each(|(i, min_d)| {
+            min_ranks.par_iter_mut().enumerate().for_each(|(i, min_d)| {
                 let vec = &sample_data[i * dim..(i + 1) * dim];
-                let d = compute_distance_f32(vec, centroid, DistanceMetric::L2Squared);
-                if d < *min_d {
-                    *min_d = d;
+                let raw = compute_distance_f32(vec, centroid, metric);
+                let rank = if ascending { raw } else { -raw };
+                if rank < *min_d {
+                    *min_d = rank;
                 }
             });
         }
 
-        let best = min_dists
+        // Farthest from existing centroids in rank space.
+        let best = min_ranks
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
@@ -199,13 +231,34 @@ pub(crate) fn assign_l2(
     dim: usize,
     n_centroids: usize,
 ) -> Vec<usize> {
+    assign_metric(data, centroids, dim, n_centroids, DistanceMetric::L2Squared)
+}
+
+pub(crate) fn assign_metric(
+    data: &[f32],
+    centroids: &[f32],
+    dim: usize,
+    n_centroids: usize,
+    metric: DistanceMetric,
+) -> Vec<usize> {
     let n_vectors = data.len() / dim;
-    let half_norms = centroid_half_norms(centroids, dim, n_centroids);
+    let ascending = metric.is_ascending();
     (0..n_vectors)
         .into_par_iter()
         .map(|i| {
             let vector = &data[i * dim..(i + 1) * dim];
-            nearest_l2_centroid(vector, centroids, &half_norms, dim, n_centroids)
+            let mut best_c = 0usize;
+            let mut best_rank = f32::MAX;
+            for c in 0..n_centroids {
+                let centroid = &centroids[c * dim..(c + 1) * dim];
+                let raw = compute_distance_f32(vector, centroid, metric);
+                let rank = if ascending { raw } else { -raw };
+                if rank < best_rank {
+                    best_rank = rank;
+                    best_c = c;
+                }
+            }
+            best_c
         })
         .collect()
 }

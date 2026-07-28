@@ -93,6 +93,7 @@ impl SPANNIndex {
             return;
         }
 
+        let metric = self.config.distance_metric;
         let per_vector_centroids: Vec<Vec<usize>> = (0..n_vectors)
             .into_par_iter()
             .map(|i| {
@@ -103,6 +104,7 @@ impl SPANNIndex {
                     dim,
                     self.n_centroids,
                     self.replica_count,
+                    metric,
                 )
             })
             .collect();
@@ -128,27 +130,30 @@ impl SPANNIndex {
         dim: usize,
         n_centroids: usize,
         replica_count: usize,
+        metric: DistanceMetric,
     ) -> Vec<usize> {
         if n_centroids == 0 {
             return Vec::new();
         }
 
         let keep = (replica_count + 1).min(n_centroids);
+        let ascending = metric.is_ascending();
         let mut best: Vec<(f32, usize)> = vec![(f32::INFINITY, usize::MAX); keep];
 
         for c in 0..n_centroids {
             let centroid = &centroids[c * dim..(c + 1) * dim];
-            let dist = compute_distance_f32(vector, centroid, DistanceMetric::L2Squared);
-            if dist >= best[keep - 1].0 {
+            let raw = compute_distance_f32(vector, centroid, metric);
+            let rank = if ascending { raw } else { -raw };
+            if rank >= best[keep - 1].0 {
                 continue;
             }
 
             let mut pos = keep - 1;
-            while pos > 0 && dist < best[pos - 1].0 {
+            while pos > 0 && rank < best[pos - 1].0 {
                 best[pos] = best[pos - 1];
                 pos -= 1;
             }
-            best[pos] = (dist, c);
+            best[pos] = (rank, c);
         }
 
         let mut selected = Vec::with_capacity(keep);
@@ -162,18 +167,15 @@ impl SPANNIndex {
             return selected;
         }
 
-        let primary_dist = best[0].0;
-        let threshold = if primary_dist <= f32::EPSILON {
-            primary_dist + f32::EPSILON
-        } else {
-            primary_dist * REPLICA_DISTANCE_FACTOR
-        };
+        let primary_rank = best[0].0;
+        let slack = primary_rank.abs().max(f32::EPSILON) * (REPLICA_DISTANCE_FACTOR - 1.0);
+        let threshold = primary_rank + slack;
 
-        for &(dist, centroid) in best.iter().skip(1) {
+        for &(rank, centroid) in best.iter().skip(1) {
             if centroid == usize::MAX {
                 continue;
             }
-            if selected.len() <= replica_count && dist <= threshold {
+            if selected.len() <= replica_count && rank <= threshold {
                 selected.push(centroid);
             }
         }
@@ -188,19 +190,25 @@ impl SPANNIndex {
             return Vec::new();
         }
 
+        let metric = self.config.distance_metric;
+        let ascending = metric.is_ascending();
         let mut centroid_dists: Vec<(f32, u32)> = (0..n_centroids)
             .map(|c| {
                 let centroid = &self.centroids[c * dim..(c + 1) * dim];
                 (
-                    compute_distance_f32(encoded_query, centroid, DistanceMetric::L2Squared),
+                    compute_distance_f32(encoded_query, centroid, metric),
                     c as u32,
                 )
             })
             .collect();
 
-        quickselect_k_pub(&mut centroid_dists, nprobe, true);
+        quickselect_k_pub(&mut centroid_dists, nprobe, ascending);
         let top = &mut centroid_dists[..nprobe];
-        top.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        if ascending {
+            top.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        } else {
+            top.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        }
         top.iter().map(|&(_, c)| c as usize).collect()
     }
 
@@ -282,7 +290,14 @@ impl VectorIndex for SPANNIndex {
             return Ok(());
         }
 
-        let trained = kmeans::train_l2(&self.encoded_data, n_vectors, dim, self.n_centroids, 20);
+        let trained = kmeans::train_for_metric(
+            &self.encoded_data,
+            n_vectors,
+            dim,
+            self.n_centroids,
+            20,
+            self.config.distance_metric,
+        );
         self.centroids = trained.centroids;
         self.n_centroids = trained.n_centroids;
         self.primary_assignments = trained.assignments;
@@ -319,6 +334,13 @@ impl VectorIndex for SPANNIndex {
         }
 
         let dim = self.config.dimension;
+        let nprobe = if params.nprobe == 0 {
+            self.nprobe.max(1)
+        } else {
+            params.nprobe.max(1)
+        };
+        let use_exact_rerank = self.config.quantizer_type != QuantizerType::None
+            && self.data.len() == self.ids.len() * dim;
         let encoded_query = if self.config.quantizer_type != QuantizerType::None {
             let bytes = self.quantizer.encode(query, 1, dim)?;
             self.quantizer.decode(&bytes, 1, dim)?
@@ -332,7 +354,7 @@ impl VectorIndex for SPANNIndex {
             .map(|subset| subset.iter().copied().collect::<HashSet<u64>>());
         let subset = subset_set.as_ref();
 
-        let probed = self.nearest_centroids_for_query(&encoded_query, params.nprobe);
+        let probed = self.nearest_centroids_for_query(&encoded_query, nprobe);
         let mut candidates = self.collect_candidates(&probed, subset);
         if candidates.len() < k {
             candidates = self.fallback_candidates(subset);
@@ -341,7 +363,11 @@ impl VectorIndex for SPANNIndex {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        let limit = k.min(candidates.len());
+        let pool = if use_exact_rerank {
+            (k.saturating_mul(10)).max(k).min(candidates.len())
+        } else {
+            k.min(candidates.len())
+        };
         let ascending = self.config.distance_metric.is_ascending();
         let mut scored: Vec<(f32, u32)> = candidates
             .iter()
@@ -357,17 +383,45 @@ impl VectorIndex for SPANNIndex {
             })
             .collect();
 
-        quickselect_k_pub(&mut scored, limit, ascending);
-        let top = &mut scored[..limit];
+        quickselect_k_pub(&mut scored, pool, ascending);
+        let top = &mut scored[..pool];
         if ascending {
             top.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
         } else {
             top.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
         }
 
+        if use_exact_rerank {
+            let mut rescored: Vec<(f32, u32)> = top
+                .iter()
+                .map(|(_, local_idx)| {
+                    let row_idx = candidates[*local_idx as usize];
+                    let dist = compute_distance_f32(
+                        query,
+                        &self.data[row_idx * dim..row_idx * dim + dim],
+                        self.config.distance_metric,
+                    );
+                    (dist, row_idx as u32)
+                })
+                .collect();
+            let limit = k.min(rescored.len());
+            quickselect_k_pub(&mut rescored, limit, ascending);
+            let exact_top = &mut rescored[..limit];
+            if ascending {
+                exact_top.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+            } else {
+                exact_top.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+            }
+            return Ok((
+                exact_top.iter().map(|(_, row)| self.ids[*row as usize]).collect(),
+                exact_top.iter().map(|(d, _)| *d).collect(),
+            ));
+        }
+
+        let limit = k.min(top.len());
         let mut result_ids = Vec::with_capacity(limit);
         let mut result_dists = Vec::with_capacity(limit);
-        for &(dist, local_idx) in top.iter() {
+        for &(dist, local_idx) in top.iter().take(limit) {
             let row_idx = candidates[local_idx as usize];
             result_ids.push(self.ids[row_idx]);
             result_dists.push(dist);
@@ -439,6 +493,7 @@ impl VectorIndex for SPANNIndex {
                 dim,
                 self.n_centroids,
                 self.replica_count,
+                self.config.distance_metric,
             );
             if let Some(&primary) = centroids.first() {
                 self.primary_assignments.push(primary);

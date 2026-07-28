@@ -1,37 +1,47 @@
 #!/usr/bin/env bash
 # Local-only quality + performance gates for LynseDB.
 #
-# These gates are intentionally NOT part of GitHub Actions. Baselines are
-# machine-specific; run on the developer workstation (or a fixed local box).
+# Performance gate defaults to an isolated A/B run:
+#   - baseline git ref in its own venv + data dir
+#   - current worktree (including uncommitted changes) in another
+#   - 1M x 128 dense index×quant matrix + sparse/hybrid/BM25 paths
+#
+# These gates are intentionally NOT part of GitHub Actions.
 #
 # Usage:
-#   scripts/run_local_gates.sh              # correctness + perf check (or record if no baseline)
-#   scripts/run_local_gates.sh --record-perf
+#   scripts/run_local_gates.sh
+#   scripts/run_local_gates.sh --baseline-ref HEAD~1
+#   scripts/run_local_gates.sh --modes FLAT-IP,HNSW-IP
 #   scripts/run_local_gates.sh --skip-perf
-#   scripts/run_local_gates.sh --skip-extended-perf
-#   scripts/run_local_gates.sh --quick      # focused Rust regression tests only + skip heavy python
-#   scripts/run_local_canary.sh             # separate local canary smoke
+#   scripts/run_local_gates.sh --skip-matrix
+#   scripts/run_local_gates.sh --quick
+#   scripts/run_local_canary.sh
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-RECORD_PERF=0
 SKIP_PERF=0
-SKIP_EXTENDED_PERF=0
+SKIP_MATRIX=0
 QUICK=0
 PYTHON="${PYTHON:-python3}"
+BASELINE_REF="${GATE_BASELINE_REF:-}"
+MODES="${GATE_INDEX_MODES:-}"
+KEEP_AB=0
+EXTRA_PERF_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --record-perf) RECORD_PERF=1; shift ;;
     --skip-perf) SKIP_PERF=1; shift ;;
-    --skip-extended-perf) SKIP_EXTENDED_PERF=1; shift ;;
+    --skip-matrix|--skip-extended-perf) SKIP_MATRIX=1; shift ;;
     --quick) QUICK=1; shift ;;
     --python) PYTHON="$2"; shift 2 ;;
+    --baseline-ref) BASELINE_REF="$2"; shift 2 ;;
+    --modes) MODES="$2"; shift 2 ;;
+    --keep-ab) KEEP_AB=1; shift ;;
     -h|--help)
-      sed -n '2,14p' "$0"
+      sed -n '2,20p' "$0"
       exit 0
       ;;
     *)
@@ -43,6 +53,9 @@ done
 
 export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-4}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export GATE_ROWS="${GATE_ROWS:-1000000}"
+export GATE_DIM="${GATE_DIM:-128}"
+export GATE_BATCH_SIZE="${GATE_BATCH_SIZE:-100000}"
 
 echo "==> Rust correctness regressions"
 if [[ "$QUICK" -eq 1 ]]; then
@@ -87,29 +100,24 @@ if [[ "$SKIP_PERF" -eq 1 ]]; then
   exit 0
 fi
 
-PERF_ARGS=()
-if [[ "$SKIP_EXTENDED_PERF" -eq 1 ]]; then
-  PERF_ARGS+=(--skip-extended)
+PERF_ARGS=(ab --python "$PYTHON")
+if [[ -n "$BASELINE_REF" ]]; then
+  PERF_ARGS+=(--baseline-ref "$BASELINE_REF")
 fi
-
-BASELINE="$ROOT/benchmarks/baselines/local-perf-baseline.json"
-if [[ "$RECORD_PERF" -eq 1 || ! -f "$BASELINE" ]]; then
-  echo "==> Recording local performance baseline -> $BASELINE"
-  "$PYTHON" "$ROOT/scripts/perf_gate_local.py" record --python "$PYTHON" "${PERF_ARGS[@]}"
-  if [[ ! -f "$BASELINE" ]]; then
-    echo "Failed to write baseline" >&2
-    exit 1
-  fi
-  if [[ "$RECORD_PERF" -eq 1 ]]; then
-    echo "Baseline recorded. Re-run without --record-perf to check."
-    exit 0
-  fi
-  echo "No prior baseline existed; recorded one for this machine. Next run will compare."
-  exit 0
+if [[ -n "$MODES" ]]; then
+  PERF_ARGS+=(--modes "$MODES")
 fi
+if [[ "$SKIP_MATRIX" -eq 1 ]]; then
+  PERF_ARGS+=(--skip-matrix)
+fi
+if [[ "$KEEP_AB" -eq 1 ]]; then
+  PERF_ARGS+=(--keep-ab)
+fi
+PERF_ARGS+=("${EXTRA_PERF_ARGS[@]}")
 
-echo "==> Local performance gate (check vs $BASELINE)"
-"$PYTHON" "$ROOT/scripts/perf_gate_local.py" check --python "$PYTHON" "${PERF_ARGS[@]}"
+echo "==> Isolated A/B performance gate (1M x 128 dense matrix + sparse/hybrid)"
+echo "    This installs baseline and candidate into separate venvs/data dirs and can take hours."
+"$PYTHON" "$ROOT/scripts/perf_gate_local.py" "${PERF_ARGS[@]}"
 
 if [[ "${SKIP_CANARY:-0}" != "1" ]]; then
   echo "==> Local canary"

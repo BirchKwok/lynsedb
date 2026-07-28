@@ -322,7 +322,9 @@ class TestIndexBuildRemove:
         assert "SPANN" in populated_collection.index_mode.upper()
 
     def test_n_clusters_is_ignored_for_non_ivf_index(self, populated_collection):
+        # Shared kwargs: n_clusters is accepted and ignored for HNSW.
         populated_collection.build_index("HNSW-IP", n_clusters=4)
+        populated_collection.build_index("HNSW-IP", m=8, ef_construction=32)
         assert "HNSW" in populated_collection.index_mode.upper()
 
     def test_bare_index_family_names_are_rejected(self, populated_collection):

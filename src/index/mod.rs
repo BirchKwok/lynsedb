@@ -14,6 +14,7 @@ use crate::distance::DistanceMetric;
 use crate::error::{LynseError, Result};
 use crate::quantizer::QuantizerType;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 
 /// Common index configuration.
@@ -80,6 +81,18 @@ pub trait VectorIndex: Send + Sync {
         ids: Option<&[u64]>,
     ) -> Result<()>;
 
+    /// Build from an owned vector buffer (avoids an extra copy for large N).
+    /// Default clones into [`build`](Self::build); DiskANN layered overrides.
+    fn build_owned(
+        &mut self,
+        vectors: Vec<f32>,
+        n_vectors: usize,
+        dim: usize,
+        ids: Option<Vec<u64>>,
+    ) -> Result<()> {
+        self.build(&vectors, n_vectors, dim, ids.as_deref())
+    }
+
     /// Search for k nearest neighbors.
     /// Returns (ids, distances).
     fn search(
@@ -91,6 +104,16 @@ pub trait VectorIndex: Send + Sync {
 
     /// Delete vectors by IDs.
     fn delete(&mut self, ids: &[u64]) -> Result<()>;
+
+    /// Delete vectors by IDs, optionally supplying their f32 vectors (row-major).
+    ///
+    /// DiskANN IP-delete uses the vectors for in-place edge repair when the
+    /// index no longer keeps full-precision data (layered mode). Default
+    /// ignores `vectors` and calls [`delete`](Self::delete).
+    fn delete_with_vectors(&mut self, ids: &[u64], vectors: &[f32]) -> Result<()> {
+        let _ = vectors;
+        self.delete(ids)
+    }
 
     /// Insert additional vectors (incremental).
     fn insert(&mut self, vectors: &[f32], n_vectors: usize, dim: usize, ids: &[u64]) -> Result<()>;
@@ -115,6 +138,27 @@ pub trait VectorIndex: Send + Sync {
     /// Deserialize the index from bytes.
     fn deserialize(&mut self, data: &[u8]) -> Result<()>;
 
+    /// Bind collection data directory (DiskANN loads `diskann/` sidecars here).
+    fn attach_data_dir(&mut self, _dir: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    /// When true, engine should call [`search_candidates`] then exact-rescore via VectorStore.
+    fn uses_store_rescore(&self) -> bool {
+        false
+    }
+
+    /// Oversampled candidate row indices for store-side exact rescore.
+    fn search_candidates(
+        &self,
+        query: &[f32],
+        k: usize,
+        params: &SearchParams,
+    ) -> Result<Vec<u32>> {
+        let (ids, _) = self.search(query, k, params)?;
+        Ok(ids.into_iter().map(|id| id as u32).collect())
+    }
+
     /// Get the index name string (matches Python API naming).
     fn name(&self) -> String;
 }
@@ -132,7 +176,8 @@ impl Default for SearchParams {
     fn default() -> Self {
         Self {
             k: 10,
-            nprobe: 10,
+            // 0 = use index build-time default (IVF/SPANN nprobe, HNSW ef_search).
+            nprobe: 0,
             ef_search: None,
             subset_indices: None,
         }
@@ -229,6 +274,21 @@ pub fn resolve_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, Qua
             IndexType::DiskANN,
             DistanceMetric::Cosine,
             QuantizerType::None,
+        )),
+        "DISKANN-IP-PQ" | "DISKANN-IP-PQ8" | "DISKANN-IP-PQ16" => Some((
+            IndexType::DiskANN,
+            DistanceMetric::InnerProduct,
+            QuantizerType::Product,
+        )),
+        "DISKANN-L2-PQ" | "DISKANN-L2-PQ8" | "DISKANN-L2-PQ16" => Some((
+            IndexType::DiskANN,
+            DistanceMetric::L2Squared,
+            QuantizerType::Product,
+        )),
+        "DISKANN-COS-PQ" | "DISKANN-COSINE-PQ" => Some((
+            IndexType::DiskANN,
+            DistanceMetric::Cosine,
+            QuantizerType::Product,
         )),
         "DISKANN-IP-SQ8" => Some((
             IndexType::DiskANN,
@@ -397,55 +457,222 @@ fn resolve_domain_index_type(alias: &str) -> Option<(IndexType, DistanceMetric, 
     accepted.then_some((index_type, metric, QuantizerType::None))
 }
 
+/// Tunable parameters for [`create_index_with_build_options`], exposed as
+/// Python/HTTP `build_index(**kwargs)` / `params`.
+///
+/// Defaults applied when a field is `None`:
+/// - IVF/SPANN: `n_clusters=256`, `nprobe=32`, SPANN `replica_count=1`
+/// - HNSW: `m=16`, `ef_construction=128`, `ef_search=50`, `max_level` uncapped
+/// - DiskANN: `r=16`, `l=64`, `alpha=1.2`, `max_degree=r`
+///
+/// Unknown keys are rejected; keys that do not apply to the selected index
+/// family are ignored (so shared kwargs dicts work across modes).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexBuildOptions {
+    /// IVF / SPANN coarse centroids (`n_centroids` accepted as alias). Default: 256.
+    #[serde(default, alias = "n_centroids")]
+    pub n_clusters: Option<usize>,
+    /// HNSW max neighbors per layer (M). Default: 16.
+    #[serde(default)]
+    pub m: Option<usize>,
+    /// HNSW construction beam width. Default: 128.
+    #[serde(default)]
+    pub ef_construction: Option<usize>,
+    /// HNSW default search beam (overridable per-query via nprobe/ef). Default: 50.
+    #[serde(default)]
+    pub ef_search: Option<usize>,
+    /// Optional HNSW max level cap (omit for uncapped / internal default).
+    #[serde(default)]
+    pub max_level: Option<usize>,
+    /// DiskANN / Vamana target out-degree (R). Default: 16.
+    #[serde(default)]
+    pub r: Option<usize>,
+    /// DiskANN search/build beam (L); build may further cap L_build. Default: 64.
+    #[serde(default)]
+    pub l: Option<usize>,
+    /// DiskANN robust-prune alpha (≥ 1.0). Default: 1.2.
+    #[serde(default)]
+    pub alpha: Option<f32>,
+    /// DiskANN hard degree cap (defaults to R when omitted).
+    #[serde(default)]
+    pub max_degree: Option<usize>,
+    /// IVF / SPANN default nprobe stored on the index. Default: 32.
+    #[serde(default)]
+    pub nprobe: Option<usize>,
+    /// SPANN boundary replica count. Default: 1.
+    #[serde(default)]
+    pub replica_count: Option<usize>,
+}
+
+impl IndexBuildOptions {
+    /// Parse from a JSON object (Python kwargs / HTTP `params`).
+    pub fn from_json(value: &serde_json::Value) -> Result<Self> {
+        let obj = value.as_object().ok_or_else(|| {
+            LynseError::InvalidArgument("index build options must be a JSON object".into())
+        })?;
+        for key in obj.keys() {
+            if !Self::is_known_key(key) {
+                return Err(LynseError::InvalidArgument(format!(
+                    "unknown index build parameter '{}'; supported keys: {}",
+                    key,
+                    Self::known_keys_csv()
+                )));
+            }
+        }
+        serde_json::from_value(value.clone()).map_err(|e| {
+            LynseError::InvalidArgument(format!("invalid index build parameter value: {}", e))
+        })
+    }
+
+    pub fn from_n_clusters(n_clusters: Option<usize>) -> Self {
+        Self {
+            n_clusters,
+            ..Self::default()
+        }
+    }
+
+    fn is_known_key(key: &str) -> bool {
+        matches!(
+            key,
+            "n_clusters"
+                | "n_centroids"
+                | "m"
+                | "ef_construction"
+                | "ef_search"
+                | "max_level"
+                | "r"
+                | "l"
+                | "alpha"
+                | "max_degree"
+                | "nprobe"
+                | "replica_count"
+        )
+    }
+
+    fn known_keys_csv() -> &'static str {
+        "n_clusters, n_centroids, m, ef_construction, ef_search, max_level, r, l, alpha, max_degree, nprobe, replica_count"
+    }
+
+    /// Drop fields that do not apply to `index_type` (keeps shared-kwargs loops safe).
+    pub fn filtered_for(&self, index_type: IndexType) -> Self {
+        match index_type {
+            IndexType::Flat => Self::default(),
+            IndexType::HNSW => Self {
+                m: self.m,
+                ef_construction: self.ef_construction,
+                ef_search: self.ef_search,
+                max_level: self.max_level,
+                ..Self::default()
+            },
+            IndexType::DiskANN => Self {
+                r: self.r,
+                l: self.l,
+                alpha: self.alpha,
+                max_degree: self.max_degree,
+                ..Self::default()
+            },
+            IndexType::IVF => Self {
+                n_clusters: self.n_clusters,
+                nprobe: self.nprobe,
+                ..Self::default()
+            },
+            IndexType::SPANN => Self {
+                n_clusters: self.n_clusters,
+                nprobe: self.nprobe,
+                replica_count: self.replica_count,
+                ..Self::default()
+            },
+        }
+    }
+
+    fn validate_positive(name: &str, value: Option<usize>) -> Result<()> {
+        if value == Some(0) {
+            return Err(LynseError::InvalidArgument(format!(
+                "{} must be greater than 0",
+                name
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        Self::validate_positive("n_clusters", self.n_clusters)?;
+        Self::validate_positive("m", self.m)?;
+        Self::validate_positive("ef_construction", self.ef_construction)?;
+        Self::validate_positive("ef_search", self.ef_search)?;
+        Self::validate_positive("r", self.r)?;
+        Self::validate_positive("l", self.l)?;
+        Self::validate_positive("max_degree", self.max_degree)?;
+        Self::validate_positive("nprobe", self.nprobe)?;
+        Self::validate_positive("replica_count", self.replica_count)?;
+        if let Some(alpha) = self.alpha {
+            if !(alpha.is_finite() && alpha >= 1.0) {
+                return Err(LynseError::InvalidArgument(
+                    "alpha must be a finite value >= 1.0".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Create an index from a type alias string.
 pub fn create_index(alias: &str) -> Result<Box<dyn VectorIndex>> {
-    create_index_with_options(alias, None)
+    create_index_with_build_options(alias, &IndexBuildOptions::default())
 }
 
 pub fn create_index_with_options(
     alias: &str,
     n_centroids: Option<usize>,
 ) -> Result<Box<dyn VectorIndex>> {
+    create_index_with_build_options(alias, &IndexBuildOptions::from_n_clusters(n_centroids))
+}
+
+pub fn create_index_with_build_options(
+    alias: &str,
+    opts: &IndexBuildOptions,
+) -> Result<Box<dyn VectorIndex>> {
     let (index_type, metric, quant) = resolve_index_type(alias)
         .ok_or_else(|| LynseError::InvalidArgument(format!("Unknown index type: {}", alias)))?;
 
-    if n_centroids == Some(0) {
-        return Err(LynseError::InvalidArgument(
-            "n_clusters must be greater than 0".to_string(),
-        ));
-    }
-    if n_centroids.is_some() && !matches!(index_type, IndexType::IVF | IndexType::SPANN) {
-        return Err(LynseError::InvalidArgument(
-            "n_clusters is only supported for IVF and SPANN indexes".to_string(),
-        ));
-    }
+    opts.validate()?;
+    let opts = opts.filtered_for(index_type);
 
     match index_type {
         IndexType::Flat => Ok(Box::new(flat::FlatIndex::new(metric, quant))),
         IndexType::HNSW => Ok(Box::new(hnsw::HNSWIndex::new(
-            metric, quant, 16,   // M
-            128,  // ef_construction (matches usearch default)
-            50,   // ef_search
-            None, // max_level
+            metric,
+            quant,
+            opts.m.unwrap_or(16),
+            opts.ef_construction.unwrap_or(128),
+            opts.ef_search.unwrap_or(50),
+            opts.max_level,
         ))),
-        IndexType::DiskANN => Ok(Box::new(diskann::DiskANNIndex::new(
-            metric, quant, 64,  // R
-            100, // L
-            1.2, // alpha
-            128, // max_degree
-        ))),
+        IndexType::DiskANN => {
+            let r = opts.r.unwrap_or(16);
+            Ok(Box::new(diskann::DiskANNIndex::with_alias(
+                metric,
+                quant,
+                r,
+                opts.l.unwrap_or(64),
+                opts.alpha.unwrap_or(1.2),
+                opts.max_degree.unwrap_or(r),
+                alias,
+            )))
+        }
         IndexType::IVF => Ok(Box::new(ivf::IVFIndex::new(
             metric,
             quant,
-            n_centroids.unwrap_or(256),
-            32, // nprobe
+            opts.n_clusters.unwrap_or(256),
+            opts.nprobe.unwrap_or(32),
         ))),
         IndexType::SPANN => Ok(Box::new(spann::SPANNIndex::new(
             metric,
             quant,
-            n_centroids.unwrap_or(256),
-            32, // nprobe
-            spann::DEFAULT_REPLICA_COUNT,
+            opts.n_clusters.unwrap_or(256),
+            opts.nprobe.unwrap_or(32),
+            opts.replica_count
+                .unwrap_or(spann::DEFAULT_REPLICA_COUNT),
         ))),
     }
 }
@@ -478,6 +705,67 @@ mod tests {
     fn spann_accepts_n_clusters() {
         let idx = create_index_with_options("SPANN-L2", Some(8)).unwrap();
         assert_eq!(idx.config().index_type, IndexType::SPANN);
+        match &idx.config().params {
+            IndexParams::SPANN { n_centroids, .. } => assert_eq!(*n_centroids, 8),
+            _ => panic!("expected SPANN params"),
+        }
+    }
+
+    #[test]
+    fn hnsw_build_options_apply_m_and_ef() {
+        let opts = IndexBuildOptions {
+            m: Some(8),
+            ef_construction: Some(64),
+            ef_search: Some(40),
+            n_clusters: Some(999), // ignored for HNSW
+            ..IndexBuildOptions::default()
+        };
+        let idx = create_index_with_build_options("HNSW-IP", &opts).unwrap();
+        match &idx.config().params {
+            IndexParams::HNSW {
+                m,
+                ef_construction,
+                ef_search,
+                ..
+            } => {
+                assert_eq!(*m, 8);
+                assert_eq!(*ef_construction, 64);
+                assert_eq!(*ef_search, 40);
+            }
+            _ => panic!("expected HNSW params"),
+        }
+    }
+
+    #[test]
+    fn diskann_build_options_apply_r_l_alpha() {
+        let opts = IndexBuildOptions {
+            r: Some(24),
+            l: Some(80),
+            alpha: Some(1.5),
+            ..IndexBuildOptions::default()
+        };
+        let idx = create_index_with_build_options("DISKANN-L2", &opts).unwrap();
+        match &idx.config().params {
+            IndexParams::DiskANN {
+                r,
+                l,
+                alpha,
+                max_degree,
+            } => {
+                assert_eq!(*r, 24);
+                assert_eq!(*l, 80);
+                assert!((*alpha - 1.5).abs() < 1e-6);
+                assert_eq!(*max_degree, 24);
+            }
+            _ => panic!("expected DiskANN params"),
+        }
+    }
+
+    #[test]
+    fn unknown_build_option_key_errors() {
+        let v = serde_json::json!({"m": 16, "typo_param": 1});
+        let err = IndexBuildOptions::from_json(&v).unwrap_err().to_string();
+        assert!(err.contains("unknown index build parameter"), "{err}");
     }
 
     #[test]

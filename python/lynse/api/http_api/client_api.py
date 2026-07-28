@@ -1509,10 +1509,10 @@ class Collection:
             self,
             index_mode: str = 'FLAT-IP',
             field_name: str = 'default',
-            n_clusters: Union[int, None] = None,
+            **kwargs,
     ):
         """
-        Build the index for the collection.
+        Build or rebuild the index for the collection (or a named vector field).
 
         Parameters:
             index_mode (str): The index mode, must be one of the following:
@@ -1603,17 +1603,57 @@ class Collection:
                 - 'IVF-COS-SQ8': IVF index with cosine similarity and SQ8 quantizer.
                 - 'IVF-JACCARD-BINARY': IVF index with Jaccard distance (binary vectors).
                 - 'IVF-HAMMING-BINARY': IVF index with Hamming distance (binary vectors).
+
             field_name (str): Named vector field to build index for.
                 Defaults to "default" (the primary collection vector).
-            n_clusters (int, optional): The number of clusters. IVF and SPANN
-                modes use it; other index modes silently ignore it.
+            **kwargs: Family-specific build parameters. Unknown names raise
+                ``ValueError``. Keys that do not apply to the selected family
+                are ignored (shared kwargs dicts across modes are OK).
+                Sent to the server as ``params`` (plus legacy top-level
+                ``n_clusters`` when present).
+
+                **IVF / SPANN**
+
+                - ``n_clusters`` / ``n_centroids`` (int, default ``256``):
+                  Number of coarse centroids / partitions.
+                - ``nprobe`` (int, default ``32``): Default partitions probed
+                  at search time (overridable per query).
+                - ``replica_count`` (int, default ``1``, SPANN only): Boundary
+                  replica count.
+
+                **HNSW**
+
+                - ``m`` (int, default ``16``): Max neighbors per layer.
+                - ``ef_construction`` (int, default ``128``): Build-time
+                  candidate list size (higher → better recall, slower build).
+                - ``ef_search`` (int, default ``50``): Default search beam
+                  (overridable per query via ``nprobe`` / ef).
+                - ``max_level`` (int, optional): Cap on max HNSW layer.
+
+                **DiskANN**
+
+                - ``r`` (int, default ``16``): Target out-degree (R).
+                - ``l`` (int, default ``64``): Search/build beam (L).
+                - ``alpha`` (float, default ``1.2``, must be ``>= 1.0``):
+                  Robust-prune factor.
+                - ``max_degree`` (int, default equals ``r``): Hard degree cap.
+
+                Flat / PQ / RaBitQ / PolarVec modes accept no build kwargs.
 
         Returns:
             dict: The response from the server.
 
         Raises:
             ExecutionError: If the server returns an error.
+
+        Examples:
+            >>> collection.build_index("IVF-L2", n_clusters=256, nprobe=32)
+            >>> collection.build_index("HNSW-IP", m=32, ef_construction=200)
+            >>> collection.build_index("DISKANN-IP", r=32, l=64, alpha=1.2)
         """
+        from ..._index_build import normalize_build_kwargs
+
+        params = normalize_build_kwargs(index_mode, kwargs)
         if field_name == 'default':
             uri = f'{self._uri}/build_index'
             data = {
@@ -1629,8 +1669,12 @@ class Collection:
                 "field_name": field_name,
                 "index_mode": index_mode,
             }
-        if n_clusters is not None and index_mode.upper().startswith(("IVF", "SPANN")):
-            data['n_clusters'] = int(n_clusters)
+        if params:
+            data["params"] = params
+            if "n_clusters" in params:
+                data["n_clusters"] = int(params["n_clusters"])
+            elif "n_centroids" in params:
+                data["n_clusters"] = int(params["n_centroids"])
 
         response = self._session.post(uri, json=data)
 

@@ -81,7 +81,7 @@ WAL state.
 
 | Method | Description |
 | --- | --- |
-| `build_index(index_mode="FLAT-IP", field_name="default", n_clusters=None)` | Build or change an index. IVF and SPANN use `n_clusters`; other index modes ignore it. |
+| `build_index(index_mode="FLAT-IP", field_name="default", **kwargs)` | Build or change an index. Pass family-specific kwargs (`n_clusters`, `m`, `r`, …); unknown keys raise `ValueError`, inapplicable keys are ignored. |
 | `remove_index(field_name="default")` | Remove the primary or named-field index. |
 | `create_vector_field(name, dim, metric="ip", index_mode=None)` | Create a named vector field. |
 | `list_vector_fields()` | List `default` and named vector fields. |
@@ -106,8 +106,13 @@ Parameter behavior is the same for local and HTTP Python clients:
   after the first primary vector write so collections with inferred dimensions
   can still be created without specifying `dim`, and the default inner-product
   metric is explicit.
-- `n_clusters` is used only by IVF and SPANN index modes. Passing it to Flat,
-  PQ, RaBitQ, PolarVec, HNSW, or DiskANN modes is allowed and ignored.
+- `build_index(**kwargs)` accepts family-specific parameters:
+  - IVF/SPANN: `n_clusters`/`n_centroids` (default 256), `nprobe` (default 32),
+    `replica_count` (SPANN only, default 1)
+  - HNSW: `m` (16), `ef_construction` (128), `ef_search` (50), `max_level`
+  - DiskANN: `r` (16), `l` (64), `alpha` (1.2), `max_degree` (defaults to `r`)
+  Unknown keys raise `ValueError`. Keys for another family are ignored (so
+  shared kwargs dicts work across modes).
 - `nprobe` controls IVF/SPANN partitions and HNSW search breadth. Flat, PQ,
   RaBitQ, PolarVec, and named vector-field searches ignore it.
 - `approx` and `eps` apply to flat IP, L2, cosine, L1, Chebyshev, Canberra,

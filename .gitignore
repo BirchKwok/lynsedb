@@ -183,3 +183,6 @@ fingerprint
 *.stats
 *.apex_id_map
 *.iporder
+*.stable_ids
+
+*.json

@@ -1084,16 +1084,25 @@ impl PyCollection {
     }
 
     /// Build or change the index for a named vector field.
-    #[pyo3(signature = (field_name, index_type, n_clusters=None))]
+    ///
+    /// `params` uses the same keys as `build_index` (n_clusters, m, r, …).
+    #[pyo3(signature = (field_name, index_type, params=None))]
     fn build_vector_field_index(
         &self,
+        py: pyo3::Python<'_>,
         field_name: &str,
         index_type: &str,
-        n_clusters: Option<usize>,
+        params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let mut coll = self.inner.write();
-        coll.build_vector_field_index_with_options(field_name, index_type, n_clusters)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        let opts = parse_index_build_options(params)?;
+        let field_name = field_name.to_owned();
+        let index_type = index_type.to_owned();
+        let inner = self.inner.clone();
+        py.allow_threads(move || {
+            let mut coll = inner.write();
+            coll.build_vector_field_index_with_build_options(&field_name, &index_type, &opts)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        })
     }
 
     /// Remove a named vector field index and return it to flat search.
@@ -1114,11 +1123,30 @@ impl PyCollection {
     ///
     /// Args:
     ///     index_type: e.g. "IVF-IP-SQ8", "HNSW-L2", "Flat-Cos", etc.
-    #[pyo3(signature = (index_type, n_clusters=None))]
-    fn build_index(&self, index_type: &str, n_clusters: Option<usize>) -> PyResult<()> {
-        let mut coll = self.inner.write();
-        coll.build_index_with_options(index_type, n_clusters)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    ///     params: optional dict of family-specific build kwargs. Unknown keys
+    ///         error; inapplicable keys are ignored.
+    ///
+    ///         IVF/SPANN: `n_clusters`/`n_centroids` (default 256), `nprobe`
+    ///         (default 32), `replica_count` (SPANN, default 1).
+    ///         HNSW: `m` (16), `ef_construction` (128), `ef_search` (50),
+    ///         `max_level` (optional).
+    ///         DiskANN: `r` (16), `l` (64), `alpha` (1.2, >= 1.0),
+    ///         `max_degree` (defaults to `r`).
+    #[pyo3(signature = (index_type, params=None))]
+    fn build_index(
+        &self,
+        py: pyo3::Python<'_>,
+        index_type: &str,
+        params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let opts = parse_index_build_options(params)?;
+        let index_type = index_type.to_owned();
+        let inner = self.inner.clone();
+        py.allow_threads(move || {
+            let mut coll = inner.write();
+            coll.build_index_with_build_options(&index_type, &opts)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        })
     }
 
     /// Remove the current index.
@@ -1152,7 +1180,7 @@ impl PyCollection {
     ) -> PyResult<PySearchResult> {
         let query = vector.as_slice()?;
         let k = k.unwrap_or(10);
-        let nprobe = nprobe.unwrap_or(10);
+        let nprobe = nprobe.unwrap_or(0);
         let approx = approx.unwrap_or(false);
         let eps = eps.unwrap_or(1e-4);
 
@@ -1222,7 +1250,7 @@ impl PyCollection {
     ) -> PyResult<PyObject> {
         let query = vector.as_slice()?;
         let k = k.unwrap_or(10);
-        let nprobe = nprobe.unwrap_or(10);
+        let nprobe = nprobe.unwrap_or(0);
         let approx = approx.unwrap_or(false);
         let eps = eps.unwrap_or(1e-4);
 
@@ -1366,7 +1394,7 @@ impl PyCollection {
             .as_slice()
             .expect("numpy array must be contiguous (C-order)");
         let k = k.unwrap_or(10);
-        let nprobe = nprobe.unwrap_or(10);
+        let nprobe = nprobe.unwrap_or(0);
 
         let coll = self.inner.read();
         let results = coll
@@ -1692,7 +1720,7 @@ impl PyCollection {
     /// Soft-delete vectors by ID. Deleted IDs are excluded from all future search results.
     /// The raw data is NOT removed from disk; use vacuum() to physically compact.
     fn delete_items(&self, ids: Vec<u64>) -> PyResult<()> {
-        let coll = self.inner.read();
+        let mut coll = self.inner.write();
         coll.delete_items(&ids)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
@@ -2523,6 +2551,21 @@ fn percent_encode(value: &str) -> String {
         }
     }
     out
+}
+
+fn parse_index_build_options(
+    params: Option<&Bound<'_, PyDict>>,
+) -> PyResult<crate::index::IndexBuildOptions> {
+    let Some(params) = params else {
+        return Ok(crate::index::IndexBuildOptions::default());
+    };
+    let mut map = serde_json::Map::new();
+    for (k, v) in params.iter() {
+        let key: String = k.extract()?;
+        map.insert(key, py_to_json_value(&v)?);
+    }
+    crate::index::IndexBuildOptions::from_json(&serde_json::Value::Object(map))
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 fn query_params_from_pydict(params: Option<&Bound<'_, PyDict>>) -> PyResult<Vec<(String, String)>> {

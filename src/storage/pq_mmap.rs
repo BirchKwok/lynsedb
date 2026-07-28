@@ -29,6 +29,8 @@ pub const DEFAULT_N_CLUSTERS: usize = 256;
 const TRAINING_SUBSAMPLE: usize = 50_000;
 /// K-means iterations per subspace.
 const KMEANS_ITERS: usize = 15;
+/// Fewer iters when K is small (DiskANN candidate PQ).
+const KMEANS_ITERS_FAST: usize = 6;
 /// Default oversample factor for two-pass re-ranking.
 pub const DEFAULT_OVERSAMPLE: usize = 32;
 
@@ -61,11 +63,26 @@ impl PQIndex {
     ///
     /// - `n_subspaces`: number of subspaces; must divide `dim` evenly.
     pub fn build(data: &[f32], n_vectors: usize, dim: usize, n_subspaces: usize) -> Self {
+        Self::build_with_clusters(data, n_vectors, dim, n_subspaces, DEFAULT_N_CLUSTERS)
+    }
+
+    /// Like [`build`](Self::build) but with an explicit cluster count (≤ 256).
+    ///
+    /// DiskANN layered search only needs PQ for candidate generation (exact
+    /// re-rank comes from the collection store), so a smaller K greatly speeds
+    /// up encode at 10M+ without collapsing final recall.
+    pub fn build_with_clusters(
+        data: &[f32],
+        n_vectors: usize,
+        dim: usize,
+        n_subspaces: usize,
+        n_clusters: usize,
+    ) -> Self {
         assert_eq!(dim % n_subspaces, 0, "dim must be divisible by n_subspaces");
         assert!(n_vectors > 0, "need at least one vector");
 
         let subspace_size = dim / n_subspaces;
-        let n_clusters = DEFAULT_N_CLUSTERS.min(n_vectors);
+        let n_clusters = n_clusters.clamp(1, DEFAULT_N_CLUSTERS).min(n_vectors);
 
         // Subsample for training (uniform stride, capped at TRAINING_SUBSAMPLE)
         let train_n = n_vectors.min(TRAINING_SUBSAMPLE);
@@ -97,6 +114,11 @@ impl PQIndex {
                     subspace_size,
                     n_clusters,
                     m as u64, // per-subspace seed for reproducibility
+                    if n_clusters <= 64 {
+                        KMEANS_ITERS_FAST
+                    } else {
+                        KMEANS_ITERS
+                    },
                 )
             })
             .collect();
@@ -203,6 +225,151 @@ impl PQIndex {
     #[inline]
     pub fn len(&self) -> usize {
         self.n_vectors
+    }
+
+    #[inline]
+    pub fn n_subspaces(&self) -> usize {
+        self.n_subspaces
+    }
+
+    #[inline]
+    pub fn n_clusters(&self) -> usize {
+        self.n_clusters
+    }
+
+    #[inline]
+    pub fn subspace_size(&self) -> usize {
+        self.subspace_size
+    }
+
+    #[inline]
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Build an ADC LUT for `query` under `metric`.
+    pub fn adc_lut(&self, query: &[f32], metric: DistanceMetric) -> Vec<f32> {
+        build_lut(
+            query,
+            &self.codebooks,
+            self.n_subspaces,
+            self.n_clusters,
+            self.subspace_size,
+            metric,
+        )
+    }
+
+    /// Asymmetric distance (or IP) for a single encoded vector via LUT.
+    /// Lower is better for ascending metrics; for IP this returns raw IP (higher better).
+    #[inline]
+    pub fn adc_raw(&self, idx: usize, lut: &[f32]) -> f32 {
+        if idx >= self.n_vectors {
+            return f32::MAX;
+        }
+        let code = &self.codes[idx * self.n_subspaces..(idx + 1) * self.n_subspaces];
+        let mut sum = 0.0f32;
+        for (m, &c) in code.iter().enumerate() {
+            sum += lut[m * self.n_clusters + c as usize];
+        }
+        sum
+    }
+
+    /// Rank distance: lower is always closer (IP negated).
+    #[inline]
+    pub fn adc_rank(&self, idx: usize, lut: &[f32], ascending: bool) -> f32 {
+        let raw = self.adc_raw(idx, lut);
+        if ascending {
+            raw
+        } else {
+            -raw
+        }
+    }
+
+    /// Append encoded rows for incremental insert (codes only; codebooks fixed).
+    pub fn append_encoded(&mut self, data: &[f32], n_vectors: usize, dim: usize) -> Result<(), String> {
+        if dim != self.dim {
+            return Err(format!(
+                "PQ dim mismatch: expected {}, got {}",
+                self.dim, dim
+            ));
+        }
+        if n_vectors == 0 {
+            return Ok(());
+        }
+        let new_codes = encode_vectors(
+            data,
+            n_vectors,
+            dim,
+            &self.codebooks,
+            self.n_subspaces,
+            self.n_clusters,
+            self.subspace_size,
+        );
+        self.codes.extend_from_slice(&new_codes);
+        self.n_vectors += n_vectors;
+        Ok(())
+    }
+
+    /// Overwrite PQ codes for an existing row (codebooks fixed).
+    pub fn set_encoded_row(&mut self, idx: usize, vector: &[f32], dim: usize) -> Result<(), String> {
+        if dim != self.dim {
+            return Err(format!(
+                "PQ dim mismatch: expected {}, got {}",
+                self.dim, dim
+            ));
+        }
+        if idx >= self.n_vectors {
+            return Err(format!(
+                "PQ set_encoded_row: idx {} out of range (n={})",
+                idx, self.n_vectors
+            ));
+        }
+        if vector.len() < dim {
+            return Err(format!(
+                "PQ set_encoded_row: vector len {} < dim {}",
+                vector.len(),
+                dim
+            ));
+        }
+        let codes = encode_vectors(
+            &vector[..dim],
+            1,
+            dim,
+            &self.codebooks,
+            self.n_subspaces,
+            self.n_clusters,
+            self.subspace_size,
+        );
+        let start = idx * self.n_subspaces;
+        self.codes[start..start + self.n_subspaces].copy_from_slice(&codes);
+        Ok(())
+    }
+
+    /// Reconstruct an approximate f32 vector from PQ centroids (for IP graph updates).
+    pub fn reconstruct(&self, idx: usize) -> Option<Vec<f32>> {
+        if idx >= self.n_vectors {
+            return None;
+        }
+        let mut out = vec![0.0f32; self.dim];
+        let code = &self.codes[idx * self.n_subspaces..(idx + 1) * self.n_subspaces];
+        for (m, &c) in code.iter().enumerate() {
+            let cb_off = (m * self.n_clusters + c as usize) * self.subspace_size;
+            let dst = m * self.subspace_size;
+            out[dst..dst + self.subspace_size]
+                .copy_from_slice(&self.codebooks[cb_off..cb_off + self.subspace_size]);
+        }
+        Some(out)
+    }
+
+    /// Keep only the listed row indices (in order), compacting codes.
+    pub fn retain_indices(&mut self, keep: &[usize]) {
+        let mut new_codes = Vec::with_capacity(keep.len() * self.n_subspaces);
+        for &idx in keep {
+            let start = idx * self.n_subspaces;
+            new_codes.extend_from_slice(&self.codes[start..start + self.n_subspaces]);
+        }
+        self.codes = new_codes;
+        self.n_vectors = keep.len();
     }
 
     /// Save the PQ index to `path`.
@@ -323,7 +490,7 @@ impl PQIndex {
 ///
 /// `lut[m * K + k]` = distance(query_subspace_m, codebook\[m\]\[k\]).
 /// For IP: inner product. For L2/Cosine: L2².
-fn build_lut(
+pub fn build_lut(
     query: &[f32],
     codebooks: &[f32],
     n_subspaces: usize,
@@ -360,6 +527,7 @@ fn kmeans_subspace(
     ss: usize, // subspace_size
     k: usize,  // n_clusters
     seed: u64,
+    iters: usize,
 ) -> Vec<f32> {
     let k = k.min(n_vectors);
 
@@ -374,7 +542,7 @@ fn kmeans_subspace(
     let mut centroids = random_init_centroids(&sub, n_vectors, ss, k, seed);
     let mut assignments = vec![0u32; n_vectors];
 
-    for _iter in 0..KMEANS_ITERS {
+    for _iter in 0..iters.max(1) {
         // --- Assign ---
         let mut changed = false;
         for i in 0..n_vectors {
@@ -465,6 +633,10 @@ fn random_init_centroids(data: &[f32], n: usize, ss: usize, k: usize, seed: u64)
     centroids
 }
 
+fn l2sq_slice(a: &[f32], b: &[f32]) -> f32 {
+    simd::l2_squared_f32(a, b)
+}
+
 /// Encode all vectors using the trained codebooks (parallel across vectors).
 fn encode_vectors(
     data: &[f32],
@@ -481,18 +653,47 @@ fn encode_vectors(
         .enumerate()
         .for_each(|(i, code_row)| {
             for m in 0..n_subspaces {
-                let v_sub = &data[i * dim + m * subspace_size..i * dim + (m + 1) * subspace_size];
+                let v_sub =
+                    &data[i * dim + m * subspace_size..i * dim + (m + 1) * subspace_size];
                 let cb_base = m * n_clusters * subspace_size;
                 let mut best_c = 0u8;
                 let mut best_d = f32::MAX;
-                for c in 0..n_clusters {
-                    let cb =
-                        &codebooks[cb_base + c * subspace_size..cb_base + (c + 1) * subspace_size];
-                    let d = l2sq_slice(v_sub, cb);
+                let mut c = 0usize;
+                while c + 8 <= n_clusters {
+                    let b0 = &codebooks[cb_base + c * subspace_size
+                        ..cb_base + (c + 1) * subspace_size];
+                    let b1 = &codebooks[cb_base + (c + 1) * subspace_size
+                        ..cb_base + (c + 2) * subspace_size];
+                    let b2 = &codebooks[cb_base + (c + 2) * subspace_size
+                        ..cb_base + (c + 3) * subspace_size];
+                    let b3 = &codebooks[cb_base + (c + 3) * subspace_size
+                        ..cb_base + (c + 4) * subspace_size];
+                    let b4 = &codebooks[cb_base + (c + 4) * subspace_size
+                        ..cb_base + (c + 5) * subspace_size];
+                    let b5 = &codebooks[cb_base + (c + 5) * subspace_size
+                        ..cb_base + (c + 6) * subspace_size];
+                    let b6 = &codebooks[cb_base + (c + 6) * subspace_size
+                        ..cb_base + (c + 7) * subspace_size];
+                    let b7 = &codebooks[cb_base + (c + 7) * subspace_size
+                        ..cb_base + (c + 8) * subspace_size];
+                    let dists = simd::l2_squared_batch8_f32(v_sub, b0, b1, b2, b3, b4, b5, b6, b7);
+                    for (k, &d) in dists.iter().enumerate() {
+                        if d < best_d {
+                            best_d = d;
+                            best_c = (c + k) as u8;
+                        }
+                    }
+                    c += 8;
+                }
+                while c < n_clusters {
+                    let cb = &codebooks[cb_base + c * subspace_size
+                        ..cb_base + (c + 1) * subspace_size];
+                    let d = simd::l2_squared_f32(v_sub, cb);
                     if d < best_d {
                         best_d = d;
                         best_c = c as u8;
                     }
+                    c += 1;
                 }
                 code_row[m] = best_c;
             }
@@ -686,20 +887,6 @@ pub fn try_rescore_exact_with<E>(
     let indices = exact.iter().map(|e| e.1).collect();
     let dists = exact.iter().map(|e| e.0).collect();
     Ok((indices, dists))
-}
-
-// ─── Distance helpers ─────────────────────────────────────────────────────────
-
-/// Scalar L2² distance for small subspace vectors.
-#[inline(always)]
-fn l2sq_slice(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(&x, &y)| {
-            let d = x - y;
-            d * d
-        })
-        .sum()
 }
 
 // ─── I/O helpers ──────────────────────────────────────────────────────────────

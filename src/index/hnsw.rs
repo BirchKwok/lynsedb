@@ -277,6 +277,54 @@ fn greedy_closest_concurrent(
     entry
 }
 
+/// Free-standing HNSW neighbor heuristic (shared by concurrent insert).
+fn select_neighbors_heuristic_free(
+    _query: &[f32],
+    candidates: &[DistNode],
+    m: usize,
+    encoded_data: &[f32],
+    dim: usize,
+    metric: DistanceMetric,
+    ascending: bool,
+) -> Vec<u32> {
+    if m == 0 || candidates.is_empty() {
+        return Vec::new();
+    }
+    if candidates.len() <= m {
+        return candidates.iter().map(|dn| dn.node).collect();
+    }
+    let mut selected: Vec<u32> = Vec::with_capacity(m);
+    for c in candidates {
+        if selected.len() >= m {
+            break;
+        }
+        let c_vec = get_vec_raw(encoded_data, c.node, dim);
+        let mut keep = true;
+        for &s in &selected {
+            let raw = compute_distance_f32(c_vec, get_vec_raw(encoded_data, s, dim), metric);
+            let dist_cs = if ascending { raw } else { -raw };
+            if dist_cs < c.dist {
+                keep = false;
+                break;
+            }
+        }
+        if keep {
+            selected.push(c.node);
+        }
+    }
+    if selected.len() < m {
+        for c in candidates {
+            if selected.len() >= m {
+                break;
+            }
+            if !selected.contains(&c.node) {
+                selected.push(c.node);
+            }
+        }
+    }
+    selected
+}
+
 /// Insert a single point into the concurrent HNSW graph.
 /// Called from multiple rayon threads simultaneously.
 fn insert_point_concurrent(
@@ -334,11 +382,15 @@ fn insert_point_concurrent(
             curr_obj = first.node;
         }
 
-        let neighbors: Vec<u32> = candidates
-            .iter()
-            .take(m_for_level)
-            .map(|dn| dn.node)
-            .collect();
+        let neighbors: Vec<u32> = select_neighbors_heuristic_free(
+            point_vec,
+            &candidates,
+            m_for_level,
+            encoded_data,
+            dim,
+            metric,
+            ascending,
+        );
 
         // Set forward connections (write lock on this node)
         *graph.levels[lc][point_id as usize].write() = neighbors.clone();
@@ -351,7 +403,6 @@ fn insert_point_concurrent(
             nn.push(point_id);
 
             if nn.len() > max_conn {
-                // Prune: re-score all neighbors and keep closest max_conn
                 let neighbor_vec = get_vec_raw(encoded_data, neighbor, dim);
                 let mut scored: Vec<DistNode> = nn
                     .iter()
@@ -367,13 +418,18 @@ fn insert_point_concurrent(
                         }
                     })
                     .collect();
-                if scored.len() > max_conn {
-                    scored.select_nth_unstable_by(max_conn - 1, |a, b| {
-                        a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal)
-                    });
-                    scored.truncate(max_conn);
-                }
-                *nn = scored.iter().map(|dn| dn.node).collect();
+                scored.sort_unstable_by(|a, b| {
+                    a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal)
+                });
+                *nn = select_neighbors_heuristic_free(
+                    neighbor_vec,
+                    &scored,
+                    max_conn,
+                    encoded_data,
+                    dim,
+                    metric,
+                    ascending,
+                );
             }
             // write lock dropped here
         }
@@ -485,12 +541,83 @@ impl HNSWIndex {
         }
     }
 
+    /// Select up to `m` neighbors with the HNSW heuristic (Malkov Alg.4).
+    ///
+    /// Candidates must be sorted nearest-first. Keep `e` if it is closer to the
+    /// query than to every already-selected neighbor (relative neighborhood);
+    /// fill remaining slots with nearest leftovers if the heuristic is sparse.
+    fn select_neighbors_heuristic(
+        _query: &[f32],
+        candidates: &[DistNode],
+        m: usize,
+        encoded_data: &[f32],
+        dim: usize,
+        metric: DistanceMetric,
+        ascending: bool,
+    ) -> Vec<u32> {
+        if m == 0 || candidates.is_empty() {
+            return Vec::new();
+        }
+        if candidates.len() <= m {
+            return candidates.iter().map(|dn| dn.node).collect();
+        }
+
+        let mut selected: Vec<u32> = Vec::with_capacity(m);
+        for c in candidates {
+            if selected.len() >= m {
+                break;
+            }
+            let c_vec =
+                unsafe { std::slice::from_raw_parts(encoded_data.as_ptr().add(c.node as usize * dim), dim) };
+            let mut keep = true;
+            for &s in &selected {
+                let s_vec =
+                    unsafe { std::slice::from_raw_parts(encoded_data.as_ptr().add(s as usize * dim), dim) };
+                let raw = compute_distance_f32(c_vec, s_vec, metric);
+                let dist_cs = if ascending { raw } else { -raw };
+                // Discard if some selected neighbor is closer to c than query is.
+            if dist_cs < c.dist {
+                keep = false;
+                break;
+            }
+        }
+        if keep {
+            selected.push(c.node);
+        }
+    }
+        if selected.len() < m {
+            for c in candidates {
+                if selected.len() >= m {
+                    break;
+                }
+                if !selected.contains(&c.node) {
+                    selected.push(c.node);
+                }
+            }
+        }
+        selected
+    }
+
     /// Select up to `m` nearest neighbors from pre-scored candidates.
-    /// Candidates are already sorted by search_layer — just truncate.
-    /// This is O(m) vs the heuristic's O(candidates × m × dim) distance calls.
     #[inline]
-    fn select_neighbors(candidates: &[DistNode], m: usize) -> Vec<u32> {
-        candidates.iter().take(m).map(|dn| dn.node).collect()
+    fn select_neighbors(
+        query: &[f32],
+        candidates: &[DistNode],
+        m: usize,
+        encoded_data: &[f32],
+        dim: usize,
+        metric: DistanceMetric,
+        ascending: bool,
+    ) -> Vec<u32> {
+        Self::select_neighbors_heuristic(
+            query,
+            candidates,
+            m,
+            encoded_data,
+            dim,
+            metric,
+            ascending,
+        )
     }
 
     /// Core HNSW layer search using BinaryHeap.
@@ -624,7 +751,12 @@ impl HNSWIndex {
 
         let entry = match self.entry_point {
             Some(ep) => ep,
-            None => return,
+            None => {
+                // First point becomes the entry point (paper Alg.1).
+                self.entry_point = Some(point_id);
+                self.max_level = level;
+                return;
+            }
         };
 
         let mut curr_obj = entry;
@@ -651,7 +783,15 @@ impl HNSWIndex {
                 curr_obj = first.node;
             }
 
-            let neighbors = Self::select_neighbors(&candidates, m_for_level);
+            let neighbors = Self::select_neighbors(
+                point_vec,
+                &candidates,
+                m_for_level,
+                &self.encoded_data,
+                dim,
+                metric,
+                ascending,
+            );
 
             // Set forward connections
             self.graphs[lc].set_neighbors(point_id, neighbors.clone());
@@ -663,8 +803,6 @@ impl HNSWIndex {
 
                 let nn = self.graphs[lc].neighbors(neighbor);
                 if nn.len() > max_conn {
-                    // Prune: re-score all neighbors and keep closest max_conn
-                    // SAFETY: same as point_vec — only graphs are mutated, not encoded_data
                     let n_start = neighbor as usize * dim;
                     let neighbor_vec = unsafe {
                         std::slice::from_raw_parts(self.encoded_data.as_ptr().add(n_start), dim)
@@ -685,14 +823,18 @@ impl HNSWIndex {
                             }
                         })
                         .collect();
-                    // Partial sort: only need top max_conn, O(n) average
-                    if scored.len() > max_conn {
-                        scored.select_nth_unstable_by(max_conn - 1, |a, b| {
-                            a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal)
-                        });
-                        scored.truncate(max_conn);
-                    }
-                    let pruned: Vec<u32> = scored.iter().map(|dn| dn.node).collect();
+                    scored.sort_unstable_by(|a, b| {
+                        a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal)
+                    });
+                    let pruned = Self::select_neighbors(
+                        neighbor_vec,
+                        &scored,
+                        max_conn,
+                        &self.encoded_data,
+                        dim,
+                        metric,
+                        ascending,
+                    );
                     self.graphs[lc].set_neighbors(neighbor, pruned);
                 }
             }
@@ -842,8 +984,13 @@ impl VectorIndex for HNSWIndex {
 
         let dim = self.config.dimension;
         let ef = params.ef_search.unwrap_or(self.ef_search).max(k);
+        // Align SQ and non-SQ graph beams: both explore with `ef`.
+        // Quantized modes still exact-rescore the ef shortlist on `self.data`.
+        let use_exact_rerank = self.config.quantizer_type != QuantizerType::None
+            && self.data.len() == self.ids.len() * dim;
+        let candidate_budget = ef;
 
-        // Encode query
+        // Encode query (SQ/Binary/PQ); non-quantized uses raw f32.
         let encoded_query = if self.config.quantizer_type != QuantizerType::None {
             let bytes = self.quantizer.encode(query, 1, dim)?;
             self.quantizer.decode(&bytes, 1, dim)?
@@ -862,14 +1009,20 @@ impl VectorIndex for HNSWIndex {
             curr_obj = self.greedy_closest(&encoded_query, curr_obj, level);
         }
 
-        // Phase 2: ef-search at level 0
-        let candidates = self.search_layer(&encoded_query, curr_obj, ef, 0, &mut visited);
+        // Phase 2: ef-search at level 0 (same beam for SQ and non-SQ)
+        let candidates =
+            self.search_layer(&encoded_query, curr_obj, candidate_budget, 0, &mut visited);
 
         if candidates.is_empty() {
-            // Fallback: brute force
+            // Fallback: brute force on the space we can score exactly.
+            let (data_ref, q_ref) = if use_exact_rerank {
+                (&self.data, query)
+            } else {
+                (&self.encoded_data, encoded_query.as_slice())
+            };
             let (top_idx, top_dist) = crate::distance::top_k_search(
-                &encoded_query,
-                &self.encoded_data,
+                q_ref,
+                data_ref,
                 dim,
                 k,
                 self.config.distance_metric,
@@ -878,7 +1031,35 @@ impl VectorIndex for HNSWIndex {
             return Ok((result_ids, top_dist));
         }
 
-        // Score and select top-k (candidates already sorted by search_layer)
+        if use_exact_rerank {
+            let ascending = self.config.distance_metric.is_ascending();
+            let mut rescored: Vec<(f32, u32)> = candidates
+                .iter()
+                .map(|c| {
+                    let start = c.node as usize * dim;
+                    let dist = compute_distance_f32(
+                        query,
+                        &self.data[start..start + dim],
+                        self.config.distance_metric,
+                    );
+                    (dist, c.node)
+                })
+                .collect();
+            let take = k.min(rescored.len());
+            crate::distance::quickselect_k_pub(&mut rescored, take, ascending);
+            let top = &mut rescored[..take];
+            if ascending {
+                top.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+            } else {
+                top.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+            }
+            return Ok((
+                top.iter().map(|(_, n)| self.ids[*n as usize]).collect(),
+                top.iter().map(|(d, _)| *d).collect(),
+            ));
+        }
+
+        // Non-quantized: distances from the graph beam are already exact.
         let take = k.min(candidates.len());
         let result_ids: Vec<u64> = candidates[..take]
             .iter()
@@ -1036,6 +1217,7 @@ impl VectorIndex for HNSWIndex {
             ml: self.ml,
             level_mult: self.level_mult,
             trained: self.trained,
+            quantizer_state: self.quantizer.serialize()?,
         };
         bincode::serialize(&state).map_err(|e| LynseError::Serialization(e.to_string()))
     }
@@ -1058,6 +1240,9 @@ impl VectorIndex for HNSWIndex {
         self.ml = state.ml;
         self.level_mult = state.level_mult;
         self.trained = state.trained;
+        if !state.quantizer_state.is_empty() {
+            self.quantizer.deserialize(&state.quantizer_state)?;
+        }
         Ok(())
     }
 
@@ -1090,4 +1275,6 @@ struct HNSWState {
     ml: Option<usize>,
     level_mult: f64,
     trained: bool,
+    #[serde(default)]
+    quantizer_state: Vec<u8>,
 }

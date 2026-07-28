@@ -7,6 +7,7 @@
 
 pub mod approx_search;
 pub mod bitset;
+pub mod diskann_graph;
 pub mod dtype;
 pub mod field_store;
 pub mod flat_mmap;

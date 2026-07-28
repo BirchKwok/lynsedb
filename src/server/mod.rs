@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::{DatabaseManager, ExternalId};
 use crate::error::LynseError;
+use crate::index::IndexBuildOptions;
 use crate::storage::dtype::VectorDtype;
 
 // ─── Shared application state ────────────────────────────────────────────────
@@ -1127,6 +1128,12 @@ struct BuildVectorFieldIndexRequest {
     field_name: String,
     index_mode: Option<String>,
     n_clusters: Option<usize>,
+    /// Optional build kwargs object (same keys as Python `build_index(**kwargs)`):
+    /// IVF/SPANN: `n_clusters`/`n_centroids`, `nprobe`, `replica_count`;
+    /// HNSW: `m`, `ef_construction`, `ef_search`, `max_level`;
+    /// DiskANN: `r`, `l`, `alpha`, `max_degree`.
+    #[serde(default)]
+    params: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -1224,6 +1231,12 @@ struct BuildIndexRequest {
     collection_name: String,
     index_mode: Option<String>,
     n_clusters: Option<usize>,
+    /// Optional build kwargs object (same keys as Python `build_index(**kwargs)`):
+    /// IVF/SPANN: `n_clusters`/`n_centroids`, `nprobe`, `replica_count`;
+    /// HNSW: `m`, `ef_construction`, `ef_search`, `max_level`;
+    /// DiskANN: `r`, `l`, `alpha`, `max_degree`.
+    #[serde(default)]
+    params: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -1390,6 +1403,24 @@ impl<T: Serialize> ApiResponse<T> {
 
 fn error_response(msg: &str) -> HttpResponse {
     HttpResponse::InternalServerError().json(serde_json::json!({"error": msg}))
+}
+
+/// Merge legacy top-level `n_clusters` with optional `params` object.
+fn index_build_options_from_request(
+    n_clusters: Option<usize>,
+    params: Option<&serde_json::Value>,
+) -> Result<IndexBuildOptions, String> {
+    let mut opts = match params {
+        Some(value) if !value.is_null() => {
+            IndexBuildOptions::from_json(value).map_err(|e| e.to_string())?
+        }
+        _ => IndexBuildOptions::default(),
+    };
+    if opts.n_clusters.is_none() {
+        opts.n_clusters = n_clusters;
+    }
+    opts.validate().map_err(|e| e.to_string())?;
+    Ok(opts)
 }
 
 fn bad_request(msg: &str) -> HttpResponse {
@@ -2133,7 +2164,7 @@ fn openapi_schemas() -> serde_json::Value {
         "CreateVectorFieldRequest": object_schema(&["database_name", "collection_name", "field_name", "dim", "metric", "index_mode", "dtypes"]),
         "AddNamedVectorsRequest": object_schema(&["database_name", "collection_name", "field_name", "vectors", "ids"]),
         "AddSparseVectorsRequest": object_schema(&["database_name", "collection_name", "vectors", "ids"]),
-        "BuildVectorFieldIndexRequest": object_schema(&["database_name", "collection_name", "field_name", "index_mode", "n_clusters"]),
+        "BuildVectorFieldIndexRequest": object_schema(&["database_name", "collection_name", "field_name", "index_mode", "n_clusters", "params"]),
         "SearchRequest": object_schema(&["database_name", "collection_name", "vector", "vector_field", "k", "where", "return_fields", "nprobe"]),
         "SearchProfileRequest": object_schema(&["database_name", "collection_name", "vector", "k", "where", "return_fields", "nprobe"]),
         "TextSearchRequest": object_schema(&["database_name", "collection_name", "text", "text_fields", "k", "where", "return_fields"]),
@@ -2142,7 +2173,7 @@ fn openapi_schemas() -> serde_json::Value {
         "BatchSearchRequest": object_schema(&["database_name", "collection_name", "vectors", "k", "where", "return_fields", "nprobe"]),
         "CommitRequest": object_schema(&["database_name", "collection_name"]),
         "UpdateDescriptionRequest": object_schema(&["database_name", "collection_name", "description"]),
-        "BuildIndexRequest": object_schema(&["database_name", "collection_name", "index_mode", "n_clusters"]),
+        "BuildIndexRequest": object_schema(&["database_name", "collection_name", "index_mode", "n_clusters", "params"]),
         "HeadTailRequest": object_schema(&["database_name", "collection_name", "n"]),
         "QueryRequest": object_schema(&["database_name", "collection_name", "where", "filter_ids", "return_ids_only"]),
         "QueryVectorsRequest": object_schema(&["database_name", "collection_name", "where", "filter_ids"]),
@@ -3330,10 +3361,12 @@ async fn build_vector_field_index(
             .map(|(n, _)| n)
             .unwrap_or(0);
         metrics.track_index_build(n_vectors, || {
-            coll.build_vector_field_index_with_options(
+            let opts = index_build_options_from_request(body.n_clusters, body.params.as_ref())
+                .map_err(LynseError::InvalidArgument)?;
+            coll.build_vector_field_index_with_build_options(
                 &body.field_name,
                 index_mode,
-                body.n_clusters,
+                &opts,
             )
         })
     });
@@ -3345,6 +3378,7 @@ async fn build_vector_field_index(
             "field_name": body.field_name,
             "index_mode": index_mode,
             "n_clusters": body.n_clusters,
+            "params": body.params,
         })),
         Err(e) => error_response(&e.to_string()),
     }
@@ -3975,7 +4009,9 @@ async fn build_index(
         |coll| {
             let n_vectors = coll.shape().map(|(n, _)| n).unwrap_or(0);
             metrics.track_index_build(n_vectors, || {
-                coll.build_index_with_options(index_mode, body.n_clusters)
+                let opts = index_build_options_from_request(body.n_clusters, body.params.as_ref())
+                    .map_err(LynseError::InvalidArgument)?;
+                coll.build_index_with_build_options(index_mode, &opts)
             })
         },
     );
@@ -3985,7 +4021,8 @@ async fn build_index(
             "database_name": body.database_name,
             "collection_name": body.collection_name,
             "index_mode": index_mode,
-            "n_clusters": body.n_clusters
+            "n_clusters": body.n_clusters,
+            "params": body.params,
         })),
         Err(e) => error_response(&e.to_string()),
     }
@@ -4259,7 +4296,7 @@ async fn delete_records(
     if let Err(e) = validate_batch_vectors(&state.limits, body.ids.len(), "ids") {
         return limit_bad_request(e);
     }
-    let result = with_collection(
+    let result = with_collection_mut(
         &state.manager,
         &body.database_name,
         &body.collection_name,

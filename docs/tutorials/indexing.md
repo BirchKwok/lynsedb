@@ -113,23 +113,39 @@ print(collection.index_mode)
 
 Removing an index returns the collection to flat search.
 
-## IVF and SPANN parameters
+## Index build parameters
 
-IVF and SPANN split vectors into coarse clusters. `n_clusters` controls how many
-clusters are built.
+Pass family-specific kwargs to `build_index`:
 
 ```python
-collection.build_index("IVF-L2", n_clusters=256)
-collection.build_index("SPANN-L2", n_clusters=256)
+collection.build_index("IVF-L2", n_clusters=256, nprobe=32)
+collection.build_index("SPANN-L2", n_clusters=256, replica_count=8)
+collection.build_index("HNSW-IP", m=32, ef_construction=200)
+collection.build_index("DISKANN-IP", r=32, l=64, alpha=1.2)
 ```
+
+| Family | Key | Default | Meaning |
+|--------|-----|---------|---------|
+| IVF / SPANN | `n_clusters` (alias `n_centroids`) | `256` | Coarse centroids / partitions |
+| IVF / SPANN | `nprobe` | `32` | Default partitions probed at search |
+| SPANN | `replica_count` | `1` | Boundary replica count |
+| HNSW | `m` | `16` | Max neighbors per layer |
+| HNSW | `ef_construction` | `128` | Build-time candidate list size |
+| HNSW | `ef_search` | `50` | Default search beam |
+| HNSW | `max_level` | *(optional)* | Cap on max HNSW layer |
+| DiskANN | `r` | `16` | Target out-degree (R) |
+| DiskANN | `l` | `64` | Search/build beam (L) |
+| DiskANN | `alpha` | `1.2` (≥ 1.0) | Robust-prune factor |
+| DiskANN | `max_degree` | equals `r` | Hard adjacency degree cap |
 
 Rules:
 
-- `n_clusters` is used only for IVF and SPANN indexes.
-- For indexes other than IVF/SPANN, `n_clusters` is allowed and ignored by the Python API.
-- For IVF and SPANN indexes, `n_clusters` must be greater than zero.
-- More clusters usually reduce scanned vectors per query but can require higher
+- Unknown kwargs raise `ValueError`.
+- Keys that do not apply to the selected family are ignored (shared kwargs dicts are OK).
+- Positive integers are required when a size parameter is provided; `alpha` must be finite and `>= 1.0`.
+- More IVF/SPANN clusters usually reduce scanned vectors per query but can require higher
   `nprobe` for recall.
+- Higher HNSW `m` / `ef_construction` or DiskANN `r` / `l` generally improves recall at the cost of build time and memory.
 
 Search with:
 
@@ -232,6 +248,11 @@ For Hamming, Jaccard/Tanimoto, and Dice, lower distance is better. Flat search
 uses a lazily built one-bit-per-dimension hot representation. `approx` and
 `eps` do not change binary-distance search behavior.
 
+IVF binary variants (`IVF-HAMMING-BINARY`, `IVF-JACCARD-BINARY`) train and route
+coarse partitions with L2 on the binarized codes, then score candidates with
+packed Hamming/Jaccard. Prefer already `{0,1}` inputs; float rows are median-
+thresholded during IVF binary build. Raise `nprobe` when recall is below target.
+
 ## Practical tuning workflow
 
 1. Build `FLAT-*` first and record quality on an evaluation set.
@@ -294,7 +315,21 @@ collection.build_index("DiskANN-IP-SQ8")
 collection.build_index("DiskANN-L2-SQ8")
 collection.build_index("DiskANN-COS-SQ8")
 collection.build_index("DiskANN-COSINE-SQ8")
+```
 
+### DiskANN streaming updates (IP-DiskANN)
+
+Layered DiskANN (`DiskANN-IP` / `DiskANN-L2` / `*-PQ*`) supports **in-place** inserts, deletes, and upserts without a full graph rebuild:
+
+- **insert / add**: Vamana-style linking into the existing graph (`graph.bin` + `pq.bin`).
+- **delete**: IP-DiskANN edge repair (approximate in-neighbors via a fresh greedy search), then soft-delete the slot. Collection tombstones still filter search results.
+- **upsert / update**: delete old links → rewrite the vector row → re-insert at the same row.
+- **dangling cleanup**: when deleted slots exceed ~20% of live nodes, a lightweight scan strips edges that still point at deleted IDs (no distance computations).
+- **`compact` / `vacuum`**: still performs a hard physical rewrite + full index rebuild when you want to reclaim holes.
+
+SQ8 DiskANN stays in-memory and uses the same IP update path. If PQ codebook quality drifts after a long update stream, call `build_index(...)` once to rebuild from scratch.
+
+```python
 collection.build_index("IVF-IP", n_clusters=256)
 collection.build_index("IVF-L2", n_clusters=256)
 collection.build_index("IVF-COS", n_clusters=256)

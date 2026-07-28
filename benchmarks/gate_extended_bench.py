@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""Extended local-gate scenarios for LynseDB.
+"""Lightweight extended scenarios for ad-hoc local debugging.
 
-Covers paths the core flat/upsert gate misses:
-  - filtered FLAT-IP search (~10% selectivity)
-  - batch search
-  - commit flush latency
-  - HNSW-IP search latency + recall@k vs FLAT-IP
-  - delete/tombstone + search latency
-
-Intended for machine-local gates only (not GitHub Actions).
+The default local performance gate now uses
+``benchmarks/gate_matrix_bench.py`` via ``scripts/perf_gate_local.py ab``
+(1M×128 full index matrix + sparse/hybrid in isolated A/B envs). Keep this
+script for quick FLAT/HNSW smoke timings only.
 """
 
 from __future__ import annotations

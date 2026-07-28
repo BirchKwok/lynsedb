@@ -1105,7 +1105,7 @@ fn handle_ids(manager: &DatabaseManager, meta: IdsMeta, restore: bool) -> Result
     manager.get_or_open_database(&meta.database_name)?;
     manager.with_database(&meta.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&meta.collection_name, 0, 100_000)?;
-        let coll = coll_arc.read();
+        let mut coll = coll_arc.write();
         if restore {
             coll.restore_items(&meta.ids)
         } else {

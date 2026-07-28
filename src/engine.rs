@@ -1699,7 +1699,7 @@ impl Collection {
         std::fs::create_dir_all(&index_path)?;
         std::fs::create_dir_all(&index_meta_path)?;
 
-        let (index, index_mode) = Self::try_load_index(&index_meta_path, &index_path)?;
+        let (index, index_mode) = Self::try_load_index(&index_meta_path, &index_path, &collection_path)?;
 
         // Load last sync fingerprint
         let last_sync_fingerprint = Self::load_sync_fingerprint(&collection_path);
@@ -2110,7 +2110,8 @@ impl Collection {
                 std::fs::create_dir_all(&index_path)?;
                 std::fs::create_dir_all(&index_meta_path)?;
             }
-            let (index, loaded_index_mode) = Self::try_load_index(&index_meta_path, &index_path)?;
+            let (index, loaded_index_mode) =
+                Self::try_load_index(&index_meta_path, &index_path, &field_path)?;
             if let Some(index_mode) = loaded_index_mode {
                 config.index_mode = index_mode;
                 config.metric = Self::metric_from_mode_str(&config.index_mode)
@@ -3147,14 +3148,89 @@ impl Collection {
     }
 
     /// Mark vectors as soft-deleted. Deleted IDs are excluded from all search results.
-    pub fn delete_items(&self, ids: &[u64]) -> Result<()> {
+    /// When a DiskANN index is present, also apply IP-DiskANN in-place graph deletes.
+    pub fn delete_items(&mut self, ids: &[u64]) -> Result<()> {
         self.ensure_writable()?;
         let mut set = self.tombstone.write();
         for &id in ids {
             set.insert(id);
         }
         let path = self.path.join("tombstone.bin");
-        Self::save_tombstone_to_disk(&path, &set)
+        Self::save_tombstone_to_disk(&path, &set)?;
+        drop(set);
+
+        self.apply_diskann_delete(ids)?;
+        Ok(())
+    }
+
+    /// Apply IP-DiskANN delete for the given user IDs (row-aligned graph slots).
+    fn apply_diskann_delete(&mut self, user_ids: &[u64]) -> Result<()> {
+        let is_diskann = self
+            .index
+            .as_ref()
+            .map(|idx| matches!(idx.config().index_type, IndexType::DiskANN))
+            .unwrap_or(false);
+        if !is_diskann {
+            return Ok(());
+        }
+
+        let dim = self.meta.dimension;
+        let mut row_ids = Vec::new();
+        let mut vectors = Vec::new();
+        for &uid in user_ids {
+            let Some(&row) = self.reverse_id_map.get(&uid) else {
+                continue;
+            };
+            let row_u64 = row as u64;
+            match self.vector_store.read_rows(&[row_u64]) {
+                Ok(v) if v.len() >= dim => {
+                    row_ids.push(row_u64);
+                    vectors.extend_from_slice(&v[..dim]);
+                }
+                _ => {
+                    row_ids.push(row_u64);
+                    vectors.extend(std::iter::repeat(0.0).take(dim));
+                }
+            }
+        }
+        if row_ids.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(ref mut idx) = self.index {
+            let _ = idx.attach_data_dir(&self.path);
+            idx.delete_with_vectors(&row_ids, &vectors)?;
+            self.persist_ann_index()?;
+        }
+        Ok(())
+    }
+
+    /// Persist the in-memory ANN index blob (and metadata generation file).
+    fn persist_ann_index(&mut self) -> Result<()> {
+        let Some(ref idx) = self.index else {
+            return Ok(());
+        };
+        let Some(index_type) = self.index_mode.clone() else {
+            return Ok(());
+        };
+        let n_vectors = self
+            .vector_store
+            .get_shape()
+            .map(|(n, _)| n as usize)
+            .unwrap_or(0);
+        let dim = self.meta.dimension;
+        let index_data = idx.serialize()?;
+        let index_path = self.path.join("index");
+        let index_file = Self::write_generation_index(&index_path, &index_data)?;
+        let meta_path = self.path.join("index_meta");
+        let meta = serde_json::json!({
+            "index_type": index_type,
+            "n_vectors": n_vectors,
+            "dimension": dim,
+            "index_file": index_file,
+        });
+        Self::save_index_metadata(&meta_path, &meta)?;
+        Ok(())
     }
 
     /// Undelete previously soft-deleted vectors.
@@ -3334,6 +3410,7 @@ impl Collection {
     fn try_load_index(
         meta_path: &Path,
         index_path: &Path,
+        data_dir: &Path,
     ) -> Result<(Option<Box<dyn VectorIndex>>, Option<String>)> {
         let meta_file = meta_path.join("index_metadata.json");
         if !meta_file.exists() {
@@ -3363,6 +3440,7 @@ impl Collection {
         let data = std::fs::read(&index_data_file)?;
         let mut idx = index::create_index(index_type)?;
         idx.deserialize(&data)?;
+        idx.attach_data_dir(data_dir)?;
 
         Ok((Some(idx), Some(index_type.to_string())))
     }
@@ -3747,7 +3825,11 @@ impl Collection {
             let vectors = vectors.ok_or_else(|| {
                 LynseError::Storage("decoded vectors are required for index updates".to_string())
             })?;
+            let _ = idx.attach_data_dir(&self.path);
             idx.insert(vectors, n_vectors, dim, &row_ids)?;
+            if matches!(idx.config().index_type, IndexType::DiskANN) {
+                // Defer full meta rewrite; persist after maps are updated below.
+            }
         }
 
         for (i, &user_id) in ids.iter().enumerate() {
@@ -3760,6 +3842,15 @@ impl Collection {
                 self.external_to_internal_id.insert(external_id, user_id);
                 self.next_internal_id = self.next_internal_id.max(user_id.saturating_add(1));
             }
+        }
+
+        if self
+            .index
+            .as_ref()
+            .map(|idx| matches!(idx.config().index_type, IndexType::DiskANN))
+            .unwrap_or(false)
+        {
+            self.persist_ann_index()?;
         }
 
         if direct_write {
@@ -4160,7 +4251,11 @@ impl Collection {
 
     /// Build or change the index for a named vector field.
     pub fn build_vector_field_index(&mut self, field_name: &str, index_type: &str) -> Result<()> {
-        self.build_vector_field_index_with_options(field_name, index_type, None)
+        self.build_vector_field_index_with_build_options(
+            field_name,
+            index_type,
+            &index::IndexBuildOptions::default(),
+        )
     }
 
     pub fn build_vector_field_index_with_options(
@@ -4169,23 +4264,29 @@ impl Collection {
         index_type: &str,
         n_clusters: Option<usize>,
     ) -> Result<()> {
+        self.build_vector_field_index_with_build_options(
+            field_name,
+            index_type,
+            &index::IndexBuildOptions::from_n_clusters(n_clusters),
+        )
+    }
+
+    pub fn build_vector_field_index_with_build_options(
+        &mut self,
+        field_name: &str,
+        index_type: &str,
+        opts: &index::IndexBuildOptions,
+    ) -> Result<()> {
         self.ensure_writable()?;
         if field_name == DEFAULT_VECTOR_FIELD_NAME || field_name.trim().is_empty() {
-            return self.build_index_with_options(index_type, n_clusters);
+            return self.build_index_with_build_options(index_type, opts);
         }
 
         let field_name = Self::validate_vector_field_name(field_name)?;
         let metric = Self::metric_from_mode_str(index_type);
         let index_type = Self::normalize_field_index_mode(Some(index_type), metric)?;
         let is_flat = Self::resolve_metric_from_type(&index_type).is_some();
-        let index_upper = index_type.to_uppercase();
-        if n_clusters.is_some()
-            && !(index_upper.starts_with("IVF") || index_upper.starts_with("SPANN"))
-        {
-            return Err(LynseError::InvalidArgument(
-                "n_clusters is only supported for IVF and SPANN indexes".to_string(),
-            ));
-        }
+        opts.validate()?;
 
         {
             let field = self
@@ -4227,7 +4328,8 @@ impl Collection {
 
                 let all_data = field.vector_store.read_all_f32()?;
                 let row_ids: Vec<u64> = (0..n as u64).collect();
-                let mut idx = index::create_index_with_options(&index_type, n_clusters)?;
+                let mut idx = index::create_index_with_build_options(&index_type, opts)?;
+                idx.attach_data_dir(&field.path)?;
                 idx.build(&all_data, n, dim, Some(&row_ids))?;
 
                 let index_data = idx.serialize()?;
@@ -4239,7 +4341,7 @@ impl Collection {
                     "n_vectors": n,
                     "dimension": dim,
                     "index_file": index_file,
-                    "n_clusters": n_clusters,
+                    "build_options": opts,
                 });
                 Self::save_index_metadata(&meta_path, &meta)?;
                 field.index = Some(idx);
@@ -4366,13 +4468,24 @@ impl Collection {
     ///
     /// For HNSW/IVF/SPANN types: loads data from mmap and builds the index structure.
     pub fn build_index(&mut self, index_type: &str) -> Result<()> {
-        self.build_index_with_options(index_type, None)
+        self.build_index_with_build_options(index_type, &index::IndexBuildOptions::default())
     }
 
     pub fn build_index_with_options(
         &mut self,
         index_type: &str,
         n_clusters: Option<usize>,
+    ) -> Result<()> {
+        self.build_index_with_build_options(
+            index_type,
+            &index::IndexBuildOptions::from_n_clusters(n_clusters),
+        )
+    }
+
+    pub fn build_index_with_build_options(
+        &mut self,
+        index_type: &str,
+        opts: &index::IndexBuildOptions,
     ) -> Result<()> {
         self.ensure_writable()?;
         self.flush_pending_ingest()?;
@@ -4402,17 +4515,18 @@ impl Collection {
             )));
         }
 
+        opts.validate()?;
+
         // Clear any previously built quantizer indices
         self.pq_index = None;
         self.rabitq_index = None;
         self.polarvec_index = None;
+        let stale_diskann = self.path.join("diskann");
+        if stale_diskann.exists() {
+            let _ = std::fs::remove_dir_all(&stale_diskann);
+        }
 
         let is_flat = Self::resolve_metric_from_type(index_type).is_some();
-        if n_clusters.is_some() && !(upper.starts_with("IVF") || upper.starts_with("SPANN")) {
-            return Err(LynseError::InvalidArgument(
-                "n_clusters is only supported for IVF and SPANN indexes".to_string(),
-            ));
-        }
 
         let n_vectors = if is_flat {
             // Flat family: clear any graph/partition index, and remove stale graph index.bin
@@ -4469,8 +4583,11 @@ impl Collection {
             let all_data = self.vector_store.read_all_f32()?;
             let ids: Vec<u64> = (0..n as u64).collect();
 
-            let mut idx = index::create_index_with_options(index_type, n_clusters)?;
-            idx.build(&all_data, n, dim, Some(&ids))?;
+            let mut idx = index::create_index_with_build_options(index_type, opts)?;
+            idx.attach_data_dir(&self.path)?;
+            // Move the buffer into the index when possible (DiskANN layered)
+            // to avoid a second 10M×dim f32 copy that forces swap thrashing.
+            idx.build_owned(all_data, n, dim, Some(ids))?;
 
             // Save index to disk
             let index_data = idx.serialize()?;
@@ -4484,7 +4601,7 @@ impl Collection {
                 "n_vectors": n,
                 "dimension": dim,
                 "index_file": index_file,
-                "n_clusters": n_clusters,
+                "build_options": opts,
             });
             Self::save_index_metadata(&meta_path, &meta)?;
             n
@@ -4600,7 +4717,9 @@ impl Collection {
                 k.saturating_add(tombstone_count)
             },
             nprobe,
-            ef_search: None,
+            // nprobe==0 → use index build defaults (HNSW ef_search / IVF nprobe).
+            // nprobe>0 → override HNSW beam (documented as query-time ef).
+            ef_search: if nprobe > 0 { Some(nprobe) } else { None },
             subset_indices,
         };
         let search_k = search_params.k;
@@ -4634,8 +4753,22 @@ impl Collection {
             // returning rows outside the metadata predicate.
             self.brute_force_search_filtered(query, search_k, &search_params)?
         } else if let Some(ref idx) = self.index {
-            // ANN structure index path
-            idx.search(query, search_k, &search_params)?
+            // ANN structure index path — DiskANN layered uses PQ beam + VectorStore rescore.
+            if idx.uses_store_rescore() {
+                let candidates = idx.search_candidates(query, search_k, &search_params)?;
+                let (indices, distances) = self.vector_store.rescore_exact_candidates(
+                    &candidates,
+                    query,
+                    search_k,
+                    collection_metric,
+                )?;
+                (
+                    indices.into_iter().map(|i| i as u64).collect(),
+                    distances,
+                )
+            } else {
+                idx.search(query, search_k, &search_params)?
+            }
         } else if search_params.subset_indices.is_some() {
             // Filtered flat-family search must evaluate only allowed row IDs.
             // Auxiliary flat quantizers (PQ/RaBitQ/PolarVec) are whole-corpus
@@ -4746,15 +4879,25 @@ impl Collection {
         let (rows, dists) = if use_field_index {
             let search_params = SearchParams {
                 k,
-                nprobe: 10,
+                nprobe: 0,
                 ef_search: None,
                 subset_indices: None,
             };
-            field
-                .index
-                .as_ref()
-                .unwrap()
-                .search(query, k, &search_params)?
+            let idx = field.index.as_ref().unwrap();
+            let metric = DistanceMetric::from_str(&field.config.metric)
+                .unwrap_or_else(|| Self::metric_from_mode_str(&field.config.index_mode));
+            if idx.uses_store_rescore() {
+                let candidates = idx.search_candidates(query, k, &search_params)?;
+                let (indices, distances) = field
+                    .vector_store
+                    .rescore_exact_candidates(&candidates, query, k, metric)?;
+                (
+                    indices.into_iter().map(|i| i as u64).collect(),
+                    distances,
+                )
+            } else {
+                idx.search(query, k, &search_params)?
+            }
         } else {
             let metric = DistanceMetric::from_str(&field.config.metric)
                 .unwrap_or_else(|| Self::metric_from_mode_str(&field.config.index_mode));
@@ -5285,27 +5428,27 @@ impl Collection {
             }
         }
 
-        use rayon::prelude::*;
-
         // Keep batch routing identical to `search_with_precomputed_filter` so
         // filtered HNSW/DiskANN/PQ paths cannot leak unfiltered ids.
-        let results: Vec<Result<SearchResult>> = (0..n_queries)
-            .into_par_iter()
-            .map(|i| {
-                let start = i * dim;
-                let query = &queries[start..start + dim];
-                self.search_with_precomputed_filter(
-                    query,
-                    k,
-                    subset_indices.clone(),
-                    nprobe,
-                    false,
-                    1e-4,
-                )
-            })
-            .collect();
-
-        results.into_iter().collect()
+        //
+        // Run queries sequentially at this layer: each `search_*` path already
+        // parallelizes over the corpus with Rayon. Nesting `into_par_iter` here
+        // can deadlock the global pool (especially at large N with a small
+        // RAYON_NUM_THREADS), which previously hung 1M-scale batch_search.
+        let mut results = Vec::with_capacity(n_queries);
+        for i in 0..n_queries {
+            let start = i * dim;
+            let query = &queries[start..start + dim];
+            results.push(self.search_with_precomputed_filter(
+                query,
+                k,
+                subset_indices.clone(),
+                nprobe,
+                false,
+                1e-4,
+            )?);
+        }
+        Ok(results)
     }
 
     fn has_auxiliary_quantized_index(&self) -> bool {
@@ -5731,10 +5874,21 @@ impl Collection {
             return false;
         };
         let upper = mode.to_uppercase();
+        // DiskANN supports IP in-place insert/delete (including layered *-PQ*).
+        if upper.contains("DISKANN") {
+            return false;
+        }
         upper.contains("PQ")
             || upper.contains("RABITQ")
             || upper.contains("POLARVEC")
             || Self::resolve_metric_from_type(mode).is_none()
+    }
+
+    fn is_diskann_index(&self) -> bool {
+        self.index
+            .as_ref()
+            .map(|idx| matches!(idx.config().index_type, IndexType::DiskANN))
+            .unwrap_or(false)
     }
 
     /// Upsert vectors by user ID.
@@ -5810,11 +5964,38 @@ impl Collection {
         }
 
         if !existing_ids.is_empty() {
+            if self.is_diskann_index() && !rebuild_index {
+                let mut row_ids = Vec::with_capacity(existing_ids.len());
+                let mut old_vecs = Vec::with_capacity(existing_ids.len() * dim);
+                for &uid in &existing_ids {
+                    let row = *self.reverse_id_map.get(&uid).unwrap_or(&0) as u64;
+                    row_ids.push(row);
+                    match self.vector_store.read_rows(&[row]) {
+                        Ok(v) if v.len() >= dim => old_vecs.extend_from_slice(&v[..dim]),
+                        _ => old_vecs.extend(std::iter::repeat(0.0).take(dim)),
+                    }
+                }
+                if let Some(ref mut idx) = self.index {
+                    let _ = idx.attach_data_dir(&self.path);
+                    idx.delete_with_vectors(&row_ids, &old_vecs)?;
+                }
+            }
             self.apply_existing_items_in_place(
                 &existing_ids,
                 &existing_vectors,
                 existing_fields.as_deref(),
             )?;
+            if self.is_diskann_index() && !rebuild_index {
+                let row_ids: Vec<u64> = existing_ids
+                    .iter()
+                    .filter_map(|uid| self.reverse_id_map.get(uid).map(|&r| r as u64))
+                    .collect();
+                if let Some(ref mut idx) = self.index {
+                    let _ = idx.attach_data_dir(&self.path);
+                    idx.insert(&existing_vectors, existing_ids.len(), dim, &row_ids)?;
+                    self.persist_ann_index()?;
+                }
+            }
         }
 
         if !new_ids.is_empty() {
@@ -5827,6 +6008,9 @@ impl Collection {
                 LynseError::Storage("index mode disappeared during upsert".to_string())
             })?;
             self.build_index(&mode)?;
+        } else if self.is_diskann_index() {
+            // New inserts already updated the index via add_items; ensure blob is saved.
+            self.persist_ann_index()?;
         }
         self.vector_store.finish_pending_updates()?;
         Ok(())
@@ -5885,6 +6069,7 @@ impl Collection {
         let pq_path = self.path.join("pq_index.bin");
         let rq_path = self.path.join("rabitq_index.bin");
         let pv_path = self.path.join("polarvec_index.bin");
+        let diskann_dir = self.path.join("diskann");
 
         if index_path.exists() {
             std::fs::remove_dir_all(&index_path)?;
@@ -5900,6 +6085,9 @@ impl Collection {
         }
         if pv_path.exists() {
             std::fs::remove_file(&pv_path)?;
+        }
+        if diskann_dir.exists() {
+            std::fs::remove_dir_all(&diskann_dir)?;
         }
 
         Ok(())
@@ -5953,6 +6141,7 @@ impl Collection {
         let dim = self.meta.dimension;
 
         if let Some(ref mut idx) = self.index {
+            let _ = idx.attach_data_dir(&self.path);
             let guard = self.vector_store.read_mmap()?;
             if let Some(fm) = guard.as_ref() {
                 let all_data = fm.as_f32_cow();

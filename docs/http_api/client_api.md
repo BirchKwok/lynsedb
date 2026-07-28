@@ -65,10 +65,12 @@ The remote `Collection` class mirrors the local collection API:
   `snapshot_to`, `export_to`, `update_description`.
 
 The HTTP Python client uses the same explicit method signatures and parameter
-ignore rules as the local client. For example, `build_index(...,
-n_clusters=...)` uses `n_clusters` only for IVF and SPANN indexes, and `search(...,
-nprobe=..., approx=..., eps=...)` ignores parameters that do not apply to the
-active index or metric.
+ignore rules as the local client. For example, `build_index(..., **kwargs)`
+accepts the same family-specific keys as the local client (`n_clusters`, `m`,
+`r`, …) and forwards them as `params`; unknown keys raise `ValueError`, and
+keys for another index family are ignored. `search(..., nprobe=..., approx=...,
+eps=...)` still ignores parameters that do not apply to the active index or
+metric.
 
 ## Error behavior
 

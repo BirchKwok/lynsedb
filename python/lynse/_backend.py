@@ -433,7 +433,7 @@ class Collection:
         self,
         index_mode: str,
         field_name: str = "default",
-        n_clusters: Optional[int] = None,
+        **kwargs,
     ) -> None:
         """Build or rebuild the index.
 
@@ -480,6 +480,15 @@ class Collection:
                 - 'FLAT-L2-RABITQ': RaBitQ with squared L2 distance.
                 - 'FLAT-COS-RABITQ': RaBitQ with cosine similarity.
 
+                **Flat + PolarVec (training-free multi-bit quantization, 4-8x compression):**
+
+                - 'FLAT-IP-POLARVEC': PolarVec with inner product (auto bits, default 4).
+                - 'FLAT-L2-POLARVEC': PolarVec with squared L2 distance.
+                - 'FLAT-COS-POLARVEC': PolarVec with cosine similarity.
+                - 'FLAT-IP-POLARVEC3': PolarVec with inner product and 3-bit codes (~10.7x).
+                - 'FLAT-IP-POLARVEC4': PolarVec with inner product and 4-bit codes (~8x).
+                - 'FLAT-IP-POLARVEC8': PolarVec with inner product and 8-bit codes (~4x).
+
                 **HNSW (graph-based ANN):**
 
                 - 'HNSW-IP': HNSW index with inner product.
@@ -520,19 +529,53 @@ class Collection:
 
             field_name (str): Named vector field to build index for.
                 Defaults to "default" (the primary collection vector).
-            n_clusters (int, optional): Number of clusters. IVF and SPANN modes
-                use it; other index modes silently ignore it.
+            **kwargs: Index-family build parameters. Unknown names raise
+                ``ValueError``. Keys that do not apply to the selected family
+                are ignored (so shared kwargs dicts work across modes).
+                See also ``lynse._index_build`` for the shared key reference.
+
+                **IVF / SPANN**
+
+                - ``n_clusters`` / ``n_centroids`` (int, default ``256``):
+                  Number of coarse centroids / partitions.
+                - ``nprobe`` (int, default ``32``): Default partitions probed
+                  at search time (overridable per query).
+                - ``replica_count`` (int, default ``1``, SPANN only): Boundary
+                  replica count.
+
+                **HNSW**
+
+                - ``m`` (int, default ``16``): Max neighbors per layer.
+                - ``ef_construction`` (int, default ``128``): Build-time
+                  candidate list size (higher → better recall, slower build).
+                - ``ef_search`` (int, default ``50``): Default search beam
+                  (overridable per query via ``nprobe`` / ef).
+                - ``max_level`` (int, optional): Cap on max HNSW layer.
+
+                **DiskANN**
+
+                - ``r`` (int, default ``16``): Target out-degree (R).
+                - ``l`` (int, default ``64``): Search/build beam (L).
+                - ``alpha`` (float, default ``1.2``, must be ``>= 1.0``):
+                  Robust-prune factor.
+                - ``max_degree`` (int, default equals ``r``): Hard degree cap.
+
+                Flat / PQ / RaBitQ / PolarVec modes accept no build kwargs.
+
+        Examples:
+            >>> collection.build_index("IVF-L2", n_clusters=256, nprobe=32)
+            >>> collection.build_index("HNSW-IP", m=32, ef_construction=200)
+            >>> collection.build_index("DISKANN-IP", r=32, l=64, alpha=1.2)
         """
-        effective_n_clusters = (
-            n_clusters
-            if index_mode.upper().startswith(("IVF", "SPANN"))
-            else None
-        )
+        from ._index_build import normalize_build_kwargs
+
+        params = normalize_build_kwargs(index_mode, kwargs)
+        params_arg = params or None
 
         if field_name == "default":
-            self._inner.build_index(index_mode, effective_n_clusters)
+            self._inner.build_index(index_mode, params_arg)
         else:
-            self._inner.build_vector_field_index(field_name, index_mode, effective_n_clusters)
+            self._inner.build_vector_field_index(field_name, index_mode, params_arg)
 
     def remove_index(self, field_name: str = "default") -> None:
         """Remove the index.
@@ -588,7 +631,7 @@ class Collection:
         k: int = 10,
         where: Optional[str] = None,
         field_name: str = "default",
-        nprobe: int = 10,
+        nprobe: Optional[int] = None,
         approx: bool = False,
         eps: float = 1e-4,
     ) -> ResultView:
@@ -600,7 +643,8 @@ class Collection:
             where: optional SQL-like filter.
             field_name: named vector field to search. Defaults to "default"
                 (the primary collection vector).
-            nprobe: controls search breadth by index type (default: 10).
+            nprobe: search breadth override. ``None`` (default) uses the
+                index build-time setting (IVF/SPANN ``nprobe``, HNSW ``ef_search``).
                 - **IVF / SPANN**: number of partitions to probe — higher = better recall, slower.
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
                 - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).
@@ -650,7 +694,7 @@ class Collection:
         vector: np.ndarray,
         k: int = 10,
         where: Optional[str] = None,
-        nprobe: int = 10,
+        nprobe: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Search and return profile/explain metadata."""
         vector = np.ascontiguousarray(vector, dtype=np.float32).ravel()
@@ -710,7 +754,7 @@ class Collection:
         vectors: np.ndarray,
         k: int = 10,
         where: Optional[str] = None,
-        nprobe: int = 10,
+        nprobe: Optional[int] = None,
     ) -> List[ResultView]:
         """Batch search: search multiple query vectors in parallel.
 
@@ -718,7 +762,7 @@ class Collection:
             vectors: shape (n_queries, dim), dtype float32.
             k: number of results per query.
             where: optional SQL-like filter.
-            nprobe: controls search breadth by index type (default: 10).
+            nprobe: search breadth override. ``None`` uses index build defaults.
                 - **IVF / SPANN**: number of partitions to probe — higher = better recall, slower.
                 - **HNSW**: ef_search beam width — higher = better recall, slower.
                 - **Flat / PQ / RaBitQ**: ignored (exhaustive two-pass search).

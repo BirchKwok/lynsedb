@@ -52,7 +52,8 @@ def _class_public_method_signatures(path, class_name):
     raise AssertionError(f"{class_name} not found in {path}")
 
 
-def test_python_api_files_do_not_expose_kwargs_parameters():
+def test_python_api_kwargs_only_on_build_index():
+    """Prefer explicit parameters; ``build_index`` is the exception for index-family kwargs."""
     paths = [
         "python/lynse/api/local_client.py",
         "python/lynse/api/http_api/client_api.py",
@@ -60,14 +61,32 @@ def test_python_api_files_do_not_expose_kwargs_parameters():
         "python/lynse/result_view.py",
         "python/lynse/execution_layer/session.py",
     ]
+    allowed = {
+        "python/lynse/api/local_client.py:build_index",
+        "python/lynse/api/http_api/client_api.py:build_index",
+        "python/lynse/_backend.py:build_index",
+    }
     offenders = []
     for path in paths:
         tree = ast.parse((ROOT / path).read_text())
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.args.kwarg:
-                offenders.append(f"{path}:{node.lineno}:{node.name}")
+                key = f"{path}:{node.name}"
+                if key not in allowed:
+                    offenders.append(f"{path}:{node.lineno}:{node.name}")
 
     assert offenders == []
+    # Ensure the intended kwargs surfaces still exist.
+    for key in allowed:
+        path, name = key.split(":")
+        tree = ast.parse((ROOT / path).read_text())
+        found = any(
+            isinstance(node, ast.FunctionDef)
+            and node.name == name
+            and node.args.kwarg is not None
+            for node in ast.walk(tree)
+        )
+        assert found, f"expected **kwargs on {key}"
 
 
 def test_local_and_http_collection_common_signatures_match():
@@ -170,7 +189,7 @@ class _FakeSearchResult:
         return len(self.ids)
 
 
-def test_http_build_index_ignores_non_ivf_n_clusters():
+def test_http_build_index_kwargs():
     from lynse.api.http_api.client_api import Collection
 
     coll = Collection("http://server", "db", "items")
@@ -178,20 +197,23 @@ def test_http_build_index_ignores_non_ivf_n_clusters():
 
     coll.build_index("FLAT-L2", n_clusters=128)
     _, first_kwargs = coll._session.posts[-1]
-    assert "n_clusters" not in first_kwargs["json"]
+    # Non-IVF n_clusters is still forwarded in params; server/index filters it.
+    assert first_kwargs["json"]["params"]["n_clusters"] == 128
 
     coll.build_index("IVF-L2", n_clusters=128)
     _, second_kwargs = coll._session.posts[-1]
     assert second_kwargs["json"]["n_clusters"] == 128
+    assert second_kwargs["json"]["params"]["n_clusters"] == 128
 
     coll.build_index("SPANN-L2", n_clusters=64)
     _, spann_kwargs = coll._session.posts[-1]
     assert spann_kwargs["json"]["n_clusters"] == 64
 
-    coll.build_index("HNSW-L2", field_name="image", n_clusters=128)
+    coll.build_index("HNSW-L2", field_name="image", m=16, ef_construction=64)
     uri, third_kwargs = coll._session.posts[-1]
     assert uri.endswith("/build_vector_field_index")
-    assert "n_clusters" not in third_kwargs["json"]
+    assert third_kwargs["json"]["params"]["m"] == 16
+    assert third_kwargs["json"]["params"]["ef_construction"] == 64
 
 
 class _FakeRustCollection:
@@ -202,8 +224,8 @@ class _FakeRustCollection:
     def __init__(self):
         self.calls = []
 
-    def build_index(self, index_mode, field_name="default", n_clusters=None):
-        self.calls.append((index_mode, field_name, n_clusters))
+    def build_index(self, index_mode, field_name="default", **kwargs):
+        self.calls.append((index_mode, field_name, dict(kwargs)))
 
     def max_id(self):
         return -1
@@ -237,20 +259,23 @@ class _FakeRustCollection:
         return list(ids)
 
 
-def test_local_build_index_ignores_non_ivf_n_clusters():
+def test_local_build_index_kwargs():
     from lynse.api.local_client import LocalCollection
 
     rust = _FakeRustCollection()
     coll = LocalCollection(object(), "db", "items", rust, dim=4)
 
     coll.build_index("FLAT-L2", n_clusters=128)
-    assert rust.calls[-1] == ("FLAT-L2", "default", None)
+    assert rust.calls[-1] == ("FLAT-L2", "default", {"n_clusters": 128})
 
     coll.build_index("IVF-L2", field_name="image", n_clusters=128)
-    assert rust.calls[-1] == ("IVF-L2", "image", 128)
+    assert rust.calls[-1] == ("IVF-L2", "image", {"n_clusters": 128})
 
     coll.build_index("SPANN-L2", n_clusters=64)
-    assert rust.calls[-1] == ("SPANN-L2", "default", 64)
+    assert rust.calls[-1] == ("SPANN-L2", "default", {"n_clusters": 64})
+
+    coll.build_index("HNSW-IP", m=8, ef_construction=64)
+    assert rust.calls[-1] == ("HNSW-IP", "default", {"m": 8, "ef_construction": 64})
 
 
 def test_local_wire_dtype_is_accepted_without_changing_local_float32_path():
