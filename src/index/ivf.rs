@@ -4,9 +4,13 @@
 //! only the nearest clusters. Good balance of speed and recall for large datasets.
 
 use super::{kmeans, IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
+use crate::distance::simd::{
+    pack_binary_f32, packed_dice_u64, packed_hamming_u64, packed_jaccard_u64,
+};
 use crate::distance::{compute_distance_f32, DistanceMetric};
 use crate::error::{LynseError, Result};
 use crate::quantizer::{self, Quantizer, QuantizerType};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -25,6 +29,9 @@ pub struct IVFIndex {
     n_centroids: usize,
     nprobe: usize,
     trained: bool,
+    /// Packed one-bit codes for binary search metrics (`words_per_vector` u64s/row).
+    packed_codes: Vec<u64>,
+    words_per_vector: usize,
 }
 
 impl IVFIndex {
@@ -62,7 +69,62 @@ impl IVFIndex {
             n_centroids,
             nprobe,
             trained: false,
+            packed_codes: Vec::new(),
+            words_per_vector: 0,
         }
+    }
+
+    /// Coarse quantizer metric. Binary search metrics route with L2 so continuous
+    /// centroids keep soft bit-density information (Hamming on thresholded means
+    /// discards that and yields weak probe order + very slow training).
+    #[inline]
+    fn routing_metric(&self) -> DistanceMetric {
+        if self.config.distance_metric.is_binary() {
+            DistanceMetric::L2Squared
+        } else {
+            self.config.distance_metric
+        }
+    }
+
+    fn rebuild_packed_codes(&mut self) {
+        self.packed_codes.clear();
+        self.words_per_vector = 0;
+        if !self.config.distance_metric.is_binary() || self.encoded_data.is_empty() {
+            return;
+        }
+        let dim = self.config.dimension;
+        let n = self.ids.len();
+        if dim == 0 || n == 0 {
+            return;
+        }
+        let words = dim.div_ceil(64);
+        let mut packed = vec![0u64; n * words];
+        packed
+            .par_chunks_mut(words)
+            .zip(self.encoded_data.par_chunks(dim))
+            .for_each(|(dst, src)| pack_binary_f32(src, dst));
+        self.words_per_vector = words;
+        self.packed_codes = packed;
+    }
+
+    #[inline]
+    fn packed_distance_fn(metric: DistanceMetric) -> fn(&[u64], &[u64]) -> f32 {
+        match metric {
+            DistanceMetric::Hamming => packed_hamming_u64,
+            DistanceMetric::Jaccard | DistanceMetric::Tanimoto => packed_jaccard_u64,
+            DistanceMetric::Dice => packed_dice_u64,
+            _ => packed_hamming_u64,
+        }
+    }
+
+    fn pack_query_binary(&self, query: &[f32]) -> Result<Vec<u64>> {
+        let dim = self.config.dimension;
+        let bytes = self.quantizer.encode(query, 1, dim)?;
+        let encoded = self.quantizer.decode(&bytes, 1, dim)?;
+        let words = dim.div_ceil(64);
+        let mut packed = vec![0u64; words];
+        pack_binary_f32(&encoded, &mut packed);
+        Ok(packed)
     }
 }
 
@@ -91,16 +153,26 @@ impl VectorIndex for IVFIndex {
         }
 
         if n_vectors == 0 {
+            self.packed_codes.clear();
+            self.words_per_vector = 0;
             self.trained = true;
             return Ok(());
         }
 
-        // Train centroids and assign vectors without cloning the encoded matrix.
-        let trained = kmeans::train_l2(&self.encoded_data, n_vectors, dim, self.n_centroids, 20);
+        // Train centroids with the routing metric (L2 for binary search metrics).
+        let trained = kmeans::train_for_metric(
+            &self.encoded_data,
+            n_vectors,
+            dim,
+            self.n_centroids,
+            20,
+            self.routing_metric(),
+        );
         self.centroids = trained.centroids;
         self.n_centroids = trained.n_centroids;
         self.inverted_lists =
             kmeans::inverted_lists_from_assignments(&trained.assignments, self.n_centroids);
+        self.rebuild_packed_codes();
 
         self.trained = true;
         Ok(())
@@ -117,7 +189,24 @@ impl VectorIndex for IVFIndex {
         }
 
         let dim = self.config.dimension;
-        let nprobe = params.nprobe.max(1);
+        let nprobe = if params.nprobe == 0 {
+            self.nprobe.max(1)
+        } else {
+            params.nprobe.max(1)
+        };
+
+        // SQ8/PQ benefit from oversample + full-precision re-rank. Binary codes are
+        // already the search representation — skip the slow float re-rank path.
+        let use_exact_rerank = matches!(
+            self.config.quantizer_type,
+            QuantizerType::Scalar | QuantizerType::Product
+        ) && self.data.len() == self.ids.len() * dim;
+
+        let metric = self.config.distance_metric;
+        let ascending = metric.is_ascending();
+        let binary_metric = metric.is_binary();
+        let routing = self.routing_metric();
+        let routing_ascending = routing.is_ascending();
 
         let encoded_query = if self.config.quantizer_type != QuantizerType::None {
             let bytes = self.quantizer.encode(query, 1, dim)?;
@@ -126,24 +215,34 @@ impl VectorIndex for IVFIndex {
             query.to_vec()
         };
 
+        let packed_query = if binary_metric && self.words_per_vector > 0 {
+            Some(self.pack_query_binary(query)?)
+        } else {
+            None
+        };
+
         let n_centroids = self.centroids.len() / dim;
 
-        // Find nearest centroids
+        // Rank centroids with the routing metric (L2 for binary indexes).
         let mut centroid_dists: Vec<(f32, usize)> = (0..n_centroids)
             .map(|c| {
                 let dist = compute_distance_f32(
                     &encoded_query,
                     &self.centroids[c * dim..(c + 1) * dim],
-                    DistanceMetric::L2Squared,
+                    routing,
                 );
                 (dist, c)
             })
             .collect();
-        centroid_dists.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        if routing_ascending {
+            centroid_dists.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        } else {
+            centroid_dists.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        }
 
-        // Collect candidates from nearest clusters
+        // Collect *all* vectors from the nprobe nearest lists (Faiss-style).
         let mut candidates: Vec<usize> = Vec::new();
-        for &(_, centroid_id) in centroid_dists.iter().take(nprobe) {
+        for &(_, centroid_id) in centroid_dists.iter().take(nprobe.min(n_centroids)) {
             if let Some(list) = self.inverted_lists.get(&centroid_id) {
                 candidates.extend_from_slice(list);
             }
@@ -172,29 +271,81 @@ impl VectorIndex for IVFIndex {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        // Score candidates
-        let mut scored: Vec<(f32, usize)> = candidates
-            .iter()
-            .map(|&c| {
-                let dist = compute_distance_f32(
-                    &encoded_query,
-                    &self.encoded_data[c * dim..(c + 1) * dim],
-                    self.config.distance_metric,
-                );
-                (dist, c)
-            })
-            .collect();
-
-        // Sort by distance metric
-        if self.config.distance_metric.is_ascending() {
-            scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        let pool = if use_exact_rerank {
+            (k.saturating_mul(10)).max(k).min(candidates.len())
         } else {
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
-        }
-        scored.truncate(k);
+            k.min(candidates.len())
+        };
 
-        let result_ids: Vec<u64> = scored.iter().map(|(_, idx)| self.ids[*idx]).collect();
-        let result_dists: Vec<f32> = scored.iter().map(|(d, _)| *d).collect();
+        let mut scored: Vec<(f32, u32)> = if let Some(ref pq) = packed_query {
+            let words = self.words_per_vector;
+            let dist_fn = Self::packed_distance_fn(metric);
+            candidates
+                .iter()
+                .enumerate()
+                .map(|(local_idx, &c)| {
+                    let start = c * words;
+                    let dist = dist_fn(pq, &self.packed_codes[start..start + words]);
+                    (dist, local_idx as u32)
+                })
+                .collect()
+        } else {
+            candidates
+                .iter()
+                .enumerate()
+                .map(|(local_idx, &c)| {
+                    let dist = compute_distance_f32(
+                        &encoded_query,
+                        &self.encoded_data[c * dim..(c + 1) * dim],
+                        metric,
+                    );
+                    (dist, local_idx as u32)
+                })
+                .collect()
+        };
+
+        crate::distance::quickselect_k_pub(&mut scored, pool, ascending);
+        let top = &mut scored[..pool];
+        if ascending {
+            top.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        } else {
+            top.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        }
+
+        if use_exact_rerank {
+            let mut rescored: Vec<(f32, u32)> = top
+                .iter()
+                .map(|(_, local_idx)| {
+                    let c = candidates[*local_idx as usize];
+                    let dist =
+                        compute_distance_f32(query, &self.data[c * dim..(c + 1) * dim], metric);
+                    (dist, c as u32)
+                })
+                .collect();
+            let limit = k.min(rescored.len());
+            crate::distance::quickselect_k_pub(&mut rescored, limit, ascending);
+            let exact_top = &mut rescored[..limit];
+            if ascending {
+                exact_top.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+            } else {
+                exact_top.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+            }
+            return Ok((
+                exact_top
+                    .iter()
+                    .map(|(_, c)| self.ids[*c as usize])
+                    .collect(),
+                exact_top.iter().map(|(d, _)| *d).collect(),
+            ));
+        }
+
+        let limit = k.min(top.len());
+        let mut result_ids = Vec::with_capacity(limit);
+        let mut result_dists = Vec::with_capacity(limit);
+        for &(dist, local_idx) in top.iter().take(limit) {
+            result_ids.push(self.ids[candidates[local_idx as usize]]);
+            result_dists.push(dist);
+        }
 
         Ok((result_ids, result_dists))
     }
@@ -220,20 +371,22 @@ impl VectorIndex for IVFIndex {
         self.encoded_data = new_encoded;
         self.ids = new_ids;
 
-        // Reassign to clusters
+        // Reassign to clusters with the same routing metric used at build time.
         if !self.encoded_data.is_empty() {
             let n = self.ids.len();
-            let assignments = kmeans::assign_l2(
+            let assignments = kmeans::assign_metric(
                 &self.encoded_data[..n * dim],
                 &self.centroids,
                 dim,
                 self.n_centroids,
+                self.routing_metric(),
             );
             self.inverted_lists =
                 kmeans::inverted_lists_from_assignments(&assignments, self.n_centroids);
         } else {
             self.inverted_lists.clear();
         }
+        self.rebuild_packed_codes();
 
         Ok(())
     }
@@ -258,22 +411,42 @@ impl VectorIndex for IVFIndex {
         };
         self.encoded_data.extend_from_slice(&encoded_new);
 
-        // Assign new vectors to clusters
+        // Assign new vectors to clusters with the routing metric.
+        let routing = self.routing_metric();
+        let ascending = routing.is_ascending();
         let n_centroids = self.centroids.len() / dim;
-        let half_norms = kmeans::centroid_half_norms(&self.centroids, dim, n_centroids);
+        let words = if self.config.distance_metric.is_binary() {
+            dim.div_ceil(64)
+        } else {
+            0
+        };
+        if words > 0 && self.words_per_vector == 0 {
+            self.words_per_vector = words;
+        }
         for i in 0..n_vectors {
             let vec_idx = old_count + i;
-            let best_c = kmeans::nearest_l2_centroid(
-                &encoded_new[i * dim..(i + 1) * dim],
-                &self.centroids,
-                &half_norms,
-                dim,
-                n_centroids,
-            );
+            let vector = &encoded_new[i * dim..(i + 1) * dim];
+            let mut best_c = 0usize;
+            let mut best_rank = f32::MAX;
+            for c in 0..n_centroids {
+                let centroid = &self.centroids[c * dim..(c + 1) * dim];
+                let raw = compute_distance_f32(vector, centroid, routing);
+                let rank = if ascending { raw } else { -raw };
+                if rank < best_rank {
+                    best_rank = rank;
+                    best_c = c;
+                }
+            }
             self.inverted_lists
                 .entry(best_c)
                 .or_insert_with(Vec::new)
                 .push(vec_idx);
+
+            if words > 0 {
+                let mut packed = vec![0u64; words];
+                pack_binary_f32(vector, &mut packed);
+                self.packed_codes.extend_from_slice(&packed);
+            }
         }
 
         Ok(())
@@ -302,6 +475,9 @@ impl VectorIndex for IVFIndex {
             n_centroids: self.n_centroids,
             nprobe: self.nprobe,
             trained: self.trained,
+            quantizer_state: self.quantizer.serialize()?,
+            packed_codes: self.packed_codes.clone(),
+            words_per_vector: self.words_per_vector,
         };
         bincode::serialize(&state).map_err(|e| LynseError::Serialization(e.to_string()))
     }
@@ -318,6 +494,18 @@ impl VectorIndex for IVFIndex {
         self.n_centroids = state.n_centroids;
         self.nprobe = state.nprobe;
         self.trained = state.trained;
+        self.packed_codes = state.packed_codes;
+        self.words_per_vector = state.words_per_vector;
+        if !state.quantizer_state.is_empty() {
+            self.quantizer.deserialize(&state.quantizer_state)?;
+        }
+        // Older checkpoints omit packed codes — rebuild lazily for binary metrics.
+        if self.config.distance_metric.is_binary()
+            && (self.packed_codes.is_empty() || self.words_per_vector == 0)
+            && !self.encoded_data.is_empty()
+        {
+            self.rebuild_packed_codes();
+        }
         Ok(())
     }
 
@@ -344,6 +532,12 @@ struct IVFState {
     n_centroids: usize,
     nprobe: usize,
     trained: bool,
+    #[serde(default)]
+    quantizer_state: Vec<u8>,
+    #[serde(default)]
+    packed_codes: Vec<u64>,
+    #[serde(default)]
+    words_per_vector: usize,
 }
 
 #[cfg(test)]
@@ -380,5 +574,109 @@ mod tests {
             "unfiltered ids leaked: {:?}",
             result_ids
         );
+    }
+
+    #[test]
+    fn ivf_ip_recall_improves_with_nprobe() {
+        let mut idx = IVFIndex::new(DistanceMetric::InnerProduct, QuantizerType::None, 32, 4);
+        let n = 800usize;
+        let dim = 32usize;
+        let mut vectors = Vec::with_capacity(n * dim);
+        let mut ids = Vec::with_capacity(n);
+        for i in 0..n {
+            for j in 0..dim {
+                let x = (((i * 131 + j * 17 + 1) % 997) as f32 / 997.0) + 0.01;
+                vectors.push(x);
+            }
+            ids.push(i as u64);
+        }
+        idx.build(&vectors, n, dim, Some(&ids)).unwrap();
+
+        let q = &vectors[..dim];
+        // Brute-force top-10 by IP
+        let mut scored: Vec<(f32, u64)> = (0..n)
+            .map(|i| {
+                let v = &vectors[i * dim..(i + 1) * dim];
+                let ip: f32 = q.iter().zip(v.iter()).map(|(a, b)| a * b).sum();
+                (ip, i as u64)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        let exact: std::collections::HashSet<u64> =
+            scored.iter().take(10).map(|(_, id)| *id).collect();
+
+        let low = SearchParams {
+            k: 10,
+            nprobe: 2,
+            ef_search: None,
+            subset_indices: None,
+        };
+        let high = SearchParams {
+            k: 10,
+            nprobe: 32,
+            ef_search: None,
+            subset_indices: None,
+        };
+        let (ids_low, _) = idx.search(q, 10, &low).unwrap();
+        let (ids_high, _) = idx.search(q, 10, &high).unwrap();
+        let rec_low = ids_low.iter().filter(|id| exact.contains(id)).count() as f32 / 10.0;
+        let rec_high = ids_high.iter().filter(|id| exact.contains(id)).count() as f32 / 10.0;
+        assert!(
+            rec_high >= rec_low,
+            "higher nprobe should not hurt recall: low={rec_low} high={rec_high}"
+        );
+        // nprobe == n_centroids → full scan of all inverted lists → exact top-k.
+        assert!(
+            (rec_high - 1.0).abs() < f32::EPSILON,
+            "IVF-IP with nprobe=n_centroids must be exact, got recall={rec_high} ids={:?}",
+            ids_high
+        );
+        // Raising nprobe past tiny values must change or improve results vs nprobe=2
+        // (guards against the old k*100 early-stop that froze probe depth).
+        assert!(
+            rec_high > rec_low || ids_low != ids_high || rec_low >= 0.9,
+            "nprobe increase should improve exploration: low={rec_low} high={rec_high}"
+        );
+    }
+
+    #[test]
+    fn ivf_hamming_binary_full_probe_matches_flat_distances() {
+        let mut idx = IVFIndex::new(DistanceMetric::Hamming, QuantizerType::Binary, 16, 4);
+        let n = 256usize;
+        let dim = 32usize;
+        let mut vectors = Vec::with_capacity(n * dim);
+        let mut ids = Vec::with_capacity(n);
+        for i in 0..n {
+            for j in 0..dim {
+                vectors.push(if ((i * 17 + j * 3) % 2) == 0 {
+                    1.0
+                } else {
+                    0.0
+                });
+            }
+            ids.push(i as u64);
+        }
+        idx.build(&vectors, n, dim, Some(&ids)).unwrap();
+        assert!(!idx.packed_codes.is_empty());
+
+        let q = &vectors[..dim];
+        let mut exact: Vec<(f32, u64)> = (0..n)
+            .map(|i| {
+                let v = &vectors[i * dim..(i + 1) * dim];
+                let dist = compute_distance_f32(q, v, DistanceMetric::Hamming);
+                (dist, i as u64)
+            })
+            .collect();
+        exact.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        let exact_dists: Vec<f32> = exact.iter().take(10).map(|(d, _)| *d).collect();
+
+        let params = SearchParams {
+            k: 10,
+            nprobe: 16,
+            ef_search: None,
+            subset_indices: None,
+        };
+        let (_, got_dists) = idx.search(q, 10, &params).unwrap();
+        assert_eq!(got_dists, exact_dists);
     }
 }

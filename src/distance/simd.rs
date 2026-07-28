@@ -745,6 +745,61 @@ pub fn hamming_u8(a: &[u8], b: &[u8]) -> u32 {
         .sum()
 }
 
+/// Pack an f32 row into little-endian bit words (`value > threshold` → 1).
+#[inline]
+pub fn pack_binary_f32_into(source: &[f32], words: &mut [u64], threshold: f32) {
+    words.fill(0);
+    for (index, &value) in source.iter().enumerate() {
+        if value > threshold {
+            words[index / 64] |= 1u64 << (index % 64);
+        }
+    }
+}
+
+/// Pack an f32 row with the Flat/binary hot-path threshold of 0.5.
+#[inline]
+pub fn pack_binary_f32(source: &[f32], words: &mut [u64]) {
+    pack_binary_f32_into(source, words, 0.5);
+}
+
+#[inline(always)]
+pub fn packed_hamming_u64(a: &[u64], b: &[u64]) -> f32 {
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| (x ^ y).count_ones())
+        .sum::<u32>() as f32
+}
+
+#[inline(always)]
+pub fn packed_jaccard_u64(a: &[u64], b: &[u64]) -> f32 {
+    let mut intersection = 0u32;
+    let mut union = 0u32;
+    for (&x, &y) in a.iter().zip(b) {
+        intersection += (x & y).count_ones();
+        union += (x | y).count_ones();
+    }
+    if union == 0 {
+        0.0
+    } else {
+        1.0 - intersection as f32 / union as f32
+    }
+}
+
+#[inline(always)]
+pub fn packed_dice_u64(a: &[u64], b: &[u64]) -> f32 {
+    let mut intersection = 0u32;
+    let mut count = 0u32;
+    for (&x, &y) in a.iter().zip(b) {
+        intersection += (x & y).count_ones();
+        count += x.count_ones() + y.count_ones();
+    }
+    if count == 0 {
+        0.0
+    } else {
+        1.0 - (2 * intersection) as f32 / count as f32
+    }
+}
+
 // ─── Float16 candidate distance helpers ─────────────────────────────────────
 
 /// Inner product between an f32 query and an f16-encoded candidate row.

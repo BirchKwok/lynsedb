@@ -285,24 +285,72 @@ impl Quantizer for ScalarQuantizer {
 /// Extremely compact: reduces memory by 32x compared to f32.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinaryQuantizer {
+    /// Legacy / fallback global threshold. Matches Flat packed binary (`> 0.5`).
     threshold: f32,
+    /// Optional per-dimension thresholds from [`Quantizer::fit`] (medians).
+    #[serde(default)]
+    thresholds: Vec<f32>,
 }
 
 impl BinaryQuantizer {
     pub fn new(threshold: f32) -> Self {
-        Self { threshold }
+        Self {
+            threshold,
+            thresholds: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn threshold_at(&self, dim_idx: usize) -> f32 {
+        self.thresholds
+            .get(dim_idx)
+            .copied()
+            .unwrap_or(self.threshold)
     }
 }
 
 impl Default for BinaryQuantizer {
     fn default() -> Self {
+        // Align with Flat packed binary + hamming_f32 / jaccard_f32 (`> 0.5`).
         Self::new(0.5)
     }
 }
 
 impl Quantizer for BinaryQuantizer {
-    fn fit(&mut self, _data: &[f32], _n_vectors: usize, _dim: usize) -> Result<()> {
-        Ok(()) // No training needed
+    fn fit(&mut self, data: &[f32], n_vectors: usize, dim: usize) -> Result<()> {
+        if n_vectors == 0 || dim == 0 {
+            self.thresholds.clear();
+            return Ok(());
+        }
+        // Already-binary corpora ({0,1}) must keep the Flat threshold of 0.5.
+        // Column medians on balanced bits land on 0 or 1, and `value > 1` collapses
+        // every dimension to zero — breaking IVF-HAMMING/JACCARD search.
+        let already_binary = data.iter().all(|&v| v == 0.0 || v == 1.0);
+        if already_binary {
+            self.threshold = 0.5;
+            self.thresholds.clear();
+            return Ok(());
+        }
+        // Per-dimension medians so float corpora (e.g. raw SIFT) binarize usefully.
+        // If the median equals min/max (no separating cut with `>`), fall back to midrange.
+        let mut thresholds = vec![self.threshold; dim];
+        let mut column = vec![0.0f32; n_vectors];
+        for d in 0..dim {
+            for i in 0..n_vectors {
+                column[i] = data[i * dim + d];
+            }
+            column.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let min = column[0];
+            let max = column[n_vectors - 1];
+            let med = column[n_vectors / 2];
+            thresholds[d] = if med <= min || med >= max {
+                0.5 * (min + max)
+            } else {
+                med
+            };
+        }
+        self.thresholds = thresholds;
+        Ok(())
     }
 
     fn encode(&self, data: &[f32], n_vectors: usize, dim: usize) -> Result<Vec<u8>> {
@@ -314,7 +362,7 @@ impl Quantizer for BinaryQuantizer {
             let base_in = i * dim;
             let base_out = i * bytes_per_vector;
             for d in 0..dim {
-                if data[base_in + d] > self.threshold {
+                if data[base_in + d] > self.threshold_at(d) {
                     codes[base_out + d / 8] |= 1 << (d % 8);
                 }
             }
@@ -690,10 +738,34 @@ mod tests {
     #[test]
     fn test_binary_quantizer() {
         let q = BinaryQuantizer::default();
+        // Default threshold is 0.5 (matches Flat packed binary / hamming_f32).
         let data = vec![0.1f32, 0.9, 0.3, 0.7];
         let encoded = q.encode(&data, 1, 4).unwrap();
         assert_eq!(encoded.len(), 1); // 4 bits packed in 1 byte
-                                      // 0.1 < 0.5 → 0, 0.9 > 0.5 → 1, 0.3 < 0.5 → 0, 0.7 > 0.5 → 1
+                                      // 0.1 ≤ 0.5 → 0, 0.9 > 0.5 → 1, 0.3 ≤ 0.5 → 0, 0.7 > 0.5 → 1
         assert_eq!(encoded[0] & 0x0F, 0b1010);
+
+        let mut fitted = BinaryQuantizer::default();
+        // col0 [0,0,10]: median==min → midrange 5
+        // col1 [1,2,3]: median 2
+        // col2 [0,5,10]: median 5
+        // col3 [0,0,0]: midrange 0
+        let train = vec![
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 2.0, 5.0, 0.0, //
+            10.0, 3.0, 10.0, 0.0,
+        ];
+        fitted.fit(&train, 3, 4).unwrap();
+        let row = vec![1.0, 2.5, 4.0, 1.0];
+        let codes = fitted.encode(&row, 1, 4).unwrap();
+        // > thresholds [5,2,5,0] → 0,1,0,1
+        assert_eq!(codes[0] & 0x0F, 0b1010);
+
+        // Balanced {0,1} data must not learn threshold=1 (which zeroes all bits).
+        let mut binary = BinaryQuantizer::default();
+        let bits = vec![0.0f32, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0];
+        binary.fit(&bits, 2, 4).unwrap();
+        let encoded = binary.encode(&bits[..4], 1, 4).unwrap();
+        assert_eq!(encoded[0] & 0x0F, 0b0110);
     }
 }
