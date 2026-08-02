@@ -11,8 +11,10 @@ giving the common happy path automatic shard failover.
 import argparse
 import array
 import asyncio
+import base64
 import heapq
 import hashlib
+import hmac
 import importlib
 import json
 import os
@@ -44,8 +46,19 @@ DEFAULT_HEALTH_INTERVAL_SECS = 1.0
 DEFAULT_HEALTH_FAILURES = 3
 DEFAULT_REQUEST_TIMEOUT_SECS = 30.0
 DEFAULT_COORDINATOR_LEASE_SECS = 5.0
+DEFAULT_JSON_LIMIT_MB = 256
+DEFAULT_PAYLOAD_LIMIT_MB = 512
 REPLICA_ACTIVE = "active"
 REPLICA_STALE = "stale"
+
+CLUSTER_PUBLIC_ENDPOINTS = frozenset({"/", "/healthz", "/readyz"})
+CLUSTER_BINARY_REQUEST_ENDPOINTS = frozenset({
+    "/search_binary",
+    "/batch_search_binary",
+    "/bulk_add_binary",
+    "/add_binary_ids",
+    "/upsert_binary",
+})
 
 RPC_OP_PING = 1
 RPC_OP_SEARCH = 2
@@ -1450,6 +1463,7 @@ class ClusterCoordinator:
         timeout_secs: float = DEFAULT_REQUEST_TIMEOUT_SECS,
         health_interval_secs: float = DEFAULT_HEALTH_INTERVAL_SECS,
         health_failures: int = DEFAULT_HEALTH_FAILURES,
+        client_api_key: str | None = None,
         shard_api_key: str | None = None,
         coordinator_id: str | None = None,
         coordinator_uri: str | None = None,
@@ -1460,10 +1474,12 @@ class ClusterCoordinator:
         self.timeout_secs = float(timeout_secs)
         self.health_interval_secs = float(health_interval_secs)
         self.health_failures = int(health_failures)
+        self.client_api_key = client_api_key
         self.shard_api_key = shard_api_key
         self.coordinator_uri = _normalize_uri(coordinator_uri or "")
         self.coordinator_id = str(coordinator_id or self.coordinator_uri or f"{socket.gethostname()}:{os.getpid()}")
         self.client = RustRemoteSession(api_key=shard_api_key)
+        self.coordinator_client = RustRemoteSession(api_key=client_api_key)
         self._health_lock = threading.Lock()
         self._failures: dict[str, int] = {}
         self._healthy: dict[str, bool] = {}
@@ -1528,6 +1544,7 @@ class ClusterCoordinator:
         self._fanout_pool.shutdown(wait=True, cancel_futures=False)
         self._replica_pool.shutdown(wait=True, cancel_futures=False)
         self.client.close()
+        self.coordinator_client.close()
         self._close_rpc_pool()
         if self._async_thread.is_alive() and self._async_ready.wait(timeout=5):
             loop = self._async_loop
@@ -1652,12 +1669,11 @@ class ClusterCoordinator:
             lower = name.lower()
             if lower in {
                 "accept",
-                "authorization",
                 "content-type",
             }:
                 forwarded_headers[name] = value
 
-        return self.client.request(
+        return self.coordinator_client.request(
             method,
             f"{leader_uri}{target}",
             content=body,
@@ -3227,18 +3243,85 @@ class ClusterCoordinator:
 
 class ClusterRequestHandler(BaseHTTPRequestHandler):
     coordinator: ClusterCoordinator
+    client_api_key: str | None = None
+    json_limit_bytes: int = DEFAULT_JSON_LIMIT_MB * 1024 * 1024
+    payload_limit_bytes: int = DEFAULT_PAYLOAD_LIMIT_MB * 1024 * 1024
 
     server_version = "LynseDBCluster/0.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return
 
-    def _read_body(self) -> bytes:
-        length = int(self.headers.get("Content-Length") or 0)
-        return self.rfile.read(length) if length else b""
+    def _is_authorized(self, path: str) -> bool:
+        expected = self.client_api_key
+        if not expected or path in CLUSTER_PUBLIC_ENDPOINTS:
+            return True
 
-    def _read_json(self) -> dict[str, Any]:
-        body = self._read_body()
+        authorization = self.headers.get("Authorization") or ""
+        supplied = None
+        if authorization.startswith("Bearer "):
+            supplied = authorization[len("Bearer "):]
+        elif authorization.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(
+                    authorization[len("Basic "):],
+                    validate=True,
+                ).decode("utf-8")
+                supplied = decoded.split(":", 1)[1]
+            except (IndexError, ValueError, UnicodeDecodeError):
+                supplied = None
+
+        if supplied is not None and hmac.compare_digest(supplied, expected):
+            return True
+
+        self._send_json(
+            {"status": "error", "error": "Unauthorized"},
+            status=401,
+            headers={"WWW-Authenticate": 'Basic realm="LynseDB"'},
+        )
+        return False
+
+    def _read_body(self, path: str) -> bytes | None:
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            self._send_error_json("Content-Length header is required", status=411)
+            return None
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self._send_error_json("Invalid Content-Length header", status=400)
+            return None
+        if length < 0:
+            self._send_error_json("Content-Length must be non-negative", status=400)
+            return None
+
+        content_type = (self.headers.get("Content-Type") or "").lower()
+        is_binary = (
+            path in CLUSTER_BINARY_REQUEST_ENDPOINTS
+            or content_type.startswith("application/octet-stream")
+        )
+        limit = self.payload_limit_bytes if is_binary else self.json_limit_bytes
+        if length > limit:
+            kind = "binary payload" if is_binary else "JSON payload"
+            self._send_error_json(
+                f"{kind} size {length} exceeds coordinator limit {limit}",
+                status=413,
+            )
+            return None
+
+        body = self.rfile.read(length) if length else b""
+        if len(body) != length:
+            self._send_error_json(
+                f"Incomplete request body: expected {length} bytes, got {len(body)}",
+                status=400,
+            )
+            return None
+        return body
+
+    def _read_json(self, path: str) -> dict[str, Any] | None:
+        body = self._read_body(path)
+        if body is None:
+            return None
         return self._json_from_body(body)
 
     def _json_from_body(self, body: bytes) -> dict[str, Any]:
@@ -3246,11 +3329,18 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(body.decode("utf-8"))
 
-    def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
+    def _send_json(
+        self,
+        payload: dict[str, Any],
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -3305,10 +3395,22 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             parsed = urlparse(self.path)
+            if not self._is_authorized(parsed.path):
+                return
             if self._proxy_if_standby("GET"):
                 return
             if parsed.path == "/":
                 self._send_json(_json_success({"message": "LynseDB cluster coordinator"}))
+            elif parsed.path == "/healthz":
+                self._send_json(_json_success({"status": "healthy"}))
+            elif parsed.path == "/readyz":
+                ready = self.coordinator.is_active_coordinator() or bool(
+                    self.coordinator.current_leader_record()
+                )
+                if ready:
+                    self._send_json(_json_success({"status": "ready"}))
+                else:
+                    self._send_error_json("coordinator is not ready", status=503)
             elif parsed.path == "/list_databases":
                 self._send_json(_json_success({"databases": self.coordinator.state.databases()}))
             elif parsed.path == "/cluster_info":
@@ -3327,7 +3429,11 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             path = parsed.path
-            raw_body = self._read_body()
+            if not self._is_authorized(path):
+                return
+            raw_body = self._read_body(path)
+            if raw_body is None:
+                return
             if self._proxy_if_standby("POST", raw_body):
                 return
             if path == "/search_binary":
@@ -3637,7 +3743,10 @@ def run_coordinator(
     *,
     cluster_config: str | None = None,
     cluster_state: str | None = None,
+    api_key: str | None = None,
     shard_api_key: str | None = None,
+    json_limit_mb: int | None = None,
+    payload_limit_mb: int | None = None,
     request_timeout_secs: float = DEFAULT_REQUEST_TIMEOUT_SECS,
     health_interval_secs: float = DEFAULT_HEALTH_INTERVAL_SECS,
     health_failures: int = DEFAULT_HEALTH_FAILURES,
@@ -3668,7 +3777,23 @@ def run_coordinator(
             os.environ.get("LYNSE_COORDINATOR_LEASE_SECS", DEFAULT_COORDINATOR_LEASE_SECS),
         )
     )
+    client_key = api_key or config.get("api_key") or os.environ.get("LYNSE_API_KEY")
     shard_key = shard_api_key or config.get("shard_api_key")
+    json_limit_mb = int(
+        json_limit_mb
+        if json_limit_mb is not None
+        else config.get("json_limit_mb", os.environ.get("LYNSE_JSON_LIMIT_MB", DEFAULT_JSON_LIMIT_MB))
+    )
+    payload_limit_mb = int(
+        payload_limit_mb
+        if payload_limit_mb is not None
+        else config.get(
+            "payload_limit_mb",
+            os.environ.get("LYNSE_PAYLOAD_LIMIT_MB", DEFAULT_PAYLOAD_LIMIT_MB),
+        )
+    )
+    if json_limit_mb <= 0 or payload_limit_mb <= 0:
+        raise ValueError("coordinator request limits must be positive")
     effective_metadata_owners = (
         metadata_owners
         or _split_csv(config.get("metadata_owners") or config.get("metadata_owner"))
@@ -3699,6 +3824,7 @@ def run_coordinator(
         timeout_secs=request_timeout_secs,
         health_interval_secs=health_interval_secs,
         health_failures=health_failures,
+        client_api_key=client_key,
         shard_api_key=shard_key,
         coordinator_id=(
             coordinator_id
@@ -3717,6 +3843,9 @@ def run_coordinator(
         pass
 
     Handler.coordinator = coordinator
+    Handler.client_api_key = client_key
+    Handler.json_limit_bytes = json_limit_mb * 1024 * 1024
+    Handler.payload_limit_bytes = payload_limit_mb * 1024 * 1024
     httpd = ThreadingHTTPServer((host, int(port)), Handler)
     try:
         httpd.serve_forever()
@@ -3740,7 +3869,10 @@ def main(argv: list[str] | None = None) -> None:
             "on the metadata owner shard(s)."
         ),
     )
+    parser.add_argument("--api-key", default=os.environ.get("LYNSE_API_KEY"))
     parser.add_argument("--shard-api-key")
+    parser.add_argument("--json-limit-mb", type=int)
+    parser.add_argument("--payload-limit-mb", type=int)
     parser.add_argument("--request-timeout-secs", type=float, default=DEFAULT_REQUEST_TIMEOUT_SECS)
     parser.add_argument("--health-interval-secs", type=float, default=DEFAULT_HEALTH_INTERVAL_SECS)
     parser.add_argument("--health-failures", type=int, default=DEFAULT_HEALTH_FAILURES)
@@ -3760,7 +3892,10 @@ def main(argv: list[str] | None = None) -> None:
         args.port,
         cluster_config=args.cluster_config,
         cluster_state=args.cluster_state,
+        api_key=args.api_key,
         shard_api_key=args.shard_api_key,
+        json_limit_mb=args.json_limit_mb,
+        payload_limit_mb=args.payload_limit_mb,
         request_timeout_secs=args.request_timeout_secs,
         health_interval_secs=args.health_interval_secs,
         health_failures=args.health_failures,

@@ -137,6 +137,65 @@ class TestCheckpoint:
         reopened.close()
 
 
+class TestUserBlob:
+    def test_roundtrip_range_replace_and_delete(self, collection):
+        payload = bytes(range(256)) * 384
+
+        assert collection.read_blob("missing") is None
+        assert collection.read_blob_range("missing", offset=10, length=20) is None
+        assert collection.write_blob("model/artifact-v1", payload) == {
+            "status": "success"
+        }
+        assert collection.flush() == {"status": "success"}
+        assert collection.read_blob("model/artifact-v1") == payload
+        assert collection.read_blob_range(
+            "model/artifact-v1", offset=255, length=258
+        ) == payload[255:513]
+        assert collection.read_blob_range(
+            "model/artifact-v1", offset=len(payload)
+        ) == b""
+
+        replacement = b"replacement\x00payload"
+        collection.write_blob("model/artifact-v1", replacement)
+        assert collection.read_blob("model/artifact-v1") == replacement
+        assert collection.delete_blob("model/artifact-v1") is True
+        assert collection.delete_blob("model/artifact-v1") is False
+        assert collection.read_blob("model/artifact-v1") is None
+
+    def test_blob_persists_after_checkpoint_and_reopen(self, tmp_root):
+        import lynse
+
+        payload = bytes(range(251)) * 400
+        client = lynse.VectorDBClient(uri=tmp_root)
+        db = client.create_database("blob_db", drop_if_exists=True)
+        collection = db.require_collection("blob_col", dim=DIM, drop_if_exists=True)
+        collection.write_blob("weights'v1", payload)
+        collection.checkpoint()
+
+        del collection, db
+        client.close()
+        del client
+        gc.collect()
+
+        reopened = lynse.VectorDBClient(uri=tmp_root)
+        reopened_collection = reopened.get_database("blob_db").get_collection("blob_col")
+        assert reopened_collection.read_blob("weights'v1") == payload
+        assert reopened_collection.read_blob_range(
+            "weights'v1", offset=17, length=4096
+        ) == payload[17 : 17 + 4096]
+        reopened.close()
+
+    def test_blob_rejects_invalid_python_inputs(self, collection):
+        with pytest.raises(TypeError, match="bytes-like"):
+            collection.write_blob("bad", "not bytes")
+        with pytest.raises(ValueError, match="offset"):
+            collection.read_blob_range("bad", offset=-1)
+        with pytest.raises(ValueError, match="length"):
+            collection.read_blob_range("bad", length=-1)
+        with pytest.raises(Exception, match="must not be empty"):
+            collection.write_blob("", b"payload")
+
+
 class TestBulkAdd:
     def test_add_batch(self, collection):
         ids = list(range(10))

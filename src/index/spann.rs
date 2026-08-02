@@ -9,10 +9,13 @@ use super::{kmeans, IndexConfig, IndexParams, IndexType, SearchParams, VectorInd
 use crate::distance::{compute_distance_f32, quickselect_k_pub, DistanceMetric};
 use crate::error::{LynseError, Result};
 use crate::quantizer::{self, Quantizer, QuantizerType};
+use crate::storage::bitset::BitSet;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashSet;
+#[cfg(test)]
+use std::sync::Arc;
 
 pub(crate) const DEFAULT_REPLICA_COUNT: usize = 1;
 const REPLICA_DISTANCE_FACTOR: f32 = 1.35;
@@ -215,7 +218,7 @@ impl SPANNIndex {
     fn collect_candidates(
         &self,
         probed_centroids: &[usize],
-        subset: Option<&HashSet<u64>>,
+        subset: Option<&BitSet>,
     ) -> Vec<usize> {
         let mut seen = vec![false; self.ids.len()];
         let estimated = probed_centroids
@@ -234,7 +237,7 @@ impl SPANNIndex {
                     continue;
                 }
                 if let Some(subset) = subset {
-                    if !subset.contains(&self.ids[idx]) {
+                    if !subset.contains(self.ids[idx] as usize) {
                         continue;
                     }
                 }
@@ -246,14 +249,14 @@ impl SPANNIndex {
         candidates
     }
 
-    fn fallback_candidates(&self, subset: Option<&HashSet<u64>>) -> Vec<usize> {
+    fn fallback_candidates(&self, subset: Option<&BitSet>) -> Vec<usize> {
         match subset {
             None => (0..self.ids.len()).collect(),
             Some(subset) => self
                 .ids
                 .iter()
                 .enumerate()
-                .filter_map(|(idx, id)| subset.contains(id).then_some(idx))
+                .filter_map(|(idx, id)| subset.contains(*id as usize).then_some(idx))
                 .collect(),
         }
     }
@@ -348,11 +351,7 @@ impl VectorIndex for SPANNIndex {
             query.to_vec()
         };
 
-        let subset_set = params
-            .subset_indices
-            .as_ref()
-            .map(|subset| subset.iter().copied().collect::<HashSet<u64>>());
-        let subset = subset_set.as_ref();
+        let subset = params.subset.as_deref();
 
         let probed = self.nearest_centroids_for_query(&encoded_query, nprobe);
         let mut candidates = self.collect_candidates(&probed, subset);
@@ -413,7 +412,10 @@ impl VectorIndex for SPANNIndex {
                 exact_top.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
             }
             return Ok((
-                exact_top.iter().map(|(_, row)| self.ids[*row as usize]).collect(),
+                exact_top
+                    .iter()
+                    .map(|(_, row)| self.ids[*row as usize])
+                    .collect(),
                 exact_top.iter().map(|(d, _)| *d).collect(),
             ));
         }
@@ -607,7 +609,7 @@ mod tests {
             k: 2,
             nprobe: 2,
             ef_search: None,
-            subset_indices: None,
+            subset: None,
         };
         let (result_ids, dists) = idx.search(&[5.1, 5.0], 2, &params).unwrap();
 
@@ -626,7 +628,7 @@ mod tests {
             k: 2,
             nprobe: 1,
             ef_search: None,
-            subset_indices: Some(vec![0, 1].into()),
+            subset: Some(Arc::new(BitSet::from_ids([0u64, 1]))),
         };
         let (result_ids, _) = idx.search(&[5.1, 5.0], 2, &params).unwrap();
 
@@ -655,7 +657,7 @@ mod tests {
             k: 2,
             nprobe: 2,
             ef_search: None,
-            subset_indices: None,
+            subset: None,
         };
         let (result_ids, dists) = loaded.search(&[5.1, 5.0], 2, &params).unwrap();
 

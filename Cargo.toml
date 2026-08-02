@@ -16,12 +16,13 @@ pyo3 = { version = "0.26", optional = true }
 numpy = { version = "0.26", optional = true }
 
 # Storage backends
-apexbase = { version = "1.19.0", default-features = false }
-arrow = { version = "57.3.0", features = ["ipc"] }
+apexbase = { version = "1.27.0", default-features = false }
+arrow = { version = "59.1.0", features = ["ipc"] }
 
 
 # Parallelism
 rayon = "1.10"
+forkunion = "3.0.2"
 crossbeam = "0.8"
 parking_lot = "0.12"
 

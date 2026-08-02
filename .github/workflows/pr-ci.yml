@@ -1,17 +1,17 @@
-name: Tag CI
+name: CI
 
-# Automatic runs only on version tags. Use workflow_dispatch for ad-hoc checks.
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr-ci-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -28,6 +28,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Run Rust tests
         run: cargo test --locked
+      - name: Check all targets and features
+        run: cargo check --locked --all-targets --all-features
 
   python:
     name: Python API checks
@@ -48,3 +50,17 @@ jobs:
           python -m pip install --config-settings=maturin.build-args=--locked .
       - name: Run Python API tests
         run: python -m pytest tests/standard_tests tests/test_explicit_api_parameters.py -q
+
+  docs:
+    name: Documentation checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install documentation dependencies
+        run: python -m pip install mkdocs-material mkdocstrings-python
+      - name: Build documentation
+        run: python -m mkdocs build --strict

@@ -14,6 +14,7 @@ use super::{IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
 use crate::distance::{compute_distance_f32, DistanceMetric};
 use crate::error::{LynseError, Result};
 use crate::quantizer::{create_quantizer, Quantizer, QuantizerType};
+use crate::storage::bitset::BitSet;
 use parking_lot::RwLock;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
@@ -567,24 +568,26 @@ impl HNSWIndex {
             if selected.len() >= m {
                 break;
             }
-            let c_vec =
-                unsafe { std::slice::from_raw_parts(encoded_data.as_ptr().add(c.node as usize * dim), dim) };
+            let c_vec = unsafe {
+                std::slice::from_raw_parts(encoded_data.as_ptr().add(c.node as usize * dim), dim)
+            };
             let mut keep = true;
             for &s in &selected {
-                let s_vec =
-                    unsafe { std::slice::from_raw_parts(encoded_data.as_ptr().add(s as usize * dim), dim) };
+                let s_vec = unsafe {
+                    std::slice::from_raw_parts(encoded_data.as_ptr().add(s as usize * dim), dim)
+                };
                 let raw = compute_distance_f32(c_vec, s_vec, metric);
                 let dist_cs = if ascending { raw } else { -raw };
                 // Discard if some selected neighbor is closer to c than query is.
-            if dist_cs < c.dist {
-                keep = false;
-                break;
+                if dist_cs < c.dist {
+                    keep = false;
+                    break;
+                }
+            }
+            if keep {
+                selected.push(c.node);
             }
         }
-        if keep {
-            selected.push(c.node);
-        }
-    }
         if selected.len() < m {
             for c in candidates {
                 if selected.len() >= m {
@@ -609,21 +612,16 @@ impl HNSWIndex {
         metric: DistanceMetric,
         ascending: bool,
     ) -> Vec<u32> {
-        Self::select_neighbors_heuristic(
-            query,
-            candidates,
-            m,
-            encoded_data,
-            dim,
-            metric,
-            ascending,
-        )
+        Self::select_neighbors_heuristic(query, candidates, m, encoded_data, dim, metric, ascending)
     }
 
     /// Core HNSW layer search using BinaryHeap.
     ///
     /// Returns up to `ef` nearest neighbors at the given level as scored DistNodes.
     /// Uses min-heap for candidates (pop closest) and max-heap for results (evict furthest).
+    ///
+    /// When `subset` is set, non-matching nodes may still be explored as bridges, but only
+    /// in-subset nodes are admitted to the result heap (DiskANN-style filtered search).
     fn search_layer(
         &self,
         query: &[f32],
@@ -631,11 +629,13 @@ impl HNSWIndex {
         ef: usize,
         level: usize,
         visited: &mut VisitedSet,
+        subset: Option<&BitSet>,
     ) -> Vec<DistNode> {
         visited.reset();
         visited.visit(entry);
 
         let entry_dist = self.distance(entry, query);
+        let entry_in = self.node_in_subset(entry, subset);
 
         // candidates: min-heap (closest first via Reverse)
         let mut candidates: BinaryHeap<Reverse<DistNode>> = BinaryHeap::with_capacity(ef * 2);
@@ -644,12 +644,14 @@ impl HNSWIndex {
             node: entry,
         }));
 
-        // result: max-heap (furthest first for eviction)
+        // result: max-heap (furthest first for eviction) — only in-subset hits
         let mut result: BinaryHeap<DistNode> = BinaryHeap::with_capacity(ef + 1);
-        result.push(DistNode {
-            dist: entry_dist,
-            node: entry,
-        });
+        if entry_in {
+            result.push(DistNode {
+                dist: entry_dist,
+                node: entry,
+            });
+        }
 
         let graph = &self.graphs[level];
 
@@ -667,15 +669,22 @@ impl HNSWIndex {
                 }
 
                 let n_dist = self.distance(neighbor, query);
+                let in_subset = self.node_in_subset(neighbor, subset);
                 let worst = result.peek().map_or(f32::MAX, |x| x.dist);
 
-                if result.len() < ef || n_dist < worst {
-                    let dn = DistNode {
+                // Explore bridges outside the subset to preserve connectivity.
+                let explore = result.len() < ef || n_dist < worst || !in_subset;
+                if explore {
+                    candidates.push(Reverse(DistNode {
                         dist: n_dist,
                         node: neighbor,
-                    };
-                    candidates.push(Reverse(dn));
-                    result.push(dn);
+                    }));
+                }
+                if in_subset && (result.len() < ef || n_dist < worst) {
+                    result.push(DistNode {
+                        dist: n_dist,
+                        node: neighbor,
+                    });
                     if result.len() > ef {
                         result.pop(); // evict furthest
                     }
@@ -687,6 +696,62 @@ impl HNSWIndex {
         let mut res: Vec<DistNode> = result.into_vec();
         res.sort_unstable_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal));
         res
+    }
+
+    #[inline]
+    fn node_in_subset(&self, node: u32, subset: Option<&BitSet>) -> bool {
+        match subset {
+            None => true,
+            Some(bs) => {
+                let idx = node as usize;
+                idx < self.ids.len() && bs.contains(self.ids[idx] as usize)
+            }
+        }
+    }
+
+    fn brute_force_search(
+        &self,
+        query: &[f32],
+        encoded_query: &[f32],
+        k: usize,
+        subset: Option<&BitSet>,
+        use_exact_rerank: bool,
+    ) -> Result<(Vec<u64>, Vec<f32>)> {
+        let dim = self.config.dimension;
+        let (data_ref, q_ref) = if use_exact_rerank {
+            (self.data.as_slice(), query)
+        } else {
+            (self.encoded_data.as_slice(), encoded_query)
+        };
+
+        if let Some(subset) = subset {
+            let mut filtered_data = Vec::new();
+            let mut filtered_ids = Vec::new();
+            for (i, &id) in self.ids.iter().enumerate() {
+                if subset.contains(id as usize) {
+                    let start = i * dim;
+                    filtered_data.extend_from_slice(&data_ref[start..start + dim]);
+                    filtered_ids.push(id);
+                }
+            }
+            if filtered_ids.is_empty() {
+                return Ok((Vec::new(), Vec::new()));
+            }
+            let (top_idx, top_dist) = crate::distance::top_k_search(
+                q_ref,
+                &filtered_data,
+                dim,
+                k,
+                self.config.distance_metric,
+            );
+            let result_ids: Vec<u64> = top_idx.iter().map(|&i| filtered_ids[i as usize]).collect();
+            return Ok((result_ids, top_dist));
+        }
+
+        let (top_idx, top_dist) =
+            crate::distance::top_k_search(q_ref, data_ref, dim, k, self.config.distance_metric);
+        let result_ids: Vec<u64> = top_idx.iter().map(|&i| self.ids[i as usize]).collect();
+        Ok((result_ids, top_dist))
     }
 
     /// Greedy descent: find closest node at a given level (ef=1 search).
@@ -775,7 +840,7 @@ impl HNSWIndex {
         let ascending = metric.is_ascending();
 
         for lc in (0..=top).rev() {
-            let candidates = self.search_layer(point_vec, curr_obj, ef_c, lc, visited);
+            let candidates = self.search_layer(point_vec, curr_obj, ef_c, lc, visited, None);
             let m_for_level = if lc == 0 { m0 } else { m };
 
             // Update entry for next lower level to closest found
@@ -983,7 +1048,14 @@ impl VectorIndex for HNSWIndex {
         }
 
         let dim = self.config.dimension;
-        let ef = params.ef_search.unwrap_or(self.ef_search).max(k);
+        let subset = params.subset.as_deref();
+        let mut ef = params.ef_search.unwrap_or(self.ef_search).max(k);
+        // Filtered search needs a wider beam: many graph neighbors are bridges only.
+        if subset.is_some() {
+            ef = ef
+                .max(k.saturating_mul(4))
+                .max(self.ef_search.saturating_mul(2));
+        }
         // Align SQ and non-SQ graph beams: both explore with `ef`.
         // Quantized modes still exact-rescore the ef shortlist on `self.data`.
         let use_exact_rerank = self.config.quantizer_type != QuantizerType::None
@@ -1010,25 +1082,18 @@ impl VectorIndex for HNSWIndex {
         }
 
         // Phase 2: ef-search at level 0 (same beam for SQ and non-SQ)
-        let candidates =
-            self.search_layer(&encoded_query, curr_obj, candidate_budget, 0, &mut visited);
+        let candidates = self.search_layer(
+            &encoded_query,
+            curr_obj,
+            candidate_budget,
+            0,
+            &mut visited,
+            subset,
+        );
 
-        if candidates.is_empty() {
-            // Fallback: brute force on the space we can score exactly.
-            let (data_ref, q_ref) = if use_exact_rerank {
-                (&self.data, query)
-            } else {
-                (&self.encoded_data, encoded_query.as_slice())
-            };
-            let (top_idx, top_dist) = crate::distance::top_k_search(
-                q_ref,
-                data_ref,
-                dim,
-                k,
-                self.config.distance_metric,
-            );
-            let result_ids: Vec<u64> = top_idx.iter().map(|&i| self.ids[i as usize]).collect();
-            return Ok((result_ids, top_dist));
+        if candidates.is_empty() || (subset.is_some() && candidates.len() < k) {
+            // Fallback: brute force on the allowed subset (or full corpus).
+            return self.brute_force_search(query, &encoded_query, k, subset, use_exact_rerank);
         }
 
         if use_exact_rerank {
@@ -1277,4 +1342,44 @@ struct HNSWState {
     trained: bool,
     #[serde(default)]
     quantizer_state: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn hnsw_filtered_search_respects_subset_bitset() {
+        let mut idx = HNSWIndex::new(
+            DistanceMetric::L2Squared,
+            QuantizerType::None,
+            8,
+            16,
+            32,
+            None,
+        );
+        let vectors = vec![
+            0.0, 0.0, // id 1
+            0.1, 0.0, // id 2
+            10.0, 10.0, // id 3
+            10.1, 10.0, // id 4
+        ];
+        let ids = [1u64, 2, 3, 4];
+        idx.build(&vectors, 4, 2, Some(&ids)).unwrap();
+
+        let params = SearchParams {
+            k: 2,
+            nprobe: 0,
+            ef_search: Some(32),
+            subset: Some(Arc::new(BitSet::from_ids([3u64, 4]))),
+        };
+        let (result_ids, _) = idx.search(&[0.0, 0.0], 2, &params).unwrap();
+        assert!(!result_ids.is_empty(), "expected filtered hits");
+        assert!(
+            result_ids.iter().all(|id| *id == 3 || *id == 4),
+            "unfiltered ids leaked: {:?}",
+            result_ids
+        );
+    }
 }

@@ -132,6 +132,7 @@ def test_read_only_client_can_read_but_rejects_writes(tmp_root):
     db = writer.create_database("readonly_db", drop_if_exists=True)
     coll = db.require_collection("items", dim=DIM, drop_if_exists=True)
     coll.add(ids=1, vectors=np.ones(DIM, dtype=np.float32), fields={"tag": "stored"})
+    coll.write_blob("artifact", b"stored bytes")
     coll.commit()
     coll.close()
     writer.close()
@@ -142,9 +143,14 @@ def test_read_only_client_can_read_but_rejects_writes(tmp_root):
         assert ro_coll.is_read_only is True
         assert ro_coll.search(np.ones(DIM, dtype=np.float32), k=1).ids.tolist() == [1]
         assert ro_coll.query(filter_ids=[1]).fields[0]["tag"] == "stored"
+        assert ro_coll.read_blob("artifact") == b"stored bytes"
 
         with pytest.raises(RuntimeError, match="read-only"):
             ro_coll.add(ids=2, vectors=np.zeros(DIM, dtype=np.float32))
+        with pytest.raises(RuntimeError, match="read-only"):
+            ro_coll.write_blob("artifact", b"replacement")
+        with pytest.raises(RuntimeError, match="read-only"):
+            ro_coll.delete_blob("artifact")
     finally:
         reader.close()
 

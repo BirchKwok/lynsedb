@@ -3,6 +3,8 @@
 //! Provides a RESTful API using actix-web, replacing the Python Flask server.
 //! All endpoints are compatible with the existing HTTPClient Python class.
 
+mod errors;
+
 use std::collections::HashMap;
 use std::future::{ready, Future, Ready};
 use std::io::Write;
@@ -22,6 +24,11 @@ use crate::engine::{DatabaseManager, ExternalId};
 use crate::error::LynseError;
 use crate::index::IndexBuildOptions;
 use crate::storage::dtype::VectorDtype;
+
+use errors::{
+    bad_request, binary_bad_request, binary_lynse_error as binary_lynse_error_response,
+    internal_error as error_response, limit_bad_request, lynse_error as lynse_error_response,
+};
 
 // ─── Shared application state ────────────────────────────────────────────────
 
@@ -643,6 +650,7 @@ fn is_query_endpoint(path: &str) -> bool {
             | "/query"
             | "/query_vectors"
             | "/search_range"
+            | "/read_blob"
     )
 }
 
@@ -661,6 +669,8 @@ fn audit_action_for_path(path: &str) -> Option<&'static str> {
         "/add" => Some("add"),
         "/upsert" => Some("upsert"),
         "/bulk_add_binary" => Some("bulk_add_binary"),
+        "/write_blob" => Some("write_blob"),
+        "/delete_blob" => Some("delete_blob"),
         "/create_vector_field" => Some("create_vector_field"),
         "/add_named_vectors" => Some("add_named_vectors"),
         "/add_sparse_vectors" => Some("add_sparse_vectors"),
@@ -908,7 +918,10 @@ where
                 return Box::pin(async move {
                     let mut response = HttpResponse::Unauthorized()
                         .insert_header(("WWW-Authenticate", "Basic realm=\"LynseDB\""))
-                        .json(serde_json::json!({"error": "Unauthorized"}));
+                        .json(serde_json::json!({
+                            "error": "Unauthorized",
+                            "code": "unauthorized"
+                        }));
                     attach_request_id_header(response.headers_mut(), request_id);
                     let elapsed = started.elapsed();
                     metrics.observe(401, elapsed, RequestOutcome::Unauthorized);
@@ -1046,6 +1059,22 @@ struct RequireCollectionRequest {
 struct CollectionRequest {
     database_name: String,
     collection_name: String,
+}
+
+#[derive(Deserialize)]
+struct BlobRequest {
+    database_name: String,
+    collection_name: String,
+    key: String,
+}
+
+#[derive(Deserialize)]
+struct ReadBlobQuery {
+    database_name: String,
+    collection_name: String,
+    key: String,
+    offset: Option<usize>,
+    length: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -1401,10 +1430,6 @@ impl<T: Serialize> ApiResponse<T> {
     }
 }
 
-fn error_response(msg: &str) -> HttpResponse {
-    HttpResponse::InternalServerError().json(serde_json::json!({"error": msg}))
-}
-
 /// Merge legacy top-level `n_clusters` with optional `params` object.
 fn index_build_options_from_request(
     n_clusters: Option<usize>,
@@ -1421,14 +1446,6 @@ fn index_build_options_from_request(
     }
     opts.validate().map_err(|e| e.to_string())?;
     Ok(opts)
-}
-
-fn bad_request(msg: &str) -> HttpResponse {
-    HttpResponse::BadRequest().json(serde_json::json!({"error": msg}))
-}
-
-fn limit_bad_request(err: LynseError) -> HttpResponse {
-    bad_request(&err.to_string())
 }
 
 // ─── Helper: get collection from manager ─────────────────────────────────────
@@ -1749,6 +1766,27 @@ fn openapi_routes() -> &'static [OpenApiRoute] {
             tag: "vectors",
             summary: "Add records",
             request_schema: Some("AddRecordsRequest"),
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/write_blob",
+            tag: "collection",
+            summary: "Write collection user blob",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "get",
+            path: "/read_blob",
+            tag: "collection",
+            summary: "Read collection user blob",
+            request_schema: None,
+        },
+        OpenApiRoute {
+            method: "post",
+            path: "/delete_blob",
+            tag: "collection",
+            summary: "Delete collection user blob",
+            request_schema: Some("BlobRequest"),
         },
         OpenApiRoute {
             method: "post",
@@ -2154,6 +2192,7 @@ fn openapi_schemas() -> serde_json::Value {
         "DatabaseExistsRequest": object_schema(&["database_name"]),
         "SnapshotDatabaseRequest": object_schema(&["database_name", "snapshot_path"]),
         "RestoreDatabaseRequest": object_schema(&["database_name", "snapshot_path", "overwrite"]),
+        "BlobRequest": object_schema(&["database_name", "collection_name", "key"]),
         "RequireCollectionRequest": object_schema(&["database_name", "collection_name", "dim", "drop_if_exists", "description", "dtypes"]),
         "CollectionRequest": object_schema(&["database_name", "collection_name"]),
         "SnapshotCollectionRequest": object_schema(&["database_name", "collection_name", "snapshot_path"]),
@@ -2436,7 +2475,7 @@ async fn create_database(
 
     if drop_if_exists && state.manager.database_exists(&body.database_name) {
         if let Err(e) = state.manager.drop_database(&body.database_name) {
-            return error_response(&e.to_string());
+            return lynse_error_response(&e);
         }
     }
 
@@ -2444,7 +2483,7 @@ async fn create_database(
         Ok(()) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2456,7 +2495,7 @@ async fn drop_database(
         Ok(()) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2472,7 +2511,7 @@ async fn snapshot_database(
             "database_name": body.database_name,
             "snapshot_path": body.snapshot_path
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2489,7 +2528,7 @@ async fn restore_database(
             "database_name": body.database_name,
             "snapshot_path": body.snapshot_path
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2536,7 +2575,7 @@ async fn cluster_metadata_get(
                 "value": value,
             }))
         }
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2577,7 +2616,7 @@ async fn delete_database(
         Ok(()) => ApiResponse::success(serde_json::json!({
             "database_name": body.database_name
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2602,7 +2641,7 @@ async fn required_collection(
             "database_name": body.database_name,
             "collection_name": body.collection_name
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2618,7 +2657,7 @@ async fn drop_collection(
             "database_name": body.database_name,
             "collection_name": body.collection_name
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2636,7 +2675,7 @@ async fn snapshot_collection(
             "collection_name": body.collection_name,
             "snapshot_path": body.snapshot_path
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2654,7 +2693,7 @@ async fn export_collection(
             "collection_name": body.collection_name,
             "export_path": body.export_path
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2673,7 +2712,7 @@ async fn restore_collection(
             "collection_name": body.collection_name,
             "snapshot_path": body.snapshot_path
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2692,7 +2731,7 @@ async fn import_collection(
             "collection_name": body.collection_name,
             "export_path": body.export_path
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2710,7 +2749,7 @@ async fn show_collections(
             "database_name": db_name,
             "collections": collections
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2760,7 +2799,7 @@ async fn add_records(
     };
 
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
     let limits = state.limits;
     let result = state.manager.with_database(&body.database_name, |engine| {
@@ -2777,7 +2816,7 @@ async fn add_records(
             "collection_name": body.collection_name,
             "ids": ids
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2822,7 +2861,7 @@ async fn add_records_binary(
     let external_ids: Vec<ExternalId> = ids.iter().copied().map(ExternalId::Int).collect();
 
     if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
     let limits = state.limits;
     let result = state.manager.with_database(&query.database_name, |engine| {
@@ -2844,7 +2883,7 @@ async fn add_records_binary(
             "collection_name": query.collection_name,
             "ids": ids
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -2894,7 +2933,7 @@ async fn upsert_records(
     };
 
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
     let limits = state.limits;
     let result = state.manager.with_database(&body.database_name, |engine| {
@@ -2981,7 +3020,7 @@ async fn upsert_records(
             "collection_name": body.collection_name,
             "ids": ids
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3025,7 +3064,7 @@ async fn bulk_add_binary(
     };
 
     if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
     let limits = state.limits;
     // bulk_add_binary has no user IDs in the binary protocol — assign sequential from current max
@@ -3057,7 +3096,7 @@ async fn bulk_add_binary(
             "collection_name": query.collection_name,
             "n_vectors": n_vectors
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3102,7 +3141,7 @@ async fn upsert_records_binary(
     let external_ids: Vec<ExternalId> = ids.iter().copied().map(ExternalId::Int).collect();
 
     if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
     let limits = state.limits;
     let result = state.manager.with_database(&query.database_name, |engine| {
@@ -3189,7 +3228,7 @@ async fn upsert_records_binary(
             "collection_name": query.collection_name,
             "ids": ids
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3198,7 +3237,7 @@ async fn create_vector_field(
     body: web::Json<CreateVectorFieldRequest>,
 ) -> HttpResponse {
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
 
     let result = state.manager.with_database(&body.database_name, |engine| {
@@ -3219,7 +3258,7 @@ async fn create_vector_field(
             "collection_name": body.collection_name,
             "field": config
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3228,7 +3267,7 @@ async fn list_vector_fields(
     body: web::Json<CollectionRequest>,
 ) -> HttpResponse {
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
 
     let result = state.manager.with_database(&body.database_name, |engine| {
@@ -3243,7 +3282,7 @@ async fn list_vector_fields(
             "collection_name": body.collection_name,
             "fields": fields
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3279,7 +3318,7 @@ async fn add_named_vectors(
     }
 
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
 
     let limits = state.limits;
@@ -3298,7 +3337,7 @@ async fn add_named_vectors(
             "field_name": body.field_name,
             "ids": body.ids,
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3339,7 +3378,7 @@ async fn add_sparse_vectors(
             "collection_name": body.collection_name,
             "ids": body.ids,
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3349,7 +3388,7 @@ async fn build_vector_field_index(
 ) -> HttpResponse {
     let index_mode = body.index_mode.as_deref().unwrap_or("FLAT-IP");
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
 
     let metrics = Arc::clone(&state.metrics);
@@ -3363,11 +3402,7 @@ async fn build_vector_field_index(
         metrics.track_index_build(n_vectors, || {
             let opts = index_build_options_from_request(body.n_clusters, body.params.as_ref())
                 .map_err(LynseError::InvalidArgument)?;
-            coll.build_vector_field_index_with_build_options(
-                &body.field_name,
-                index_mode,
-                &opts,
-            )
+            coll.build_vector_field_index_with_build_options(&body.field_name, index_mode, &opts)
         })
     });
 
@@ -3380,7 +3415,7 @@ async fn build_vector_field_index(
             "n_clusters": body.n_clusters,
             "params": body.params,
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3389,7 +3424,7 @@ async fn remove_vector_field_index(
     body: web::Json<BuildVectorFieldIndexRequest>,
 ) -> HttpResponse {
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
 
     let result = state.manager.with_database(&body.database_name, |engine| {
@@ -3404,7 +3439,7 @@ async fn remove_vector_field_index(
             "collection_name": body.collection_name,
             "field_name": body.field_name,
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3424,7 +3459,7 @@ async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> H
     let vector_field = body.vector_field.as_deref().unwrap_or("default");
 
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
@@ -3474,7 +3509,7 @@ async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> H
                 }
             }))
         }
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3525,7 +3560,7 @@ async fn search_profile(
             },
             "profile": profile,
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3568,7 +3603,7 @@ async fn text_search(
                 "index": sr.index_mode,
             }
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3615,7 +3650,7 @@ async fn sparse_search(
                 "index": sr.index_mode,
             }
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3684,7 +3719,7 @@ async fn hybrid_search(
                 "fusion": fusion,
             }
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3715,7 +3750,7 @@ async fn batch_search(
     let filter = body.where_expr.clone();
 
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
@@ -3754,13 +3789,13 @@ async fn batch_search(
             "collection_name": body.collection_name,
             "results": results
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
 async fn commit(state: web::Data<AppState>, body: web::Json<CommitRequest>) -> HttpResponse {
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
@@ -3780,7 +3815,7 @@ async fn commit(state: web::Data<AppState>, body: web::Json<CommitRequest>) -> H
                 }
             }))
         }
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3797,7 +3832,7 @@ async fn flush(state: web::Data<AppState>, body: web::Json<CollectionRequest>) -
             "database_name": body.database_name,
             "collection_name": body.collection_name
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3817,7 +3852,7 @@ async fn checkpoint(
             "database_name": body.database_name,
             "collection_name": body.collection_name
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3837,7 +3872,7 @@ async fn close_collection(
             "database_name": body.database_name,
             "collection_name": body.collection_name
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3858,7 +3893,7 @@ async fn collection_shape(
             "collection_name": body.collection_name,
             "shape": [rows, dim]
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3875,7 +3910,7 @@ async fn is_collection_exists(
             "collection_name": body.collection_name,
             "exists": exists
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3898,7 +3933,7 @@ async fn get_collection_config(
                 ))
             }
         }
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3916,7 +3951,7 @@ async fn update_collection_description(
             "collection_name": body.collection_name,
             "description": body.description
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -3939,16 +3974,16 @@ async fn show_collections_details(
 
     let configs = match state.manager.get_collection_configs(db_name) {
         Ok(c) => c,
-        Err(e) => return error_response(&e.to_string()),
+        Err(e) => return lynse_error_response(&e),
     };
 
     let collections = match state.manager.show_collections(db_name) {
         Ok(c) => c,
-        Err(e) => return error_response(&e.to_string()),
+        Err(e) => return lynse_error_response(&e),
     };
 
     if let Err(e) = state.manager.get_or_open_database(db_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
 
     let mut details: HashMap<String, serde_json::Value> = HashMap::new();
@@ -4024,7 +4059,7 @@ async fn build_index(
             "n_clusters": body.n_clusters,
             "params": body.params,
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4044,7 +4079,7 @@ async fn remove_index(
             "database_name": body.database_name,
             "collection_name": body.collection_name
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4078,7 +4113,7 @@ async fn head(state: web::Data<AppState>, body: web::Json<HeadTailRequest>) -> H
             "collection_name": body.collection_name,
             "head": [vectors, ids, fields]
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4112,7 +4147,7 @@ async fn tail(state: web::Data<AppState>, body: web::Json<HeadTailRequest>) -> H
             "collection_name": body.collection_name,
             "tail": [vectors, ids, fields]
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4199,7 +4234,7 @@ async fn query(state: web::Data<AppState>, body: web::Json<QueryRequest>) -> Htt
             "collection_name": body.collection_name,
             "result": result_data
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4246,7 +4281,7 @@ async fn query_vectors(
             "collection_name": body.collection_name,
             "result": [vectors, ids, fields]
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4285,7 +4320,7 @@ async fn read_by_only_id(
             "collection_name": body.collection_name,
             "item": [vectors, ids, fields]
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4311,7 +4346,7 @@ async fn delete_records(
             "collection_name": body.collection_name,
             "status": "ok"
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4337,7 +4372,7 @@ async fn restore_records(
             "collection_name": body.collection_name,
             "status": "ok"
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4357,7 +4392,7 @@ async fn list_deleted_ids(
             "collection_name": body.collection_name,
             "ids": ids
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4386,7 +4421,7 @@ async fn search_range(
             "collection_name": body.collection_name,
             "result": {"ids": ids, "distances": dists}
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4407,7 +4442,7 @@ async fn list_fields(
             "collection_name": body.collection_name,
             "fields": fields
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4428,7 +4463,7 @@ async fn index_mode(
             "collection_name": body.collection_name,
             "index_mode": mode
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4480,13 +4515,13 @@ async fn max_id(state: web::Data<AppState>, body: web::Json<MaxIdRequest>) -> Ht
             "collection_name": body.collection_name,
             "max_id": max
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
 async fn compact(state: web::Data<AppState>, body: web::Json<CollectionRequest>) -> HttpResponse {
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
@@ -4501,7 +4536,7 @@ async fn compact(state: web::Data<AppState>, body: web::Json<CollectionRequest>)
             "collection_name": body.collection_name,
             "vectors_removed": removed
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4510,7 +4545,7 @@ async fn collection_stats(
     body: web::Json<CollectionRequest>,
 ) -> HttpResponse {
     if let Err(e) = state.manager.get_or_open_database(&body.database_name) {
-        return error_response(&e.to_string());
+        return lynse_error_response(&e);
     }
     let result = state.manager.with_database(&body.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&body.collection_name, 0, 100_000)?;
@@ -4536,7 +4571,7 @@ async fn collection_stats(
             "collection_name": body.collection_name,
             "stats": stats
         })),
-        Err(e) => error_response(&e.to_string()),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4609,18 +4644,6 @@ fn encode_vectors_binary(
     buf
 }
 
-fn binary_error(msg: &str) -> HttpResponse {
-    HttpResponse::InternalServerError()
-        .content_type("text/plain")
-        .body(msg.to_string())
-}
-
-fn binary_bad_request(msg: &str) -> HttpResponse {
-    HttpResponse::BadRequest()
-        .content_type("text/plain")
-        .body(msg.to_string())
-}
-
 // ─── Binary search endpoint ─────────────────────────────────────────────────
 
 async fn search_binary(
@@ -4657,7 +4680,7 @@ async fn search_binary(
     let vector_field = query.vector_field.as_deref().unwrap_or("default");
 
     if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
-        return binary_error(&e.to_string());
+        return binary_lynse_error_response(&e);
     }
     let result = state.manager.with_database(&query.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&query.collection_name, 0, 100_000)?;
@@ -4692,7 +4715,7 @@ async fn search_binary(
         Ok(buf) => HttpResponse::Ok()
             .content_type("application/octet-stream")
             .body(buf),
-        Err(e) => binary_error(&e.to_string()),
+        Err(e) => binary_lynse_error_response(&e),
     }
 }
 
@@ -4740,7 +4763,7 @@ async fn batch_search_binary(
     let filter = query.where_expr.clone();
 
     if let Err(e) = state.manager.get_or_open_database(&query.database_name) {
-        return binary_error(&e.to_string());
+        return binary_lynse_error_response(&e);
     }
     let result = state.manager.with_database(&query.database_name, |engine| {
         let coll_arc = engine.get_or_open_collection(&query.collection_name, 0, 100_000)?;
@@ -4769,7 +4792,7 @@ async fn batch_search_binary(
         Ok(buf) => HttpResponse::Ok()
             .content_type("application/octet-stream")
             .body(buf),
-        Err(e) => binary_error(&e.to_string()),
+        Err(e) => binary_lynse_error_response(&e),
     }
 }
 
@@ -4799,7 +4822,7 @@ async fn head_binary(
         Ok(buf) => HttpResponse::Ok()
             .content_type("application/octet-stream")
             .body(buf),
-        Err(e) => binary_error(&e.to_string()),
+        Err(e) => binary_lynse_error_response(&e),
     }
 }
 
@@ -4827,7 +4850,57 @@ async fn tail_binary(
         Ok(buf) => HttpResponse::Ok()
             .content_type("application/octet-stream")
             .body(buf),
-        Err(e) => binary_error(&e.to_string()),
+        Err(e) => binary_lynse_error_response(&e),
+    }
+}
+
+async fn write_blob(
+    state: web::Data<AppState>,
+    query: web::Query<BlobRequest>,
+    body: web::Bytes,
+) -> HttpResponse {
+    match with_collection_mut(
+        &state.manager,
+        &query.database_name,
+        &query.collection_name,
+        |coll| coll.write_blob(&query.key, &body),
+    ) {
+        Ok(()) => ApiResponse::success(serde_json::json!({"written": true})),
+        Err(e) => lynse_error_response(&e),
+    }
+}
+
+async fn read_blob(state: web::Data<AppState>, query: web::Query<ReadBlobQuery>) -> HttpResponse {
+    let result = with_collection(
+        &state.manager,
+        &query.database_name,
+        &query.collection_name,
+        |coll| {
+            if query.offset.is_some() || query.length.is_some() {
+                coll.read_blob_range(&query.key, query.offset.unwrap_or(0), query.length)
+            } else {
+                coll.read_blob(&query.key)
+            }
+        },
+    );
+    match result {
+        Ok(Some(value)) => HttpResponse::Ok()
+            .content_type("application/octet-stream")
+            .body(value),
+        Ok(None) => HttpResponse::NoContent().finish(),
+        Err(e) => binary_lynse_error_response(&e),
+    }
+}
+
+async fn delete_blob(state: web::Data<AppState>, body: web::Json<BlobRequest>) -> HttpResponse {
+    match with_collection_mut(
+        &state.manager,
+        &body.database_name,
+        &body.collection_name,
+        |coll| coll.delete_blob(&body.key),
+    ) {
+        Ok(deleted) => ApiResponse::success(serde_json::json!({"deleted": deleted})),
+        Err(e) => lynse_error_response(&e),
     }
 }
 
@@ -4867,6 +4940,9 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/show_collections", web::post().to(show_collections))
         .route("/add", web::post().to(add_records))
         .route("/add_records_binary", web::post().to(add_records_binary))
+        .route("/write_blob", web::post().to(write_blob))
+        .route("/read_blob", web::get().to(read_blob))
+        .route("/delete_blob", web::post().to(delete_blob))
         .route("/create_vector_field", web::post().to(create_vector_field))
         .route("/list_vector_fields", web::post().to(list_vector_fields))
         .route("/add_named_vectors", web::post().to(add_named_vectors))
@@ -5092,9 +5168,10 @@ pub fn start_server_background(
 #[cfg(test)]
 mod tests {
     use super::{
-        audit_action_for_path, collect_storage_usage, is_public_endpoint, is_query_endpoint,
-        openapi_spec, validate_batch_vectors, validate_collection_insert, validate_top_k, AppState,
-        HttpMetrics, RequestOutcome, ServerLimits,
+        audit_action_for_path, bad_request, collect_storage_usage, is_public_endpoint,
+        is_query_endpoint, lynse_error_response, openapi_spec, validate_batch_vectors,
+        validate_collection_insert, validate_top_k, AppState, HttpMetrics, RequestOutcome,
+        ServerLimits,
     };
     use actix_web::{body::to_bytes, http::StatusCode, web};
     use std::fs;
@@ -5104,6 +5181,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::engine::DatabaseManager;
+    use crate::error::LynseError;
 
     fn test_limits() -> ServerLimits {
         ServerLimits {
@@ -5122,6 +5200,47 @@ mod tests {
         assert!(!is_public_endpoint("/metrics"));
         assert!(!is_public_endpoint("/openapi.json"));
         assert!(!is_public_endpoint("/search"));
+    }
+
+    #[actix_rt::test]
+    async fn lynse_errors_map_to_http_status_and_machine_readable_codes() {
+        let cases = [
+            (
+                LynseError::InvalidArgument("bad request".into()),
+                StatusCode::BAD_REQUEST,
+                "invalid_argument",
+            ),
+            (
+                LynseError::CollectionNotFound("missing".into()),
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+            (
+                LynseError::CollectionAlreadyExists("duplicate".into()),
+                StatusCode::CONFLICT,
+                "already_exists",
+            ),
+            (
+                LynseError::Storage("disk failure".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            ),
+        ];
+
+        for (error, expected_status, expected_code) in cases {
+            let response = lynse_error_response(&error);
+            assert_eq!(response.status(), expected_status);
+            let bytes = to_bytes(response.into_body()).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["code"], expected_code);
+            assert_eq!(body["error"], error.to_string());
+        }
+
+        let response = bad_request("malformed request");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body()).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "invalid_argument");
     }
 
     #[test]

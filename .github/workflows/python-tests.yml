@@ -1,4 +1,4 @@
-name: Python API Tests
+name: Release
 
 on:
   push:
@@ -68,7 +68,33 @@ jobs:
           tag = "${{ steps.resolve-tag.outputs.tag_name }}"
           if Path("pyproject.toml").exists():
               package_kind = "maturin"
-              version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+              pyproject_version = tomllib.loads(
+                  Path("pyproject.toml").read_text()
+              )["project"]["version"]
+              cargo_version = tomllib.loads(
+                  Path("Cargo.toml").read_text()
+              )["package"]["version"]
+
+              package_tree = ast.parse(Path("python/lynse/__init__.py").read_text())
+              runtime_version = None
+              for node in package_tree.body:
+                  if not isinstance(node, ast.Assign):
+                      continue
+                  if any(
+                      isinstance(target, ast.Name) and target.id == "__version__"
+                      for target in node.targets
+                  ) and isinstance(node.value, ast.Constant):
+                      runtime_version = node.value.value
+                      break
+
+              versions = {
+                  "pyproject.toml": pyproject_version,
+                  "Cargo.toml": cargo_version,
+                  "python/lynse/__init__.py": runtime_version,
+              }
+              if len(set(versions.values())) != 1:
+                  sys.exit(f"Package versions are not synchronized: {versions}")
+              version = pyproject_version
           elif Path("setup.py").exists():
               package_kind = "legacy"
               version = None
@@ -92,6 +118,10 @@ jobs:
 
           if not re.match(r"^[0-9]+(\.[0-9]+)*([-.][0-9A-Za-z]+)*$", version):
               sys.exit(f"Invalid package version: {version!r}")
+
+          release_notes = Path("docs/releases.md").read_text()
+          if not re.search(rf"^##\s+{re.escape(tag)}\s*$", release_notes, re.MULTILINE):
+              sys.exit(f"docs/releases.md has no release section for {tag}")
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               print(f"package_kind={package_kind}", file=output)
@@ -257,8 +287,14 @@ jobs:
         path: dist/*.tar.gz
         if-no-files-found: error
 
+  docker-test:
+    needs: [verify-main-tag, build]
+    uses: ./.github/workflows/docker-tests.yml
+    with:
+      tag: ${{ needs.verify-main-tag.outputs.tag_name }}
+
   github-release:
-    needs: [verify-main-tag, build-wheels, build-sdist]
+    needs: [verify-main-tag, build-wheels, build-sdist, docker-test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -322,7 +358,7 @@ jobs:
         make_latest: true
 
   publish-pypi:
-    needs: [verify-main-tag, build-wheels, build-sdist]
+    needs: [verify-main-tag, build-wheels, build-sdist, docker-test]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: pypi
@@ -342,3 +378,57 @@ jobs:
         packages-dir: dist
         password: ${{ secrets.PYPI_API_TOKEN }}
         skip-existing: true
+
+  publish-docker:
+    needs: [verify-main-tag, build-wheels, build-sdist, docker-test]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-main-tag.outputs.tag_name }}
+
+      - name: Resolve image tags
+        id: image-tags
+        env:
+          RELEASE_TAG: ${{ needs.verify-main-tag.outputs.tag_name }}
+          TAG_COMMIT: ${{ needs.verify-main-tag.outputs.tag_commit }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${TAG_COMMIT:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and publish versioned images
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            birchkwok/lynsedb:${{ needs.verify-main-tag.outputs.tag_name }}
+            birchkwok/lynsedb:${{ steps.image-tags.outputs.version }}
+            birchkwok/lynsedb:sha-${{ steps.image-tags.outputs.short_sha }}
+
+      - name: Update latest after versioned image succeeds
+        run: |
+          docker buildx imagetools create \
+            --tag birchkwok/lynsedb:latest \
+            birchkwok/lynsedb:${{ steps.image-tags.outputs.version }}

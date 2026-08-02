@@ -6,10 +6,11 @@
 use crate::distance::DistanceMetric;
 use crate::error::{LynseError, Result};
 use crate::index::{self, IndexType, SearchParams, VectorIndex};
+use crate::storage::bitset::BitSet;
 use crate::storage::dtype::{
     decode_vector_bytes_to_f32, encode_f32_slice_as_le_bytes, f16_bits_to_f32, VectorDtype,
 };
-use crate::storage::field_store::FieldStore;
+use crate::storage::field_store::{FieldStore, MatchedIds};
 use crate::storage::polarvec_mmap::{
     parse_bits, PolarVecIndex, DEFAULT_BITS as POLARVEC_DEFAULT_BITS,
     DEFAULT_OVERSAMPLE as POLARVEC_OVERSAMPLE,
@@ -91,6 +92,14 @@ const STORAGE_FORMAT_VERSION: u32 = 2;
 const WAL_FORMAT_VERSION: u32 = 4;
 const PENDING_INGEST_FLUSH_ROWS: usize = 10_000;
 const PENDING_INGEST_FLUSH_BYTES: usize = 32 * 1024 * 1024;
+const ANN_FILTER_EXACT_MAX_ROWS: u64 = 100_000;
+const ANN_FILTER_EXACT_MAX_FRACTION_DENOMINATOR: u64 = 4;
+
+fn should_use_exact_filtered_search(subset_rows: usize, total_rows: u64) -> bool {
+    let fraction_cap = total_rows.saturating_add(ANN_FILTER_EXACT_MAX_FRACTION_DENOMINATOR - 1)
+        / ANN_FILTER_EXACT_MAX_FRACTION_DENOMINATOR;
+    (subset_rows as u64) <= ANN_FILTER_EXACT_MAX_ROWS.min(fraction_cap)
+}
 
 #[cfg(test)]
 static SNAPSHOT_COPY_DELAY_MS: AtomicU64 = AtomicU64::new(0);
@@ -1699,7 +1708,8 @@ impl Collection {
         std::fs::create_dir_all(&index_path)?;
         std::fs::create_dir_all(&index_meta_path)?;
 
-        let (index, index_mode) = Self::try_load_index(&index_meta_path, &index_path, &collection_path)?;
+        let (index, index_mode) =
+            Self::try_load_index(&index_meta_path, &index_path, &collection_path)?;
 
         // Load last sync fingerprint
         let last_sync_fingerprint = Self::load_sync_fingerprint(&collection_path);
@@ -3068,10 +3078,30 @@ impl Collection {
         self.reverse_id_map.get(&user_id).copied()
     }
 
-    fn field_keys_to_rows(&self, keys: Vec<u64>) -> Vec<u64> {
-        keys.into_iter()
-            .filter_map(|id| self.user_id_to_row(id).map(|row| row as u64))
-            .collect()
+    /// Map field-query matches (external IDs) to a row-domain BitSet for ANN filtering.
+    fn field_keys_to_row_bitset(&self, keys: &MatchedIds) -> BitSet {
+        let n = self
+            .vector_store
+            .get_shape()
+            .map(|s| s.0 as usize)
+            .unwrap_or(0);
+        let mut bs = BitSet::new(n, false);
+        for id in keys.iter() {
+            if let Some(row) = self.user_id_to_row(id) {
+                bs.set_bit(row);
+            }
+        }
+        bs
+    }
+
+    fn resolve_where_subset(&self, where_expr: Option<&str>) -> Result<Option<Arc<BitSet>>> {
+        match where_expr {
+            Some(filter) => {
+                let matched = self.field_store.query(filter)?;
+                Ok(Some(Arc::new(self.field_keys_to_row_bitset(&matched))))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Check if a user ID exists in the collection.
@@ -3281,7 +3311,7 @@ impl Collection {
         &self,
         query: &[f32],
         k: usize,
-        subset_indices: Option<&[u64]>,
+        subset: Option<&BitSet>,
         metric: DistanceMetric,
     ) -> (Vec<u64>, Vec<f32>) {
         if k == 0 {
@@ -3299,12 +3329,11 @@ impl Collection {
             return (Vec::new(), Vec::new());
         }
 
-        let (data, row_offsets) = if let Some(subset) = subset_indices {
-            let subset: HashSet<u64> = subset.iter().copied().collect();
+        let (data, row_offsets) = if let Some(subset) = subset {
             let mut data = Vec::new();
             let mut row_offsets = Vec::new();
             for (idx, &row) in snapshot.row_offsets.iter().enumerate() {
-                if subset.contains(&row) {
+                if subset.contains(row as usize) {
                     let start = idx * dim;
                     let end = start + dim;
                     if end <= snapshot.vectors.len() {
@@ -4396,6 +4425,7 @@ impl Collection {
     pub fn flush(&self) -> Result<()> {
         self.ensure_writable()?;
         self.flush_pending_ingest()?;
+        self.field_store.flush()?;
         self.persist_vector_store_metadata()?;
         self.wal.flush()?;
         self.sync_collection_files()
@@ -4661,9 +4691,9 @@ impl Collection {
     /// Search for nearest neighbors.
     ///
     /// Search path:
-    /// 1. If an HNSW/IVF/SPANN/DiskANN index exists → use it
+    /// 1. If an HNSW/IVF/SPANN/DiskANN index exists → use it (in-graph BitSet filter)
     /// 2. Otherwise → zero-copy mmap brute-force via VectorStore's FlatMmap
-    /// 3. Filtered search → brute-force with subset filtering on mmap data
+    /// 3. Filtered flat / quantized paths → subset BitSet scan on mmap data
     pub fn search(
         &self,
         query: &[f32],
@@ -4681,22 +4711,15 @@ impl Collection {
             });
         }
 
-        let subset_indices = if let Some(filter) = where_expr {
-            Some(Arc::new(
-                self.field_keys_to_rows(self.field_store.query(filter)?),
-            ))
-        } else {
-            None
-        };
-
-        self.search_with_precomputed_filter(query, k, subset_indices, nprobe, approx, eps)
+        let subset = self.resolve_where_subset(where_expr)?;
+        self.search_with_precomputed_filter(query, k, subset, nprobe, approx, eps)
     }
 
     fn search_with_precomputed_filter(
         &self,
         query: &[f32],
         k: usize,
-        subset_indices: Option<Arc<Vec<u64>>>,
+        subset: Option<Arc<BitSet>>,
         nprobe: usize,
         approx: bool,
         eps: f32,
@@ -4720,9 +4743,15 @@ impl Collection {
             // nprobe==0 → use index build defaults (HNSW ef_search / IVF nprobe).
             // nprobe>0 → override HNSW beam (documented as query-time ef).
             ef_search: if nprobe > 0 { Some(nprobe) } else { None },
-            subset_indices,
+            subset,
         };
         let search_k = search_params.k;
+        let use_exact_filtered_search = if let Some(subset) = search_params.subset.as_ref() {
+            let (total_rows, _) = self.vector_store.get_shape()?;
+            should_use_exact_filtered_search(subset.count(), total_rows)
+        } else {
+            false
+        };
 
         let collection_metric = self.resolve_metric();
         let approx_cfg = if approx && collection_metric.supports_flat_approx() {
@@ -4735,26 +4764,12 @@ impl Collection {
         };
         let mut approx_applied_eps = None;
 
-        let filtered_index_requires_exact = search_params.subset_indices.is_some()
-            && self
-                .index
-                .as_ref()
-                .map(|idx| {
-                    matches!(
-                        idx.config().index_type,
-                        IndexType::HNSW | IndexType::DiskANN
-                    )
-                })
-                .unwrap_or(false);
-
-        let (result_ids, result_dists) = if filtered_index_requires_exact {
-            // HNSW and DiskANN do not currently apply subset_indices inside
-            // their graph searches. Use the exact filtered path to avoid
-            // returning rows outside the metadata predicate.
-            self.brute_force_search_filtered(query, search_k, &search_params)?
-        } else if let Some(ref idx) = self.index {
-            // ANN structure index path — DiskANN layered uses PQ beam + VectorStore rescore.
-            if idx.uses_store_rescore() {
+        let (result_ids, result_dists) = if let Some(ref idx) = self.index {
+            // ANN structure index path — layered DiskANN uses exact filtered mmap
+            // search for selective subsets, otherwise PQ beam + VectorStore rescore.
+            if idx.uses_store_rescore() && use_exact_filtered_search {
+                self.brute_force_search_filtered(query, search_k, &search_params)?
+            } else if idx.uses_store_rescore() {
                 let candidates = idx.search_candidates(query, search_k, &search_params)?;
                 let (indices, distances) = self.vector_store.rescore_exact_candidates(
                     &candidates,
@@ -4762,14 +4777,11 @@ impl Collection {
                     search_k,
                     collection_metric,
                 )?;
-                (
-                    indices.into_iter().map(|i| i as u64).collect(),
-                    distances,
-                )
+                (indices.into_iter().map(|i| i as u64).collect(), distances)
             } else {
                 idx.search(query, search_k, &search_params)?
             }
-        } else if search_params.subset_indices.is_some() {
+        } else if search_params.subset.is_some() {
             // Filtered flat-family search must evaluate only allowed row IDs.
             // Auxiliary flat quantizers (PQ/RaBitQ/PolarVec) are whole-corpus
             // candidate generators, so filtered queries use the exact filtered
@@ -4788,10 +4800,7 @@ impl Collection {
         let (pending_ids, pending_dists) = self.pending_search(
             query,
             search_k,
-            search_params
-                .subset_indices
-                .as_ref()
-                .map(|subset| subset.as_slice()),
+            search_params.subset.as_deref(),
             collection_metric,
         );
         let (result_ids, result_dists) = self.merge_row_results(
@@ -4862,7 +4871,7 @@ impl Collection {
 
         let allowed_ids = if let Some(filter) = where_expr {
             let keys = self.field_store.query(filter)?;
-            Some(keys.into_iter().collect::<HashSet<u64>>())
+            Some(keys.iter().collect::<HashSet<u64>>())
         } else {
             None
         };
@@ -4881,20 +4890,18 @@ impl Collection {
                 k,
                 nprobe: 0,
                 ef_search: None,
-                subset_indices: None,
+                subset: None,
             };
             let idx = field.index.as_ref().unwrap();
             let metric = DistanceMetric::from_str(&field.config.metric)
                 .unwrap_or_else(|| Self::metric_from_mode_str(&field.config.index_mode));
             if idx.uses_store_rescore() {
                 let candidates = idx.search_candidates(query, k, &search_params)?;
-                let (indices, distances) = field
-                    .vector_store
-                    .rescore_exact_candidates(&candidates, query, k, metric)?;
-                (
-                    indices.into_iter().map(|i| i as u64).collect(),
-                    distances,
-                )
+                let (indices, distances) =
+                    field
+                        .vector_store
+                        .rescore_exact_candidates(&candidates, query, k, metric)?;
+                (indices.into_iter().map(|i| i as u64).collect(), distances)
             } else {
                 idx.search(query, k, &search_params)?
             }
@@ -4974,7 +4981,7 @@ impl Collection {
 
         let allowed_ids = if let Some(filter) = where_expr {
             let keys = self.field_store.query(filter)?;
-            Some(keys.into_iter().collect())
+            Some(keys.iter().collect::<HashSet<u64>>())
         } else {
             None
         };
@@ -5008,19 +5015,19 @@ impl Collection {
         let mut filter_us = 0u64;
         let mut filter_matches = None;
 
-        let subset_indices = if let Some(expr) = where_expr {
+        let subset = if let Some(expr) = where_expr {
             let filter_started = Instant::now();
-            let ids = self.field_keys_to_rows(self.field_store.query(expr)?);
+            let matched = self.field_store.query(expr)?;
+            let bs = self.field_keys_to_row_bitset(&matched);
             filter_us = elapsed_micros_u64(filter_started);
-            filter_matches = Some(ids.len());
-            Some(Arc::new(ids))
+            filter_matches = Some(bs.count());
+            Some(Arc::new(bs))
         } else {
             None
         };
 
         let search_started = Instant::now();
-        let result =
-            self.search_with_precomputed_filter(query, k, subset_indices, nprobe, approx, eps)?;
+        let result = self.search_with_precomputed_filter(query, k, subset, nprobe, approx, eps)?;
         let search_us = elapsed_micros_u64(search_started);
         let total_vectors = self.shape()?.0;
         let filtered = where_expr.is_some();
@@ -5091,18 +5098,12 @@ impl Collection {
 
         let candidate_limit = candidate_limit.max(k).max(1);
         let mut fused: HashMap<u64, f32> = HashMap::new();
-        let subset_indices = if let Some(filter) = where_expr {
-            Some(Arc::new(
-                self.field_keys_to_rows(self.field_store.query(filter)?),
-            ))
-        } else {
-            None
-        };
+        let subset = self.resolve_where_subset(where_expr)?;
         if let Some(vector) = query {
             let vector_result = self.search_with_precomputed_filter(
                 vector,
                 candidate_limit,
-                subset_indices.clone(),
+                subset.clone(),
                 nprobe,
                 false,
                 1e-4,
@@ -5121,9 +5122,9 @@ impl Collection {
 
         if let Some(text) = query_text {
             if !text.trim().is_empty() {
-                let allowed_text_ids = subset_indices.as_ref().map(|rows| {
-                    rows.iter()
-                        .map(|&row| self.row_to_user_id(row))
+                let allowed_text_ids = subset.as_ref().map(|rows| {
+                    rows.iter_set_bits()
+                        .map(|row| self.row_to_user_id(row as u64))
                         .collect::<HashSet<u64>>()
                 });
                 let (text_scores, _) = self.bm25_text_scores_with_allowed_ids(
@@ -5200,7 +5201,7 @@ impl Collection {
     ) -> Result<(Vec<(u64, f32)>, &'static str)> {
         let allowed_ids = if let Some(expr) = where_expr {
             let keys = self.field_store.query(expr)?;
-            Some(keys.into_iter().collect())
+            Some(keys.iter().collect::<HashSet<u64>>())
         } else {
             None
         };
@@ -5251,7 +5252,7 @@ impl Collection {
         limit: usize,
     ) -> Result<Vec<(u64, f32)>> {
         let field_keys: Vec<u64> = if let Some(expr) = where_expr {
-            self.field_store.query(expr)?
+            self.field_store.query(expr)?.to_vec()
         } else {
             self.id_map.clone()
         };
@@ -5375,15 +5376,60 @@ impl Collection {
         }
 
         // Pre-compute filter once (shared across all queries)
-        let subset_indices = if let Some(filter) = where_expr {
-            Some(Arc::new(
-                self.field_keys_to_rows(self.field_store.query(filter)?),
-            ))
-        } else {
-            None
-        };
+        let subset = self.resolve_where_subset(where_expr)?;
 
-        if subset_indices.is_none()
+        if let Some(index) = self
+            .index
+            .as_ref()
+            .filter(|index| index.uses_store_rescore())
+        {
+            let (total_rows, _) = self.vector_store.get_shape()?;
+            let use_exact_filtered_search = subset.as_ref().is_some_and(|allowed| {
+                should_use_exact_filtered_search(allowed.count(), total_rows)
+            });
+            if !use_exact_filtered_search {
+                let tombstone_count = self.tombstone.read().len();
+                let search_k = if tombstone_count == 0 {
+                    k
+                } else {
+                    k.saturating_add(tombstone_count)
+                };
+                let params = SearchParams {
+                    k: search_k,
+                    nprobe,
+                    ef_search: (nprobe > 0).then_some(nprobe),
+                    subset: subset.clone(),
+                };
+                let candidate_batches =
+                    index.batch_search_candidates(queries, n_queries, dim, search_k, &params)?;
+                let metric = self.resolve_metric();
+                let mut results = Vec::with_capacity(n_queries);
+                for (query, candidates) in queries.chunks_exact(dim).zip(candidate_batches) {
+                    let (rows, distances) = self.vector_store.rescore_exact_candidates(
+                        &candidates,
+                        query,
+                        search_k,
+                        metric,
+                    )?;
+                    let ids = rows
+                        .into_iter()
+                        .map(|row| self.row_to_user_id(row as u64))
+                        .collect();
+                    let (ids, distances) = self.filter_tombstoned_limit(ids, distances, k);
+                    results.push(SearchResult {
+                        ids,
+                        distances,
+                        fields: Vec::new(),
+                        index_mode: self.index_mode.clone().unwrap_or("FLAT-IP".into()),
+                        dimension: dim,
+                        k,
+                    });
+                }
+                return Ok(results);
+            }
+        }
+
+        if subset.is_none()
             && self.index.is_none()
             && self.pq_index.is_none()
             && self.rabitq_index.is_none()
@@ -5442,7 +5488,7 @@ impl Collection {
             results.push(self.search_with_precomputed_filter(
                 query,
                 k,
-                subset_indices.clone(),
+                subset.clone(),
                 nprobe,
                 false,
                 1e-4,
@@ -5500,8 +5546,8 @@ impl Collection {
     ) -> Result<(Vec<u64>, Vec<f32>)> {
         let metric = self.resolve_metric();
 
-        let subset = match &params.subset_indices {
-            Some(s) => s.as_slice(),
+        let subset = match &params.subset {
+            Some(s) => s,
             None => {
                 // No filter — use unfiltered path
                 return self
@@ -5510,11 +5556,13 @@ impl Collection {
             }
         };
 
-        if subset.is_empty() {
+        if subset.count() == 0 {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        self.vector_store.search_filtered(query, k, metric, subset)
+        let subset_rows = subset.to_vec();
+        self.vector_store
+            .search_filtered(query, k, metric, &subset_rows)
     }
 
     // ─── Filtered search strategies for benchmarking ────────────────────────
@@ -5761,7 +5809,8 @@ impl Collection {
 
         // Get matching IDs once (shared by all strategies)
         let t0 = std::time::Instant::now();
-        let subset = self.field_keys_to_rows(self.field_store.query(where_expr)?);
+        let matched = self.field_store.query(where_expr)?;
+        let subset = self.field_keys_to_row_bitset(&matched).to_vec();
         let field_query_us = t0.elapsed().as_micros() as f64;
         let n_matches = subset.len();
 
@@ -6210,8 +6259,8 @@ impl Collection {
     pub fn query_fields(&self, where_expr: &str) -> Result<Vec<u64>> {
         let field_keys = self.field_store.query(where_expr)?;
         Ok(field_keys
-            .into_iter()
-            .filter(|id| self.reverse_id_map.contains_key(id))
+            .iter()
+            .filter(|id| self.reverse_id_map.contains_key(&id))
             .collect())
     }
 
@@ -6241,6 +6290,47 @@ impl Collection {
     /// List all field names in the collection.
     pub fn list_fields(&self) -> Result<Vec<String>> {
         self.field_store.list_fields()
+    }
+
+    /// Store or replace arbitrary collection-local user bytes under `key`.
+    pub fn write_blob(&self, key: &str, value: &[u8]) -> Result<()> {
+        self.ensure_writable()?;
+        self.field_store.write_user_blob(key, value)
+    }
+
+    /// Read arbitrary collection-local user bytes. Missing keys return `None`.
+    pub fn read_blob(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.field_store.read_user_blob(key)
+    }
+
+    /// Read a byte range from a collection-local user blob.
+    pub fn read_blob_range(
+        &self,
+        key: &str,
+        offset: usize,
+        length: Option<usize>,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(value) = self.field_store.read_user_blob(key)? else {
+            return Ok(None);
+        };
+        if offset > value.len() {
+            return Err(LynseError::InvalidArgument(format!(
+                "blob range offset {} exceeds blob length {}",
+                offset,
+                value.len()
+            )));
+        }
+        let end = match length {
+            Some(length) => offset.saturating_add(length).min(value.len()),
+            None => value.len(),
+        };
+        Ok(Some(value[offset..end].to_vec()))
+    }
+
+    /// Delete a collection-local user blob. Returns whether it existed.
+    pub fn delete_blob(&self, key: &str) -> Result<bool> {
+        self.ensure_writable()?;
+        self.field_store.delete_user_blob(key)
     }
 
     /// Get the current index mode string.
@@ -7663,6 +7753,15 @@ mod tests {
         assert!(validate_resource_name("collection", "foo/bar").is_err());
         assert!(validate_resource_name("collection", "..").is_err());
         assert!(validate_resource_name("database", "").is_err());
+    }
+
+    #[test]
+    fn selective_layered_ann_filters_use_exact_search_budget() {
+        assert!(should_use_exact_filtered_search(0, 10_000));
+        assert!(should_use_exact_filtered_search(2_500, 10_000));
+        assert!(!should_use_exact_filtered_search(2_501, 10_000));
+        assert!(should_use_exact_filtered_search(100_000, 1_000_000));
+        assert!(!should_use_exact_filtered_search(100_001, 1_000_000));
     }
 
     #[test]

@@ -141,6 +141,10 @@ accepts HTTP Basic auth where the password is the API key.
 Public endpoints are `/`, `/healthz`, and `/readyz`. Operational and data
 endpoints require authentication when `--api-key` is configured.
 
+The same `--api-key` protects a cluster coordinator. In cluster mode, keep it
+separate from `--shard-api-key`: the former authenticates applications at the
+coordinator, while the latter authenticates coordinator-to-shard traffic.
+
 ## Docker
 
 ```shell

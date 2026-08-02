@@ -221,6 +221,51 @@ impl PQIndex {
         )
     }
 
+    /// Batch ADC scan that traverses the PQ codes once for all queries.
+    /// This avoids repeating the memory pass for layered DiskANN batch search.
+    pub fn search_candidates_batch(
+        &self,
+        queries: &[f32],
+        n_queries: usize,
+        k: usize,
+        metric: DistanceMetric,
+        oversample: usize,
+    ) -> Vec<Vec<u32>> {
+        if self.n_vectors == 0
+            || n_queries == 0
+            || k == 0
+            || queries.len() != n_queries.saturating_mul(self.dim)
+        {
+            return vec![Vec::new(); n_queries];
+        }
+        let n_candidates = k
+            .min(self.n_vectors)
+            .saturating_mul(oversample)
+            .min(self.n_vectors);
+        let luts: Vec<Vec<f32>> = queries
+            .chunks_exact(self.dim)
+            .map(|query| {
+                build_lut(
+                    query,
+                    &self.codebooks,
+                    self.n_subspaces,
+                    self.n_clusters,
+                    self.subspace_size,
+                    metric,
+                )
+            })
+            .collect();
+        adc_scan_topn_batch(
+            &self.codes,
+            self.n_vectors,
+            self.n_subspaces,
+            self.n_clusters,
+            &luts,
+            n_candidates,
+            metric.is_ascending(),
+        )
+    }
+
     /// Number of indexed vectors.
     #[inline]
     pub fn len(&self) -> usize {
@@ -286,7 +331,12 @@ impl PQIndex {
     }
 
     /// Append encoded rows for incremental insert (codes only; codebooks fixed).
-    pub fn append_encoded(&mut self, data: &[f32], n_vectors: usize, dim: usize) -> Result<(), String> {
+    pub fn append_encoded(
+        &mut self,
+        data: &[f32],
+        n_vectors: usize,
+        dim: usize,
+    ) -> Result<(), String> {
         if dim != self.dim {
             return Err(format!(
                 "PQ dim mismatch: expected {}, got {}",
@@ -311,7 +361,12 @@ impl PQIndex {
     }
 
     /// Overwrite PQ codes for an existing row (codebooks fixed).
-    pub fn set_encoded_row(&mut self, idx: usize, vector: &[f32], dim: usize) -> Result<(), String> {
+    pub fn set_encoded_row(
+        &mut self,
+        idx: usize,
+        vector: &[f32],
+        dim: usize,
+    ) -> Result<(), String> {
         if dim != self.dim {
             return Err(format!(
                 "PQ dim mismatch: expected {}, got {}",
@@ -648,56 +703,82 @@ fn encode_vectors(
     subspace_size: usize,
 ) -> Vec<u8> {
     let mut codes = vec![0u8; n_vectors * n_subspaces];
+    let encode_row = |i: usize, code_row: &mut [u8]| {
+        for m in 0..n_subspaces {
+            let v_sub = &data[i * dim + m * subspace_size..i * dim + (m + 1) * subspace_size];
+            let cb_base = m * n_clusters * subspace_size;
+            let mut best_c = 0u8;
+            let mut best_d = f32::MAX;
+            let mut c = 0usize;
+            while c + 8 <= n_clusters {
+                let b0 = &codebooks[cb_base + c * subspace_size..cb_base + (c + 1) * subspace_size];
+                let b1 = &codebooks
+                    [cb_base + (c + 1) * subspace_size..cb_base + (c + 2) * subspace_size];
+                let b2 = &codebooks
+                    [cb_base + (c + 2) * subspace_size..cb_base + (c + 3) * subspace_size];
+                let b3 = &codebooks
+                    [cb_base + (c + 3) * subspace_size..cb_base + (c + 4) * subspace_size];
+                let b4 = &codebooks
+                    [cb_base + (c + 4) * subspace_size..cb_base + (c + 5) * subspace_size];
+                let b5 = &codebooks
+                    [cb_base + (c + 5) * subspace_size..cb_base + (c + 6) * subspace_size];
+                let b6 = &codebooks
+                    [cb_base + (c + 6) * subspace_size..cb_base + (c + 7) * subspace_size];
+                let b7 = &codebooks
+                    [cb_base + (c + 7) * subspace_size..cb_base + (c + 8) * subspace_size];
+                let dists = simd::l2_squared_batch8_f32(v_sub, b0, b1, b2, b3, b4, b5, b6, b7);
+                for (k, &d) in dists.iter().enumerate() {
+                    if d < best_d {
+                        best_d = d;
+                        best_c = (c + k) as u8;
+                    }
+                }
+                c += 8;
+            }
+            while c < n_clusters {
+                let cb = &codebooks[cb_base + c * subspace_size..cb_base + (c + 1) * subspace_size];
+                let d = simd::l2_squared_f32(v_sub, cb);
+                if d < best_d {
+                    best_d = d;
+                    best_c = c as u8;
+                }
+                c += 1;
+            }
+            code_row[m] = best_c;
+        }
+    };
+
+    let threads = rayon::current_num_threads().max(1).min(n_vectors.max(1));
+    if threads > 1 {
+        if let Ok(topology) = forkunion::Topology::new() {
+            if let Ok(mut pool) =
+                forkunion::ThreadPool::try_named_spawn(&topology, "lynse-pq", threads)
+            {
+                let codes_ptr = forkunion::SyncMutPtr::new(codes.as_mut_ptr());
+                // SAFETY: `for_slices` assigns disjoint vector-index ranges;
+                // each callback writes exactly one non-overlapping PQ code row,
+                // and the operation joins before `codes` is returned.
+                let operation = pool.for_slices(n_vectors, |prong, count| {
+                    for i in prong.task_index..prong.task_index + count {
+                        let code_row = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                codes_ptr.get(i * n_subspaces),
+                                n_subspaces,
+                            )
+                        };
+                        encode_row(i, code_row);
+                    }
+                });
+                drop(operation);
+                return codes;
+            }
+        }
+    }
+
     codes
         .par_chunks_mut(n_subspaces)
         .enumerate()
-        .for_each(|(i, code_row)| {
-            for m in 0..n_subspaces {
-                let v_sub =
-                    &data[i * dim + m * subspace_size..i * dim + (m + 1) * subspace_size];
-                let cb_base = m * n_clusters * subspace_size;
-                let mut best_c = 0u8;
-                let mut best_d = f32::MAX;
-                let mut c = 0usize;
-                while c + 8 <= n_clusters {
-                    let b0 = &codebooks[cb_base + c * subspace_size
-                        ..cb_base + (c + 1) * subspace_size];
-                    let b1 = &codebooks[cb_base + (c + 1) * subspace_size
-                        ..cb_base + (c + 2) * subspace_size];
-                    let b2 = &codebooks[cb_base + (c + 2) * subspace_size
-                        ..cb_base + (c + 3) * subspace_size];
-                    let b3 = &codebooks[cb_base + (c + 3) * subspace_size
-                        ..cb_base + (c + 4) * subspace_size];
-                    let b4 = &codebooks[cb_base + (c + 4) * subspace_size
-                        ..cb_base + (c + 5) * subspace_size];
-                    let b5 = &codebooks[cb_base + (c + 5) * subspace_size
-                        ..cb_base + (c + 6) * subspace_size];
-                    let b6 = &codebooks[cb_base + (c + 6) * subspace_size
-                        ..cb_base + (c + 7) * subspace_size];
-                    let b7 = &codebooks[cb_base + (c + 7) * subspace_size
-                        ..cb_base + (c + 8) * subspace_size];
-                    let dists = simd::l2_squared_batch8_f32(v_sub, b0, b1, b2, b3, b4, b5, b6, b7);
-                    for (k, &d) in dists.iter().enumerate() {
-                        if d < best_d {
-                            best_d = d;
-                            best_c = (c + k) as u8;
-                        }
-                    }
-                    c += 8;
-                }
-                while c < n_clusters {
-                    let cb = &codebooks[cb_base + c * subspace_size
-                        ..cb_base + (c + 1) * subspace_size];
-                    let d = simd::l2_squared_f32(v_sub, cb);
-                    if d < best_d {
-                        best_d = d;
-                        best_c = c as u8;
-                    }
-                    c += 1;
-                }
-                code_row[m] = best_c;
-            }
-        });
+        .for_each(|(i, code_row)| encode_row(i, code_row));
     codes
 }
 
@@ -828,6 +909,116 @@ fn adc_scan_topn(
     all_entries.iter().map(|e| e.1).collect()
 }
 
+fn adc_scan_topn_batch(
+    codes: &[u8],
+    n_vectors: usize,
+    n_subspaces: usize,
+    n_clusters: usize,
+    luts: &[Vec<f32>],
+    n_candidates: usize,
+    ascending: bool,
+) -> Vec<Vec<u32>> {
+    if luts.is_empty() || n_candidates == 0 {
+        return vec![Vec::new(); luts.len()];
+    }
+    let n_threads = rayon::current_num_threads().max(1);
+    let chunk_vecs = (n_vectors / n_threads).max(256);
+
+    let chunk_results: Vec<Vec<Vec<u32>>> = codes
+        .par_chunks(chunk_vecs * n_subspaces)
+        .enumerate()
+        .map(|(chunk_idx, code_chunk)| {
+            let n_in_chunk = code_chunk.len() / n_subspaces;
+            let base_idx = chunk_idx * chunk_vecs;
+            if ascending {
+                let mut heaps: Vec<BinaryHeap<HeapEntry>> = (0..luts.len())
+                    .map(|_| BinaryHeap::with_capacity(n_candidates + 1))
+                    .collect();
+                for i in 0..n_in_chunk {
+                    let code =
+                        unsafe { code_chunk.get_unchecked(i * n_subspaces..(i + 1) * n_subspaces) };
+                    for (query_idx, lut) in luts.iter().enumerate() {
+                        let mut score = 0.0f32;
+                        for m in 0..n_subspaces {
+                            score +=
+                                unsafe { *lut.get_unchecked(m * n_clusters + code[m] as usize) };
+                        }
+                        let heap = &mut heaps[query_idx];
+                        let entry = HeapEntry {
+                            score,
+                            idx: (base_idx + i) as u32,
+                        };
+                        if heap.len() < n_candidates {
+                            heap.push(entry);
+                        } else if heap.peek().is_some_and(|top| score < top.score) {
+                            heap.pop();
+                            heap.push(entry);
+                        }
+                    }
+                }
+                heaps
+                    .into_iter()
+                    .map(|heap| heap.into_iter().map(|entry| entry.idx).collect())
+                    .collect()
+            } else {
+                let mut heaps: Vec<BinaryHeap<std::cmp::Reverse<HeapEntry>>> = (0..luts.len())
+                    .map(|_| BinaryHeap::with_capacity(n_candidates + 1))
+                    .collect();
+                for i in 0..n_in_chunk {
+                    let code =
+                        unsafe { code_chunk.get_unchecked(i * n_subspaces..(i + 1) * n_subspaces) };
+                    for (query_idx, lut) in luts.iter().enumerate() {
+                        let mut score = 0.0f32;
+                        for m in 0..n_subspaces {
+                            score +=
+                                unsafe { *lut.get_unchecked(m * n_clusters + code[m] as usize) };
+                        }
+                        let heap = &mut heaps[query_idx];
+                        let entry = HeapEntry {
+                            score,
+                            idx: (base_idx + i) as u32,
+                        };
+                        if heap.len() < n_candidates {
+                            heap.push(std::cmp::Reverse(entry));
+                        } else if heap.peek().is_some_and(|top| score > top.0.score) {
+                            heap.pop();
+                            heap.push(std::cmp::Reverse(entry));
+                        }
+                    }
+                }
+                heaps
+                    .into_iter()
+                    .map(|heap| heap.into_iter().map(|entry| entry.0.idx).collect())
+                    .collect()
+            }
+        })
+        .collect();
+
+    (0..luts.len())
+        .map(|query_idx| {
+            let lut = &luts[query_idx];
+            let mut entries: Vec<(f32, u32)> = chunk_results
+                .iter()
+                .flat_map(|chunk| chunk[query_idx].iter().copied())
+                .map(|idx| {
+                    let code = &codes[idx as usize * n_subspaces..(idx as usize + 1) * n_subspaces];
+                    let score = (0..n_subspaces)
+                        .map(|m| unsafe { *lut.get_unchecked(m * n_clusters + code[m] as usize) })
+                        .sum();
+                    (score, idx)
+                })
+                .collect();
+            if ascending {
+                entries.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+            } else {
+                entries.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+            }
+            entries.truncate(n_candidates);
+            entries.into_iter().map(|(_, idx)| idx).collect()
+        })
+        .collect()
+}
+
 // ─── Exact f32 Re-scoring ─────────────────────────────────────────────────────
 
 /// Re-score candidate indices with exact f32 distances and return top-k.
@@ -955,7 +1146,7 @@ mod tests {
         assert_eq!(pq.len(), n);
 
         let query = random_data(1, dim, 99);
-        let (ids, dists) = pq.search(&query, 10, &data, DistanceMetric::InnerProduct, 32);
+        let (ids, _dists) = pq.search(&query, 10, &data, DistanceMetric::InnerProduct, 32);
         assert_eq!(ids.len(), 10);
         // Highest IP should be in top-10
         let brute_best = (0..n)
@@ -986,6 +1177,23 @@ mod tests {
             .unwrap()
             .0;
         assert!(ids.contains(&(brute_best as u32)));
+    }
+
+    #[test]
+    fn test_pq_batch_candidates_match_single_queries() {
+        let n = 500;
+        let dim = 16;
+        let data = random_data(n, dim, 12);
+        let queries = random_data(3, dim, 34);
+        let pq = PQIndex::build(&data, n, dim, 4);
+
+        let batch = pq.search_candidates_batch(&queries, 3, 20, DistanceMetric::L2Squared, 1);
+        let singles: Vec<Vec<u32>> = queries
+            .chunks_exact(dim)
+            .map(|query| pq.search_candidates(query, 20, DistanceMetric::L2Squared, 1))
+            .collect();
+
+        assert_eq!(batch, singles);
     }
 
     #[test]

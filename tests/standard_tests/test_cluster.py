@@ -1,3 +1,5 @@
+import base64
+import http.client
 import json
 import queue
 import socket
@@ -15,6 +17,7 @@ from lynse.cluster import (
     RPC_OP_METADATA_CAS,
     RPC_OP_METADATA_GET,
     ClusterCoordinator,
+    ClusterRequestHandler,
     ClusterState,
     MetadataConflict,
     MetadataCoordinatorLease,
@@ -109,6 +112,128 @@ def _read_exact(conn, size):
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+class _HandlerTestState:
+    @staticmethod
+    def databases():
+        return ["db"]
+
+
+class _HandlerTestCoordinator:
+    def __init__(self):
+        self.state = _HandlerTestState()
+        self.create_calls = []
+
+    @staticmethod
+    def is_active_coordinator():
+        return True
+
+    @staticmethod
+    def try_become_leader_once():
+        return False
+
+    @staticmethod
+    def current_leader_record():
+        return {"leader_uri": "http://127.0.0.1:1"}
+
+    def create_database(self, body):
+        self.create_calls.append(body)
+        return {"status": "success", "params": body}
+
+
+def _start_cluster_handler(*, api_key=None, json_limit_bytes=1024, payload_limit_bytes=1024):
+    coordinator = _HandlerTestCoordinator()
+
+    class Handler(ClusterRequestHandler):
+        pass
+
+    Handler.coordinator = coordinator
+    Handler.client_api_key = api_key
+    Handler.json_limit_bytes = json_limit_bytes
+    Handler.payload_limit_bytes = payload_limit_bytes
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return coordinator, server, thread
+
+
+def _http_request(server, method, path, *, body=None, headers=None):
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+    try:
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        connection.close()
+
+
+def test_cluster_handler_enforces_client_api_key_and_keeps_probes_public():
+    coordinator, server, thread = _start_cluster_handler(api_key="client-secret")
+    try:
+        status, _, _ = _http_request(server, "GET", "/healthz")
+        assert status == 200
+
+        status, headers, body = _http_request(server, "GET", "/list_databases")
+        assert status == 401
+        assert headers["WWW-Authenticate"] == 'Basic realm="LynseDB"'
+        assert json.loads(body)["error"] == "Unauthorized"
+
+        status, _, _ = _http_request(
+            server,
+            "GET",
+            "/list_databases",
+            headers={"Authorization": "Bearer client-secret"},
+        )
+        assert status == 200
+
+        basic = base64.b64encode(b"user:client-secret").decode("ascii")
+        status, _, _ = _http_request(
+            server,
+            "GET",
+            "/list_databases",
+            headers={"Authorization": f"Basic {basic}"},
+        )
+        assert status == 200
+        assert coordinator.create_calls == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_cluster_handler_rejects_oversized_json_and_binary_before_dispatch():
+    coordinator, server, thread = _start_cluster_handler(
+        api_key="client-secret",
+        json_limit_bytes=8,
+        payload_limit_bytes=2,
+    )
+    auth = {"Authorization": "Bearer client-secret"}
+    try:
+        status, _, body = _http_request(
+            server,
+            "POST",
+            "/create_database",
+            body=b'{"database_name":"db"}',
+            headers={**auth, "Content-Type": "application/json"},
+        )
+        assert status == 413
+        assert "JSON payload" in json.loads(body)["error"]
+
+        status, _, body = _http_request(
+            server,
+            "POST",
+            "/bulk_add_binary",
+            body=b"abc",
+            headers={**auth, "Content-Type": "application/octet-stream"},
+        )
+        assert status == 413
+        assert "binary payload" in json.loads(body)["error"]
+        assert coordinator.create_calls == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 class MemoryMetadataStore(MetadataStore):
@@ -329,6 +454,7 @@ def test_standby_proxy_forwards_binary_body_to_leader(tmp_path):
             body = self.rfile.read(length)
             received["path"] = self.path
             received["content_type"] = self.headers.get("Content-Type")
+            received["authorization"] = self.headers.get("Authorization")
             received["body"] = body
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
@@ -351,6 +477,7 @@ def test_standby_proxy_forwards_binary_body_to_leader(tmp_path):
     lease.try_acquire()
     standby = ClusterCoordinator(
         state,
+        client_api_key="coordinator-secret",
         coordinator_id="standby",
         coordinator_uri="http://127.0.0.1:9102",
         coordinator_lease_secs=5,
@@ -372,6 +499,7 @@ def test_standby_proxy_forwards_binary_body_to_leader(tmp_path):
         assert response.content == b"\x01\x02\x03"
         assert received["path"] == "/bulk_add_binary?database_name=db&collection_name=docs"
         assert received["content_type"] == "application/octet-stream"
+        assert received["authorization"] == "Bearer coordinator-secret"
         assert received["body"] == b"\x01\x02\x03"
     finally:
         standby.stop()

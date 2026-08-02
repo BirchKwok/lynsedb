@@ -593,6 +593,34 @@ class LocalCollection:
         self.COMMIT_FLAG = True
         return {'status': 'success'}
 
+    def write_blob(self, key: str, value: bytes):
+        """Store or replace arbitrary collection-local user bytes."""
+        with self._lock:
+            self._rust_coll.write_blob(key, value)
+        self.COMMIT_FLAG = False
+        return {'status': 'success'}
+
+    def read_blob(self, key: str) -> Optional[bytes]:
+        """Read collection-local user bytes, returning ``None`` when absent."""
+        return self._rust_coll.read_blob(key)
+
+    def read_blob_range(
+            self,
+            key: str,
+            offset: int = 0,
+            length: Optional[int] = None,
+    ) -> Optional[bytes]:
+        """Read a byte range from a collection-local user blob."""
+        return self._rust_coll.read_blob_range(key, offset=offset, length=length)
+
+    def delete_blob(self, key: str) -> bool:
+        """Delete collection-local user bytes and report whether they existed."""
+        with self._lock:
+            deleted = self._rust_coll.delete_blob(key)
+        if deleted:
+            self.COMMIT_FLAG = False
+        return deleted
+
     def flush(self):
         """Flush pending bytes and fsync collection files without clearing WAL."""
         if not self._mesosphere_list.empty():
@@ -809,7 +837,7 @@ class LocalCollection:
         Examples:
             >>> collection.build_index("IVF-L2", n_clusters=256, nprobe=32)
             >>> collection.build_index("HNSW-IP", m=32, ef_construction=200)
-            >>> collection.build_index("DISKANN-IP", r=32, l=64, alpha=1.2)
+            >>> collection.build_index("DISKANN-IP", r=32, l=128, alpha=1.2)
         """
         self._rust_coll.build_index(index_mode, field_name=field_name, **kwargs)
         if field_name == "default":

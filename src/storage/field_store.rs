@@ -7,6 +7,7 @@
 //! - Schema inference from first insert
 
 use crate::error::{LynseError, Result};
+use crate::storage::bitset::BitSet;
 use arrow::array::{
     Array, BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
     Int64Array, Int8Array, LargeBinaryArray, LargeStringArray, StringArray, UInt16Array,
@@ -20,6 +21,134 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// Prefer a BitSet when the external-ID universe stays compact.
+const MATCHED_IDS_BITSET_MAX_ID: u64 = 16_777_216; // 2^24
+/// Allow BitSet to use up to this multiple of the explicit-list byte size.
+const MATCHED_IDS_BITSET_BYTES_FACTOR: usize = 8;
+const USER_BLOB_TABLE: &str = "__lynse_user_blobs";
+const USER_BLOB_KEY_MAX_BYTES: usize = 1024;
+
+/// Matching external IDs from a field query.
+///
+/// Dense ID spaces are stored as a [`BitSet`] for O(1) membership and cheap
+/// iteration; sparse/large IDs fall back to an explicit list so values like
+/// `10^12` do not force a huge allocation.
+#[derive(Debug, Clone)]
+pub struct MatchedIds {
+    inner: MatchedIdsInner,
+}
+
+#[derive(Debug, Clone)]
+enum MatchedIdsInner {
+    Bits(BitSet),
+    List(Vec<u64>),
+}
+
+impl MatchedIds {
+    /// Build from a list of external IDs, choosing BitSet vs Vec automatically.
+    pub fn from_ids(ids: Vec<u64>) -> Self {
+        if ids.is_empty() {
+            return Self {
+                inner: MatchedIdsInner::Bits(BitSet::empty()),
+            };
+        }
+        let max = ids.iter().copied().max().unwrap_or(0);
+        let bitset_bytes = ((max as usize / 64) + 1).saturating_mul(8);
+        let list_bytes = ids.len().saturating_mul(8);
+        let budget = list_bytes
+            .saturating_mul(MATCHED_IDS_BITSET_BYTES_FACTOR)
+            .max(4096);
+        if max <= MATCHED_IDS_BITSET_MAX_ID && bitset_bytes <= budget {
+            Self {
+                inner: MatchedIdsInner::Bits(BitSet::from_ids(ids)),
+            }
+        } else {
+            Self {
+                inner: MatchedIdsInner::List(ids),
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.inner {
+            MatchedIdsInner::Bits(bs) => bs.count(),
+            MatchedIdsInner::List(ids) => ids.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn contains(&self, id: u64) -> bool {
+        match &self.inner {
+            MatchedIdsInner::Bits(bs) => bs.contains(id as usize),
+            MatchedIdsInner::List(ids) => ids.contains(&id),
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<u64> {
+        match &self.inner {
+            MatchedIdsInner::Bits(bs) => bs.to_vec(),
+            MatchedIdsInner::List(ids) => ids.clone(),
+        }
+    }
+
+    pub fn iter(&self) -> MatchedIdsIter<'_> {
+        match &self.inner {
+            MatchedIdsInner::Bits(bs) => MatchedIdsIter::Bits(bs.iter_set_bits()),
+            MatchedIdsInner::List(ids) => MatchedIdsIter::List(ids.iter()),
+        }
+    }
+
+    /// True when the compact BitSet representation is in use.
+    pub fn is_bitset(&self) -> bool {
+        matches!(self.inner, MatchedIdsInner::Bits(_))
+    }
+}
+
+impl PartialEq for MatchedIds {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_vec() == other.to_vec()
+    }
+}
+
+impl PartialEq<Vec<u64>> for MatchedIds {
+    fn eq(&self, other: &Vec<u64>) -> bool {
+        let mut left = self.to_vec();
+        let mut right = other.clone();
+        left.sort_unstable();
+        right.sort_unstable();
+        left == right
+    }
+}
+
+impl IntoIterator for MatchedIds {
+    type Item = u64;
+    type IntoIter = std::vec::IntoIter<u64>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.to_vec().into_iter()
+    }
+}
+
+/// Iterator over [`MatchedIds`].
+pub enum MatchedIdsIter<'a> {
+    Bits(crate::storage::bitset::SetBitIter<'a>),
+    List(std::slice::Iter<'a, u64>),
+}
+
+impl Iterator for MatchedIdsIter<'_> {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<u64> {
+        match self {
+            MatchedIdsIter::Bits(it) => it.next().map(|i| i as u64),
+            MatchedIdsIter::List(it) => it.next().copied(),
+        }
+    }
+}
 
 /// Binary record size in the .apex_id_map file: [u64 ext_id][u64 apex_id] = 16 bytes.
 const MAP_RECORD_SIZE: usize = 16;
@@ -652,7 +781,109 @@ impl FieldStore {
                 .flush()
                 .map_err(|e| LynseError::ApexBase(format!("Flush error: {}", e)))?;
         }
+        if let Ok(table) = self.db.table(USER_BLOB_TABLE) {
+            table
+                .flush()
+                .map_err(|e| LynseError::ApexBase(format!("Blob flush error: {}", e)))?;
+        }
         Ok(())
+    }
+
+    /// Store or replace an arbitrary user blob under a collection-local key.
+    pub fn write_user_blob(&self, key: &str, value: &[u8]) -> Result<()> {
+        validate_user_blob_key(key)?;
+        let _ = self.db.create_table_with_schema(
+            USER_BLOB_TABLE,
+            &[
+                ("blob_key".to_string(), apexbase::ColumnType::String),
+                ("payload".to_string(), apexbase::ColumnType::Blob),
+            ],
+        );
+        let table = self
+            .db
+            .table(USER_BLOB_TABLE)
+            .map_err(|e| LynseError::ApexBase(format!("Blob table error: {}", e)))?;
+        let mut row = HashMap::new();
+        row.insert(
+            "blob_key".to_string(),
+            apexbase::data::Value::String(key.to_string()),
+        );
+        row.insert(
+            "payload".to_string(),
+            apexbase::data::Value::Blob(value.to_vec()),
+        );
+        if let Some(id) = self.user_blob_apex_id(key)? {
+            table
+                .replace(id, row)
+                .map_err(|e| LynseError::ApexBase(format!("Blob replace error: {}", e)))?;
+        } else {
+            table
+                .insert(row)
+                .map_err(|e| LynseError::ApexBase(format!("Blob insert error: {}", e)))?;
+        }
+        Ok(())
+    }
+
+    /// Read a collection-local user blob. Missing keys return `None`.
+    pub fn read_user_blob(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        validate_user_blob_key(key)?;
+        let table = match self.db.table(USER_BLOB_TABLE) {
+            Ok(table) => table,
+            Err(_) => return Ok(None),
+        };
+        let Some(id) = self.user_blob_apex_id(key)? else {
+            return Ok(None);
+        };
+        let Some(row) = table
+            .retrieve(id)
+            .map_err(|e| LynseError::ApexBase(format!("Blob read error: {}", e)))?
+        else {
+            return Ok(None);
+        };
+        match row.get("payload") {
+            Some(apexbase::data::Value::Blob(value))
+            | Some(apexbase::data::Value::Binary(value)) => Ok(Some(value.clone())),
+            Some(apexbase::data::Value::Null) | None => Ok(None),
+            Some(other) => Err(LynseError::ApexBase(format!(
+                "Blob payload has unexpected type: {:?}",
+                other.data_type()
+            ))),
+        }
+    }
+
+    /// Delete a collection-local user blob. Returns whether it existed.
+    pub fn delete_user_blob(&self, key: &str) -> Result<bool> {
+        validate_user_blob_key(key)?;
+        let table = match self.db.table(USER_BLOB_TABLE) {
+            Ok(table) => table,
+            Err(_) => return Ok(false),
+        };
+        let Some(id) = self.user_blob_apex_id(key)? else {
+            return Ok(false);
+        };
+        table
+            .delete(id)
+            .map_err(|e| LynseError::ApexBase(format!("Blob delete error: {}", e)))
+    }
+
+    fn user_blob_apex_id(&self, key: &str) -> Result<Option<u64>> {
+        let table = match self.db.table(USER_BLOB_TABLE) {
+            Ok(table) => table,
+            Err(_) => return Ok(None),
+        };
+        let escaped = key.replace('\'', "''");
+        let sql = format!(
+            "SELECT _id FROM \"{}\" WHERE blob_key = '{}' LIMIT 1",
+            USER_BLOB_TABLE, escaped
+        );
+        let batch = table
+            .execute(&sql)
+            .and_then(|result| result.to_record_batch())
+            .map_err(|e| LynseError::ApexBase(format!("Blob key lookup error: {}", e)))?;
+        if batch.num_rows() == 0 {
+            return Ok(None);
+        }
+        Ok(u64_column_values(&batch, "_id")?.into_iter().next())
     }
 
     /// Store a single record with its fields.
@@ -966,13 +1197,13 @@ impl FieldStore {
     }
 
     /// Query fields using a SQL-like filter expression.
-    /// Returns matching external IDs.
+    /// Returns matching external IDs as a compact [`MatchedIds`] set (BitSet when dense).
     /// Fast path: if the expression is a simple AND of equality conditions and the
     /// in-memory field_eq_index is populated, answers in O(1) without touching ApexBase.
-    pub fn query(&self, filter_expr: &str) -> Result<Vec<u64>> {
+    pub fn query(&self, filter_expr: &str) -> Result<MatchedIds> {
         // Fast path: in-memory equality index
         if let Some(ids) = self.query_from_index(filter_expr) {
-            return Ok(ids);
+            return Ok(MatchedIds::from_ids(ids));
         }
 
         // Slow path: ApexBase SQL
@@ -994,7 +1225,9 @@ impl FieldStore {
             .to_record_batch()
             .map_err(|e| LynseError::ApexBase(format!("Result conversion error: {}", e)))?;
 
-        self.current_external_ids_from_batch(&batch)
+        Ok(MatchedIds::from_ids(
+            self.current_external_ids_from_batch(&batch)?,
+        ))
     }
 
     /// Query fields and return both IDs and field data in a single SQL query.
@@ -1547,6 +1780,21 @@ fn record_batch_has_column(batch: &RecordBatch, name: &str) -> bool {
         .fields()
         .iter()
         .any(|field| field.name() == name)
+}
+
+fn validate_user_blob_key(key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Err(LynseError::InvalidArgument(
+            "blob key must not be empty".to_string(),
+        ));
+    }
+    if key.len() > USER_BLOB_KEY_MAX_BYTES {
+        return Err(LynseError::InvalidArgument(format!(
+            "blob key exceeds {} UTF-8 bytes",
+            USER_BLOB_KEY_MAX_BYTES
+        )));
+    }
+    Ok(())
 }
 
 fn u64_column_values(batch: &RecordBatch, name: &str) -> Result<Vec<u64>> {
@@ -2135,6 +2383,48 @@ fn apex_value_to_json(v: &apexbase::data::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_blob_roundtrip_replace_delete_and_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = "model's/payload";
+        let packed = vec![0xA5; 96 * 1024];
+        {
+            let store = FieldStore::new(tmp.path(), "fields_v2").unwrap();
+            assert_eq!(store.read_user_blob(key).unwrap(), None);
+            store.write_user_blob(key, &packed).unwrap();
+            assert_eq!(
+                store.read_user_blob(key).unwrap().as_deref(),
+                Some(&packed[..])
+            );
+            store.write_user_blob(key, b"replacement").unwrap();
+            assert_eq!(
+                store.read_user_blob(key).unwrap().as_deref(),
+                Some(&b"replacement"[..])
+            );
+            store.flush().unwrap();
+        }
+        {
+            let store = FieldStore::new(tmp.path(), "fields_v2").unwrap();
+            assert_eq!(
+                store.read_user_blob(key).unwrap().as_deref(),
+                Some(&b"replacement"[..])
+            );
+            assert!(store.delete_user_blob(key).unwrap());
+            assert!(!store.delete_user_blob(key).unwrap());
+            assert_eq!(store.read_user_blob(key).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn user_blob_rejects_invalid_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FieldStore::new(tmp.path(), "fields_v2").unwrap();
+        assert!(store.write_user_blob("", b"x").is_err());
+        assert!(store
+            .write_user_blob(&"x".repeat(USER_BLOB_KEY_MAX_BYTES + 1), b"x")
+            .is_err());
+    }
 
     #[test]
     fn dense_int_index_is_not_blacklisted_at_high_cardinality() {

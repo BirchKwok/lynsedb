@@ -44,16 +44,11 @@ impl NeighborCache {
         }
     }
 
-    fn get(&mut self, idx: usize) -> Option<&Vec<u32>> {
-        if self.map.contains_key(&idx) {
-            if let Some(pos) = self.order.iter().position(|&x| x == idx) {
-                self.order.remove(pos);
-                self.order.push_back(idx);
-            }
-            self.map.get(&idx)
-        } else {
-            None
-        }
+    fn get(&self, idx: usize) -> Option<&Vec<u32>> {
+        // Keep hits O(1). Updating VecDeque recency used to linearly scan as
+        // many as 65K entries on every graph step, which dominated mmap row
+        // reads and serialized concurrent batch searches behind this lock.
+        self.map.get(&idx)
     }
 
     fn insert(&mut self, idx: usize, neighbors: Vec<u32>) {
@@ -184,7 +179,7 @@ impl DiskGraphStore {
             return Vec::new();
         }
         {
-            let mut cache = self.cache.lock();
+            let cache = self.cache.lock();
             if let Some(hit) = cache.get(idx) {
                 return hit.clone();
             }
@@ -312,31 +307,6 @@ impl DiskGraphStore {
         self.mmap
             .flush()
             .map_err(|e| LynseError::Storage(e.to_string()))
-    }
-
-    /// Advise the OS that these nodes' adjacency rows will be needed soon.
-    pub fn prefetch(&self, ids: &[usize]) {
-        #[cfg(unix)]
-        {
-            for &idx in ids {
-                if idx >= self.n {
-                    continue;
-                }
-                let start = idx * self.degree * 4;
-                let len = self.degree * 4;
-                if start + len > self.mmap.len() {
-                    continue;
-                }
-                let ptr = unsafe { self.mmap.as_ptr().add(start) } as *mut libc::c_void;
-                unsafe {
-                    libc::madvise(ptr, len, libc::MADV_WILLNEED);
-                }
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = ids;
-        }
     }
 }
 

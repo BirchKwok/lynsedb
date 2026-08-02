@@ -13,9 +13,13 @@ pub mod spann;
 use crate::distance::DistanceMetric;
 use crate::error::{LynseError, Result};
 use crate::quantizer::QuantizerType;
+use crate::storage::bitset::BitSet;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
+
+pub const DEFAULT_DISKANN_R: usize = 16;
+pub const DEFAULT_DISKANN_L: usize = 64;
 
 /// Common index configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +163,28 @@ pub trait VectorIndex: Send + Sync {
         Ok(ids.into_iter().map(|id| id as u32).collect())
     }
 
+    /// Candidate rows for several queries. Implementations may parallelize
+    /// graph/quantized traversal; the default preserves single-query behavior.
+    fn batch_search_candidates(
+        &self,
+        queries: &[f32],
+        n_queries: usize,
+        dim: usize,
+        k: usize,
+        params: &SearchParams,
+    ) -> Result<Vec<Vec<u32>>> {
+        if queries.len() != n_queries.saturating_mul(dim) {
+            return Err(LynseError::DimensionMismatch {
+                expected: n_queries.saturating_mul(dim),
+                got: queries.len(),
+            });
+        }
+        queries
+            .chunks_exact(dim)
+            .map(|query| self.search_candidates(query, k, params))
+            .collect()
+    }
+
     /// Get the index name string (matches Python API naming).
     fn name(&self) -> String;
 }
@@ -167,9 +193,10 @@ pub trait VectorIndex: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct SearchParams {
     pub k: usize,
-    pub nprobe: usize,                         // for IVF/SPANN
-    pub ef_search: Option<usize>,              // for HNSW
-    pub subset_indices: Option<Arc<Vec<u64>>>, // filter row IDs
+    pub nprobe: usize,            // for IVF/SPANN
+    pub ef_search: Option<usize>, // for HNSW
+    /// Optional filter over index/row IDs (bit `i` set ⇒ ID `i` is allowed).
+    pub subset: Option<Arc<BitSet>>,
 }
 
 impl Default for SearchParams {
@@ -179,8 +206,19 @@ impl Default for SearchParams {
             // 0 = use index build-time default (IVF/SPANN nprobe, HNSW ef_search).
             nprobe: 0,
             ef_search: None,
-            subset_indices: None,
+            subset: None,
         }
+    }
+}
+
+impl SearchParams {
+    /// Whether ID `id` is allowed by the optional subset filter.
+    #[inline]
+    pub fn allows_id(&self, id: u64) -> bool {
+        self.subset
+            .as_ref()
+            .map(|s| s.contains(id as usize))
+            .unwrap_or(true)
     }
 }
 
@@ -649,12 +687,12 @@ pub fn create_index_with_build_options(
             opts.max_level,
         ))),
         IndexType::DiskANN => {
-            let r = opts.r.unwrap_or(16);
+            let r = opts.r.unwrap_or(DEFAULT_DISKANN_R);
             Ok(Box::new(diskann::DiskANNIndex::with_alias(
                 metric,
                 quant,
                 r,
-                opts.l.unwrap_or(64),
+                opts.l.unwrap_or(DEFAULT_DISKANN_L),
                 opts.alpha.unwrap_or(1.2),
                 opts.max_degree.unwrap_or(r),
                 alias,
@@ -671,8 +709,7 @@ pub fn create_index_with_build_options(
             quant,
             opts.n_clusters.unwrap_or(256),
             opts.nprobe.unwrap_or(32),
-            opts.replica_count
-                .unwrap_or(spann::DEFAULT_REPLICA_COUNT),
+            opts.replica_count.unwrap_or(spann::DEFAULT_REPLICA_COUNT),
         ))),
     }
 }
@@ -756,6 +793,25 @@ mod tests {
                 assert_eq!(*l, 80);
                 assert!((*alpha - 1.5).abs() < 1e-6);
                 assert_eq!(*max_degree, 24);
+            }
+            _ => panic!("expected DiskANN params"),
+        }
+    }
+
+    #[test]
+    fn diskann_defaults_apply_documented_parameters() {
+        let idx = create_index("DISKANN-L2").unwrap();
+        match &idx.config().params {
+            IndexParams::DiskANN {
+                r,
+                l,
+                alpha,
+                max_degree,
+            } => {
+                assert_eq!(*r, DEFAULT_DISKANN_R);
+                assert_eq!(*l, DEFAULT_DISKANN_L);
+                assert!((*alpha - 1.2).abs() < 1e-6);
+                assert_eq!(*max_degree, DEFAULT_DISKANN_R);
             }
             _ => panic!("expected DiskANN params"),
         }

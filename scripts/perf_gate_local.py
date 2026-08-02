@@ -440,7 +440,11 @@ def evaluate(baseline: dict, candidate: dict, args: argparse.Namespace) -> list[
 
     modes_b = baseline.get("modes") or {}
     modes_c = candidate.get("modes") or {}
-    for mode in sorted(set(modes_b) | set(modes_c)):
+    compared_modes = set(modes_b) | set(modes_c)
+    if args.modes:
+        requested_modes = {mode.strip().upper() for mode in args.modes.split(",") if mode.strip()}
+        compared_modes &= requested_modes
+    for mode in sorted(compared_modes):
         if mode == "__NONE__":
             continue
         row_b = modes_b.get(mode)

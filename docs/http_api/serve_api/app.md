@@ -26,13 +26,20 @@ Successful JSON responses use this shape:
 }
 ```
 
-Error responses include an `error` field:
+JSON error responses include a human-readable `error` and a stable `code`:
 
 ```json
 {
-  "error": "message"
+  "error": "Collection not found: examples",
+  "code": "not_found"
 }
 ```
+
+The server uses HTTP `400` for invalid arguments, `401` for authentication
+failures, `404` for missing databases or collections, `409` for conflicts such
+as duplicate resources or an unavailable index/quantizer, and `500` for
+internal failures. Binary endpoints use the same HTTP status classes with a
+plain-text body.
 
 ## Authentication
 
@@ -65,6 +72,11 @@ Some high-throughput operations use compact binary payloads internally:
 - `/batch_search_binary`
 - `/head_binary`
 - `/tail_binary`
+
+User blobs also use binary bodies: `POST /write_blob` stores arbitrary bytes
+under a collection-local key, and `GET /read_blob` returns the whole value or a
+byte range. The Python client exposes these as `write_blob`, `read_blob`,
+`read_blob_range`, and `delete_blob` in both local and HTTP modes.
 
 The Python HTTP client handles these protocols. Prefer the Python client unless
 you are implementing another language client.

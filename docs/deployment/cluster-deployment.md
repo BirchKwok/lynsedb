@@ -61,12 +61,13 @@ Plan these pieces before production:
 | Shards | Run one LynseDB server per primary or replica data directory. |
 | Data directories | Give every shard process its own persistent directory. Do not share one directory between nodes. |
 | Network | Let clients reach the coordinator. Let the coordinator reach every shard HTTP port and derived RPC port. |
-| Auth | Use `--api-key` on shards and `--shard-api-key` on the coordinator. Protect the coordinator with a private network or reverse proxy. |
+| Auth | Use a client-facing `--api-key` on every coordinator. Use a separate shard `--api-key` and pass that value through coordinator `--shard-api-key`. |
 | Backups | Back up every shard data directory. Metadata owner shard data directories include coordinator metadata. |
 
-The coordinator currently does not enforce client authentication itself. If the
-coordinator is reachable outside a trusted network, put it behind a reverse
-proxy, gateway, firewall, or service mesh that provides authentication.
+The coordinator enforces Bearer or Basic authentication on data, metadata and
+management endpoints when `--api-key` is configured. Keep network policy or a
+reverse proxy as an additional boundary, especially when TLS termination is
+required.
 
 ### Coordinator Metadata Mental Model
 
@@ -224,6 +225,7 @@ lynse serve \
   --port 7637 \
   --cluster-config /etc/lynsedb/cluster.json \
   --cluster-state /var/lib/lynsedb/coordinator/cluster_state.cache.json \
+  --api-key "${LYNSE_API_KEY}" \
   --shard-api-key "${LYNSE_SHARD_API_KEY}" \
   --health-interval-secs 1.0 \
   --health-failures 3
@@ -241,6 +243,7 @@ lynse serve \
   --cluster-config /etc/lynsedb/cluster.json \
   --cluster-state /var/lib/lynsedb/coordinator/cluster_state.cache.json \
   --coordinator-uri http://node-a:7637 \
+  --api-key "${LYNSE_API_KEY}" \
   --shard-api-key "${LYNSE_SHARD_API_KEY}"
 ```
 
@@ -252,6 +255,7 @@ lynse serve \
   --cluster-config /etc/lynsedb/cluster.json \
   --cluster-state /var/lib/lynsedb/coordinator/cluster_state.cache.json \
   --coordinator-uri http://node-b:7637 \
+  --api-key "${LYNSE_API_KEY}" \
   --shard-api-key "${LYNSE_SHARD_API_KEY}"
 ```
 
@@ -299,6 +303,7 @@ Cluster config fields:
 | `write_mirror_replicas` | `true` | Mirror writes to replicas whose state is `active`. |
 | `shard_groups` | required | List of shard groups. Each group needs a `primary` URI and may have `replicas`. |
 | `state_path` | `cluster_state.cache.json` | Optional local coordinator metadata cache path when `--cluster-state` is not provided. |
+| `api_key` | none | Optional client-facing key required by protected coordinator endpoints. Keep it distinct from the shard credential. |
 | `shard_api_key` | none | Optional key used by the coordinator when forwarding requests to shards. |
 | `metadata_owners` or `metadata.owners` | inferred from shard primaries | Optional metadata owner shard URI(s). Omit to use the first three primaries when available, or the first primary for small clusters. Use one URI to force single-owner metadata, or 3+ URIs for replicated metadata. |
 
@@ -323,7 +328,10 @@ Coordinator CLI flags:
 | `--role coordinator` | Start coordinator mode instead of a normal shard server. |
 | `--cluster-config` | JSON config used to seed metadata on first start and infer the default metadata owners. |
 | `--cluster-state` | Local coordinator metadata cache path. It does not need to be shared between machines. |
+| `--api-key` | Client-facing API key required by coordinator data and management endpoints. `/`, `/healthz`, and `/readyz` remain public. |
 | `--shard-api-key` | API key sent to shard nodes as `Authorization: Bearer ...`. |
+| `--json-limit-mb` | Maximum JSON request body accepted by the coordinator before dispatch or proxying. |
+| `--payload-limit-mb` | Maximum binary request body accepted by the coordinator before dispatch or proxying. |
 | `--metadata-owners` | Optional comma-separated metadata owner shard HTTP URIs. Omit to infer owners from shard primaries; provide 3+ URIs for replicated metadata. |
 | `--coordinator-uri` | Advertised URI for this coordinator. Other coordinators proxy to this address when this process is leader. |
 | `--coordinator-id` | Stable coordinator ID. Defaults to `--coordinator-uri`; most deployments do not need to set it. |
@@ -338,12 +346,21 @@ Environment variables are also supported:
 export LYNSE_ROLE=coordinator
 export LYNSE_CLUSTER_CONFIG=/etc/lynsedb/cluster.json
 export LYNSE_CLUSTER_STATE=/var/lib/lynsedb/coordinator/cluster_state.cache.json
+export LYNSE_API_KEY=your_client_facing_key
 export LYNSE_SHARD_API_KEY=your_shard_key
+export LYNSE_JSON_LIMIT_MB=256
+export LYNSE_PAYLOAD_LIMIT_MB=512
 export LYNSE_CLUSTER_METADATA_OWNERS=http://10.0.0.11:7638
 export LYNSE_COORDINATOR_URI=http://node-a:7637
 export LYNSE_HEALTH_INTERVAL_SECS=1.0
 export LYNSE_HEALTH_FAILURES=3
 ```
+
+`LYNSE_API_KEY` protects the public coordinator address used by applications.
+`LYNSE_SHARD_API_KEY` authenticates coordinator-to-shard traffic. Use different
+values and rotate them independently. All coordinators participating in leader
+failover must share the same client-facing key so a standby can authenticate
+when proxying an already-authorized request to the active coordinator.
 
 ## How Routing Works
 
@@ -410,7 +427,8 @@ serving requests directly.
 Check coordinator status:
 
 ```shell
-curl http://coordinator:7637/coordinator_status
+curl -H "Authorization: Bearer ${LYNSE_API_KEY}" \
+  http://coordinator:7637/coordinator_status
 ```
 
 Look for:
@@ -547,8 +565,10 @@ Monitor the coordinator:
 
 ```shell
 curl http://coordinator:7637/
-curl http://coordinator:7637/cluster_info
-curl http://coordinator:7637/coordinator_status
+curl -H "Authorization: Bearer ${LYNSE_API_KEY}" \
+  http://coordinator:7637/cluster_info
+curl -H "Authorization: Bearer ${LYNSE_API_KEY}" \
+  http://coordinator:7637/coordinator_status
 ```
 
 Alert on:
@@ -566,6 +586,7 @@ Alert on:
 | Symptom | What to check |
 | --- | --- |
 | Coordinator will not start | Pass `--cluster-config`, or pass `--metadata-owners` explicitly when no config is available. |
+| Coordinator returns unauthorized | Pass the coordinator client-facing key to `VectorDBClient(..., api_key=...)` or send it as a Bearer/Basic credential. Do not substitute the shard key. |
 | `cluster config requires at least one shard group` | The config must contain `shard_groups` or `shards` with at least one entry. |
 | Shard requests return unauthorized | Make sure shards use `--api-key` and the coordinator uses the same `--shard-api-key`. |
 | Metadata owner is unreachable | Open the derived RPC port from each coordinator to each metadata owner shard. Metadata reads, writes, lease renewals, and owner repair use internal RPC. |
@@ -583,7 +604,8 @@ Before accepting production traffic:
 - metadata owner shard data directories are on persistent storage;
 - coordinator-to-shard HTTP and derived RPC ports are reachable;
 - shard authentication is configured if the shard network is not fully trusted;
-- coordinator access is protected by network policy or a proxy;
+- coordinator `--api-key` authentication is enabled and uses a credential distinct from the shard key;
+- coordinator access is additionally protected by network policy or a TLS-terminating proxy;
 - `/cluster_info` shows the expected primaries and active replicas;
 - a backup and restore procedure has been tested;
 - application clients connect only to the coordinator.

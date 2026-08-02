@@ -250,18 +250,15 @@ impl VectorIndex for IVFIndex {
 
         // Apply subset filter. Empty probed lists must fall back to the filtered
         // corpus — never to an unfiltered full scan.
-        let subset_set = params
-            .subset_indices
-            .as_ref()
-            .map(|subset| subset.iter().copied().collect::<HashSet<u64>>());
-        if let Some(ref subset) = subset_set {
-            candidates.retain(|&c| subset.contains(&self.ids[c]));
+        let subset = params.subset.as_ref();
+        if let Some(subset) = subset {
+            candidates.retain(|&c| subset.contains(self.ids[c] as usize));
         }
 
         if candidates.is_empty() {
-            candidates = match subset_set.as_ref() {
+            candidates = match subset {
                 Some(subset) => (0..self.ids.len())
-                    .filter(|&c| subset.contains(&self.ids[c]))
+                    .filter(|&c| subset.contains(self.ids[c] as usize))
                     .collect(),
                 None => (0..self.ids.len()).collect(),
             };
@@ -560,12 +557,13 @@ mod tests {
 
         // Only keep the far cluster in the filter, but probe the near centroid
         // of the query so the probed lists become empty after filtering.
-        let subset = Arc::new(vec![3u64, 4u64]);
         let params = SearchParams {
             k: 2,
             nprobe: 1,
             ef_search: None,
-            subset_indices: Some(subset),
+            subset: Some(Arc::new(crate::storage::bitset::BitSet::from_ids([
+                3u64, 4,
+            ]))),
         };
         let (result_ids, _) = idx.search(&[0.0, 0.0], 2, &params).unwrap();
         assert!(!result_ids.is_empty(), "expected filtered fallback hits");
@@ -609,13 +607,13 @@ mod tests {
             k: 10,
             nprobe: 2,
             ef_search: None,
-            subset_indices: None,
+            subset: None,
         };
         let high = SearchParams {
             k: 10,
             nprobe: 32,
             ef_search: None,
-            subset_indices: None,
+            subset: None,
         };
         let (ids_low, _) = idx.search(q, 10, &low).unwrap();
         let (ids_high, _) = idx.search(q, 10, &high).unwrap();
@@ -674,7 +672,7 @@ mod tests {
             k: 10,
             nprobe: 16,
             ef_search: None,
-            subset_indices: None,
+            subset: None,
         };
         let (_, got_dists) = idx.search(q, 10, &params).unwrap();
         assert_eq!(got_dists, exact_dists);

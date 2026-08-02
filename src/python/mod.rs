@@ -1098,7 +1098,7 @@ impl PyCollection {
         let field_name = field_name.to_owned();
         let index_type = index_type.to_owned();
         let inner = self.inner.clone();
-        py.allow_threads(move || {
+        py.detach(move || {
             let mut coll = inner.write();
             coll.build_vector_field_index_with_build_options(&field_name, &index_type, &opts)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
@@ -1142,7 +1142,7 @@ impl PyCollection {
         let opts = parse_index_build_options(params)?;
         let index_type = index_type.to_owned();
         let inner = self.inner.clone();
-        py.allow_threads(move || {
+        py.detach(move || {
             let mut coll = inner.write();
             coll.build_index_with_build_options(&index_type, &opts)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
@@ -1247,7 +1247,7 @@ impl PyCollection {
         nprobe: Option<usize>,
         approx: Option<bool>,
         eps: Option<f32>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let query = vector.as_slice()?;
         let k = k.unwrap_or(10);
         let nprobe = nprobe.unwrap_or(0);
@@ -1714,6 +1714,43 @@ impl PyCollection {
     fn list_fields(&self) -> PyResult<Vec<String>> {
         let coll = self.inner.read();
         coll.list_fields()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Store or replace collection-local user bytes under a string key.
+    fn write_blob(&self, key: &str, value: &Bound<'_, PyBytes>) -> PyResult<()> {
+        let coll = self.inner.write();
+        coll.write_blob(key, value.as_bytes())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Read collection-local user bytes. Missing keys return None.
+    fn read_blob(&self, py: Python<'_>, key: &str) -> PyResult<Option<Py<PyBytes>>> {
+        let coll = self.inner.read();
+        coll.read_blob(key)
+            .map(|value| value.map(|bytes| PyBytes::new(py, &bytes).unbind()))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Read a byte range from a collection-local user blob.
+    #[pyo3(signature = (key, offset=0, length=None))]
+    fn read_blob_range(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        offset: usize,
+        length: Option<usize>,
+    ) -> PyResult<Option<Py<PyBytes>>> {
+        let coll = self.inner.read();
+        coll.read_blob_range(key, offset, length)
+            .map(|value| value.map(|bytes| PyBytes::new(py, &bytes).unbind()))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Delete collection-local user bytes. Returns whether the key existed.
+    fn delete_blob(&self, key: &str) -> PyResult<bool> {
+        let coll = self.inner.write();
+        coll.delete_blob(key)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -2429,7 +2466,7 @@ fn py_start_server(
 ) -> PyResult<()> {
     let host = host.to_string();
     let root_path = root_path.to_string();
-    py.allow_threads(move || {
+    py.detach(move || {
         crate::server::run_server(&host, port, &root_path, api_key)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     })
@@ -2448,7 +2485,7 @@ fn py_start_server_background(
 ) -> PyResult<()> {
     let host = host.to_string();
     let root_path = root_path.to_string();
-    py.allow_threads(move || {
+    py.detach(move || {
         crate::server::start_server_background(host, port, root_path, api_key);
     });
     // Give server a moment to start

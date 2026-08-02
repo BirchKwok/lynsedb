@@ -104,11 +104,11 @@ impl VectorIndex for FlatIndex {
 
         // Apply subset filter if provided
         let (search_data, search_ids): (Vec<f32>, Vec<u64>) =
-            if let Some(ref subset) = params.subset_indices {
+            if let Some(ref subset) = params.subset {
                 let mut filtered_data = Vec::new();
                 let mut filtered_ids = Vec::new();
                 for (i, &id) in self.ids.iter().enumerate() {
-                    if subset.contains(&id) {
+                    if subset.contains(id as usize) {
                         let start = i * dim;
                         filtered_data.extend_from_slice(&self.encoded_data[start..start + dim]);
                         filtered_ids.push(id);

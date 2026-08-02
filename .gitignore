@@ -186,3 +186,5 @@ fingerprint
 *.stable_ids
 
 *.json
+
+AGENTS.md

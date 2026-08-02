@@ -9,6 +9,7 @@ use super::{IndexConfig, IndexParams, IndexType, SearchParams, VectorIndex};
 use crate::distance::{compute_distance_f32, top_k_search, DistanceMetric};
 use crate::error::{LynseError, Result};
 use crate::quantizer::{self, Quantizer, QuantizerType};
+use crate::storage::bitset::BitSet;
 use crate::storage::diskann_graph::DiskGraphStore;
 use crate::storage::pq_mmap::{parse_n_subspaces, PQIndex, DEFAULT_OVERSAMPLE};
 use rand::rngs::StdRng;
@@ -26,6 +27,52 @@ use std::time::Instant;
 /// Soft ceiling on construction beam width (paper uses L ≫ R; avoid unbounded RAM).
 /// Search still uses full `l` / nprobe.
 const L_BUILD_CAP: usize = 128;
+/// Points processed against one frozen graph view during Vamana construction.
+/// Reverse edges are applied between batches, so later batches can navigate
+/// through the graph learned by earlier ones without serializing every point.
+const VAMANA_BUILD_BATCH: usize = 256;
+/// Deterministic build-only starts spread across the row-id space. A wider
+/// start set prevents early batches from learning only the medoid's component
+/// on weakly structured, high-dimensional data. Query search remains bounded
+/// by `SEARCH_ANCHORS`.
+const VAMANA_BUILD_ANCHORS: usize = 32;
+/// Additional deterministic entry points used to tolerate disconnected or
+/// weakly connected graph regions produced by approximate construction.
+const SEARCH_ANCHORS: usize = 8;
+/// PQ16 needs a wider L2 candidate beam before exact VectorStore re-ranking.
+const LAYERED_L2_MIN_EF: usize = 768;
+/// When graph-beam ADC scores occupy a very narrow band, PQ ordering is too
+/// ambiguous to trust as the only candidate source. Supplement those L2
+/// queries with a global ADC shortlist before exact VectorStore re-ranking.
+const LAYERED_L2_ADC_SPREAD_THRESHOLD: f32 = 0.16;
+/// A concentrated query only needs a smaller independent PQ shortlist; the
+/// graph beam remains the primary candidate source.
+const GLOBAL_PQ_SUPPLEMENT_DIVISOR: usize = 3;
+/// Extra global-PQ capacity used when a non-selective metadata subset is
+/// active. Selective subsets already use the exact filtered mmap path.
+const GLOBAL_PQ_FILTER_SLACK_NUMERATOR: usize = 5;
+const GLOBAL_PQ_FILTER_SLACK_DENOMINATOR: usize = 4;
+
+fn candidate_ef(layered: bool, metric: DistanceMetric, requested: usize, rows: usize) -> usize {
+    if layered && metric == DistanceMetric::L2Squared {
+        requested.max(LAYERED_L2_MIN_EF).min(rows)
+    } else {
+        requested.min(rows)
+    }
+}
+
+fn needs_global_pq_supplement(metric: DistanceMetric, hits: &[(f32, usize)]) -> bool {
+    if metric != DistanceMetric::L2Squared || hits.len() < 20 {
+        return false;
+    }
+    // L2 hits are sorted ascending by `search_graph_pq`.
+    let last = hits.len() - 1;
+    let p05 = hits[last / 20].0;
+    let median = hits[last / 2].0.abs().max(f32::EPSILON);
+    let p95 = hits[last.saturating_mul(19) / 20].0;
+    let relative_spread = (p95 - p05).max(0.0) / median;
+    relative_spread <= LAYERED_L2_ADC_SPREAD_THRESHOLD
+}
 
 /// IP-DiskANN delete search list size (paper `C`).
 const IP_DELETE_L: usize = 128;
@@ -109,213 +156,21 @@ thread_local! {
     static BUILD_VISITED: RefCell<VisitedSet> = RefCell::new(VisitedSet::new(0));
 }
 
-// ─── Full-precision batched Vamana build helpers ─────────────────────────────
-
-#[inline(always)]
-fn diskann_vec(data: &[f32], idx: u32, dim: usize) -> &[f32] {
-    let start = idx as usize * dim;
-    unsafe { data.get_unchecked(start..start + dim) }
-}
-
-#[inline(always)]
-fn diskann_rank(
-    data: &[f32],
-    idx: u32,
-    query: &[f32],
-    dim: usize,
-    metric: DistanceMetric,
-    ascending: bool,
-) -> f32 {
-    let raw = compute_distance_f32(diskann_vec(data, idx, dim), query, metric);
-    if ascending {
-        raw
-    } else {
-        -raw
-    }
-}
-
-#[inline(always)]
-fn diskann_rank_between(
-    data: &[f32],
-    a: u32,
-    b: u32,
-    dim: usize,
-    metric: DistanceMetric,
-    ascending: bool,
-) -> f32 {
-    diskann_rank(data, a, diskann_vec(data, b, dim), dim, metric, ascending)
-}
-
-/// Free-standing robust prune (same α-RNG rules as DiskANNIndex::robust_prune).
-fn robust_prune_raw(
-    data: &[f32],
-    p: u32,
-    candidates: &[(f32, u32)],
-    degree: usize,
-    alpha: f32,
-    dim: usize,
-    metric: DistanceMetric,
-    ascending: bool,
-) -> Vec<u32> {
-    let degree = degree.max(1);
-    let alpha = alpha.max(1.0);
-    let ln_alpha = if ascending || (alpha - 1.0).abs() <= f32::EPSILON {
-        0.0
-    } else {
-        alpha.ln()
-    };
-
-    let mut pool: Vec<(f32, u32)> = Vec::with_capacity(candidates.len());
-    let mut seen = HashSet::with_capacity(candidates.len());
-    for &(rank, idx) in candidates {
-        if idx == p || !seen.insert(idx) {
-            continue;
-        }
-        pool.push((rank, idx));
-    }
-    pool.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
-
-    let mut selected: Vec<u32> = Vec::with_capacity(degree);
-    let mut remaining = pool;
-    while !remaining.is_empty() && selected.len() < degree {
-        let best = remaining[0].1;
-        selected.push(best);
-        remaining.retain(|&(dist_p_v, v)| {
-            if v == best {
-                return false;
-            }
-            let dist_best_v = diskann_rank_between(data, best, v, dim, metric, ascending);
-            if ascending {
-                alpha * dist_best_v > dist_p_v
-            } else {
-                dist_p_v < dist_best_v + ln_alpha
-            }
-        });
-    }
-    selected
-}
-
-/// Fast reverse-edge prune: keep the closest `degree` neighbors (HNSW-style).
-fn prune_closest_raw(
-    data: &[f32],
-    center: u32,
-    neighbors: &[u32],
-    degree: usize,
-    dim: usize,
-    metric: DistanceMetric,
-    ascending: bool,
-) -> Vec<u32> {
-    if neighbors.len() <= degree {
-        return neighbors.to_vec();
-    }
-    let mut scored: Vec<(f32, u32)> = neighbors
-        .iter()
-        .map(|&nb| {
-            (
-                diskann_rank_between(data, center, nb, dim, metric, ascending),
-                nb,
-            )
-        })
-        .collect();
-    if scored.len() > degree {
-        scored.select_nth_unstable_by(degree - 1, |a, b| {
-            a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal)
-        });
-        scored.truncate(degree);
-    }
-    scored.into_iter().map(|(_, n)| n).collect()
-}
-
-#[allow(dead_code)]
-fn take_closest_ranked(cand: &[(f32, u32)], point: u32, degree: usize) -> Vec<u32> {
-    let mut pool = cand.to_vec();
-    pool.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
-    let mut out = Vec::with_capacity(degree);
-    let mut seen = HashSet::with_capacity(degree * 2);
-    seen.insert(point);
-    for (_, nb) in pool {
-        if seen.insert(nb) {
-            out.push(nb);
-            if out.len() >= degree {
-                break;
-            }
+fn search_entry_points(n: usize, primary: usize, requested_anchors: usize) -> Vec<usize> {
+    let anchor_count = requested_anchors.min(n);
+    let mut starts = Vec::with_capacity(anchor_count + 1);
+    starts.push(primary);
+    for anchor in 0..anchor_count {
+        let idx = anchor.saturating_mul(n) / anchor_count;
+        // The evenly spaced anchors are unique while anchor_count <= n; only
+        // the primary entry point can duplicate one of them. Avoid a linear
+        // `contains` scan here because large graphs intentionally use many
+        // search-only anchors to compensate for weak R=16 connectivity.
+        if idx != primary {
+            starts.push(idx);
         }
     }
-    out
-}
-
-/// Total-order wrapper so f32 ranks can live in BinaryHeap.
-#[derive(Clone, Copy)]
-struct OrderedF32(f32);
-
-impl PartialEq for OrderedF32 {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl Eq for OrderedF32 {}
-impl PartialOrd for OrderedF32 {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for OrderedF32 {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(Ordering::Equal)
-    }
-}
-
-fn search_beam_snapshot(
-    graph: &[Vec<u32>],
-    data: &[f32],
-    dim: usize,
-    metric: DistanceMetric,
-    ascending: bool,
-    query: &[f32],
-    entry: u32,
-    ef: usize,
-    visited: &mut VisitedSet,
-) -> Vec<(f32, u32)> {
-    let n = graph.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let ef = ef.max(1);
-    visited.ensure_capacity(n);
-    visited.reset();
-    visited.try_visit(entry as usize);
-
-    let entry_rank = diskann_rank(data, entry, query, dim, metric, ascending);
-    let mut candidates: BinaryHeap<Reverse<(OrderedF32, u32)>> =
-        BinaryHeap::with_capacity(ef * 2);
-    candidates.push(Reverse((OrderedF32(entry_rank), entry)));
-    let mut result: BinaryHeap<(OrderedF32, u32)> = BinaryHeap::with_capacity(ef + 1);
-    result.push((OrderedF32(entry_rank), entry));
-
-    while let Some(Reverse((OrderedF32(closest_rank), closest))) = candidates.pop() {
-        let worst = result.peek().map_or(f32::MAX, |x| x.0 .0);
-        if result.len() >= ef && closest_rank > worst {
-            break;
-        }
-        for &neighbor in &graph[closest as usize] {
-            if !visited.try_visit(neighbor as usize) {
-                continue;
-            }
-            let n_rank = diskann_rank(data, neighbor, query, dim, metric, ascending);
-            let worst = result.peek().map_or(f32::MAX, |x| x.0 .0);
-            if result.len() < ef || n_rank < worst {
-                candidates.push(Reverse((OrderedF32(n_rank), neighbor)));
-                result.push((OrderedF32(n_rank), neighbor));
-                if result.len() > ef {
-                    result.pop();
-                }
-            }
-        }
-    }
-
-    let mut out: Vec<(f32, u32)> = result.into_iter().map(|(r, i)| (r.0, i)).collect();
-    out.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
-    out
+    starts
 }
 
 /// DiskANN / Vamana graph-based index.
@@ -345,6 +200,8 @@ pub struct DiskANNIndex {
     index_alias: String,
     /// Soft-deleted slots since last Alg-6 dangling cleanup.
     pending_dangling: usize,
+    #[cfg(test)]
+    build_seed_override: Option<u64>,
 }
 
 impl DiskANNIndex {
@@ -410,6 +267,8 @@ impl DiskANNIndex {
             layered: false,
             index_alias: index_alias.to_ascii_uppercase(),
             pending_dangling: 0,
+            #[cfg(test)]
+            build_seed_override: None,
         }
     }
 
@@ -452,7 +311,9 @@ impl DiskANNIndex {
         let _ = writeln!(
             stderr(),
             "diskann flush detail: graph_write={:.1}s pq_build={:.1}s (M={}, K=256)",
-            write_s, pq_s, n_subspaces
+            write_s,
+            pq_s,
+            n_subspaces
         );
         self.disk_graph = Some(disk_graph);
         self.pq = Some(pq);
@@ -468,6 +329,15 @@ impl DiskANNIndex {
     #[inline]
     fn is_live(&self, idx: usize) -> bool {
         idx < self.ids.len() && (idx >= self.deleted_mask.len() || !self.deleted_mask[idx])
+    }
+
+    /// Whether graph node `idx` is allowed by the optional row/ID BitSet filter.
+    #[inline]
+    fn id_in_subset(&self, idx: usize, subset: Option<&BitSet>) -> bool {
+        match subset {
+            None => true,
+            Some(bs) => idx < self.ids.len() && bs.contains(self.ids[idx] as usize),
+        }
     }
 
     fn live_entry(&self) -> Option<usize> {
@@ -505,11 +375,7 @@ impl DiskANNIndex {
     fn write_out_neighbors(&mut self, idx: usize, neighbors: &[usize]) -> Result<()> {
         let degree = self.r.min(self.max_degree);
         if self.layered {
-            let raw: Vec<u32> = neighbors
-                .iter()
-                .take(degree)
-                .map(|&n| n as u32)
-                .collect();
+            let raw: Vec<u32> = neighbors.iter().take(degree).map(|&n| n as u32).collect();
             if let Some(g) = self.disk_graph.as_mut() {
                 g.set_neighbors(idx, &raw)?;
             }
@@ -721,9 +587,7 @@ impl DiskANNIndex {
             ));
         }
         self.disk_graph = Some(DiskGraphStore::open(&graph_path, n, degree)?);
-        self.pq = Some(
-            PQIndex::load(&pq_path).map_err(|e| LynseError::Storage(e.to_string()))?,
-        );
+        self.pq = Some(PQIndex::load(&pq_path).map_err(|e| LynseError::Storage(e.to_string()))?);
         if self.deleted_mask.len() != n {
             self.deleted_mask = vec![false; n];
         }
@@ -739,7 +603,7 @@ impl DiskANNIndex {
         &self,
         query: &[f32],
         ef: usize,
-        subset: Option<&HashSet<usize>>,
+        subset: Option<&BitSet>,
         visited: &mut VisitedSet,
         entry: usize,
     ) -> Vec<(f32, usize)> {
@@ -761,26 +625,29 @@ impl DiskANNIndex {
         visited.ensure_capacity(n);
         visited.reset();
 
-        let entry_raw = pq.adc_raw(entry, &lut);
-        let entry_rank = if ascending { entry_raw } else { -entry_raw };
         let mut candidates: BinaryHeap<Reverse<RankNode>> = BinaryHeap::with_capacity(ef * 2);
-        if self.is_live(entry) {
-            candidates.push(Reverse(RankNode {
-                rank: entry_rank,
-                raw: entry_raw,
-                idx: entry,
-            }));
-            visited.try_visit(entry);
-        }
-
         let mut result: BinaryHeap<RankNode> = BinaryHeap::with_capacity(ef + 1);
-        let entry_ok = self.is_live(entry) && subset.map(|s| s.contains(&entry)).unwrap_or(true);
-        if entry_ok {
-            result.push(RankNode {
-                rank: entry_rank,
-                raw: entry_raw,
-                idx: entry,
-            });
+        for start in search_entry_points(n, entry, SEARCH_ANCHORS) {
+            if !self.is_live(start) || !visited.try_visit(start) {
+                continue;
+            }
+            let raw = pq.adc_raw(start, &lut);
+            let rank = if ascending { raw } else { -raw };
+            candidates.push(Reverse(RankNode {
+                rank,
+                raw,
+                idx: start,
+            }));
+            if self.id_in_subset(start, subset) {
+                result.push(RankNode {
+                    rank,
+                    raw,
+                    idx: start,
+                });
+                if result.len() > ef {
+                    result.pop();
+                }
+            }
         }
 
         while let Some(Reverse(closest)) = candidates.pop() {
@@ -789,8 +656,6 @@ impl DiskANNIndex {
                 break;
             }
             let neighbors = disk.neighbors(closest.idx);
-            let prefetch_ids: Vec<usize> = neighbors.iter().map(|&x| x as usize).collect();
-            disk.prefetch(&prefetch_ids);
             for &neighbor_u32 in &neighbors {
                 let neighbor = neighbor_u32 as usize;
                 if !self.is_live(neighbor) || !visited.try_visit(neighbor) {
@@ -798,7 +663,7 @@ impl DiskANNIndex {
                 }
                 let n_raw = pq.adc_raw(neighbor, &lut);
                 let n_rank = if ascending { n_raw } else { -n_raw };
-                let in_subset = subset.map(|s| s.contains(&neighbor)).unwrap_or(true);
+                let in_subset = self.id_in_subset(neighbor, subset);
                 let worst = result.peek().map_or(f32::MAX, |node| node.rank);
                 let explore = result.len() < ef || n_rank < worst || !in_subset;
                 if explore {
@@ -828,6 +693,46 @@ impl DiskANNIndex {
             out.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
         }
         out
+    }
+
+    fn global_pq_candidates(
+        &self,
+        query: &[f32],
+        ef: usize,
+        subset: Option<&BitSet>,
+    ) -> Vec<usize> {
+        let pq = match self.pq.as_ref() {
+            Some(pq) => pq,
+            None => return Vec::new(),
+        };
+        let rows = self.ids.len();
+        let eligible = subset.map_or(rows, BitSet::count).min(rows);
+        if rows == 0 || eligible == 0 {
+            return Vec::new();
+        }
+
+        // For a subset, scan enough globally ranked PQ codes to retain about
+        // `ef` eligible rows. The 25% slack absorbs ordinary sampling variance.
+        let scan = if subset.is_some() {
+            let proportional = ef.saturating_mul(rows).saturating_add(eligible - 1) / eligible;
+            proportional
+                .saturating_mul(GLOBAL_PQ_FILTER_SLACK_NUMERATOR)
+                .saturating_add(GLOBAL_PQ_FILTER_SLACK_DENOMINATOR - 1)
+                / GLOBAL_PQ_FILTER_SLACK_DENOMINATOR
+        } else {
+            ef
+        };
+        pq.search_candidates(
+            query,
+            scan.max(ef).min(rows),
+            self.config.distance_metric,
+            1,
+        )
+        .into_iter()
+        .map(|idx| idx as usize)
+        .filter(|&idx| self.is_live(idx) && self.id_in_subset(idx, subset))
+        .take(ef)
+        .collect()
     }
 
     #[inline]
@@ -890,7 +795,6 @@ impl DiskANNIndex {
     }
 
     /// Initialize each node with up to `r` random out-neighbors (Vamana start).
-    #[allow(dead_code)]
     fn init_random_graph(&mut self, rng: &mut impl Rng) {
         let n = self.ids.len();
         self.graph = vec![Vec::with_capacity(self.r); n];
@@ -923,7 +827,13 @@ impl DiskANNIndex {
     /// *inverts* the long-range intent and collapses out-degree (~1). We apply
     /// the mathematically equivalent α-RNG on `exp(rank)` in log-space:
     /// keep `v` iff `rank(p,v) < rank(best,v) + ln(α)`.
-    fn robust_prune(&self, p: usize, candidates: &[(f32, usize)], degree: usize, alpha: f32) -> Vec<usize> {
+    fn robust_prune(
+        &self,
+        p: usize,
+        candidates: &[(f32, usize)],
+        degree: usize,
+        alpha: f32,
+    ) -> Vec<usize> {
         let degree = degree.max(1);
         let alpha = alpha.max(1.0);
         let ascending = self.config.distance_metric.is_ascending();
@@ -971,9 +881,10 @@ impl DiskANNIndex {
         &self,
         query: &[f32],
         ef: usize,
-        subset: Option<&HashSet<usize>>,
+        subset: Option<&BitSet>,
         visited: &mut VisitedSet,
         entry: usize,
+        anchor_count: usize,
     ) -> Vec<(f32, usize)> {
         let n = self.ids.len();
         if n == 0 {
@@ -984,27 +895,30 @@ impl DiskANNIndex {
         visited.ensure_capacity(n);
         visited.reset();
 
-        let entry_raw = self.raw_distance(entry, query);
-        let entry_rank = if ascending { entry_raw } else { -entry_raw };
         let mut candidates: BinaryHeap<Reverse<RankNode>> = BinaryHeap::with_capacity(ef * 2);
-        if self.is_live(entry) {
-            candidates.push(Reverse(RankNode {
-                rank: entry_rank,
-                raw: entry_raw,
-                idx: entry,
-            }));
-            visited.try_visit(entry);
-        }
-
         // Max-heap of accepted (in-subset) results by rank.
         let mut result: BinaryHeap<RankNode> = BinaryHeap::with_capacity(ef + 1);
-        let entry_ok = self.is_live(entry) && subset.map(|s| s.contains(&entry)).unwrap_or(true);
-        if entry_ok {
-            result.push(RankNode {
-                rank: entry_rank,
-                raw: entry_raw,
-                idx: entry,
-            });
+        for start in search_entry_points(n, entry, anchor_count) {
+            if !self.is_live(start) || !visited.try_visit(start) {
+                continue;
+            }
+            let raw = self.raw_distance(start, query);
+            let rank = if ascending { raw } else { -raw };
+            candidates.push(Reverse(RankNode {
+                rank,
+                raw,
+                idx: start,
+            }));
+            if self.id_in_subset(start, subset) {
+                result.push(RankNode {
+                    rank,
+                    raw,
+                    idx: start,
+                });
+                if result.len() > ef {
+                    result.pop();
+                }
+            }
         }
 
         while let Some(Reverse(closest)) = candidates.pop() {
@@ -1021,7 +935,7 @@ impl DiskANNIndex {
                 }
                 let n_raw = self.raw_distance(neighbor, query);
                 let n_rank = if ascending { n_raw } else { -n_raw };
-                let in_subset = subset.map(|s| s.contains(&neighbor)).unwrap_or(true);
+                let in_subset = self.id_in_subset(neighbor, subset);
 
                 // Always expand (bridges help filtered connectivity).
                 let worst = result.peek().map_or(f32::MAX, |node| node.rank);
@@ -1058,40 +972,63 @@ impl DiskANNIndex {
         out
     }
 
-    fn link_bidirectional(&mut self, src: usize, neighbors: &[usize], alpha: f32) {
+    /// Commit one construction batch without losing reverse links between
+    /// points that belong to the same batch. All forward lists are installed
+    /// first, reverse edges are merged, and each affected destination is
+    /// robust-pruned at most once.
+    fn apply_vamana_updates(&mut self, updates: Vec<(usize, Vec<usize>)>, alpha: f32) {
         let degree = self.r.min(self.max_degree);
-        for &dst in neighbors {
-            if dst == src {
-                continue;
+        for (src, neighbors) in &updates {
+            self.graph[*src] = neighbors.clone();
+        }
+
+        let mut touched = Vec::with_capacity(updates.len().saturating_mul(degree));
+        let mut was_touched = HashSet::with_capacity(touched.capacity());
+        for (src, neighbors) in &updates {
+            for &dst in neighbors {
+                if dst == *src {
+                    continue;
+                }
+                if !self.graph[dst].contains(src) {
+                    self.graph[dst].push(*src);
+                }
+                if was_touched.insert(dst) {
+                    touched.push(dst);
+                }
             }
-            if !self.graph[dst].contains(&src) {
-                self.graph[dst].push(src);
-            }
-            if self.graph[dst].len() > degree {
+        }
+
+        let pruned: Vec<(usize, Vec<usize>)> = touched
+            .par_iter()
+            .filter_map(|&dst| {
+                if self.graph[dst].len() <= degree {
+                    return None;
+                }
                 let cand: Vec<(f32, usize)> = self.graph[dst]
                     .iter()
                     .map(|&n| (self.rank_between(dst, n), n))
                     .collect();
-                let pruned = self.robust_prune(dst, &cand, degree, alpha);
-                self.graph[dst] = pruned;
-            }
+                Some((dst, self.robust_prune(dst, &cand, degree, alpha)))
+            })
+            .collect();
+        for (dst, neighbors) in pruned {
+            self.graph[dst] = neighbors;
         }
     }
 
     /// One Vamana pass over all points with the given alpha.
     ///
     /// Uses batched parallel search/prune against a graph snapshot, then applies
-    /// adjacency updates sequentially (same strategy as GPU/Parallel DiskANN).
-    #[allow(dead_code)]
-    fn vamana_pass(&mut self, alpha: f32, order: &[usize], _visited: &mut VisitedSet) {
+    /// both forward and reverse adjacency updates before the next batch. This
+    /// preserves Vamana's incremental connectivity while retaining parallel
+    /// distance evaluation inside each batch.
+    fn vamana_pass(&mut self, alpha: f32, order: &[usize]) {
         let entry = self.entry_point.unwrap_or(0);
         let degree = self.r.min(self.max_degree);
-        let l = self.l;
+        let l = self.l.min(L_BUILD_CAP).max(degree);
         let ascending = self.config.distance_metric.is_ascending();
         let n = self.ids.len();
-        // Larger batches → more parallelism, slightly staler snapshot. Keep
-        // moderate size so reverse-link updates stay fresh enough for recall.
-        let batch = 64.min(n.max(1));
+        let batch = VAMANA_BUILD_BATCH.min(n.max(1));
 
         for chunk in order.chunks(batch) {
             let updates: Vec<(usize, Vec<usize>)> = chunk
@@ -1110,8 +1047,14 @@ impl DiskANNIndex {
                                 )
                             }
                         };
-                        let mut cand =
-                            self.search_graph(query, l, None, &mut local_visited, entry);
+                        let mut cand = self.search_graph(
+                            query,
+                            l,
+                            None,
+                            &mut local_visited,
+                            entry,
+                            VAMANA_BUILD_ANCHORS,
+                        );
                         for &nb in &self.graph[p] {
                             cand.push((self.raw_distance(p, self.vec_at(nb)), nb));
                         }
@@ -1128,61 +1071,34 @@ impl DiskANNIndex {
                 })
                 .collect();
 
-            for (p, pruned) in updates {
-                self.graph[p] = pruned.clone();
-                self.link_bidirectional(p, &pruned, alpha);
-            }
+            self.apply_vamana_updates(updates, alpha);
         }
     }
 
-    /// Full-precision batched Vamana.
+    /// Full-precision staged Vamana.
     ///
-    /// Each batch: parallel beam-search against a frozen adjacency snapshot,
-    /// then apply forward edges. Reverse edges are merged and degree-pruned.
-    /// When α>1, run a first pass at α=1 (connectivity) then α (long edges),
-    /// matching the DiskANN/Vamana two-pass construction.
+    /// Construction starts from a random R-regular graph. Each small batch is
+    /// searched and robust-pruned in parallel, then its forward and reverse
+    /// links are committed before the next batch. When α>1, a connectivity
+    /// pass at α=1 precedes the diversification pass at the configured α.
     fn build_vamana_parallel(&mut self) {
         let n = self.ids.len();
-        let dim = self.config.dimension;
-        let metric = self.config.distance_metric;
-        let ascending = metric.is_ascending();
-        let degree = self.r.min(self.max_degree);
-        let l_build = self.l.min(L_BUILD_CAP).max(degree);
-        let data = self.encoded_data.as_slice();
 
         // Optional reproducible build: LYNSE_DISKANN_SEED=<u64>.
-        // Per-node init uses seed^mix(i) so parallel construction stays deterministic.
-        let build_seed: Option<u64> = std::env::var("LYNSE_DISKANN_SEED")
+        let environment_seed = std::env::var("LYNSE_DISKANN_SEED")
             .ok()
             .and_then(|s| s.parse::<u64>().ok());
+        #[cfg(test)]
+        let build_seed = self.build_seed_override.or(environment_seed);
+        #[cfg(not(test))]
+        let build_seed = environment_seed;
         let mut rng: StdRng = match build_seed {
             Some(s) => StdRng::seed_from_u64(s),
             None => StdRng::from_entropy(),
         };
         let entry = self.choose_medoid(&mut rng);
         self.entry_point = Some(entry);
-
-        // Random R-regular init (cheap) so early beam searches have connectivity.
-        let mut graph: Vec<Vec<u32>> = vec![Vec::with_capacity(degree); n];
-        if n > 1 {
-            let d = degree.min(n - 1);
-            let seed_base = build_seed.unwrap_or_else(|| rng.gen::<u64>());
-            graph.par_iter_mut().enumerate().for_each(|(i, nbrs)| {
-                let mut local = StdRng::seed_from_u64(
-                    seed_base
-                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                        .wrapping_add(i as u64),
-                );
-                let mut chosen = Vec::with_capacity(d);
-                while chosen.len() < d {
-                    let j = local.gen_range(0..n) as u32;
-                    if j as usize != i && !chosen.contains(&j) {
-                        chosen.push(j);
-                    }
-                }
-                *nbrs = chosen;
-            });
-        }
+        self.init_random_graph(&mut rng);
 
         let mut order: Vec<usize> = (0..n).collect();
         order.shuffle(&mut rng);
@@ -1190,114 +1106,21 @@ impl DiskANNIndex {
             order.swap(0, pos);
         }
 
-        let alphas: Vec<f32> = if self.alpha > 1.0 + f32::EPSILON {
-            vec![1.0, self.alpha]
-        } else {
-            vec![self.alpha.max(1.0)]
-        };
-
-        let batch = 8192.min(n.max(1));
-        for &alpha in &alphas {
-            for chunk in order.chunks(batch) {
-                let snapshot = &graph;
-                let updates: Vec<(usize, Vec<u32>)> = chunk
-                    .par_iter()
-                    .map(|&p| {
-                        BUILD_VISITED.with(|cell| {
-                            let mut visited = cell.borrow_mut();
-                            let query = diskann_vec(data, p as u32, dim);
-                            let mut cand = search_beam_snapshot(
-                                snapshot,
-                                data,
-                                dim,
-                                metric,
-                                ascending,
-                                query,
-                                entry as u32,
-                                l_build,
-                                &mut visited,
-                            );
-                            for &nb in &snapshot[p] {
-                                cand.push((
-                                    diskann_rank_between(
-                                        data, p as u32, nb, dim, metric, ascending,
-                                    ),
-                                    nb,
-                                ));
-                            }
-                            let pruned = robust_prune_raw(
-                                data,
-                                p as u32,
-                                &cand,
-                                degree,
-                                alpha,
-                                dim,
-                                metric,
-                                ascending,
-                            );
-                            (p, pruned)
-                        })
-                    })
-                    .collect();
-
-                for (p, pruned) in updates {
-                    graph[p] = pruned;
-                }
-            }
+        self.vamana_pass(1.0, &order);
+        if self.alpha > 1.0 + f32::EPSILON {
+            self.vamana_pass(self.alpha, &order);
         }
-
-        // Materialize reverse edges, then degree-prune by distance (never drop
-        // all reverse links just because the forward list is already full).
-        let mut rev: Vec<Vec<u32>> = vec![Vec::new(); n];
-        for (src, nbrs) in graph.iter().enumerate() {
-            for &dst in nbrs {
-                let d = dst as usize;
-                if d != src {
-                    rev[d].push(src as u32);
-                }
-            }
-        }
-        graph
-            .par_iter_mut()
-            .enumerate()
-            .zip(rev.into_par_iter())
-            .for_each(|((center, fwd), rev_nbrs)| {
-                let mut merged = std::mem::take(fwd);
-                for nb in rev_nbrs {
-                    if !merged.contains(&nb) {
-                        merged.push(nb);
-                    }
-                }
-                *fwd = if merged.len() > degree {
-                    prune_closest_raw(
-                        data,
-                        center as u32,
-                        &merged,
-                        degree,
-                        dim,
-                        metric,
-                        ascending,
-                    )
-                } else {
-                    merged
-                };
-            });
-
-        self.graph = graph
-            .into_iter()
-            .map(|v| v.into_iter().map(|x| x as usize).collect())
-            .collect();
     }
 
     fn brute_force_candidates(
         &self,
         encoded_query: &[f32],
         k: usize,
-        subset: Option<&HashSet<usize>>,
+        subset: Option<&BitSet>,
     ) -> Result<(Vec<u64>, Vec<f32>)> {
         let candidate_idxs: Vec<usize> = match subset {
             Some(sub) => (0..self.ids.len())
-                .filter(|i| self.is_live(*i) && sub.contains(i))
+                .filter(|i| self.is_live(*i) && self.id_in_subset(*i, Some(sub)))
                 .collect(),
             None => (0..self.ids.len()).filter(|&i| self.is_live(i)).collect(),
         };
@@ -1342,12 +1165,7 @@ impl VectorIndex for DiskANNIndex {
         dim: usize,
         ids: Option<&[u64]>,
     ) -> Result<()> {
-        self.build_owned(
-            vectors.to_vec(),
-            n_vectors,
-            dim,
-            ids.map(|s| s.to_vec()),
-        )
+        self.build_owned(vectors.to_vec(), n_vectors, dim, ids.map(|s| s.to_vec()))
     }
 
     fn build_owned(
@@ -1435,15 +1253,7 @@ impl VectorIndex for DiskANNIndex {
             query.to_vec()
         };
 
-        let subset = params.subset_indices.as_ref().map(|ids| {
-            let id_set: HashSet<u64> = ids.iter().cloned().collect();
-            self.ids
-                .iter()
-                .enumerate()
-                .filter(|(_, id)| id_set.contains(id))
-                .map(|(i, _)| i)
-                .collect::<HashSet<usize>>()
-        });
+        let subset = params.subset.as_deref();
 
         let ef = params
             .ef_search
@@ -1462,9 +1272,16 @@ impl VectorIndex for DiskANNIndex {
         let mut hits = SEARCH_VISITED.with(|cell| {
             let mut visited = cell.borrow_mut();
             if self.layered {
-                self.search_graph_pq(&encoded_query, ef, subset.as_ref(), &mut visited, entry)
+                self.search_graph_pq(&encoded_query, ef, subset, &mut visited, entry)
             } else {
-                self.search_graph(&encoded_query, ef, subset.as_ref(), &mut visited, entry)
+                self.search_graph(
+                    &encoded_query,
+                    ef,
+                    subset,
+                    &mut visited,
+                    entry,
+                    SEARCH_ANCHORS,
+                )
             }
         });
 
@@ -1472,7 +1289,7 @@ impl VectorIndex for DiskANNIndex {
             if self.layered {
                 return Ok((Vec::new(), Vec::new()));
             }
-            return self.brute_force_candidates(&encoded_query, k, subset.as_ref());
+            return self.brute_force_candidates(&encoded_query, k, subset);
         }
 
         // Non-layered SQ8/Binary: beam used reconstructed vectors — re-rank with
@@ -1582,7 +1399,7 @@ impl VectorIndex for DiskANNIndex {
                 let hits = if self.layered {
                     self.search_graph_pq(&query, delete_l, None, &mut visited, entry)
                 } else {
-                    self.search_graph(&query, delete_l, None, &mut visited, entry)
+                    self.search_graph(&query, delete_l, None, &mut visited, entry, SEARCH_ANCHORS)
                 };
                 // Approximate visited ≈ all expanded hits from beam.
                 let visited_nodes: Vec<usize> = hits.iter().map(|(_, idx)| *idx).collect();
@@ -1762,10 +1579,7 @@ impl VectorIndex for DiskANNIndex {
                 }
             }
 
-            let entry = self
-                .live_entry()
-                .filter(|&e| e != row)
-                .unwrap_or(row);
+            let entry = self.live_entry().filter(|&e| e != row).unwrap_or(row);
 
             let mut visited = VisitedSet::new(self.ids.len());
             let mut cand = if self.layered {
@@ -1782,6 +1596,7 @@ impl VectorIndex for DiskANNIndex {
                     None,
                     &mut visited,
                     entry,
+                    SEARCH_ANCHORS,
                 )
             };
             for &n in &self.out_neighbors(row) {
@@ -1919,26 +1734,162 @@ impl VectorIndex for DiskANNIndex {
         if k == 0 {
             return Ok(Vec::new());
         }
-        let ef = params
+        let subset = params.subset.as_deref();
+        let requested_ef = params
             .ef_search
             .unwrap_or(0)
             .max(params.nprobe)
             .max(self.l)
             .max(k.saturating_mul(DEFAULT_OVERSAMPLE));
+        let ef = candidate_ef(
+            self.layered,
+            self.config.distance_metric,
+            requested_ef,
+            self.ids.len(),
+        );
         let entry = self.live_entry().unwrap_or(0);
         let hits = SEARCH_VISITED.with(|cell| {
             let mut visited = cell.borrow_mut();
             if self.layered {
-                self.search_graph_pq(query, ef, None, &mut visited, entry)
+                self.search_graph_pq(query, ef, subset, &mut visited, entry)
             } else {
-                self.search_graph(query, ef, None, &mut visited, entry)
+                self.search_graph(query, ef, subset, &mut visited, entry, SEARCH_ANCHORS)
             }
         });
-        let n_cand = ef.min(hits.len());
-        Ok(hits
+        let supplement_global =
+            self.layered && needs_global_pq_supplement(self.config.distance_metric, &hits);
+        let global = if supplement_global {
+            let global_limit = (ef / GLOBAL_PQ_SUPPLEMENT_DIVISOR)
+                .max(k.saturating_mul(16))
+                .min(ef);
+            self.global_pq_candidates(query, global_limit, subset)
+        } else {
+            Vec::new()
+        };
+
+        let mut seen = HashSet::with_capacity(hits.len().saturating_add(global.len()));
+        let mut candidates = Vec::with_capacity(seen.capacity());
+        for idx in hits.into_iter().take(ef).map(|(_, idx)| idx).chain(global) {
+            if seen.insert(idx) {
+                candidates.push(idx as u32);
+            }
+        }
+        Ok(candidates)
+    }
+
+    fn batch_search_candidates(
+        &self,
+        queries: &[f32],
+        n_queries: usize,
+        dim: usize,
+        k: usize,
+        params: &SearchParams,
+    ) -> Result<Vec<Vec<u32>>> {
+        if queries.len() != n_queries.saturating_mul(dim) || dim != self.config.dimension {
+            return Err(LynseError::DimensionMismatch {
+                expected: n_queries.saturating_mul(self.config.dimension),
+                got: queries.len(),
+            });
+        }
+        if !self.layered || self.config.distance_metric != DistanceMetric::L2Squared {
+            return queries
+                .chunks_exact(dim)
+                .map(|query| self.search_candidates(query, k, params))
+                .collect();
+        }
+
+        let subset = params.subset.as_deref();
+        let requested_ef = params
+            .ef_search
+            .unwrap_or(0)
+            .max(params.nprobe)
+            .max(self.l)
+            .max(k.saturating_mul(DEFAULT_OVERSAMPLE));
+        let ef = candidate_ef(
+            true,
+            self.config.distance_metric,
+            requested_ef,
+            self.ids.len(),
+        );
+        let entry = self.live_entry().unwrap_or(0);
+        let graph_hits: Vec<Vec<(f32, usize)>> = queries
+            .chunks_exact(dim)
+            .map(|query| {
+                SEARCH_VISITED.with(|cell| {
+                    self.search_graph_pq(query, ef, subset, &mut cell.borrow_mut(), entry)
+                })
+            })
+            .collect();
+        let difficult: Vec<usize> = graph_hits
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, hits)| {
+                needs_global_pq_supplement(self.config.distance_metric, hits).then_some(idx)
+            })
+            .collect();
+
+        let global_limit = (ef / GLOBAL_PQ_SUPPLEMENT_DIVISOR)
+            .max(k.saturating_mul(16))
+            .min(ef);
+        let rows = self.ids.len();
+        let eligible = subset.map_or(rows, BitSet::count).min(rows);
+        let scan = if subset.is_some() && eligible > 0 {
+            let proportional = global_limit
+                .saturating_mul(rows)
+                .saturating_add(eligible - 1)
+                / eligible;
+            proportional
+                .saturating_mul(GLOBAL_PQ_FILTER_SLACK_NUMERATOR)
+                .saturating_add(GLOBAL_PQ_FILTER_SLACK_DENOMINATOR - 1)
+                / GLOBAL_PQ_FILTER_SLACK_DENOMINATOR
+        } else {
+            global_limit
+        }
+        .max(global_limit)
+        .min(rows);
+
+        let difficult_queries: Vec<f32> = difficult
+            .iter()
+            .flat_map(|&idx| queries[idx * dim..(idx + 1) * dim].iter().copied())
+            .collect();
+        let global_batches = if difficult.is_empty() || eligible == 0 {
+            Vec::new()
+        } else {
+            self.pq
+                .as_ref()
+                .map(|pq| {
+                    pq.search_candidates_batch(
+                        &difficult_queries,
+                        difficult.len(),
+                        scan,
+                        self.config.distance_metric,
+                        1,
+                    )
+                })
+                .unwrap_or_default()
+        };
+        let mut global_by_query: Vec<Vec<usize>> = vec![Vec::new(); n_queries];
+        for (&query_idx, raw) in difficult.iter().zip(global_batches) {
+            global_by_query[query_idx] = raw
+                .into_iter()
+                .map(|idx| idx as usize)
+                .filter(|&idx| self.is_live(idx) && self.id_in_subset(idx, subset))
+                .take(global_limit)
+                .collect();
+        }
+
+        Ok(graph_hits
             .into_iter()
-            .take(n_cand)
-            .map(|(_, idx)| idx as u32)
+            .zip(global_by_query)
+            .map(|(hits, global)| {
+                let mut seen = HashSet::with_capacity(hits.len().saturating_add(global.len()));
+                hits.into_iter()
+                    .take(ef)
+                    .map(|(_, idx)| idx)
+                    .chain(global)
+                    .filter_map(|idx| seen.insert(idx).then_some(idx as u32))
+                    .collect()
+            })
             .collect())
     }
 
@@ -1985,6 +1936,60 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn layered_l2_candidate_beam_has_a_quality_floor() {
+        assert_eq!(
+            candidate_ef(true, DistanceMetric::L2Squared, 128, 10_000),
+            LAYERED_L2_MIN_EF
+        );
+        assert_eq!(candidate_ef(true, DistanceMetric::L2Squared, 128, 500), 500);
+        assert_eq!(
+            candidate_ef(true, DistanceMetric::L2Squared, 128, 1_000_000),
+            LAYERED_L2_MIN_EF
+        );
+        assert_eq!(
+            candidate_ef(true, DistanceMetric::InnerProduct, 128, 10_000),
+            128
+        );
+        assert_eq!(
+            candidate_ef(false, DistanceMetric::L2Squared, 128, 10_000),
+            128
+        );
+    }
+
+    #[test]
+    fn global_pq_supplement_only_triggers_for_concentrated_l2_scores() {
+        let narrow: Vec<(f32, usize)> = (0..100)
+            .map(|idx| (10.0 + idx as f32 * 0.01, idx))
+            .collect();
+        let wide: Vec<(f32, usize)> = (0..100).map(|idx| (1.0 + idx as f32 * 0.1, idx)).collect();
+
+        assert!(needs_global_pq_supplement(
+            DistanceMetric::L2Squared,
+            &narrow
+        ));
+        assert!(!needs_global_pq_supplement(
+            DistanceMetric::L2Squared,
+            &wide
+        ));
+        assert!(!needs_global_pq_supplement(
+            DistanceMetric::InnerProduct,
+            &narrow
+        ));
+        assert!(!needs_global_pq_supplement(
+            DistanceMetric::L2Squared,
+            &narrow[..10]
+        ));
+    }
+
+    #[test]
+    fn search_uses_bounded_entry_points() {
+        assert_eq!(
+            search_entry_points(1_000_000, 1, SEARCH_ANCHORS).len(),
+            SEARCH_ANCHORS + 1
+        );
+    }
+
+    #[test]
     fn diskann_ip_search_returns_max_inner_product() {
         let mut idx = DiskANNIndex::new(
             DistanceMetric::InnerProduct,
@@ -2006,7 +2011,7 @@ mod tests {
             k: 1,
             nprobe: 1,
             ef_search: None,
-            subset_indices: None,
+            subset: None,
         };
         let (result_ids, dists) = idx.search(&[1.0, 0.0], 1, &params).unwrap();
         assert_eq!(
@@ -2032,12 +2037,11 @@ mod tests {
         let ids = [1u64, 2, 3, 4];
         idx.build(&vectors, 4, 2, Some(&ids)).unwrap();
 
-        let subset = Arc::new(vec![3u64, 4u64]);
         let params = SearchParams {
             k: 2,
             nprobe: 1,
             ef_search: None,
-            subset_indices: Some(subset),
+            subset: Some(Arc::new(BitSet::from_ids([3u64, 4]))),
         };
         let (result_ids, _) = idx.search(&[0.0, 0.0], 2, &params).unwrap();
         assert!(!result_ids.is_empty(), "expected filtered fallback hits");
@@ -2050,8 +2054,14 @@ mod tests {
 
     #[test]
     fn diskann_unfiltered_search_uses_graph_candidates() {
-        let mut idx =
-            DiskANNIndex::new(DistanceMetric::L2Squared, QuantizerType::None, 8, 32, 1.2, 16);
+        let mut idx = DiskANNIndex::new(
+            DistanceMetric::L2Squared,
+            QuantizerType::None,
+            8,
+            32,
+            1.2,
+            16,
+        );
         let mut vectors = Vec::new();
         let mut ids = Vec::new();
         for i in 0..64u64 {
@@ -2069,7 +2079,7 @@ mod tests {
             k: 5,
             nprobe: 32,
             ef_search: None,
-            subset_indices: None,
+            subset: None,
         };
         let (result_ids, _) = idx.search(&[0.0, 0.0], 2, &params).unwrap();
         assert!(!result_ids.is_empty());
@@ -2088,6 +2098,14 @@ mod tests {
         );
         let n = 500usize;
         let dim = 32usize;
+        // Seed 57 previously produced a graph region unreachable from the
+        // single medoid entry and is retained as a deterministic regression.
+        idx.build_seed_override = Some(
+            std::env::var("LYNSE_DISKANN_TEST_SEED")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(57),
+        );
         let mut vectors = Vec::with_capacity(n * dim);
         let mut ids = Vec::with_capacity(n);
         for i in 0..n {
@@ -2121,7 +2139,7 @@ mod tests {
             k: 5,
             nprobe: 64,
             ef_search: Some(128),
-            subset_indices: None,
+            subset: None,
         };
         let (result_ids, _) = idx.search(q, 5, &params).unwrap();
         eprintln!("IP self-search top: {:?}", result_ids);
@@ -2130,7 +2148,7 @@ mod tests {
             "unit-normalized self vector missing from IP DiskANN results: {:?}",
             result_ids
         );
-        // Brute-force top-1 must be reachable with high probability on this graph.
+        // Brute-force top-1 must be reachable from the adversarial seeded graph.
         let mut best_ip = f32::NEG_INFINITY;
         let mut best_id = 0u64;
         for i in 0..n {
@@ -2180,11 +2198,15 @@ mod tests {
             k: 10,
             nprobe: 64,
             ef_search: Some(128),
-            subset_indices: None,
+            subset: None,
         };
         let cands = idx.search_candidates(&vectors[..dim], 10, &params).unwrap();
         assert!(!cands.is_empty());
-        assert!(cands.contains(&0), "self row should be a candidate: {:?}", cands);
+        assert!(
+            cands.contains(&0),
+            "self row should be a candidate: {:?}",
+            cands
+        );
         let bytes = idx.serialize().unwrap();
         assert!(
             bytes.len() < n * dim,
@@ -2230,8 +2252,58 @@ mod tests {
         ];
         let pruned = idx.robust_prune(0, &cand, 2, 1.2);
         assert!(pruned.contains(&1), "nearest neighbor must be kept");
-        assert!(pruned.contains(&3), "orthogonal neighbor should survive α-prune");
+        assert!(
+            pruned.contains(&3),
+            "orthogonal neighbor should survive α-prune"
+        );
         assert_eq!(pruned.len(), 2);
+    }
+
+    #[test]
+    fn diskann_batch_commit_preserves_intra_batch_reverse_links() {
+        let mut idx =
+            DiskANNIndex::new(DistanceMetric::L2Squared, QuantizerType::None, 2, 8, 1.2, 2);
+        idx.config.dimension = 1;
+        idx.encoded_data = vec![0.0, 1.0, 2.0, 3.0];
+        idx.data = idx.encoded_data.clone();
+        idx.ids = vec![0, 1, 2, 3];
+        idx.graph = vec![Vec::new(); 4];
+
+        // Point 2 is also updated in this batch. Its forward assignment must
+        // not overwrite the reverse 2 -> 0 edge created by point 0's 0 -> 2.
+        idx.apply_vamana_updates(vec![(0, vec![2]), (2, vec![3])], 1.2);
+
+        assert_eq!(idx.graph[0], vec![2]);
+        assert!(idx.graph[2].contains(&3));
+        assert!(idx.graph[2].contains(&0));
+        assert!(idx.graph[3].contains(&2));
+        assert!(idx.graph.iter().all(|neighbors| neighbors.len() <= 2));
+    }
+
+    #[test]
+    fn diskann_staged_build_is_reproducible_with_a_seed() {
+        let n = 128usize;
+        let dim = 16usize;
+        let vectors: Vec<f32> = (0..n * dim)
+            .map(|i| ((i * 37 + 11) % 251) as f32 / 251.0)
+            .collect();
+        let ids: Vec<u64> = (0..n as u64).collect();
+
+        let build = || {
+            let mut idx = DiskANNIndex::new(
+                DistanceMetric::L2Squared,
+                QuantizerType::None,
+                8,
+                32,
+                1.2,
+                8,
+            );
+            idx.build_seed_override = Some(42);
+            idx.build(&vectors, n, dim, Some(&ids)).unwrap();
+            (idx.entry_point, idx.graph)
+        };
+
+        assert_eq!(build(), build());
     }
 
     #[test]
@@ -2269,11 +2341,9 @@ mod tests {
             k: 5,
             nprobe: 32,
             ef_search: Some(64),
-            subset_indices: None,
+            subset: None,
         };
-        let cands = idx
-            .search_candidates(&del_vec, 5, &params)
-            .unwrap();
+        let cands = idx.search_candidates(&del_vec, 5, &params).unwrap();
         assert!(
             !cands.contains(&(del as u32)),
             "deleted row must not appear in candidates: {:?}",
@@ -2288,9 +2358,7 @@ mod tests {
         assert!(idx.is_live(n));
         assert_eq!(idx.len(), n + 1);
 
-        let cands2 = idx
-            .search_candidates(&new_vec, 5, &params)
-            .unwrap();
+        let cands2 = idx.search_candidates(&new_vec, 5, &params).unwrap();
         assert!(
             cands2.contains(&(n as u32)),
             "newly inserted row should be a candidate: {:?}",

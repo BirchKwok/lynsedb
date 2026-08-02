@@ -72,6 +72,7 @@ def test_localcollection_public_api_contract():
         "compact",
         "create_vector_field",
         "delete",
+        "delete_blob",
         "exists",
         "export_to",
         "flush",
@@ -88,6 +89,8 @@ def test_localcollection_public_api_contract():
         "name",
         "query",
         "query_vectors",
+        "read_blob",
+        "read_blob_range",
         "remove_index",
         "restore",
         "search",
@@ -101,6 +104,7 @@ def test_localcollection_public_api_contract():
         "update_description",
         "upsert",
         "vector_dtype",
+        "write_blob",
     }
 
 
@@ -311,6 +315,10 @@ def test_localclient_public_api_smoke(client, tmp_path, api_name):
         "list_fields",
         "update_description",
         "index_mode",
+        "write_blob",
+        "read_blob",
+        "read_blob_range",
+        "delete_blob",
     ],
 )
 def test_localcollection_public_api_smoke(db, tmp_path, api_name):
@@ -429,6 +437,19 @@ def test_localcollection_public_api_smoke(db, tmp_path, api_name):
         assert coll.update_description("updated") == {"status": "success"}
     elif api_name == "index_mode":
         assert coll.index_mode is None or isinstance(coll.index_mode, str)
+    elif api_name == "write_blob":
+        assert coll.write_blob("smoke", b"payload") == {"status": "success"}
+        assert coll.read_blob("smoke") == b"payload"
+    elif api_name == "read_blob":
+        coll.write_blob("smoke", b"payload")
+        assert coll.read_blob("smoke") == b"payload"
+    elif api_name == "read_blob_range":
+        coll.write_blob("smoke", b"payload")
+        assert coll.read_blob_range("smoke", offset=1, length=3) == b"ayl"
+    elif api_name == "delete_blob":
+        coll.write_blob("smoke", b"payload")
+        assert coll.delete_blob("smoke") is True
+        assert coll.delete_blob("smoke") is False
 
 
 def test_resultview_public_api_smoke():

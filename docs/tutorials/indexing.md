@@ -121,7 +121,7 @@ Pass family-specific kwargs to `build_index`:
 collection.build_index("IVF-L2", n_clusters=256, nprobe=32)
 collection.build_index("SPANN-L2", n_clusters=256, replica_count=8)
 collection.build_index("HNSW-IP", m=32, ef_construction=200)
-collection.build_index("DISKANN-IP", r=32, l=64, alpha=1.2)
+collection.build_index("DISKANN-IP", r=32, l=128, alpha=1.2)
 ```
 
 | Family | Key | Default | Meaning |
@@ -146,6 +146,28 @@ Rules:
 - More IVF/SPANN clusters usually reduce scanned vectors per query but can require higher
   `nprobe` for recall.
 - Higher HNSW `m` / `ef_construction` or DiskANN `r` / `l` generally improves recall at the cost of build time and memory.
+
+The default `r=16`, `l=64` builder uses staged, bidirectional Vamana updates.
+On the repository's fixed-seed SIFT1M gate it reaches at least 0.97 recall@10
+with query-time `nprobe=64`, including filtered cases. This is a reference
+result, not a guarantee for every distribution: validate filtered and
+unfiltered queries against `FLAT-*` on your own data before deployment. For a
+larger recall margin, evaluate `r=32`, `l=128`, and a wider query beam, accepting
+the extra build time and memory.
+
+Layered L2 search also detects queries whose PQ/ADC graph candidates have an
+unusually concentrated score distribution. For those difficult queries it
+adds a smaller independent global-PQ shortlist before exact VectorStore
+re-ranking. Ordinary queries stay on the graph-only path, and batch search
+shares one PQ-code traversal across queries that need supplementation.
+
+The repository SIFT gate can enforce that acceptance explicitly:
+
+```bash
+LYNSE_DISKANN_SEED=42 python benchmarks/sift_filtered_ann_bench.py \
+  --sift-dir sift --rows 1000000 --nprobe 64 \
+  --min-ann-recall 0.90 --max-short-results 0
+```
 
 Search with:
 

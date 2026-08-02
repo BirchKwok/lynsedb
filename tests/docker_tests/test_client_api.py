@@ -75,6 +75,21 @@ def test_remote_query_without_filter_returns_empty(remote_server, unique_name):
     assert collection.query_vectors().vectors.shape == (0, 4)
 
 
+def test_remote_user_blob_round_trip(remote_server, unique_name):
+    client = lynse.VectorDBClient(remote_server.base_url)
+    db = client.create_database(unique_name, drop_if_exists=True)
+    collection = db.require_collection("blob_remote", dim=4, drop_if_exists=True)
+    payload = bytes(range(256)) * 384
+
+    assert collection.read_blob("artifact") is None
+    assert collection.write_blob("artifact", payload) == {"status": "success"}
+    assert collection.read_blob("artifact") == payload
+    assert collection.read_blob_range("artifact", offset=255, length=258) == payload[255:513]
+    assert collection.delete_blob("artifact") is True
+    assert collection.delete_blob("artifact") is False
+    assert collection.read_blob("artifact") is None
+
+
 def test_remote_named_vector_index_uses_field_endpoint(remote_server, unique_name):
     client = lynse.VectorDBClient(remote_server.base_url)
     db = client.create_database(unique_name, drop_if_exists=True)

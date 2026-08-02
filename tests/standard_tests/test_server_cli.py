@@ -2,7 +2,7 @@
 
 import json
 
-from lynse.server import _parse_args
+from lynse.server import _parse_args, main
 
 
 def test_parse_serve_with_data_dir():
@@ -194,3 +194,32 @@ def test_parse_coordinator_args():
     assert args.coordinator_uri == "http://127.0.0.1:9101"
     assert args.coordinator_lease_secs == 2.5
     assert args.metadata_owners == "http://10.0.0.11:7638,http://10.0.0.12:7638,http://10.0.0.13:7638"
+
+
+def test_coordinator_main_forwards_client_auth_and_payload_limits(monkeypatch):
+    import lynse.cluster as cluster_module
+
+    captured = {}
+
+    def fake_run_coordinator(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cluster_module, "run_coordinator", fake_run_coordinator)
+    main([
+        "serve",
+        "--role",
+        "coordinator",
+        "--api-key",
+        "client-secret",
+        "--shard-api-key",
+        "shard-secret",
+        "--json-limit-mb",
+        "7",
+        "--payload-limit-mb",
+        "11",
+    ])
+
+    assert captured["api_key"] == "client-secret"
+    assert captured["shard_api_key"] == "shard-secret"
+    assert captured["json_limit_mb"] == 7
+    assert captured["payload_limit_mb"] == 11

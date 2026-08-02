@@ -192,6 +192,30 @@ impl BitSet {
         self.iter_set_bits().map(|i| i as u64).collect()
     }
 
+    /// Build a BitSet from ID values (each ID becomes a set bit).
+    pub fn from_ids(ids: impl IntoIterator<Item = u64>) -> Self {
+        let mut bs = Self::empty();
+        for id in ids {
+            bs.set_bit(id as usize);
+        }
+        bs
+    }
+
+    /// Build a BitSet with at least `min_len` bits from ID values.
+    pub fn from_ids_with_len(ids: impl IntoIterator<Item = u64>, min_len: usize) -> Self {
+        let mut bs = Self::new(min_len, false);
+        for id in ids {
+            bs.set_bit(id as usize);
+        }
+        bs
+    }
+
+    /// Membership test alias for [`get_bit`].
+    #[inline]
+    pub fn contains(&self, index: usize) -> bool {
+        self.get_bit(index)
+    }
+
     /// Bitwise AND.
     pub fn and(&self, other: &BitSet) -> BitSet {
         let min_len = self.len.min(other.len);

@@ -1386,6 +1386,83 @@ class Collection:
         else:
             raise_error_response(response)
 
+    def write_blob(self, key: str, value: bytes):
+        """Store or replace arbitrary collection-local user bytes."""
+        if not isinstance(value, (bytes, bytearray, memoryview)):
+            raise TypeError("value must be bytes-like")
+        params = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "key": str(key),
+        }
+        response = self._session.post(
+            f'{self._uri}/write_blob',
+            content=bytes(value),
+            headers={"Content-Type": "application/octet-stream"},
+            params=params,
+        )
+        if response.status_code != 200:
+            raise_error_response(response)
+        self.COMMIT_FLAG = False
+        return {'status': 'success'}
+
+    def read_blob(self, key: str) -> Optional[bytes]:
+        """Read collection-local user bytes, returning ``None`` when absent."""
+        params = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "key": str(key),
+        }
+        response = self._session.get(f'{self._uri}/read_blob', params=params)
+        if response.status_code == 204:
+            return None
+        if response.status_code != 200:
+            raise_error_response(response)
+        return response.content
+
+    def read_blob_range(
+            self,
+            key: str,
+            offset: int = 0,
+            length: Optional[int] = None,
+    ) -> Optional[bytes]:
+        """Read a byte range from a collection-local user blob."""
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        if length is not None and length < 0:
+            raise ValueError("length must be non-negative")
+        params = {
+            "database_name": self._database_name,
+            "collection_name": self._collection_name,
+            "key": str(key),
+            "offset": int(offset),
+        }
+        if length is not None:
+            params["length"] = int(length)
+        response = self._session.get(f'{self._uri}/read_blob', params=params)
+        if response.status_code == 204:
+            return None
+        if response.status_code != 200:
+            raise_error_response(response)
+        return response.content
+
+    def delete_blob(self, key: str) -> bool:
+        """Delete collection-local user bytes and report whether they existed."""
+        response = self._session.post(
+            f'{self._uri}/delete_blob',
+            json={
+                "database_name": self._database_name,
+                "collection_name": self._collection_name,
+                "key": str(key),
+            },
+        )
+        if response.status_code != 200:
+            raise_error_response(response)
+        deleted = bool(response.json().get("params", {}).get("deleted", False))
+        if deleted:
+            self.COMMIT_FLAG = False
+        return deleted
+
     def flush(self):
         """Flush pending bytes and fsync collection files without clearing WAL."""
         uri = f'{self._uri}/flush'
@@ -1649,7 +1726,7 @@ class Collection:
         Examples:
             >>> collection.build_index("IVF-L2", n_clusters=256, nprobe=32)
             >>> collection.build_index("HNSW-IP", m=32, ef_construction=200)
-            >>> collection.build_index("DISKANN-IP", r=32, l=64, alpha=1.2)
+            >>> collection.build_index("DISKANN-IP", r=32, l=128, alpha=1.2)
         """
         from ..._index_build import normalize_build_kwargs
 

@@ -565,7 +565,7 @@ class Collection:
         Examples:
             >>> collection.build_index("IVF-L2", n_clusters=256, nprobe=32)
             >>> collection.build_index("HNSW-IP", m=32, ef_construction=200)
-            >>> collection.build_index("DISKANN-IP", r=32, l=64, alpha=1.2)
+            >>> collection.build_index("DISKANN-IP", r=32, l=128, alpha=1.2)
         """
         from ._index_build import normalize_build_kwargs
 
@@ -928,6 +928,33 @@ class Collection:
     def list_fields(self) -> List[str]:
         """List all field names in the collection."""
         return self._inner.list_fields()
+
+    def write_blob(self, key: str, value: bytes) -> None:
+        """Store or replace collection-local user bytes under ``key``."""
+        if not isinstance(value, (bytes, bytearray, memoryview)):
+            raise TypeError("value must be bytes-like")
+        self._inner.write_blob(str(key), bytes(value))
+
+    def read_blob(self, key: str) -> Optional[bytes]:
+        """Read collection-local user bytes, returning ``None`` when absent."""
+        return self._inner.read_blob(str(key))
+
+    def read_blob_range(
+        self,
+        key: str,
+        offset: int = 0,
+        length: Optional[int] = None,
+    ) -> Optional[bytes]:
+        """Read a byte range without changing the stored value."""
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        if length is not None and length < 0:
+            raise ValueError("length must be non-negative")
+        return self._inner.read_blob_range(str(key), int(offset), length)
+
+    def delete_blob(self, key: str) -> bool:
+        """Delete collection-local user bytes and report whether they existed."""
+        return bool(self._inner.delete_blob(str(key)))
 
     def delete_items(self, ids: List[int]) -> None:
         """Soft-delete vectors by user ID."""

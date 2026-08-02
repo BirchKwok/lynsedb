@@ -177,8 +177,24 @@ def configured_modes(raw: str) -> list[str]:
     return list(ALL_INDEX_MODES)
 
 
+DATASET_GENERATOR = "stable-kind-offset-v1"
+KIND_SEED_OFFSETS = {
+    "dense": 101,
+    "binary": 211,
+    "haversine": 307,
+    "distribution": 401,
+}
+
+
+def kind_seed(kind: str, *, query: bool = False) -> int:
+    """Return a process-stable seed offset for a benchmark collection kind."""
+    offset = KIND_SEED_OFFSETS[kind]
+    return offset + (10_000 if query else 0)
+
+
 def profile_marker(args: argparse.Namespace) -> dict[str, Any]:
     return {
+        "dataset_generator": DATASET_GENERATOR,
         "rows": args.rows,
         "dim": args.dim,
         "haversine_dim": 2,
@@ -194,6 +210,7 @@ def profile_marker(args: argparse.Namespace) -> dict[str, Any]:
         "sparse_dims": args.sparse_dims,
         "modes": configured_modes(args.modes),
         "rayon_threads": os.environ.get("RAYON_NUM_THREADS", "default"),
+        "diskann_seed": os.environ.get("LYNSE_DISKANN_SEED", "unset"),
     }
 
 
@@ -206,7 +223,7 @@ def open_client(data_dir: Path):
 def create_collection(client, name: str, *, n: int, dim: int, kind: str, args: argparse.Namespace):
     db = client.create_database("gate_db", drop_if_exists=False)
     coll = db.require_collection(name, dim=dim, drop_if_exists=True, default_index=None)
-    rng = np.random.default_rng(args.seed + hash(kind) % 10_000)
+    rng = np.random.default_rng(args.seed + kind_seed(kind))
     print(f"Writing {n:,} x {dim} ({kind}) into {name}...", flush=True)
     inserted = 0
     while inserted < n:
@@ -290,6 +307,11 @@ def run_one_mode(coll, mode: str, queries: np.ndarray, refs: dict[str, list[list
         "metric": metric,
         "collection_kind": collection_kind_for_mode(mode),
         "min_recall": recall_floor_for_mode(mode),
+        "batch_impl": (
+            "native_batch_search"
+            if os.environ.get("GATE_SAFE_BATCH", "1") == "0"
+            else "sequential_search_loop"
+        ),
     }
     try:
         build_args = {}
@@ -594,7 +616,7 @@ def run_upsert(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def make_queries(kind: str, args: argparse.Namespace) -> np.ndarray:
-    rng = np.random.default_rng(args.seed + 999 + hash(kind) % 1000)
+    rng = np.random.default_rng(args.seed + kind_seed(kind, query=True))
     nq = max(args.trials, args.batch_queries, 4)
     if kind == "binary":
         return make_binary(rng, nq, args.dim)
@@ -608,6 +630,7 @@ def make_queries(kind: str, args: argparse.Namespace) -> np.ndarray:
 def main() -> int:
     args = parse_args()
     os.environ.setdefault("RAYON_NUM_THREADS", os.environ.get("RAYON_NUM_THREADS", "4"))
+    os.environ.setdefault("LYNSE_DISKANN_SEED", str(args.seed))
     modes = [] if args.skip_modes else configured_modes(args.modes)
     print("=" * 100, flush=True)
     print(

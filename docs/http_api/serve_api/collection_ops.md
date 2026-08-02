@@ -80,6 +80,9 @@ deterministic on-disk durability.
 | `GET` | `/tail_binary` | query params | Last rows through compact protocol. |
 | `POST` | `/read_by_only_id` | `id` | Read one or more IDs. |
 | `POST` | `/list_fields` | none | List metadata field names. |
+| `POST` | `/write_blob` | query: database, collection, key; binary body | Store or replace collection-local user bytes. |
+| `GET` | `/read_blob` | query: database, collection, key, optional offset/length | Read a blob or byte range; returns `204` when absent. |
+| `POST` | `/delete_blob` | database, collection, key | Delete a user blob and report whether it existed. |
 | `POST` | `/index_mode` | none | Return current index mode. |
 | `POST` | `/is_id_exists` | `id` | Check whether an ID exists. |
 | `POST` | `/max_id` | none | Return max internal numeric ID. |
