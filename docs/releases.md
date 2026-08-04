@@ -2,6 +2,99 @@
 
 This page documents the major features and improvements in each version of LynseDB. Only versions with the `v` prefix are official releases.
 
+## v0.8.0
+
+**Major Release - Blob Storage, DiskANN Streaming Updates, and Search Correctness**
+
+**Key Features:**
+
+- 🗃️ **Collection-Local Blob Storage**: Local and HTTP clients can store
+  arbitrary bytes under a collection-local key with `write_blob`, `read_blob`,
+  `read_blob_range`, and `delete_blob`. The HTTP service adds `/write_blob`,
+  `/read_blob`, and `/delete_blob` endpoints, including byte-range reads.
+- 🔎 **DiskANN Streaming Updates**: Layered `DiskANN-IP`, `DiskANN-L2`, and
+  `DiskANN-*-PQ*` indexes support in-place insert, delete, and upsert without a
+  full graph rebuild. Updates use Vamana-style linking, inner-product edge
+  repair, soft-deleted slots, and automatic dangling-edge cleanup;
+  `compact`/`vacuum` still performs a hard rebuild.
+- 🧭 **Family-Specific Index Build Parameters**: `build_index` now accepts
+  validated per-family kwargs: `n_clusters`/`nprobe`/`replica_count` for
+  IVF/SPANN, `m`/`ef_construction`/`ef_search`/`max_level` for HNSW, and
+  `r`/`l`/`alpha`/`max_degree` for DiskANN. Unknown keys raise `ValueError`;
+  inapplicable keys are ignored.
+- ⚡ **Faster IVF Binary Search**: Binary IVF variants route with L2 coarse
+  partitioning and score candidates with packed Hamming/Jaccard codes. Binary
+  quantizer fitting no longer collapses `{0,1}` rows during training.
+- 🔒 **Coordinator Authentication and Request Limits**: Coordinators enforce a
+  client-facing `--api-key` (Bearer or Basic) on data, metadata, and management
+  endpoints while keeping `/`, `/healthz`, and `/readyz` public. New
+  `--json-limit-mb` and `--payload-limit-mb` limits reject oversized requests
+  before dispatch or proxying; shard credentials remain a separate key.
+
+**Improvements:**
+
+- **Search correctness**: `batch_search` uses the same filtered, tombstone-aware
+  routing as single search. Filtered DiskANN/IP, IVF, Flat, and quantized paths
+  can no longer leak unfiltered IDs, and filtered fallbacks stay within the
+  requested subset. Top-k merge and truncation no longer drop true nearest
+  neighbors, and blacklisted/unindexed `IN` filters fall back to full SQL
+  evaluation.
+- **DiskANN builder**: New staged, bidirectional full-precision Vamana
+  construction with parallel beam search and prune, correct α-RNG handling for
+  inner-product ranking, and layered `graph.bin`/`pq.bin` sidecars. Layered L2
+  search supplements difficult PQ/ADC queries with a global-PQ shortlist before
+  exact re-ranking.
+- **Approximate flat search**: `approx=True` now also covers L1/Manhattan,
+  Chebyshev, Canberra, and Bray–Curtis, with global ranking before `eps`
+  rounding.
+- **Storage validation**: WAL recovery checks record/vector/ID/field counts and
+  segment boundaries; PQ rejects unsupported versions and out-of-range codes;
+  RaBitQ validates dimensions/sign-word counts; IVF validates dimensions and
+  partition counts; manifests require safe relative paths and existing segments;
+  database and collection names reject path traversal and invalid characters;
+  empty vector matrices are rejected by local and HTTP clients.
+- **Stable HTTP errors**: JSON errors now include a stable `code` alongside
+  `error`. Invalid arguments, auth failures, missing resources, conflicts, and
+  internal failures map to distinct HTTP statuses (400/401/404/409/500) for both
+  JSON and binary endpoints.
+- **Performance guardrails**: Hosted performance regression checks moved to
+  machine-local gates (`scripts/run_local_gates.sh`,
+  `scripts/run_local_canary.sh`, `scripts/perf_gate_local.py`). CI now covers
+  Rust formatting/tests/checks, Python API tests, strict docs builds, and
+  release-time Docker API tests; release jobs verify synchronized versions and
+  the matching `docs/releases.md` section before publishing.
+
+**Testing:**
+
+- Added blob round-trip tests covering replacement, range reads, deletion, and
+  read-only client write rejection.
+- Added coordinator authentication and payload-limit scenarios, plus expanded
+  cluster API tests.
+- Added filtered-search regressions for batch/single parity across HNSW,
+  Flat-PQ, IVF, and DiskANN, and top-k/`IN` filter edge cases.
+- Added storage-corruption tests for WAL count mismatches, invalid PQ/RaBitQ
+  payloads, path-traversal names, and empty vector matrices.
+- Added DiskANN IP update, seed-variance, sliding-window, scale, and SIFT
+  filtered-ANN benchmarks, including a fixed-seed SIFT1M recall gate, plus IVF
+  binary-search and `build_index` parameter tests.
+
+**Compatibility Notes:**
+
+- Existing collections and WAL files remain readable; no storage or WAL format
+  version bump is required for this release.
+- Blobs are collection-local and follow existing commit/flush semantics; absent
+  blobs read as `None` locally and return HTTP 204 remotely.
+- `build_index` now raises `ValueError` for unknown kwargs instead of silently
+  accepting them; shared kwargs dicts must only use keys known to the target
+  family.
+- If a coordinator is restarted with `--api-key`, its data/metadata/management
+  endpoints require Bearer/Basic authentication; use a distinct value from
+  `--shard-api-key`.
+- SQ8 DiskANN update streams can drift the PQ codebook; run `build_index(...)`
+  once to rebuild from scratch after long update workloads.
+
+---
+
 ## v0.7.1
 
 **Patch Release - Custom Document Embeddings**
