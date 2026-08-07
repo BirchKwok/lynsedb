@@ -189,10 +189,13 @@ jobs:
           - os: ubuntu-latest
             target: x86_64
             manylinux: auto
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64
-            # manylinux2014's aarch64 cross-GCC is too old for libmimalloc-sys.
+            # Build natively on an arm64 runner with the official pypa image.
+            # The default rust-cross container ships GCC 7.5, which is too old
+            # for forkunion's C++20 core (and libmimalloc-sys).
             manylinux: "2_28"
+            container: quay.io/pypa/manylinux_2_28_aarch64:latest
           - os: macos-15-intel
             target: x86_64
             manylinux: auto
@@ -217,11 +220,9 @@ jobs:
         if [ ! -f Cargo.lock ]; then
           cargo generate-lockfile
         fi
-    - name: Set up QEMU for Linux aarch64 wheels
-      if: needs.verify-main-tag.outputs.package_kind == 'maturin' && runner.os == 'Linux' && matrix.platform.target == 'aarch64'
-      uses: docker/setup-qemu-action@v4
-      with:
-        platforms: arm64
+    - name: Set macOS deployment target for x86_64 wheels
+      if: needs.verify-main-tag.outputs.package_kind == 'maturin' && runner.os == 'macOS' && matrix.platform.target == 'x86_64'
+      run: echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> "$GITHUB_ENV"
     - name: Build wheel
       if: needs.verify-main-tag.outputs.package_kind == 'maturin'
       uses: PyO3/maturin-action@v1
@@ -230,6 +231,7 @@ jobs:
         target: ${{ matrix.platform.target }}
         args: --release --locked --out dist --interpreter python${{ matrix.python-version }}
         manylinux: ${{ matrix.platform.manylinux }}
+        container: ${{ matrix.platform.container }}
     - name: Build legacy wheel
       if: needs.verify-main-tag.outputs.package_kind == 'legacy' && matrix.platform.os == 'ubuntu-latest' && matrix.platform.target == 'x86_64' && matrix.python-version == '3.11'
       run: |
