@@ -424,8 +424,6 @@ impl FileLock {
     }
 
     fn acquire(path: &Path, exclusive: bool) -> Result<Self> {
-        use fs2::FileExt;
-
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -436,10 +434,14 @@ impl FileLock {
             .create(true)
             .open(path)?;
 
+        // Use explicit trait-qualified calls (UFCS): modern `std` also adds
+        // inherent `File::try_lock_shared`/`unlock` that return a different
+        // error type, so plain method syntax would make the two arms below
+        // have incompatible `Result` types on recent toolchains.
         let result = if exclusive {
-            file.try_lock_exclusive()
+            fs2::FileExt::try_lock_exclusive(&file)
         } else {
-            file.try_lock_shared()
+            fs2::FileExt::try_lock_shared(&file)
         };
         match result {
             Ok(()) => Ok(Self { _file: file }),
@@ -463,8 +465,7 @@ impl FileLock {
 #[cfg(windows)]
 impl Drop for FileLock {
     fn drop(&mut self) {
-        use fs2::FileExt;
-        let _ = self._file.unlock();
+        let _ = fs2::FileExt::unlock(&self._file);
     }
 }
 
