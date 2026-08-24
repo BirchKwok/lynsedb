@@ -17,9 +17,8 @@ embedding adapter:
 pip install "lynsedb[embeddings]"
 ```
 
-Native Linux and macOS environments are supported. Native Windows environments
-are not supported; on Windows, use WSL 2 (Windows Subsystem for Linux) or
-Docker.
+Native Linux, macOS, and Windows environments are supported. On Windows, the
+Rust core is built natively with MSVC.
 
 ```python
 import numpy as np

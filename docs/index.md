@@ -61,8 +61,7 @@ pip install lynsedb
 ```
 
 Python 3.9 or newer is required. Wheels are published for common macOS, Linux,
-and Linux environments. Native Windows environments are not supported; on
-Windows, use WSL 2 (Windows Subsystem for Linux) or Docker.
+and Windows environments; native Windows builds use MSVC.
 
 ## First search
 

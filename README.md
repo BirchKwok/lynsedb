@@ -69,8 +69,9 @@ local embedding adapter explicitly:
 pip install "lynsedb[embeddings]"
 ```
 
-Native Linux and macOS environments are supported. Native Windows environments
-are not supported; on Windows, run LynseDB inside WSL 2 or use Docker.
+Native Linux, macOS, and Windows environments are supported. On Windows, the
+Rust core is built natively with MSVC; the Unix-only `madvise` hints are no-ops
+there, and the Windows file cache handles read-ahead automatically.
 
 ## Quickstart: Build a Tiny AI Knowledge Base
 

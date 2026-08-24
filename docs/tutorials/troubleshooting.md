@@ -6,7 +6,8 @@ This page maps common LynseDB symptoms to likely causes and fixes.
 
 ### Native Windows does not work
 
-Native Windows environments are not supported. Use one of:
+Native Windows environments are supported and are built with MSVC. If the
+Windows wheel is not available for your Python version, use one of:
 
 - WSL 2 with Linux Python;
 - Docker server mode;

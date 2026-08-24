@@ -6,7 +6,7 @@ from .configs.config import generate_config_file, load_config_file
 
 FILE_PATH = Path(__file__).parent.parent
 
-__version__ = '0.8.0'
+__version__ = '0.9.0'
 
 
 class VectorDBClient:

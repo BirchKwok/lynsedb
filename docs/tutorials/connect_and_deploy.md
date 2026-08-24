@@ -15,9 +15,9 @@ db = client.create_database("app", drop_if_exists=False)
 collection = db.require_collection("items", dim=768)
 ```
 
-Local mode is supported on Linux and macOS. Native Windows environments are not
-supported; use WSL 2 (Windows Subsystem for Linux) for local mode on Windows, or
-run the HTTP server with Docker.
+Local mode is supported on Linux, macOS, and Windows. On Windows the Rust core
+is built natively with MSVC; you can also run the HTTP server with Docker if you
+prefer a containerized deployment.
 
 Use local mode for:
 
@@ -327,7 +327,7 @@ For long-lived services, create one client per process and reuse it.
 | One Python service with one worker | Local or remote | Local is simpler; remote is better if you want health checks and metrics. |
 | Web API with multiple workers | Remote | Avoid sharing one local path across independent processes. |
 | Multiple applications sharing data | Remote | One server owns the data directory. |
-| Windows host | Docker or WSL 2 | Native Windows is not supported. |
+| Windows host | Local (native) or Docker | Native Windows is supported; Docker works too. |
 | Production container | Remote | Use persistent volume, API key, health checks, and metrics. |
 
 ## Production checklist

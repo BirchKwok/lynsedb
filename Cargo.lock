@@ -303,9 +303,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "apexbase"
-version = "1.27.0"
+version = "1.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1aa5a79e9e4f692f95e8fe955d2ed5738deff5afcfc6e19d0c6e0f9710f6664"
+checksum = "a55f7732fc0889f371c23ef52f93bbe767d8575838f9bbc9571209836fa02930"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1783,7 +1783,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "lynse"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "actix-rt",
  "actix-web",
@@ -1797,6 +1797,7 @@ dependencies = [
  "crossbeam",
  "env_logger",
  "forkunion",
+ "fs2",
  "half",
  "libc",
  "log",

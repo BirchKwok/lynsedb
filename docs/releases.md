@@ -2,6 +2,37 @@
 
 This page documents the major features and improvements in each version of LynseDB. Only versions with the `v` prefix are official releases.
 
+## v0.9.0
+
+**Native Windows Support Restored**
+
+**Key Features:**
+
+- 🪟 **Native Windows builds**: Removed the compile-time gate that rejected
+  Windows (`Native Windows builds are not supported. Use WSL 2 or Docker`). The
+  Rust core now builds and runs natively on Windows via MSVC.
+- 🔒 **Windows single-writer file locking**: Replaced the Unix-only `flock` lock
+  path with a real `LockFileEx`/`UnlockFileEx` implementation (via the
+  cross-platform `fs2` crate) for `.writer.lock`, `.database.lock`, and
+  `.manager.lock`, so the per-collection and per-database single-writer
+  ownership guarantees hold on Windows too. The existing Unix `flock` hot path
+  is unchanged.
+- 🧹 **Directory-cleanup cache eviction**: Before `drop_collection` and
+  `drop_database` remove a collection/database tree, LynseDB now evicts
+  ApexBase's process-wide table cache for that directory. Cached file/mmap
+  handles no longer block recursive directory removal on Windows (this also
+  fixes drop-and-recreate workflows). On Unix this is a harmless cache release.
+- 🎁 **Packaging and CI**: `pyproject.toml` classifiers now declare Windows
+  support, and the release workflow builds and tests Windows wheels.
+
+**Platform optimization notes:**
+
+- The Unix hot paths (flat mmap, SIMD, HNSW/IVF/DiskANN/SPANN search, WAL,
+  compaction) are unchanged, so measured performance on Linux and macOS is
+  preserved. Windows code paths use the same mmap, SIMD, and parallel search
+  engines and simply no-op the Unix-only `madvise` hints, which the Windows file
+  cache handles automatically.
+
 ## v0.8.0
 
 **Major Release - Blob Storage, DiskANN Streaming Updates, and Search Correctness**

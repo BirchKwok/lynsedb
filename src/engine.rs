@@ -405,10 +405,73 @@ impl Drop for FileLock {
     }
 }
 
-#[cfg(not(unix))]
+/// Native Windows file lock, backed by `LockFileEx`/`UnlockFileEx` through the
+/// `fs2` cross-platform extension trait. This preserves the same single-writer
+/// ownership guarantees that the Unix `flock` path provides.
+#[cfg(windows)]
+struct FileLock {
+    _file: std::fs::File,
+}
+
+#[cfg(windows)]
+impl FileLock {
+    fn exclusive(path: &Path) -> Result<Self> {
+        Self::acquire(path, true)
+    }
+
+    fn shared(path: &Path) -> Result<Self> {
+        Self::acquire(path, false)
+    }
+
+    fn acquire(path: &Path, exclusive: bool) -> Result<Self> {
+        use fs2::FileExt;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)?;
+
+        let result = if exclusive {
+            file.try_lock_exclusive()
+        } else {
+            file.try_lock_shared()
+        };
+        match result {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(err) => {
+                // A contended lock surfaces as ERROR_LOCK_VIOLATION on Windows
+                // (and WouldBlock on exotic targets). Map it to a clear error.
+                let contended = err.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+                    || err.kind() == std::io::ErrorKind::WouldBlock;
+                if contended {
+                    return Err(LynseError::Storage(format!(
+                        "path is already open by another writer; lock file: {}",
+                        path.display()
+                    )));
+                }
+                Err(err.into())
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        use fs2::FileExt;
+        let _ = self._file.unlock();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 struct FileLock;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl FileLock {
     fn exclusive(_path: &Path) -> Result<Self> {
         Ok(Self)
@@ -7428,6 +7491,11 @@ impl DatabaseEngine {
         };
 
         if path.exists() {
+            // Evict ApexBase's process-wide cache for this collection's
+            // `fields_db` directory before unlinking it. This is required on
+            // Windows, where cached file and mmap handles block directory
+            // cleanup; on Unix it is a harmless best-effort cache release.
+            apexbase::storage::engine().invalidate_dir(&path.join("fields_db"));
             std::fs::remove_dir_all(&path)?;
         }
         Ok(())
@@ -9755,6 +9823,10 @@ impl DatabaseManager {
         }
 
         if db_path.exists() {
+            // Evict ApexBase's process-wide cache for the database directory so
+            // open handles do not block the recursive delete (required on
+            // Windows; harmless on Unix).
+            apexbase::storage::engine().invalidate_dir(&db_path);
             std::fs::remove_dir_all(&db_path)?;
         }
 
