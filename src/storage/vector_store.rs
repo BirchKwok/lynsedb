@@ -444,6 +444,15 @@ impl VectorStore {
         Ok(())
     }
 
+    /// Release any cached mmap handles.
+    ///
+    /// This is mainly needed before deleting collection directories on Windows,
+    /// where open mmap handles prevent file removal.
+    pub fn close(&self) {
+        *self.mmap_cache.write() = Vec::new();
+        *self.compatibility_mmap.write() = None;
+    }
+
     fn ensure_mmaps(&self) -> Result<()> {
         {
             let manifest = self.manifest.read();

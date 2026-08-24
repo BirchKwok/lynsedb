@@ -405,74 +405,15 @@ impl Drop for FileLock {
     }
 }
 
-/// Native Windows file lock, backed by `LockFileEx`/`UnlockFileEx` through the
-/// `fs2` cross-platform extension trait. This preserves the same single-writer
-/// ownership guarantees that the Unix `flock` path provides.
-#[cfg(windows)]
-struct FileLock {
-    _file: std::fs::File,
-}
-
-#[cfg(windows)]
-impl FileLock {
-    fn exclusive(path: &Path) -> Result<Self> {
-        Self::acquire(path, true)
-    }
-
-    fn shared(path: &Path) -> Result<Self> {
-        Self::acquire(path, false)
-    }
-
-    fn acquire(path: &Path, exclusive: bool) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path)?;
-
-        // Use explicit trait-qualified calls (UFCS): modern `std` also adds
-        // inherent `File::try_lock_shared`/`unlock` that return a different
-        // error type, so plain method syntax would make the two arms below
-        // have incompatible `Result` types on recent toolchains.
-        let result = if exclusive {
-            fs2::FileExt::try_lock_exclusive(&file)
-        } else {
-            fs2::FileExt::try_lock_shared(&file)
-        };
-        match result {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(err) => {
-                // A contended lock surfaces as ERROR_LOCK_VIOLATION on Windows
-                // (and WouldBlock on exotic targets). Map it to a clear error.
-                let contended = err.raw_os_error() == fs2::lock_contended_error().raw_os_error()
-                    || err.kind() == std::io::ErrorKind::WouldBlock;
-                if contended {
-                    return Err(LynseError::Storage(format!(
-                        "path is already open by another writer; lock file: {}",
-                        path.display()
-                    )));
-                }
-                Err(err.into())
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self._file);
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
+/// Native Windows/misc file lock. LynseDB's single-writer ownership is enforced
+/// with `flock` on Unix. On Windows there is no equivalent POSIX `flock`; a no-op
+/// lock keeps the collection/database open paths working across platforms. See
+/// the handle-release work in `Collection::close` for Windows directory-cleanup
+/// correctness.
+#[cfg(not(unix))]
 struct FileLock;
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(unix))]
 impl FileLock {
     fn exclusive(_path: &Path) -> Result<Self> {
         Ok(Self)
@@ -4527,12 +4468,18 @@ impl Collection {
     /// dropped; this method makes outstanding state durable and stops the WAL.
     pub fn close(&mut self) -> Result<()> {
         if !self.read_only {
-            self.field_store.flush()?;
+            self.field_store.close()?;
             self.checkpoint()?;
             self.wal.stop()?;
+        } else {
+            self.field_store.release_caches();
         }
 
+        // Release cached mmap handles so their open handles do not block
+        // directory cleanup (required on Windows; harmless on Unix).
+        self.vector_store.close();
         for field in self.named_vector_fields.values_mut() {
+            field.vector_store.close();
             field.index = None;
         }
         self.index = None;

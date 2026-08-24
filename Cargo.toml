@@ -19,9 +19,6 @@ numpy = { version = "0.26", optional = true }
 apexbase = { version = "1.29.0", default-features = false }
 arrow = { version = "59.1.0", features = ["ipc"] }
 
-# Cross-platform file locking (Windows native, Unix `flock` fallback for non-Linux)
-fs2 = "0.4"
-
 
 # Parallelism
 rayon = "1.10"

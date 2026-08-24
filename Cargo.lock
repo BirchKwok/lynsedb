@@ -1797,7 +1797,6 @@ dependencies = [
  "crossbeam",
  "env_logger",
  "forkunion",
- "fs2",
  "half",
  "libc",
  "log",
