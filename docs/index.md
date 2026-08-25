@@ -60,8 +60,8 @@ contracts and index compatibility.
 pip install lynsedb
 ```
 
-Python 3.9 or newer is required. Wheels are published for common macOS, Linux,
-and Windows environments; native Windows builds use MSVC.
+Python 3.9 or newer is required. Native wheels are published for macOS, Linux,
+and Windows; Windows is supported natively (the Rust core is built with MSVC).
 
 ## First search
 

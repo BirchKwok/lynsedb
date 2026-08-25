@@ -4,10 +4,11 @@ This page maps common LynseDB symptoms to likely causes and fixes.
 
 ## Installation
 
-### Native Windows does not work
+### No native Windows wheel for your Python version
 
-Native Windows environments are supported and are built with MSVC. If the
-Windows wheel is not available for your Python version, use one of:
+Native Windows is supported (the Rust core is built with MSVC and ships as a
+wheel). If a native Windows wheel isn't available for your Python version, use
+one of:
 
 - WSL 2 with Linux Python;
 - Docker server mode;

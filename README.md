@@ -69,9 +69,11 @@ local embedding adapter explicitly:
 pip install "lynsedb[embeddings]"
 ```
 
-Native Linux, macOS, and Windows environments are supported. On Windows, the
-Rust core is built natively with MSVC; the Unix-only `madvise` hints are no-ops
-there, and the Windows file cache handles read-ahead automatically.
+Native support has been restored for Linux, macOS, **and Windows**. On Windows
+the Rust core is built natively with MSVC and ships as a native wheel — no WSL or
+Docker required. (The Unix-only `madvise` hints are no-ops on Windows, where the
+file cache handles read-ahead automatically.) WSL 2 and Docker remain available
+as alternatives.
 
 ## Quickstart: Build a Tiny AI Knowledge Base
 
@@ -345,8 +347,9 @@ docker run -p 7637:7637 -v lynsedb-data:/data birchkwok/lynsedb:latest
 docker run -p 7637:7637 -e LYNSE_API_KEY=your_key -v lynsedb-data:/data birchkwok/lynsedb:latest
 ```
 
-On Windows, use this Docker image or install/run LynseDB from a Linux
-environment in WSL 2.
+On Windows, you can run the native wheel, this Docker image, or LynseDB from a
+Linux environment in WSL 2. The Docker image works on any host that supports
+Docker.
 
 Deployment examples:
 

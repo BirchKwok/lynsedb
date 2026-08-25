@@ -164,8 +164,9 @@ docker run \
   birchkwok/lynsedb:latest
 ```
 
-Docker is the recommended Windows deployment path when you do not want to run
-inside WSL 2.
+Native Windows is fully supported (the Rust core is built with MSVC and ships as
+a native wheel), so Docker and WSL 2 are optional alternatives rather than
+requirements on Windows.
 
 Deployment examples are included in:
 
